@@ -225,7 +225,10 @@ struct ServerPromptCache: Sendable {
         // turns (no tool calls/results or tool ids, which the text template
         // cannot represent) and must end in a user message so the generation
         // suffix applies.
-        guard let last = continuation.last,
+        // The bridge below is ChatML-shaped (leading "\n", <|im_end|> seam);
+        // other dialects re-prefill from scratch.
+        guard tokenizer.dialect == .chatml,
+              let last = continuation.last,
               last.role == .user,
               continuation.allSatisfy({
                   $0.role != .tool && $0.toolCallID == nil && $0.toolCalls.isEmpty

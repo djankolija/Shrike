@@ -40,6 +40,32 @@ struct OpenAIValidationTests {
         #expect(validated.messages.map(\.role) == [.system, .developer, .user])
     }
 
+    @Test func reasoningContentMapsToAssistantThinking() throws {
+        let data = Data(#"""
+        {"model":"m","messages":[
+          {"role":"user","content":"hi"},
+          {"role":"assistant","content":"ok","reasoning_content":"because"},
+          {"role":"user","content":"more"}
+        ]}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+        #expect(validated.messages[1].thinking == "because")
+        #expect(validated.messages[0].thinking == nil)
+    }
+
+    @Test func reasoningContentOutsideAssistantIsRejected() throws {
+        let data = Data(#"""
+        {"model":"m","messages":[
+          {"role":"user","content":"hi","reasoning_content":"sneaky"}
+        ]}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        #expect(throws: ServerRequestError.self) {
+            try OpenAIRequestValidator.validate(request, modelID: "m")
+        }
+    }
+
     @Test func rejectsLateDeveloperGuidance() throws {
         let data = Data(#"""
         {"model":"m","messages":[

@@ -11,4 +11,11 @@ enum TokenizerFixture {
             withExtension: nil,
             subdirectory: "Fixtures"))
     }
+
+    static func harmonyFolder() throws -> URL {
+        try #require(Bundle.module.url(
+            forResource: "HarmonyTokenizer",
+            withExtension: nil,
+            subdirectory: "Fixtures"))
+    }
 }

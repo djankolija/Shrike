@@ -397,6 +397,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                                finishReason: nil),
                                     outbox: outbox,
                                     context: contextBox.value)
+                            case .thinking(let text):
+                                self.enqueueStreamChunk(
+                                    self.chunk(id: responseID, created: created,
+                                               delta: ["reasoning_content": text],
+                                               finishReason: nil),
+                                    outbox: outbox,
+                                    context: contextBox.value)
                             case .toolCall(let call):
                                 self.enqueueToolCallChunks(
                                     id: responseID,
@@ -540,6 +547,10 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                     request: request, text: text,
                                     itemState: itemState,
                                     outbox: outbox, context: contextBox.value)
+                            case .thinking:
+                                // The Responses API frames reasoning as its
+                                // own item stream; not mapped yet.
+                                break
                             case .toolCall(let call):
                                 self.enqueueResponsesToolDelta(
                                     id: responseID, created: created,
@@ -790,6 +801,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             "role": "assistant",
             "content": encodedContent,
         ]
+        if let reasoning = completion.reasoningContent {
+            message["reasoning_content"] = reasoning
+        }
         if !completion.toolCalls.isEmpty {
             message["tool_calls"] = completion.toolCalls.map(toolCallObject)
         }

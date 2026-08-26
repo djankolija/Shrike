@@ -28,6 +28,22 @@ private actor ScriptedServerBackend: ServerInferenceBackend {
     }
 }
 
+private actor ReasoningServerBackend: ServerInferenceBackend {
+    func generate(
+        _ request: ValidatedChatRequest,
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> ServerCompletion {
+        onEvent(.thinking("because"))
+        onEvent(.content("hello"))
+        return ServerCompletion(
+            content: "hello",
+            reasoningContent: "because",
+            toolCalls: [],
+            finishReason: "stop",
+            usage: OpenAIUsage(promptTokens: 3, completionTokens: 2, totalTokens: 5))
+    }
+}
+
 private actor MultipleToolBackend: ServerInferenceBackend {
     func generate(
         _ request: ValidatedChatRequest,
@@ -230,6 +246,56 @@ struct HTTPServerTests {
         #expect(text.contains(#""finish_reason":"stop""#))
         #expect(text.contains(#""prompt_tokens":3"#))
         #expect(text.contains(#""cached_tokens":0"#))
+        #expect(text.hasSuffix("data: [DONE]\n\n"))
+
+        try await server.shutdown()
+    }
+
+    @Test func nonStreamingCompletionCarriesReasoningContent() async throws {
+        let server = NVMAIHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ReasoningServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data(#"""
+        {"model":"test-model","messages":[{"role":"user","content":"hi"}]}
+        """#.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let choices = try #require(object["choices"] as? [[String: Any]])
+        let message = try #require(choices[0]["message"] as? [String: Any])
+        #expect(message["content"] as? String == "hello")
+        #expect(message["reasoning_content"] as? String == "because")
+
+        try await server.shutdown()
+    }
+
+    @Test func streamingCarriesReasoningContentDeltas() async throws {
+        let server = NVMAIHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ReasoningServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data(#"""
+        {"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true}
+        """#.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains(#""reasoning_content":"because""#))
+        #expect(text.contains(#""content":"hello""#))
         #expect(text.hasSuffix("data: [DONE]\n\n"))
 
         try await server.shutdown()

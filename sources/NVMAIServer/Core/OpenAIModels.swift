@@ -78,11 +78,27 @@ public struct OpenAIChatMessage: Codable, Equatable, Sendable {
     public let toolCalls: [OpenAIToolCall]?
     public let toolCallID: String?
     public let name: String?
+    public let reasoningContent: String?
 
     enum CodingKeys: String, CodingKey {
         case role, content, name
         case toolCalls = "tool_calls"
         case toolCallID = "tool_call_id"
+        case reasoningContent = "reasoning_content"
+    }
+
+    public init(role: String,
+                content: OpenAIMessageContent?,
+                toolCalls: [OpenAIToolCall]? = nil,
+                toolCallID: String? = nil,
+                name: String? = nil,
+                reasoningContent: String? = nil) {
+        self.role = role
+        self.content = content
+        self.toolCalls = toolCalls
+        self.toolCallID = toolCallID
+        self.name = name
+        self.reasoningContent = reasoningContent
     }
 }
 
@@ -559,11 +575,16 @@ public enum OpenAIRequestValidator {
                 throw invalid("message content is required",
                               "messages", "invalid_message")
             }
+            guard role == .assistant || message.reasoningContent == nil else {
+                throw invalid("reasoning_content is only valid on assistant messages",
+                              "messages", "invalid_message")
+            }
             result.append(GFTokenizer.Message(role: role,
                                               content: content,
                                               toolCalls: calls,
                                               toolCallID: message.toolCallID,
-                                              name: message.name))
+                                              name: message.name,
+                                              thinking: message.reasoningContent))
         }
         // S19: a conversation that ends with an assistant tool call that is
         // never answered by a tool result would resume from an unanswerable

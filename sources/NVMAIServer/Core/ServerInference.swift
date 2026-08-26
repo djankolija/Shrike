@@ -4,20 +4,26 @@ import NVMAI
 
 public enum ServerInferenceEvent: Equatable, Sendable {
     case content(String)
+    case thinking(String)
     case toolCall(ParsedToolCall)
 }
 
 public struct ServerCompletion: Equatable, Sendable {
     public let content: String
+    /// Harmony analysis text (`reasoning_content` on the wire); nil when the
+    /// dialect has no thinking channel or none was produced.
+    public let reasoningContent: String?
     public let toolCalls: [ParsedToolCall]
     public let finishReason: String
     public let usage: OpenAIUsage
 
     public init(content: String,
+                reasoningContent: String? = nil,
                 toolCalls: [ParsedToolCall],
                 finishReason: String,
                 usage: OpenAIUsage) {
         self.content = content
+        self.reasoningContent = reasoningContent
         self.toolCalls = toolCalls
         self.finishReason = finishReason
         self.usage = usage
@@ -929,13 +935,16 @@ public actor ServerModelSession: ServerInferenceBackend {
             maxContext - effectivePromptIDs.count)
         config.stopStrings = []
 
-        let decoder = needsToolTemplate
+        // Harmony always decodes structurally: without the decoder, analysis
+        // text would leak into visible content on tool-free requests.
+        let decoder = needsToolTemplate || tokenizer.dialect == .harmony
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
                 allowedTools: Set(request.tools.map(\.name)))
             : nil
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""
+        var reasoning = ""
         var calls: [ParsedToolCall] = []
         var decodingError: Error?
         var shouldStop = false
@@ -962,10 +971,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                         onEvent(.content(visible))
                     }
                     if stopMatcher.isStopped { shouldStop = true }
-                case .thinking:
-                    // Harmony analysis deltas; surfaced as reasoning_content
-                    // by the B5 server surface, dropped until then.
-                    break
+                case .thinking(let text):
+                    reasoning += text
+                    onEvent(.thinking(text))
                 case .toolCall(let call):
                     calls.append(call)
                     onEvent(.toolCall(call))
@@ -1010,6 +1018,19 @@ public actor ServerModelSession: ServerInferenceBackend {
         emitGenerationDiagnostics(activeProducer: activeProducer,
                                   result: result,
                                   snapshot: runnerSnapshot)
+        // Harmony ends at a stop token the generation loop never forwards
+        // (`<|return|>` or `<|call|>`, both mapped to `.eos`); the decoder
+        // needs it to finalize a buffered tool call or close the turn, so
+        // replay the uncommitted boundary token here.
+        if tokenizer.dialect == .harmony, let decoder, decodingError == nil,
+           result.reason == .eos,
+           let boundary = result.uncommittedBoundaryTokenIDs.first {
+            do {
+                publish(try decoder.consume(tokenID: boundary, delta: ""))
+            } catch {
+                decodingError = error
+            }
+        }
         func structuredFailure(
             kind: StructuredOutputFailureKind,
             cause: StructuredOutputFailureCause
@@ -1067,6 +1088,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         completed = true
         return ServerCompletion(
             content: content,
+            reasoningContent: reasoning.isEmpty ? nil : reasoning,
             toolCalls: calls,
             finishReason: reason,
             // S26: completion_tokens reports the number of GENERATED tokens,
@@ -1093,6 +1115,10 @@ public actor ServerModelSession: ServerInferenceBackend {
         result: RawDecodeResult,
         stopStringFiltered: Bool
     ) {
+        // Harmony KV always carries the generated analysis block that a
+        // re-render drops, so no entry can ever match; skip the publish and
+        // its snapshot capture entirely.
+        guard tokenizer.dialect == .chatml else { return }
         if mtpDecoder != nil {
             // Native MTP keeps a second KV stream. Until both states are
             // persisted atomically, do not publish target-only cache entries.

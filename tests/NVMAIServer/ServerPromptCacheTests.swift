@@ -61,6 +61,45 @@ struct ServerPromptCacheTests {
         #expect(effective[cached] == tokenizer.endOfTurnID)
     }
 
+    @Test func harmonyEntriesNeverBridgeTextContinuations() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.harmonyFolder())
+        let initial = request(messages: [
+            GFTokenizer.Message(role: .user, content: "first"),
+        ])
+        let initialPrompt = tokenizer.encode(
+            try tokenizer.applyChatTemplate(initial.messages),
+            addBOS: false)
+        let generated = tokenizer.encode("answer", addBOS: false)
+        let kvBacked = initialPrompt + generated
+        var cache = ServerPromptCache()
+        // .maxTokens is the only stop a Harmony turn could publish under
+        // (its stop tokens map to .eos, which publish already rejects).
+        cache.publish(
+            domain: domain,
+            request: initial,
+            content: "answer",
+            calls: [],
+            result: rawResult(
+                prompt: initialPrompt,
+                kvBacked: kvBacked,
+                boundary: generated.last ?? 0,
+                reason: .maxTokens))
+
+        let continuation = request(messages: initial.messages + [
+            GFTokenizer.Message(role: .assistant, content: "answer"),
+            GFTokenizer.Message(role: .user, content: "second"),
+        ])
+        let rendered = tokenizer.encode(
+            try tokenizer.applyChatTemplate(continuation.messages),
+            addBOS: false)
+        let match = cache.match(
+            domain: domain,
+            request: continuation,
+            renderedPromptIDs: rendered,
+            tokenizer: tokenizer)
+        #expect(match == .miss)
+    }
+
     @Test func mismatchedLineageDomainAndUnsafeStopsMiss() async throws {
         let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         let initial = request(messages: [
