@@ -5,9 +5,12 @@ import Metal
 /// Which attention variant a layer runs. Qwen 3.6 interleaves 30
 /// gated-DeltaNet linear-attention layers with 10 full-attention layers;
 /// linear layers keep a fixed-size recurrent state (owned by
-/// `GDNStateManager`) instead of per-token K/V rows. Sourced from
-/// `ArchConfig.fullAttentionLayerMask` (0 = swa, 1 = full, 2 = linear).
-public enum LayerKind: Sendable { case swa, full, linear }
+/// `GDNStateManager`) instead of per-token K/V rows. MLA layers (Kimi-Linear)
+/// store one fused `[latent 512 | k_pe 64]` FP16 row per token — V is the
+/// row's 512-prefix, so K and V share one buffer. Sourced from
+/// `ArchConfig.fullAttentionLayerMask` (0 = swa, 1 = full, 2 = linear,
+/// 3 = mla).
+public enum LayerKind: Sendable { case swa, full, linear, mla }
 
 /// A read view the attention kernels bind. `offset` stays 0; ring-enabled SWA
 /// layers expose the physical start slot for diagnostics while kernels map
@@ -127,6 +130,24 @@ public final class KVCacheManager {
                 valueByteCounts.append(0)
                 continue
             }
+            if maskValue == 3 {
+                // MLA rows are always FP16 regardless of the configured KV
+                // precision (locked decision: the absorbed form reads the
+                // latent as both K prefix and V), and V aliases K.
+                let capacity = min(maxContext, Self.initialCapacityTokens)
+                guard let buf = device.makeBuffer(length: capacity * fullStride,
+                                                  options: .storageModeShared) else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                buf.label = "kv.KV.layer\(layer)"
+                ks.append(buf)
+                vs.append(buf)
+                st.append(fullStride)
+                kd.append(.mla)
+                caps.append(capacity)
+                valueByteCounts.append(fullStride)
+                continue
+            }
             let isFull = maskValue != 0
             let fp16Stride = isFull ? fullStride : swaStride
             let elements = fp16Stride / Self.fp16Size
@@ -201,13 +222,28 @@ public final class KVCacheManager {
 
             let stride = strides[layer]
             let length = target * stride
+            let usedBytes = min(current, position) * stride
+            if kinds[layer] == .mla {
+                // V aliases K on MLA layers; growth must preserve the alias.
+                guard let newKV = device.makeBuffer(length: length,
+                                                    options: .storageModeShared) else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                newKV.label = "kv.KV.layer\(layer)"
+                if usedBytes > 0 {
+                    memcpy(newKV.contents(), kBuffers[layer].contents(), usedBytes)
+                }
+                kBuffers[layer] = newKV
+                vBuffers[layer] = newKV
+                capacityTokens[layer] = target
+                continue
+            }
             guard let newK = device.makeBuffer(length: length, options: .storageModeShared),
                   let newV = device.makeBuffer(length: length, options: .storageModeShared) else {
                 throw ModelError.residentBufferWrapFailed
             }
             newK.label = "kv.K.layer\(layer)"
             newV.label = "kv.V.layer\(layer)"
-            let usedBytes = min(current, position) * stride
             if usedBytes > 0 {
                 memcpy(newK.contents(), kBuffers[layer].contents(), usedBytes)
                 memcpy(newV.contents(), vBuffers[layer].contents(), usedBytes)
@@ -354,7 +390,9 @@ public final class KVCacheManager {
                 by: strides[layer])
             guard !overflow else { throw InferenceStateSnapshotError.integerOverflow }
             lengths.append(length)
-            lengths.append(length)
+            // MLA V aliases K, so its V segment carries zero bytes — the pair
+            // enumeration stays stable across layer kinds.
+            lengths.append(kinds[layer] == .mla ? 0 : length)
         }
         return lengths
     }
@@ -430,7 +468,8 @@ public final class KVCacheManager {
     private func makeView(buffer: MTLBuffer, layer: Int, offset: Int,
                           validTokenCount: Int) -> KVView {
         KVView(buffer: buffer, offset: offset, stride: strides[layer],
-               validTokenCount: validTokenCount, precision: precision,
+               validTokenCount: validTokenCount,
+               precision: kinds[layer] == .mla ? .fp16 : precision,
                valueBytes: valueBytes[layer], groupSize: Self.quantizationGroupSize)
     }
 

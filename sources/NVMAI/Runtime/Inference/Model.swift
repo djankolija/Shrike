@@ -361,6 +361,26 @@ public struct Model {
         try resident(name: "language_model.model.layers.\(L).self_attn.o_norm.weight")
     }
 
+    // MARK: - Kimi MLA attention
+    //
+    // Layer-mask-3 layers. q_proj and o_proj ride the standard accessors;
+    // the fused kv_a projection, its latent norm, and the repack-time
+    // kv_b_proj split (embed_q 8-bit, unembed_out source-precision) are
+    // Kimi-only names.
+
+    public func kimiKVAProj(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.kv_a_proj_with_mqa.weight")
+    }
+    public func kimiKVALayernorm(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.kv_a_layernorm.weight")
+    }
+    public func kimiEmbedQ(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.embed_q.weight")
+    }
+    public func kimiUnembedOut(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.unembed_out.weight")
+    }
+
     /// Resolve a tensor name to a `TensorView` against the resident buffer.
     /// `fileOffset` (absolute) is converted to a buffer-relative offset by
     /// subtracting the resident region's file offset (which equals
@@ -833,6 +853,12 @@ extension Model {
                                                quant: quant)
                 continue
             }
+            if config.family == .kimiLinear48b {
+                try validateKimiLayerTensors(checks: checks, prefix: prefix,
+                                             layer: layer, config: config,
+                                             quant: quant)
+                continue
+            }
             try checks.requireAffine("\(prefix).mlp.gate.weight",
                                      rows: config.numExperts, columns: config.hiddenSize,
                                      slot: quant.router)
@@ -904,6 +930,116 @@ extension Model {
             }
         }
 
+    }
+
+    /// Kimi-Linear per-layer schema: KDA layers carry the repack-fused
+    /// linear_attn bundle plus the pass-through low-rank chains (FP32
+    /// A_log/dt_bias); MLA layers carry q_proj, the fused kv_a projection,
+    /// its latent norm, and the kv_b split (8-bit embed_q + unembed_out).
+    /// Layer 0 is a dense MLP; the rest carry the sigmoid router with its
+    /// BF16 correction bias and the ungated shared expert.
+    private static func validateKimiLayerTensors(
+        checks: RuntimeSchemaChecks,
+        prefix: String,
+        layer: Int,
+        config: ArchConfig,
+        quant: ManifestQuant
+    ) throws {
+        let attn = "\(prefix).self_attn"
+        if config.layerIsMLA(layer), let mla = config.mla {
+            let qkDim = mla.latentDim + mla.qkRopeDim
+            let qRawDim = try checks.checkedIntMultiply(
+                config.numHeads, mla.qkNopeDim + mla.qkRopeDim,
+                field: "layer \(layer) mla query")
+            try checks.requireAffine("\(attn).q_proj.weight",
+                                     rows: qRawDim, columns: config.hiddenSize,
+                                     slot: quant.attention)
+            try checks.requireAffine("\(attn).kv_a_proj_with_mqa.weight",
+                                     rows: qkDim, columns: config.hiddenSize,
+                                     slot: quant.attention)
+            try checks.requireBF16("\(attn).kv_a_layernorm.weight",
+                                   count: mla.latentDim)
+            let embedSlot = ManifestQuantSlot(
+                weightBits: 8,
+                scheme: quant.attention.scheme,
+                scaleType: quant.attention.scaleType,
+                biasType: quant.attention.biasType,
+                groupSize: quant.attention.groupSize)
+            try checks.requireAffine("\(attn).embed_q.weight",
+                                     rows: config.numHeads * mla.latentDim,
+                                     columns: mla.qkNopeDim,
+                                     slot: embedSlot)
+            try checks.requireAffine("\(attn).unembed_out.weight",
+                                     rows: config.numHeads * mla.valueHeadDim,
+                                     columns: mla.latentDim,
+                                     slot: quant.attention)
+            try checks.requireAffine("\(attn).o_proj.weight",
+                                     rows: config.hiddenSize,
+                                     columns: config.numHeads * mla.valueHeadDim,
+                                     slot: quant.attention)
+        } else if config.layerIsLinear(layer) {
+            let la = config.linearAttention
+            let aDim = la.numVHeads * la.keyHeadDim
+            try checks.requireAffine("\(prefix).linear_attn.in_proj_qkv.weight",
+                                     rows: la.qkvDim, columns: config.hiddenSize,
+                                     slot: quant.attention)
+            try checks.requireAffine("\(prefix).linear_attn.in_proj_b.weight",
+                                     rows: la.numVHeads, columns: config.hiddenSize,
+                                     slot: quant.attention)
+            try checks.requireAffine("\(attn).f_a_proj.weight",
+                                     rows: la.keyHeadDim, columns: config.hiddenSize,
+                                     slot: quant.attention)
+            try checks.requireAffine("\(attn).f_b_proj.weight",
+                                     rows: aDim, columns: la.keyHeadDim,
+                                     slot: quant.attention)
+            try checks.requireAffine("\(attn).g_a_proj.weight",
+                                     rows: la.keyHeadDim, columns: config.hiddenSize,
+                                     slot: quant.attention)
+            try checks.requireAffine("\(attn).g_b_proj.weight",
+                                     rows: la.valueDim, columns: la.keyHeadDim,
+                                     slot: quant.attention)
+            try checks.requireAffine("\(attn).o_proj.weight",
+                                     rows: config.hiddenSize, columns: la.valueDim,
+                                     slot: quant.attention)
+            try checks.requireBF16("\(prefix).linear_attn.conv1d.weight",
+                                   count: la.qkvDim * la.convKernelSize)
+            try checks.requireF32("\(attn).A_log", count: la.numVHeads)
+            try checks.requireF32("\(attn).dt_bias", count: aDim)
+            try checks.requireBF16("\(attn).o_norm.weight", count: la.valueHeadDim)
+        } else {
+            throw ModelError.indexCorrupt(
+                detail: "layer \(layer) mask value is neither KDA nor MLA on kimi_linear")
+        }
+        if layer < config.numLeadingDenseLayers {
+            try checks.requireAffine("\(prefix).mlp.gate_proj.weight",
+                                     rows: config.denseIntermediateSize,
+                                     columns: config.hiddenSize,
+                                     slot: quant.sharedExpert)
+            try checks.requireAffine("\(prefix).mlp.up_proj.weight",
+                                     rows: config.denseIntermediateSize,
+                                     columns: config.hiddenSize,
+                                     slot: quant.sharedExpert)
+            try checks.requireAffine("\(prefix).mlp.down_proj.weight",
+                                     rows: config.hiddenSize,
+                                     columns: config.denseIntermediateSize,
+                                     slot: quant.sharedExpert)
+            return
+        }
+        try checks.requireAffine("\(prefix).mlp.gate.weight",
+                                 rows: config.numExperts, columns: config.hiddenSize,
+                                 slot: quant.router)
+        try checks.requireBF16("\(prefix).mlp.e_score_correction_bias",
+                               count: config.numExperts)
+        let shared = "\(prefix).mlp.shared_experts"
+        try checks.requireAffine("\(shared).gate_proj.weight",
+                                 rows: config.intermediateSize, columns: config.hiddenSize,
+                                 slot: quant.sharedExpert)
+        try checks.requireAffine("\(shared).up_proj.weight",
+                                 rows: config.intermediateSize, columns: config.hiddenSize,
+                                 slot: quant.sharedExpert)
+        try checks.requireAffine("\(shared).down_proj.weight",
+                                 rows: config.hiddenSize, columns: config.intermediateSize,
+                                 slot: quant.sharedExpert)
     }
 
     /// gpt-oss per-layer attention + router schema: plain (not gate-packed)
@@ -1050,6 +1186,19 @@ private struct RuntimeSchemaChecks {
         }
         // Trailing zero dims encode a lower-rank tensor (e.g. a [2048]
         // vector is stored as shape (2048, 0, 0, 0)); treat them as 1.
+        let dims = [e.shape.0, e.shape.1, e.shape.2, e.shape.3]
+        let elements = dims.reduce(1) { $0 * ($1 == 0 ? 1 : Int($1)) }
+        guard elements == count else {
+            throw ModelError.tensorSizeMismatch(
+                name: name, expected: UInt64(count), actual: UInt64(elements))
+        }
+    }
+
+    func requireF32(_ name: String, count: Int) throws {
+        let e = try entry(name)
+        guard e.dtype == 3 else {
+            throw ModelError.indexCorrupt(detail: "\(name) is not FP32")
+        }
         let dims = [e.shape.0, e.shape.1, e.shape.2, e.shape.3]
         let elements = dims.reduce(1) { $0 * ($1 == 0 ? 1 : Int($1)) }
         guard elements == count else {

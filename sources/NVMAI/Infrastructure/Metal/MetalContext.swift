@@ -97,6 +97,7 @@ public final class MetalContext: @unchecked Sendable {
         "fused",
         "prefill",
         "gdn",
+        "mla",
     ]
 
     /// Bundle locations for runtime shader modules.
@@ -109,6 +110,7 @@ public final class MetalContext: @unchecked Sendable {
         "fused": "Metal/Fusions",
         "gdn": "Metal/GDN",
         "logit": "Metal/Sampling",
+        "mla": "Metal/MLA",
         "moe": "Metal/MoE",
         "prefill": "Metal/Prefill",
         "rmsnorm": "Metal/Primitives",

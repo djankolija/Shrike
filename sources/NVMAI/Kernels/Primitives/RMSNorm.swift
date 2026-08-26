@@ -15,6 +15,7 @@ final class RMSNorm {
     private let psoBF16: MTLComputePipelineState
     private let psoNoScale: MTLComputePipelineState
     private let psoBF16PerHead: MTLComputePipelineState
+    private let psoBF16Rows: MTLComputePipelineState
     private let psoNoScalePerHead: MTLComputePipelineState
     private let psoBF16D2816: MTLComputePipelineState
     private let psoNoScaleD2816: MTLComputePipelineState
@@ -27,6 +28,7 @@ final class RMSNorm {
         self.psoBF16     = try context.pipeline("rmsnorm_bf16w")
         self.psoNoScale  = try context.pipeline("rmsnorm_no_scale")
         self.psoBF16PerHead    = try context.pipeline("rmsnorm_bf16w_perhead")
+        self.psoBF16Rows       = try context.pipeline("rmsnorm_bf16w_rows")
         self.psoNoScalePerHead = try context.pipeline("rmsnorm_no_scale_perhead")
         self.psoBF16D2816 = try Self.specializedPipeline(context,
                                                          "rmsnorm_bf16w",
@@ -137,6 +139,34 @@ final class RMSNorm {
         enc.setBytes(&epsVar, length: MemoryLayout<Float>.size,  index: 3)
         let w = min(Int(pso.maxTotalThreadsPerThreadgroup), 256)
         enc.dispatchThreadgroups(MTLSize(width: numHeads, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// BF16-weight RMSNorm over the leading `d` elements of `rows` rows of
+    /// `rowStride` elements each, one dispatch (MLA kv_a latent norm — the
+    /// trailing k_pe elements of each row stay untouched). In-place safe.
+    func encodeBF16WRows(commandBuffer: MTLCommandBuffer,
+                         x: MTLBuffer, xOffset: Int = 0,
+                         weight: MTLBuffer, weightOffset: Int = 0,
+                         out: MTLBuffer, outOffset: Int = 0,
+                         d: UInt32, rows: Int, rowStrideElements: UInt32,
+                         eps: Float) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(psoBF16Rows)
+        enc.setBuffer(x,      offset: xOffset,      index: 0)
+        enc.setBuffer(weight, offset: weightOffset, index: 1)
+        enc.setBuffer(out,    offset: outOffset,    index: 2)
+        var dVar = d
+        var epsVar = eps
+        var strideVar = rowStrideElements
+        enc.setBytes(&dVar,      length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&epsVar,    length: MemoryLayout<Float>.size,  index: 4)
+        enc.setBytes(&strideVar, length: MemoryLayout<UInt32>.size, index: 5)
+        let w = min(Int(psoBF16Rows.maxTotalThreadsPerThreadgroup), 256)
+        enc.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
         enc.endEncoding()
     }

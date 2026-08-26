@@ -70,14 +70,18 @@ enum PrefillAttentionError: Error, CustomStringConvertible {
 final class PrefillAttention {
     private let context: MetalContext
     private let psoCausalTiled: MTLComputePipelineState
+    private let psoMLACausal: MTLComputePipelineState?
     private let psoFullTensorOps2DValidityV2: MTLComputePipelineState?
     /// K7: recorded once at init so an explicit TensorOps path request can
     /// throw the real reason instead of a bare `preconditionFailure`.
     private let tensorOpsUnavailableReason: String
 
-    init(context: MetalContext) throws {
+    init(context: MetalContext, supportsMLA: Bool = false) throws {
         self.context = context
         self.psoCausalTiled = try context.pipeline("attention_prefill_causal_tiled")
+        self.psoMLACausal = supportsMLA
+            ? try context.pipeline("attention_prefill_mla_causal")
+            : nil
         if context.device.supportsFamily(.apple10) {
             do {
                 self.psoFullTensorOps2DValidityV2 = try context.pipeline(
@@ -169,6 +173,60 @@ final class PrefillAttention {
         enc.endEncoding()
     }
 
+
+    /// MLA (Kimi-Linear) causal prefill over fused FP16 cache rows.
+    /// `params.headDim` is the qk width (576); output rows are `vDim` per
+    /// head, so `oTokenStrideElements = numQHeads * vDim` — smaller than the
+    /// generic validator allows, hence the dedicated checks here.
+    func encodeMLACausal(commandBuffer: MTLCommandBuffer,
+                         q: MTLBuffer, qOffset: Int = 0,
+                         kv: MTLBuffer, kvOffset: Int = 0,
+                         out: MTLBuffer, outOffset: Int = 0,
+                         params: PrefillAttentionParams,
+                         vDim: UInt32) throws {
+        guard let pipeline = psoMLACausal else {
+            throw PrefillAttentionError.tensorOpsUnavailable(
+                reason: "encodeMLACausal on a PrefillAttention built without supportsMLA")
+        }
+        precondition(params.headDim > 0 && params.headDim % 32 == 0
+                     && params.headDim <= 576,
+                     "MLA qk width must be a positive multiple of 32 up to 576")
+        precondition(vDim > 0 && vDim <= params.headDim,
+                     "MLA vDim must fit the KV row prefix")
+        precondition(params.queryCount > 0, "queryCount must be positive")
+        precondition(params.numKVHeads == 1, "MLA runs as MQA")
+        precondition(params.kvBits == 16, "MLA KV rows are always FP16")
+        precondition(params.slidingWindow == 0, "MLA layers are full attention")
+        precondition(params.qTokenStrideElements >= params.numQHeads * params.headDim,
+                     "q token stride is too small")
+        precondition(params.oTokenStrideElements >= params.numQHeads * vDim,
+                     "output token stride is too small")
+        precondition(params.kvTokenStrideElements >= params.headDim,
+                     "KV token stride is too small")
+        precondition(params.startPosition + params.queryCount <= params.kvValidCount,
+                     "kvValidCount must include all in-flight query rows")
+
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw PrefillAttentionError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(pipeline)
+        enc.setBuffer(q, offset: qOffset, index: 0)
+        enc.setBuffer(kv, offset: kvOffset, index: 1)
+        enc.setBuffer(out, offset: outOffset, index: 2)
+        var p = params
+        enc.setBytes(&p, length: MemoryLayout<PrefillAttentionParams>.stride, index: 3)
+        var vd = vDim
+        enc.setBytes(&vd, length: MemoryLayout<UInt32>.size, index: 4)
+        let threadCount = Int(params.headDim)
+        precondition(threadCount <= pipeline.maxTotalThreadsPerThreadgroup,
+                     "MLA prefill attention requires headDim <= maxTotalThreadsPerThreadgroup")
+        enc.dispatchThreadgroups(
+            MTLSize(width: Int(params.queryCount),
+                    height: Int(params.numQHeads),
+                    depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threadCount, height: 1, depth: 1))
+        enc.endEncoding()
+    }
 
     private func validate(_ params: PrefillAttentionParams) {
         precondition(params.headDim > 0, "headDim must be positive")

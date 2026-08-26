@@ -139,4 +139,90 @@ import Metal
         }
     }
 
+    // MARK: - Kimi MLA layers (mask value 3)
+
+    private func makeKimiManager(maxContext: Int,
+                                 precision: KVCachePrecision = .fp16) throws
+        -> KVCacheManager {
+        let ctx = try MetalContext()
+        return try KVCacheManager(device: ctx.device,
+                                  config: .kimiLinear48bA3b,
+                                  maxContext: maxContext,
+                                  precision: precision,
+                                  maxPrefillChunkTokens: 128)
+    }
+
+    /// MLA rows are one fused [latent 512 | k_pe 64] FP16 row per token even
+    /// under a quantized manager precision, and V aliases K.
+    @Test func mlaLayers_fuseKVIntoOneFP16Buffer() throws {
+        let kv = try makeKimiManager(maxContext: 128, precision: .int8)
+        let mlaLayer = 3   // 1-indexed layer 4
+        #expect(kv.layerKind(mlaLayer) == .mla)
+        #expect(kv.layerKind(0) == .linear)
+        #expect(kv.stride(layer: mlaLayer) == 576 * 2)
+        let view = kv.keyView(layer: mlaLayer, validTokenCount: 0)
+        #expect(view.precision == .fp16)
+        #expect(view.valueBytes == 576 * 2)
+        #expect(kv.keyBuffer(layer: mlaLayer, validTokenCount: 0) ===
+                kv.valueBuffer(layer: mlaLayer, validTokenCount: 0),
+                "MLA V must alias K")
+        #expect(kv.kSlot(layer: mlaLayer, position: 5).offset == 5 * 1152)
+    }
+
+    @Test func mlaSnapshot_emitsZeroLengthVSegmentsAndRoundtrips() throws {
+        let kv = try makeKimiManager(maxContext: 16)
+        kv.advance(by: 3)
+        let lengths = try kv.snapshotSegmentLengths(at: 3)
+        // 7 MLA layers, each a (K, V) pair with the V segment empty.
+        let mlaPairs = lengths.enumerated().filter { $0.offset % 2 == 1 }
+        #expect(lengths.count == 14)
+        #expect(mlaPairs.allSatisfy { $0.element == 0 })
+        #expect(lengths.enumerated()
+            .filter { $0.offset % 2 == 0 }
+            .allSatisfy { $0.element == 3 * 1152 })
+
+        let slot = kv.kSlot(layer: 3, position: 1)
+        let marker = slot.buffer.contents().advanced(by: slot.offset)
+            .assumingMemoryBound(to: Float16.self)
+        for i in 0..<576 { marker[i] = Float16(Float(i % 13) * 0.25) }
+
+        var payload = Data()
+        try kv.appendSnapshotPayload(to: &payload, segmentLengths: lengths)
+
+        let restored = try makeKimiManager(maxContext: 16)
+        try payload.withUnsafeBytes { bytes in
+            var offset = 0
+            try restored.restoreSnapshot(position: 3, segmentLengths: lengths,
+                                         bytes: bytes, offset: &offset)
+            #expect(offset == payload.count)
+        }
+        #expect(restored.position == 3)
+        let restoredSlot = restored.kSlot(layer: 3, position: 1)
+        let restoredRow = restoredSlot.buffer.contents()
+            .advanced(by: restoredSlot.offset)
+            .assumingMemoryBound(to: Float16.self)
+        for i in 0..<576 {
+            #expect(restoredRow[i] == marker[i], "row element \(i) diverged")
+        }
+    }
+
+    @Test func mlaGrowth_preservesAliasAndContent() throws {
+        let kv = try makeKimiManager(maxContext: 32_768)
+        kv.advance(by: 1)
+        let slot = kv.kSlot(layer: 3, position: 0)
+        let row = slot.buffer.contents().assumingMemoryBound(to: Float16.self)
+        for i in 0..<576 { row[i] = Float16(Float(i % 7)) }
+
+        try kv.reserve(tokens: KVCacheManager.initialCapacityTokens + 1)
+        #expect(kv.capacity(layer: 3) == 2 * KVCacheManager.initialCapacityTokens)
+        #expect(kv.keyBuffer(layer: 3, validTokenCount: 0) ===
+                kv.valueBuffer(layer: 3, validTokenCount: 0),
+                "growth must preserve the MLA K/V alias")
+        let grown = kv.kSlot(layer: 3, position: 0)
+        let grownRow = grown.buffer.contents().assumingMemoryBound(to: Float16.self)
+        for i in 0..<576 {
+            #expect(grownRow[i] == Float16(Float(i % 7)), "element \(i) lost in growth")
+        }
+    }
+
 }

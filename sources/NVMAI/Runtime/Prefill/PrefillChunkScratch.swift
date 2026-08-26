@@ -25,6 +25,12 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     let gdnADim: Int
     /// Kimi KDA low-rank stage (f_a / g_a output, keyHeadDim); zero otherwise.
     let gdnLowRankDim: Int
+    /// Kimi MLA per-token widths (zero when the mask has no MLA layers):
+    /// the absorbed Q rows [H * (latent + rope)] and the unembed output
+    /// [H * vHeadDim]. q_proj output rides the `q` buffer, attention output
+    /// rides `attentionOutput`.
+    let mlaQDim: Int
+    let mlaUnembedDim: Int
     /// Non-zero when the shared expert output is scalar-gated (Qwen).
     let sharedScalarGateElements: Int
 
@@ -53,6 +59,13 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
             ? config.linearAttention.numVHeads * config.linearAttention.keyHeadDim
             : (hasLinear ? config.linearAttention.numVHeads : 0)
         self.gdnLowRankDim = perChannel ? config.linearAttention.keyHeadDim : 0
+        if let mla = config.mla, config.hasMLALayers {
+            self.mlaQDim = config.numHeads * (mla.latentDim + mla.qkRopeDim)
+            self.mlaUnembedDim = config.numHeads * mla.valueHeadDim
+        } else {
+            self.mlaQDim = 0
+            self.mlaUnembedDim = 0
+        }
         self.sharedScalarGateElements = config.sharedExpertGated ? 1 : 0
     }
 
@@ -73,6 +86,8 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     var gdnBElements: Int { chunkTokens * gdnVHeads }
     var gdnYElements: Int { gdnZElements }
     var gdnLowRankElements: Int { chunkTokens * gdnLowRankDim }
+    var mlaQElements: Int { chunkTokens * mlaQDim }
+    var mlaUnembedElements: Int { chunkTokens * mlaUnembedDim }
     var sharedScalarGateBufferElements: Int { chunkTokens * sharedScalarGateElements }
     var kStageElements: Int { chunkTokens * maxKVElementsPerToken }
     var vStageElements: Int { kStageElements }
@@ -113,6 +128,8 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
             + gdnBElements
             + gdnYElements
             + gdnLowRankElements
+            + mlaQElements
+            + mlaUnembedElements
             + sharedScalarGateBufferElements
         return fp16Elements * MemoryLayout<Float16>.stride
     }
@@ -158,6 +175,8 @@ struct PrefillChunkScratchBuffers {
     let gdnB: MTLBuffer
     let gdnY: MTLBuffer
     let gdnLowRank: MTLBuffer
+    let mlaQ: MTLBuffer
+    let mlaUnembed: MTLBuffer
     let sharedScalarGate: MTLBuffer
 
     static func allocate(device: MTLDevice,
@@ -219,6 +238,9 @@ struct PrefillChunkScratchBuffers {
             gdnY: try privateBuffer(layout.gdnYElements, label: "prefill.gdnY"),
             gdnLowRank: try privateBuffer(layout.gdnLowRankElements,
                                           label: "prefill.gdnLowRank"),
+            mlaQ: try privateBuffer(layout.mlaQElements, label: "prefill.mlaQ"),
+            mlaUnembed: try privateBuffer(layout.mlaUnembedElements,
+                                          label: "prefill.mlaUnembed"),
             sharedScalarGate: try privateBuffer(layout.sharedScalarGateBufferElements,
                                                 label: "prefill.sharedScalarGate"))
     }

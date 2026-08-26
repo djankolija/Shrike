@@ -119,6 +119,8 @@ public struct ArchConfig: Sendable, Equatable {
     /// Leading layers whose MLP is dense rather than routed; they have no
     /// packed-expert layer file.
     public let numLeadingDenseLayers: Int
+    /// Intermediate size of those leading dense MLPs (Kimi layer 0: 9216).
+    public let denseIntermediateSize: Int
 
     public init(
         hiddenSize: Int,
@@ -151,7 +153,8 @@ public struct ArchConfig: Sendable, Equatable {
         sharedExpertGated: Bool = true,
         ropeNeoxSubdim: Bool = true,
         linearAttention: LinearAttentionConfig = .none,
-        numLeadingDenseLayers: Int = 0
+        numLeadingDenseLayers: Int = 0,
+        denseIntermediateSize: Int = 0
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -184,6 +187,7 @@ public struct ArchConfig: Sendable, Equatable {
         self.ropeNeoxSubdim = ropeNeoxSubdim
         self.linearAttention = linearAttention
         self.numLeadingDenseLayers = numLeadingDenseLayers
+        self.denseIntermediateSize = denseIntermediateSize
     }
 
     /// Canonical Qwen3.6-35B-A3B baseline: a 40-layer hybrid of 30
@@ -351,7 +355,8 @@ public struct ArchConfig: Sendable, Equatable {
             numKHeads: 32, numVHeads: 32,
             keyHeadDim: 128, valueHeadDim: 128,
             convKernelSize: 4),
-        numLeadingDenseLayers: 1)
+        numLeadingDenseLayers: 1,
+        denseIntermediateSize: 9216)
 
     private static func kimiLinearLayerMask() -> [UInt8] {
         // MLA (3) on 1-indexed layers {4, 8, 12, 16, 20, 24, 27}; KDA (2)
@@ -443,6 +448,11 @@ public struct ArchConfig: Sendable, Equatable {
     public var linearAttentionSigmoidGateNormEps: Float? {
         family == .kimiLinear48b ? 1e-5 : nil
     }
+    /// Layer-norm (and MLA kv_a latent norm) eps. Kimi's checkpoint pins
+    /// 1e-5; the shipped qwen36 and gpt-oss runtimes keep the 1e-6 their
+    /// bring-up gates were validated at (gpt-oss's config also says 1e-5 —
+    /// an open follow-up, not silently changed here).
+    public var rmsNormEps: Float { family == .kimiLinear48b ? 1e-5 : 1e-6 }
     /// Kimi router: scores are sigmoid(logits); top-k selects by score plus
     /// `e_score_correction_bias`, weights are the original scores of the
     /// selected renormalized (÷ sum + 1e-20) and scaled by 2.446. Other

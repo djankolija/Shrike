@@ -391,6 +391,99 @@ void attention_decode_gqa_swa_partial(
     }
 }
 
+// ============================================================================
+// MLA (Kimi-Linear) split-KV partial: MQA over fused FP16 cache rows
+// [latent | k_pe] of qk_dim elements, where V is the row's v_dim-prefix.
+// Per-head Q rows are qk_dim wide ([W_UKᵀ·q_nope | q_pe]); the partial's
+// o rows are v_dim wide, so the generic attention_decode_combine finishes
+// the merge when called with head_dim = v_dim. Always one KV head, always
+// FP16 rows, no sinks, no ring — runtime params only, no FC specialization.
+// ============================================================================
+
+constant constexpr uint kAttnMLAMaxQKDim = 576;
+
+[[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
+void attention_decode_mla_partial(
+    device const half*  Q             [[buffer(0)]],   // [num_q_heads, qk_dim]
+    device const half*  KV            [[buffer(1)]],   // [seq_len, qk_dim] FP16
+    device       float* m_out         [[buffer(2)]],   // [num_q_heads * num_chunks]
+    device       float* d_out         [[buffer(3)]],   // [num_q_heads * num_chunks]
+    device       float* o_out         [[buffer(4)]],   // [num_q_heads * num_chunks * v_dim]
+    constant     uint&  qk_dim        [[buffer(5)]],
+    constant     uint&  v_dim         [[buffer(6)]],
+    constant     uint&  num_q_heads   [[buffer(7)]],
+    constant     uint&  seq_len       [[buffer(8)]],
+    constant     uint&  chunk_len     [[buffer(9)]],
+    constant     uint&  num_chunks    [[buffer(10)]],
+    constant     float& scale         [[buffer(11)]],
+    uint tg_id           [[threadgroup_position_in_grid]],
+    uint lid             [[thread_position_in_threadgroup]],
+    uint lsize           [[threads_per_threadgroup]],
+    uint simd_lane_id    [[thread_index_in_simdgroup]],
+    uint simd_group_id   [[simdgroup_index_in_threadgroup]],
+    uint simdgroups      [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float q_smem[kAttnMLAMaxQKDim];
+    threadgroup float reduce_scratch[kAttnMaxSimdGroups];
+    threadgroup float bcast;
+    const uint QK = qk_dim;
+    const uint VD = v_dim;
+    const uint NC = num_chunks;
+
+    const uint q_head = tg_id / NC;
+    const uint chunk  = tg_id % NC;
+    if (q_head >= num_q_heads) return;
+    const uint p_start = chunk * chunk_len;
+    uint p_end = p_start + chunk_len;
+    if (p_end > seq_len) { p_end = seq_len; }
+
+    device const half* Q_row = Q + uint(q_head) * QK;
+    for (uint i = lid; i < QK; i += lsize) {
+        q_smem[i] = float(Q_row[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    constexpr uint kPerThread = (kAttnMaxHeadDim + kAttnThreads - 1) / kAttnThreads;
+    float o_local[kPerThread];
+    for (uint k = 0; k < kPerThread; ++k) { o_local[k] = 0.0f; }
+
+    float m_run = -INFINITY;
+    float d_run = 0.0f;
+
+    for (uint p = p_start; p < p_end; ++p) {
+        device const half* row = KV + uint(p) * QK;
+        float partial = 0.0f;
+        for (uint i = lid; i < QK; i += lsize) {
+            partial = fma(q_smem[i], float(row[i]), partial);
+        }
+        float s = block_reduce_sum(partial,
+                                   simd_lane_id, simd_group_id, simdgroups,
+                                   reduce_scratch, &bcast);
+        s *= scale;
+
+        const float m_new = max(m_run, s);
+        const float alpha = attn_softmax_exp(m_run - m_new);
+        const float p_exp = attn_softmax_exp(s     - m_new);
+        d_run = d_run * alpha + p_exp;
+
+        uint slot = 0;
+        for (uint i = lid; i < VD; i += lsize) {
+            o_local[slot] = o_local[slot] * alpha + p_exp * float(row[i]);
+            slot += 1;
+        }
+        m_run = m_new;
+    }
+
+    const uint base = uint(q_head) * NC + chunk;
+    if (lid == 0) { m_out[base] = m_run; d_out[base] = d_run; }
+    device float* o_row = o_out + base * VD;
+    uint slot = 0;
+    for (uint i = lid; i < VD; i += lsize) {
+        o_row[i] = o_local[slot];
+        slot += 1;
+    }
+}
+
 [[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
 void attention_decode_combine(
     device const float* m_in         [[buffer(0)]],    // [num_q_heads * num_chunks]

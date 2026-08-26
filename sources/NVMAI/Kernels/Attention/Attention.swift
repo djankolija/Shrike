@@ -38,6 +38,7 @@ final class Attention {
     private let psoCombineSWAChunks16: MTLComputePipelineState
     private let psoCombineFullChunks16: MTLComputePipelineState
     private let psoCombineSinks: MTLComputePipelineState?
+    private let psoMLAPartial: MTLComputePipelineState?
 
     /// Mirrors `kAttnThreads` in `attention.metal`. The kernel was authored
     /// with a hardcoded 256-thread group so its threadgroup-memory scratch
@@ -47,6 +48,9 @@ final class Attention {
     /// `kAttnMaxHeadDim` in attention.metal — the kernel's threadgroup scratch
     /// ceiling, independent of the instance split-KV scratch limits below.
     static let kernelMaxHeadDim = 512
+    /// `kAttnMLAMaxQKDim` — the MLA partial's q-smem ceiling (576-wide rows);
+    /// its o partials stay within `kernelMaxHeadDim`.
+    static let kernelMaxMLAQKDim = 576
     static let maxChunks = 64
 
     /// Split-KV partial-scratch limits, sized from the architecture at init
@@ -68,15 +72,23 @@ final class Attention {
     init(context: MetalContext,
          maxQHeads: Int = 16,
          maxHeadDim: Int = 512,
-         supportsSinks: Bool = false) throws {
-        precondition(maxQHeads > 0 && maxHeadDim > 0 && maxHeadDim <= Self.kernelMaxHeadDim,
-                     "split-KV scratch limits must be positive and fit the kernel scratch")
+         supportsSinks: Bool = false,
+         supportsMLA: Bool = false) throws {
+        // maxHeadDim may exceed kernelMaxHeadDim (Kimi's 576-wide MLA rows
+        // size the o-scratch); the per-encode paths enforce their own kernel
+        // ceilings.
+        precondition(maxQHeads > 0 && maxHeadDim > 0
+                     && maxHeadDim <= Self.kernelMaxMLAQKDim,
+                     "split-KV scratch limits must be positive and fit a kernel scratch")
         self.ctx = context
         self.maxQHeads = maxQHeads
         self.maxHeadDim = maxHeadDim
         self.psoCombineSinks = supportsSinks
             ? try context.pipeline("attention_decode_combine",
                                    constants: [MetalFunctionConstant(index: 66, value: .bool(true))])
+            : nil
+        self.psoMLAPartial = supportsMLA
+            ? try context.pipeline("attention_decode_mla_partial")
             : nil
         self.psoPartial = try context.pipeline("attention_decode_partial")
         self.psoGQAPartial = try context.pipeline("attention_decode_gqa_swa_partial")
@@ -252,6 +264,90 @@ final class Attention {
                     kvFormat: kvFormat)
     }
 
+
+    /// MLA (Kimi-Linear) decode attention: MQA over fused FP16 cache rows of
+    /// `qkDim` elements where V is each row's `vDim`-prefix. Same two-pass
+    /// split-KV shape as `encodeFull`; the combine runs at `head_dim = vDim`.
+    func encodeMLA(commandBuffer: MTLCommandBuffer,
+                   q: MTLBuffer, qOffset: Int = 0,
+                   kv: MTLBuffer, kvOffset: Int = 0,
+                   out: MTLBuffer, outOffset: Int = 0,
+                   qkDim: UInt32,
+                   vDim: UInt32,
+                   numQHeads: UInt32,
+                   seqLen: UInt32,
+                   scale: Float) throws {
+        guard let partialPSO = psoMLAPartial else {
+            throw MetalError.invalidState(
+                "encodeMLA on an Attention built without supportsMLA")
+        }
+        precondition(qkDim <= UInt32(Self.kernelMaxMLAQKDim),
+                     "MLA qkDim exceeds the kernel's q scratch")
+        precondition(vDim <= qkDim && Int(vDim) <= min(maxHeadDim, Self.kernelMaxHeadDim),
+                     "MLA vDim must fit the o scratch and the K row prefix")
+        precondition(Int(numQHeads) <= maxQHeads,
+                     "numQHeads \(numQHeads) exceeds split-KV scratch (max \(maxQHeads))")
+        precondition(seqLen > 0, "MLA attention requires at least one KV position")
+        splitStateLock.lock()
+        let reentered = splitInFlight
+        splitInFlight = true
+        splitStateLock.unlock()
+        defer {
+            splitStateLock.lock()
+            splitInFlight = false
+            splitStateLock.unlock()
+        }
+        guard !reentered else {
+            throw MetalError.invalidState(
+                "encodeMLA re-entered while a split-KV pass was in flight; attention must encode serially per layer")
+        }
+        let geometry = Self.splitGeometry(numQHeads: numQHeads,
+                                          numKVHeads: 1,
+                                          seqLen: seqLen,
+                                          kvStart: 0,
+                                          preferGQASWA: false)
+        let nChunks = geometry.numChunks
+        let tgWidth = min(Self.threadsPerGroup, Int(partialPSO.maxTotalThreadsPerThreadgroup))
+
+        guard let p1 = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        p1.setComputePipelineState(partialPSO)
+        p1.setBuffer(q, offset: qOffset, index: 0)
+        p1.setBuffer(kv, offset: kvOffset, index: 1)
+        p1.setBuffer(mPartial, offset: 0, index: 2)
+        p1.setBuffer(dPartial, offset: 0, index: 3)
+        p1.setBuffer(oPartial, offset: 0, index: 4)
+        var qk = qkDim, vd = vDim, nq = numQHeads, sl = seqLen
+        var cl = UInt32(geometry.chunkLength), nc = UInt32(nChunks), sc = scale
+        p1.setBytes(&qk, length: MemoryLayout<UInt32>.size, index: 5)
+        p1.setBytes(&vd, length: MemoryLayout<UInt32>.size, index: 6)
+        p1.setBytes(&nq, length: MemoryLayout<UInt32>.size, index: 7)
+        p1.setBytes(&sl, length: MemoryLayout<UInt32>.size, index: 8)
+        p1.setBytes(&cl, length: MemoryLayout<UInt32>.size, index: 9)
+        p1.setBytes(&nc, length: MemoryLayout<UInt32>.size, index: 10)
+        p1.setBytes(&sc, length: MemoryLayout<Float>.size,  index: 11)
+        p1.dispatchThreadgroups(MTLSize(width: geometry.partialThreadgroups, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
+        p1.endEncoding()
+
+        guard let p2 = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        p2.setComputePipelineState(psoCombine)
+        p2.setBuffer(mPartial, offset: 0, index: 0)
+        p2.setBuffer(dPartial, offset: 0, index: 1)
+        p2.setBuffer(oPartial, offset: 0, index: 2)
+        p2.setBuffer(out, offset: outOffset, index: 3)
+        var hd2 = vDim, nc2 = UInt32(nChunks)
+        p2.setBytes(&hd2, length: MemoryLayout<UInt32>.size, index: 4)
+        p2.setBytes(&nc2, length: MemoryLayout<UInt32>.size, index: 5)
+        let combineTGWidth = min(Self.threadsPerGroup,
+                                 Int(psoCombine.maxTotalThreadsPerThreadgroup))
+        p2.dispatchThreadgroups(MTLSize(width: Int(numQHeads), height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: combineTGWidth, height: 1, depth: 1))
+        p2.endEncoding()
+    }
 
     /// Two-pass split-KV (Flash-Decoding) dispatch shared by SWA and full
     /// attention — they differ only by `kvStart`. Pass 1 fans the head's

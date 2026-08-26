@@ -149,6 +149,38 @@ void rmsnorm_no_scale_perhead(
     }
 }
 
+// MLA kv_a latent norm: each of `rows` strided rows has its leading `D`
+// elements normed in place (the trailing k_pe stays untouched). One
+// threadgroup per row; in-place safe like the per-head kernels.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void rmsnorm_bf16w_rows(
+    device const half*   x          [[buffer(0)]],   // [rows, rowStride] FP16
+    device const bfloat* weight     [[buffer(1)]],   // [D] BF16, shared per row
+    device       half*   out        [[buffer(2)]],   // [rows, rowStride] FP16
+    constant     uint&   D          [[buffer(3)]],
+    constant     float&  eps        [[buffer(4)]],
+    constant     uint&   rowStride  [[buffer(5)]],   // elements per row
+    uint  row              [[threadgroup_position_in_grid]],
+    uint  lid              [[thread_position_in_threadgroup]],
+    uint  lsize            [[threads_per_threadgroup]],
+    uint  simd_lane_id     [[thread_index_in_simdgroup]],
+    uint  simd_group_id    [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups       [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float partial[kRmsMaxSimdGroups];
+    const uint DD = rms_fc_d(D);
+    device const half* xr = x   + row * rowStride;
+    device       half* orow = out + row * rowStride;
+    const float inv = rms_block_inv(xr, DD, eps, lid, lsize,
+                                    simd_lane_id, simd_group_id, simdgroups,
+                                    partial);
+    for (uint i = lid; i < DD; i += lsize) {
+        float xv = float(xr[i]);
+        float wv = float(weight[i]);
+        orow[i] = half(xv * inv * wv);
+    }
+}
+
 // v_norm and the MoE router's internal norm are no-scale RMSNorm:
 // y[i] = x[i] * rsqrt(mean(x^2) + eps). There is no resident weight tensor.
 [[kernel, max_total_threads_per_threadgroup(256)]]

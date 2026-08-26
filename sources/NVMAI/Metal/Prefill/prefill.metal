@@ -878,6 +878,75 @@ kernel void attention_prefill_causal_tiled(
     }
 }
 
+// ----------------------------------------------------------------------------
+// MLA (Kimi-Linear) causal prefill: MQA over fused FP16 cache rows
+// [latent | k_pe] where p.headDim is the qk width (576) and V is the row's
+// vDim-prefix. 576 threads per group (one per qk element) — the shared
+// causal-tiled kernel caps at 512, so this twin carries its own bounds.
+// Output rows are vDim per head (p.oTokenStrideElements = numQHeads * vDim).
+// No sinks, no sliding window, no ring, FP16 rows only.
+// ----------------------------------------------------------------------------
+
+constant constexpr uint kPrefillMLAMaxSimdGroups = 18;   // 576 / 32
+
+[[kernel, max_total_threads_per_threadgroup(576)]]
+kernel void attention_prefill_mla_causal(
+    device const half* Q  [[buffer(0)]],   // [T, numQHeads * headDim]
+    device const half* KV [[buffer(1)]],   // [kvValidCount, headDim]
+    device half* O        [[buffer(2)]],   // [T, numQHeads * vDim]
+    constant PrefillAttentionParams& p [[buffer(3)]],
+    constant uint& vDim   [[buffer(4)]],
+    uint3 tg [[threadgroup_position_in_grid]],
+    uint3 tid [[thread_position_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]],
+    uint simdgroups [[simdgroups_per_threadgroup]]
+) {
+    const uint t = tg.x;
+    const uint qh = tg.y;
+    if (t >= p.queryCount || qh >= p.numQHeads) return;
+
+    threadgroup float partial[2u * kPrefillMLAMaxSimdGroups];
+
+    const uint d = tid.x;
+    const bool owns_qk = d < p.headDim;
+    const bool owns_v = d < vDim;
+    const uint abs_q = p.startPosition + t;
+    const uint last_exclusive = min(p.kvValidCount, abs_q + 1u);
+
+    device const half* q_row = Q + t * p.qTokenStrideElements + qh * p.headDim;
+    float row_max = -INFINITY;
+    float row_sum = 0.0f;
+    float acc = 0.0f;
+
+    for (uint key = 0u; key < last_exclusive; ++key) {
+        device const half* kv_row = KV + key * p.kvTokenStrideElements;
+        const float qv = owns_qk ? float(q_row[d]) : 0.0f;
+        const float kv = owns_qk ? float(kv_row[d]) : 0.0f;
+        const uint bank = key & 1u;
+        const float score = prefill_attention_tg_sum(
+            qv * kv,
+            lane,
+            simd_group,
+            simdgroups,
+            partial + bank * kPrefillMLAMaxSimdGroups) * p.scale;
+
+        const float new_max = max(row_max, score);
+        const float old_scale = row_sum > 0.0f ? fast::exp(row_max - new_max) : 0.0f;
+        const float new_scale = fast::exp(score - new_max);
+        if (owns_v) {
+            acc = fma(new_scale, float(kv_row[d]), acc * old_scale);
+        }
+        row_sum = row_sum * old_scale + new_scale;
+        row_max = new_max;
+    }
+
+    if (owns_v) {
+        device half* out_row = O + t * p.oTokenStrideElements + qh * vDim;
+        out_row[d] = row_sum > 0.0f ? half(acc / row_sum) : half(0.0f);
+    }
+}
+
 #if defined(__HAVE_TENSOR__)
 
 constant constexpr int kPrefillTensorOpsOutputs = 8;

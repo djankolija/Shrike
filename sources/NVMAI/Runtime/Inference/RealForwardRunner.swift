@@ -163,6 +163,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // Qwen 3.6 kernels. Nil on architectures that never dispatch them.
     private let elementwise: Elementwise?
     private let gdn: GDN?
+    private let mla: MLA?
     private let gdnState: GDNStateManager?
     private let rope: RoPE?
     private let int8ScalarGate: DequantInt8GEMV?
@@ -239,6 +240,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let gdnY: MTLBuffer?             // [valueDim] delta-rule output
     private let gdnOut: MTLBuffer?           // [valueDim] gated-norm output
     private let gdnLowRank: MTLBuffer?       // [keyHeadDim] KDA f_a/g_a stage
+    // Kimi MLA decode scratch (mask-3 layers only).
+    private let mlaQRaw: MTLBuffer?          // [H * (nope + rope)] q_proj out
+    private let mlaQ: MTLBuffer?             // [H * (latent + rope)] absorbed Q
+    private let mlaAttnOut: MTLBuffer?       // [H * latent] attention out
+    private let mlaUnembedOut: MTLBuffer?    // [H * vHeadDim] o_proj input
     private let sharedScalarGateBuf: MTLBuffer? // [1] shared-expert gate logit
     /// BF16 ones over [numExperts]; neutral per_expert_scale when the router
     /// has no auxiliary scale tensors.
@@ -407,7 +413,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.attention = try Attention(context: context,
                                        maxQHeads: cfg.numHeads,
                                        maxHeadDim: max(cfg.headDim, cfg.fullHeadDim),
-                                       supportsSinks: cfg.hasAttentionSinks)
+                                       supportsSinks: cfg.hasAttentionSinks,
+                                       supportsMLA: cfg.hasMLALayers)
         self.kvQuantizer = runtimeConfiguration.kvCachePrecision.isQuantized
             ? try KVCacheQuantizer(context: context) : nil
         self.shared    = try SharedExpertRuntime(context: context,
@@ -441,7 +448,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             weightBits: model.attentionWeightBits)
         self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context,
                                                          yarn: yarnParameters)
-        self.prefillAttention = try PrefillAttention(context: context)
+        self.prefillAttention = try PrefillAttention(context: context,
+                                                     supportsMLA: cfg.hasMLALayers)
         self.prefillRouter = try PrefillRouter(context: context,
                                                weightBits: model.routerWeightBits)
         self.prefillSharedExpert = try PrefillSharedExpert(
@@ -479,6 +487,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         } else {
             self.gdn = nil
             self.gdnState = nil
+        }
+        if let mlaCfg = cfg.mla, cfg.hasMLALayers {
+            self.mla = try MLA(context: context, config: mlaCfg,
+                               numHeads: cfg.numHeads)
+        } else {
+            self.mla = nil
         }
         self.rope = cfg.ropeNeoxSubdim
             ? try RoPE(context: context, yarn: yarnParameters) : nil
@@ -587,6 +601,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.gdnY = nil
             self.gdnOut = nil
             self.gdnLowRank = nil
+        }
+        if let mlaCfg = cfg.mla, cfg.hasMLALayers {
+            let H = cfg.numHeads
+            self.mlaQRaw = try buf(H * (mlaCfg.qkNopeDim + mlaCfg.qkRopeDim),
+                                   label: "decode.mlaQRaw")
+            self.mlaQ = try buf(H * (mlaCfg.latentDim + mlaCfg.qkRopeDim),
+                                label: "decode.mlaQ")
+            self.mlaAttnOut = try buf(H * mlaCfg.latentDim, label: "decode.mlaAttnOut")
+            self.mlaUnembedOut = try buf(H * mlaCfg.valueHeadDim,
+                                         label: "decode.mlaUnembedOut")
+        } else {
+            self.mlaQRaw = nil
+            self.mlaQ = nil
+            self.mlaAttnOut = nil
+            self.mlaUnembedOut = nil
         }
         self.sharedScalarGateBuf = cfg.sharedExpertGated ? try buf(1, label: "decode.sharedScalarGate") : nil
         if cfg.family == .qwen36MTP {
@@ -1621,7 +1650,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             tokenPtr[i] = UInt32(bitPattern: token)
         }
         let D = cfg.hiddenSize
-        let eps: Float = 1e-6
+        let eps: Float = cfg.rmsNormEps
         let embedOutScale = cfg.embeddingScaledBySqrtHidden
             ? Float(D).squareRoot()
             : 1.0
@@ -1710,6 +1739,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     cb: cb, layer: L, views: views, scratch: scratch,
                     tokenCount: t, hiddenSize: D,
                     snapshotGDNAfterFirstToken: snapshotGDNAfterFirstToken,
+                    useTwoRowProjection: useTwoRowProjection)
+            } else if cfg.layerIsMLA(L) {
+                try encodeMLAAttentionPrefill(
+                    cb: cb, layer: L, views: views, scratch: scratch,
+                    tokenCount: t, hiddenSize: D,
+                    startPosition: startPosition,
                     useTwoRowProjection: useTwoRowProjection)
             } else if let ane = aneChunk, ane.coveredLayers.contains(L) {
                 try await runANEFullAttentionPrefill(
@@ -1862,7 +1897,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 "produce position \(position) exceeds maxContext \(maxContext)")
         }
         let D    = UInt32(cfg.hiddenSize)
-        let eps: Float = 1e-6
+        let eps: Float = cfg.rmsNormEps
         let embedOutScale = cfg.embeddingScaledBySqrtHidden
             ? Float(cfg.hiddenSize).squareRoot()
             : 1.0
@@ -2192,6 +2227,66 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     x: gdnOut, y: oOut, m: D, n: UInt32(la.valueDim))
     }
 
+    /// Kimi MLA, one decode step: q_proj GEMV, per-head absorbed embed
+    /// ([W_UKᵀ·q_nope | q_pe] via `mla_embed_q`), kv_a projection straight
+    /// into the fused cache row, latent RMSNorm in place (k_pe untouched),
+    /// split-KV MQA attention over the rows with V as the latent prefix,
+    /// per-head unembed (W_UV), o_proj into `oOut`.
+    private func encodeMLAAttentionDecode(_ cb: MTLCommandBuffer, layer L: Int,
+                                          position: Int, seqLen: UInt32) throws {
+        guard let mla, let kv, let mlaQRaw, let mlaQ, let mlaAttnOut,
+              let mlaUnembedOut, let mlaCfg = cfg.mla else {
+            throw ModelError.internalInconsistency(
+                detail: "MLA layer \(L) without MLA kernels (arch mask misconfiguration)")
+        }
+        let D = UInt32(cfg.hiddenSize)
+        let H = cfg.numHeads
+        let qkDim = mlaCfg.latentDim + mlaCfg.qkRopeDim
+        let qProjW = try model.qProj(layer: L)
+        let kvAW = try model.kimiKVAProj(layer: L)
+        let kvANorm = try model.kimiKVALayernorm(layer: L)
+        let embedQ = try model.kimiEmbedQ(layer: L)
+        let unembedOut = try model.kimiUnembedOut(layer: L)
+        let outW = try model.oProj(layer: L)
+
+        try encodePrimaryGEMV(commandBuffer: cb, projection: qProjW,
+                          x: normed, y: mlaQRaw,
+                          m: UInt32(H * (mlaCfg.qkNopeDim + mlaCfg.qkRopeDim)),
+                          n: D)
+        let slot = kv.kSlot(layer: L, position: position)
+        try encodePrimaryGEMV(commandBuffer: cb, projection: kvAW,
+                          x: normed, y: slot.buffer, yOffset: slot.offset,
+                          m: UInt32(qkDim), n: D)
+        try rms.encodeBF16WRows(commandBuffer: cb,
+                            x: slot.buffer, xOffset: slot.offset,
+                            weight: kvANorm.buffer,
+                            weightOffset: Int(kvANorm.offset),
+                            out: slot.buffer, outOffset: slot.offset,
+                            d: UInt32(mlaCfg.latentDim), rows: 1,
+                            rowStrideElements: UInt32(qkDim),
+                            eps: cfg.rmsNormEps)
+        try mla.encodeEmbedQ(commandBuffer: cb, embedQ: embedQ,
+                         qRaw: mlaQRaw, y: mlaQ, tokens: 1)
+        let kvView = kv.keyView(layer: L, validTokenCount: Int(seqLen))
+        try attention.encodeMLA(commandBuffer: cb,
+                            q: mlaQ,
+                            kv: kvView.buffer, kvOffset: kvView.offset,
+                            out: mlaAttnOut,
+                            qkDim: UInt32(qkDim),
+                            vDim: UInt32(mlaCfg.latentDim),
+                            numQHeads: UInt32(H),
+                            seqLen: seqLen,
+                            scale: Float(cfg.attentionScale))
+        try mla.encodeUnembed(commandBuffer: cb, unembedOut: unembedOut,
+                          attn: mlaAttnOut, y: mlaUnembedOut, tokens: 1)
+        try encodePrimaryGEMV(commandBuffer: cb,
+                    weights: outW.buffer, weightsOffset: Int(outW.offset),
+                    scales: outW.buffer, scalesOffset: Int(outW.scaleOffset),
+                    biases: outW.buffer, biasesOffset: Int(outW.biasOffset),
+                    x: mlaUnembedOut, y: oOut,
+                    m: D, n: UInt32(H * mlaCfg.valueHeadDim))
+    }
+
     /// Kimi KDA, one decode step: fused in_proj_qkv and in_proj_b GEMVs, the
     /// low-rank decay chain (f_a → f_b into the per-channel `a` buffer) and
     /// output-gate chain (g_a → g_b into the z slot, staged through the same
@@ -2328,7 +2423,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 detail: "full attention requires a KV cache")
         }
         let D = UInt32(cfg.hiddenSize)
-        let eps: Float = 1e-6
+        let eps: Float = cfg.rmsNormEps
         let headDim = cfg.fullHeadDim
         let numKV = cfg.numFullKVHeads
         let qDim = UInt32(cfg.numHeads * headDim)
@@ -2656,6 +2751,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let linFB: TensorView?
         let linGA: TensorView?
         let linGB: TensorView?
+        // Kimi MLA layers only (q and o ride the standard slots).
+        let mlaKVA: TensorView?
+        let mlaKVALayernorm: TensorView?
+        let mlaEmbedQ: TensorView?
+        let mlaUnembedOut: TensorView?
     }
 
     private func encodeAffineProjection(commandBuffer: MTLCommandBuffer,
@@ -3039,6 +3139,99 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                              useTwoRowProjection: useTwoRowProjection)
     }
 
+    /// Kimi MLA branch of one chunked-prefill layer: batched q_proj, kv_a
+    /// projection into `kStage` + latent RMSNorm in place, blit of the fused
+    /// rows into the cache, absorbed per-head embed, causal MQA attention
+    /// with V as the latent prefix, per-head unembed, o_proj into `h1`.
+    private func encodeMLAAttentionPrefill(
+        cb: MTLCommandBuffer, layer L: Int,
+        views: LayerPrefillQKVViews, scratch: PrefillChunkScratchBuffers,
+        tokenCount t: Int, hiddenSize D: Int, startPosition: Int,
+        useTwoRowProjection: Bool
+    ) throws {
+        guard let mla, let kv, let mlaCfg = cfg.mla,
+              let qProjW = views.q, let outW = views.o,
+              let kvAW = views.mlaKVA, let kvANorm = views.mlaKVALayernorm,
+              let embedQ = views.mlaEmbedQ, let unembedW = views.mlaUnembedOut else {
+            throw ModelError.internalInconsistency(
+                detail: "MLA layer \(L) is missing a required tensor view")
+        }
+        let H = cfg.numHeads
+        let qkDim = mlaCfg.latentDim + mlaCfg.qkRopeDim
+        let qRawDim = H * (mlaCfg.qkNopeDim + mlaCfg.qkRopeDim)
+        try encodeAffineProjection(commandBuffer: cb,
+                             family: .q,
+                             weights: qProjW,
+                             x: scratch.normed,
+                             y: scratch.q,
+                             rows: qRawDim,
+                             columns: D,
+                             tokenCount: t,
+                             xStrideElements: D,
+                             yStrideElements: qRawDim,
+                             useTwoRowProjection: useTwoRowProjection)
+        try encodeAffineProjection(commandBuffer: cb,
+                             family: .kv,
+                             weights: kvAW,
+                             x: scratch.normed,
+                             y: scratch.kStage,
+                             rows: qkDim,
+                             columns: D,
+                             tokenCount: t,
+                             xStrideElements: D,
+                             yStrideElements: qkDim,
+                             useTwoRowProjection: useTwoRowProjection)
+        try rms.encodeBF16WRows(commandBuffer: cb,
+                            x: scratch.kStage,
+                            weight: kvANorm.buffer,
+                            weightOffset: Int(kvANorm.offset),
+                            out: scratch.kStage,
+                            d: UInt32(mlaCfg.latentDim), rows: t,
+                            rowStrideElements: UInt32(qkDim),
+                            eps: cfg.rmsNormEps)
+        try copyPrefillKV(commandBuffer: cb,
+                      source: scratch.kStage,
+                      destination: kv.kRange(layer: L, start: startPosition, count: t),
+                      sourceTokenOffset: 0,
+                      tokenCount: t,
+                      bytesPerToken: qkDim * MemoryLayout<Float16>.stride)
+        try mla.encodeEmbedQ(commandBuffer: cb, embedQ: embedQ,
+                         qRaw: scratch.q, y: scratch.mlaQ, tokens: t)
+        let kvView = kv.keyView(layer: L, validTokenCount: startPosition + t)
+        let params = PrefillAttentionParams(
+            startPosition: UInt32(startPosition),
+            queryCount: UInt32(t),
+            headDim: UInt32(qkDim),
+            numQHeads: UInt32(H),
+            numKVHeads: 1,
+            kvValidCount: UInt32(startPosition + t),
+            slidingWindow: 0,
+            kvTokenStrideElements: UInt32(qkDim),
+            qTokenStrideElements: UInt32(H * qkDim),
+            oTokenStrideElements: UInt32(H * mlaCfg.latentDim),
+            scale: Float(cfg.attentionScale))
+        try prefillAttention.encodeMLACausal(commandBuffer: cb,
+                                         q: scratch.mlaQ,
+                                         kv: kvView.buffer, kvOffset: kvView.offset,
+                                         out: scratch.attentionOutput,
+                                         params: params,
+                                         vDim: UInt32(mlaCfg.latentDim))
+        try mla.encodeUnembed(commandBuffer: cb, unembedOut: unembedW,
+                          attn: scratch.attentionOutput,
+                          y: scratch.mlaUnembed, tokens: t)
+        try encodeAffineProjection(commandBuffer: cb,
+                             family: .o,
+                             weights: outW,
+                             x: scratch.mlaUnembed,
+                             y: scratch.h1,
+                             rows: D,
+                             columns: H * mlaCfg.valueHeadDim,
+                             tokenCount: t,
+                             xStrideElements: H * mlaCfg.valueHeadDim,
+                             yStrideElements: D,
+                             useTwoRowProjection: useTwoRowProjection)
+    }
+
     /// Kimi KDA prefill chains: f_a → f_b fills the per-channel `a` buffer
     /// and g_a → g_b fills the z slot, both staged through `gdnLowRank`
     /// (separate encoders, so hazard tracking serializes the reuse).
@@ -3331,19 +3524,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let isFull = cfg.fullAttentionLayerMask[L] == 1
             let isLinear = cfg.layerIsLinear(L)
             let isKDA = isLinear && cfg.linearAttentionPerChannelDecay
+            let isMLAL = cfg.layerIsMLA(L)
             return LayerPrefillQKVViews(
                 inputNorm: try model.inputNorm(layer: L),
                 postAttention: try model.postAttnNorm(layer: L),
                 router: try model.router(layer: L),
                 q: isLinear ? nil : try model.qProj(layer: L),
-                k: isLinear ? nil : try model.kProj(layer: L),
-                v: isLinear ? nil
+                k: (isLinear || isMLAL) ? nil : try model.kProj(layer: L),
+                v: (isLinear || isMLAL) ? nil
                     : ((isFull && cfg.attentionKEqV)
                         ? (try model.kProj(layer: L))
                         : (try model.vProj(layer: L))),
                 o: isLinear ? nil : try model.oProj(layer: L),
-                qNorm: (isLinear || !cfg.hasQKNorms) ? nil : try model.qNorm(layer: L),
-                kNorm: (isLinear || !cfg.hasQKNorms) ? nil : try model.kNorm(layer: L),
+                qNorm: (isLinear || isMLAL || !cfg.hasQKNorms)
+                    ? nil : try model.qNorm(layer: L),
+                kNorm: (isLinear || isMLAL || !cfg.hasQKNorms)
+                    ? nil : try model.kNorm(layer: L),
                 linQKV: isLinear ? try model.linearInProjQKV(layer: L) : nil,
                 linZ: (isLinear && !isKDA) ? try model.linearInProjZ(layer: L) : nil,
                 linA: (isLinear && !isKDA) ? try model.linearInProjA(layer: L) : nil,
@@ -3364,7 +3560,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 linFA: isKDA ? try model.kimiFAProj(layer: L) : nil,
                 linFB: isKDA ? try model.kimiFBProj(layer: L) : nil,
                 linGA: isKDA ? try model.kimiGAProj(layer: L) : nil,
-                linGB: isKDA ? try model.kimiGBProj(layer: L) : nil)
+                linGB: isKDA ? try model.kimiGBProj(layer: L) : nil,
+                mlaKVA: isMLAL ? try model.kimiKVAProj(layer: L) : nil,
+                mlaKVALayernorm: isMLAL ? try model.kimiKVALayernorm(layer: L) : nil,
+                mlaEmbedQ: isMLAL ? try model.kimiEmbedQ(layer: L) : nil,
+                mlaUnembedOut: isMLAL ? try model.kimiUnembedOut(layer: L) : nil)
         }
     }
 
@@ -4071,6 +4271,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // Gated-DeltaNet linear attention: no KV slots, no RoPE — a
             // fixed-size recurrent state updated in place.
             try encodeLinearAttentionDecode(attnCB, layer: L)
+        } else if cfg.layerIsMLA(L) {
+            // Kimi MLA: absorbed MQA over one fused [latent | k_pe] FP16
+            // row per token, NoPE.
+            try encodeMLAAttentionDecode(attnCB, layer: L,
+                                         position: position, seqLen: seqLen)
         } else if cfg.attnOutputGate {
             // Qwen full attention: packed [query ; gate] q_proj, real
             // v_proj, no V norm, NeoX sub-dim RoPE, sigmoid output gate.
