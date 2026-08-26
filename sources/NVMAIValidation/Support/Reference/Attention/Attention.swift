@@ -11,6 +11,8 @@ public enum AttentionRef {
     /// K, V layout: `[seqLen, numKVHeads, headDim]`. (V may alias K when
     /// the caller passes the same array — the math is unchanged.)
     /// Output: `[numQHeads, headDim]`.
+    /// `sinks` is a learned per-Q-head logit (gpt-oss): it joins the softmax
+    /// max and denominator as one extra term and contributes no value row.
     public static func apply(
         q: [Float],
         k: [Float],
@@ -20,13 +22,16 @@ public enum AttentionRef {
         numKVHeads: Int,
         seqLen: Int,
         window: Int? = nil,
-        scale: Float? = nil
+        scale: Float? = nil,
+        sinks: [Float]? = nil
     ) -> [Float] {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads")
         precondition(q.count == numQHeads * headDim)
         precondition(k.count == seqLen * numKVHeads * headDim)
         precondition(v.count == seqLen * numKVHeads * headDim)
+        precondition(sinks == nil || sinks?.count == numQHeads,
+                     "sinks must cover [numQHeads]")
 
         let groupSize = numQHeads / numKVHeads
         let scale = scale ?? (1.0 / Float(headDim).squareRoot())
@@ -69,6 +74,7 @@ public enum AttentionRef {
             guard !scores.isEmpty else { continue }
             var mx = scores[0]
             for s in scores { if s > mx { mx = s } }
+            if let sinks { mx = max(mx, sinks[qh]) }
             var negMax = -mx
             scores.withUnsafeMutableBufferPointer { ps in
                 vDSP_vsadd(ps.baseAddress!, 1, &negMax,
@@ -79,6 +85,7 @@ public enum AttentionRef {
             scores.withUnsafeBufferPointer { ps in
                 vDSP_sve(ps.baseAddress!, 1, &sum, vDSP_Length(ps.count))
             }
+            if let sinks { sum += Foundation.exp(sinks[qh] - mx) }
             var invSum = 1.0 / sum
             scores.withUnsafeMutableBufferPointer { ps in
                 vDSP_vsmul(ps.baseAddress!, 1, &invSum,

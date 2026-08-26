@@ -37,18 +37,23 @@ final class Attention {
     private let psoCombineFull: MTLComputePipelineState
     private let psoCombineSWAChunks16: MTLComputePipelineState
     private let psoCombineFullChunks16: MTLComputePipelineState
+    private let psoCombineSinks: MTLComputePipelineState?
 
     /// Mirrors `kAttnThreads` in `attention.metal`. The kernel was authored
     /// with a hardcoded 256-thread group so its threadgroup-memory scratch
     /// (q_smem[512] + reduce[8] + bcast) sizes are correct.
     static let threadsPerGroup: Int = 256
 
-    /// Project ceilings for the split-KV partial scratch. `kAttnMaxHeadDim` in
-    /// attention.metal is 512; the model has 16 Q heads; `maxChunks` bounds the
-    /// split factor (and therefore the scratch size: 16·64·512 FP32 ≈ 2 MB).
-    static let maxQHeads = 16
-    static let maxHeadDim = 512
+    /// `kAttnMaxHeadDim` in attention.metal — the kernel's threadgroup scratch
+    /// ceiling, independent of the instance split-KV scratch limits below.
+    static let kernelMaxHeadDim = 512
     static let maxChunks = 64
+
+    /// Split-KV partial-scratch limits, sized from the architecture at init
+    /// (defaults describe the Qwen baseline: 16 Q heads · 64 chunks · 512
+    /// head dim ≈ 2 MB of FP32 o-scratch).
+    let maxQHeads: Int
+    let maxHeadDim: Int
     /// Full attention uses 16 base chunks by default.
     private static let defaultFullChunks = 16
     private static let defaultGQASWAChunks = 8
@@ -60,8 +65,19 @@ final class Attention {
     private let dPartial: MTLBuffer
     private let oPartial: MTLBuffer
 
-    init(context: MetalContext) throws {
+    init(context: MetalContext,
+         maxQHeads: Int = 16,
+         maxHeadDim: Int = 512,
+         supportsSinks: Bool = false) throws {
+        precondition(maxQHeads > 0 && maxHeadDim > 0 && maxHeadDim <= Self.kernelMaxHeadDim,
+                     "split-KV scratch limits must be positive and fit the kernel scratch")
         self.ctx = context
+        self.maxQHeads = maxQHeads
+        self.maxHeadDim = maxHeadDim
+        self.psoCombineSinks = supportsSinks
+            ? try context.pipeline("attention_decode_combine",
+                                   constants: [MetalFunctionConstant(index: 66, value: .bool(true))])
+            : nil
         self.psoPartial = try context.pipeline("attention_decode_partial")
         self.psoGQAPartial = try context.pipeline("attention_decode_gqa_swa_partial")
         self.psoCombine = try context.pipeline("attention_decode_combine")
@@ -114,12 +130,12 @@ final class Attention {
                                                                    numQHeads: 16,
                                                                    numKVHeads: 2,
                                                                    numChunks: 16)
-        let md = Self.maxQHeads * Self.maxChunks
+        let md = maxQHeads * Self.maxChunks
         guard let m = context.device.makeBuffer(length: md * MemoryLayout<Float>.size,
                                                 options: .storageModeShared),
 	              let d = context.device.makeBuffer(length: md * MemoryLayout<Float>.size,
 	                                                options: .storageModeShared),
-	              let o = context.device.makeBuffer(length: md * Self.maxHeadDim * MemoryLayout<Float>.size,
+	              let o = context.device.makeBuffer(length: md * maxHeadDim * MemoryLayout<Float>.size,
 	                                                options: .storageModeShared) else {
             throw MetalError.bufferAllocationFailed("attention split-KV scratch")
         }
@@ -184,6 +200,7 @@ final class Attention {
                           window: UInt32,
                           scale: Float? = nil,
                           ringCapacity: UInt32 = 0,
+                          sinks: MTLBuffer? = nil, sinksOffset: Int = 0,
                           kvFormat: KVView? = nil) throws {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
@@ -199,6 +216,7 @@ final class Attention {
                     seqLen: seqLen, kvStart: kvStart, scale: sc,
                     preferGQASWA: true,
                     ringCapacity: ringCapacity,
+                    sinks: sinks, sinksOffset: sinksOffset,
                     kvFormat: kvFormat)
     }
 
@@ -214,6 +232,7 @@ final class Attention {
                            numKVHeads: UInt32,
                            seqLen: UInt32,
                            scale: Float? = nil,
+                           sinks: MTLBuffer? = nil, sinksOffset: Int = 0,
                            kvFormat: KVView? = nil) throws {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
@@ -229,6 +248,7 @@ final class Attention {
                     headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
                     seqLen: seqLen, kvStart: 0, scale: sc,
                     preferGQASWA: false,
+                    sinks: sinks, sinksOffset: sinksOffset,
                     kvFormat: kvFormat)
     }
 
@@ -247,11 +267,12 @@ final class Attention {
                              seqLen: UInt32, kvStart: UInt32, scale: Float,
                              preferGQASWA: Bool,
                              ringCapacity: UInt32 = 0,
+                             sinks: MTLBuffer? = nil, sinksOffset: Int = 0,
                              kvFormat: KVView? = nil) throws {
-        precondition(Int(numQHeads) <= Self.maxQHeads,
-                     "numQHeads \(numQHeads) exceeds split-KV scratch (max \(Self.maxQHeads))")
-        precondition(Int(headDim) <= Self.maxHeadDim,
-                     "head_dim \(headDim) exceeds split-KV scratch (max \(Self.maxHeadDim))")
+        precondition(Int(numQHeads) <= maxQHeads,
+                     "numQHeads \(numQHeads) exceeds split-KV scratch (max \(maxQHeads))")
+        precondition(Int(headDim) <= maxHeadDim,
+                     "head_dim \(headDim) exceeds split-KV scratch (max \(maxHeadDim))")
         precondition(ringCapacity == 0 || preferGQASWA,
                      "KV ring is only valid for SWA attention")
         splitStateLock.lock()
@@ -319,10 +340,19 @@ final class Attention {
         guard let p2 = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
-        let combinePSO = combinePipeline(headDim: headDim,
+        let combinePSO: MTLComputePipelineState
+        if sinks != nil {
+            guard let sinkPSO = psoCombineSinks else {
+                throw MetalError.invalidState(
+                    "sinks bound to an Attention built without supportsSinks")
+            }
+            combinePSO = sinkPSO
+        } else {
+            combinePSO = combinePipeline(headDim: headDim,
                                          numQHeads: numQHeads,
                                          numKVHeads: numKVHeads,
                                          numChunks: nChunks)
+        }
         p2.setComputePipelineState(combinePSO)
         p2.setBuffer(mPartial, offset: 0, index: 0)
         p2.setBuffer(dPartial, offset: 0, index: 1)
@@ -331,6 +361,7 @@ final class Attention {
         var hd2 = headDim, nc2 = UInt32(nChunks)
         p2.setBytes(&hd2, length: MemoryLayout<UInt32>.size, index: 4)
         p2.setBytes(&nc2, length: MemoryLayout<UInt32>.size, index: 5)
+        if let sinks { p2.setBuffer(sinks, offset: sinksOffset, index: 6) }
         let combineTGWidth = min(Self.threadsPerGroup,
                                  Int(combinePSO.maxTotalThreadsPerThreadgroup))
         p2.dispatchThreadgroups(MTLSize(width: Int(numQHeads), height: 1, depth: 1),

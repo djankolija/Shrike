@@ -108,6 +108,22 @@ import NVMAIValidationSupport
                 "scale=1.0 produced identical output to rsqrt(head_dim) — runtime arg ignored?")
     }
 
+    private static func bf16(_ x: Float) -> UInt16 {
+        UInt16(truncatingIfNeeded: x.bitPattern >> 16)
+    }
+
+    private static func bf16Value(_ x: Float) -> Float {
+        Float(bitPattern: UInt32(bf16(x)) << 16)
+    }
+
+    private static func makeBF16Buffer(_ device: MTLDevice,
+                                       values: [Float]) -> MTLBuffer? {
+        let bits = values.map { bf16($0) }
+        return device.makeBuffer(bytes: bits,
+                                 length: bits.count * 2,
+                                 options: .storageModeShared)
+    }
+
     private static func runAndCompare(
         headDim: Int,
         numQHeads: Int,
@@ -115,6 +131,7 @@ import NVMAIValidationSupport
         seqLen: Int,
         mode: Mode,
         shareKV: Bool = false,
+        sinks: [Float]? = nil,
         seed: UInt64,
         tolerance: Float = Tolerance.fp16ChainedReduction
     ) throws {
@@ -134,9 +151,13 @@ import NVMAIValidationSupport
         let qFp16 = qFp32.map { Float16($0) }
         let kFp16 = kFp32.map { Float16($0) }
         let vFp16 = vFp32.map { Float16($0) }
+        let sinkValues = sinks?.map { Self.bf16Value($0) }
 
         let ctx = try MetalContext()
-        let kernel = try Attention(context: ctx)
+        let kernel = try Attention(context: ctx,
+                                   maxQHeads: max(16, numQHeads),
+                                   maxHeadDim: max(headDim, 512),
+                                   supportsSinks: sinks != nil)
 
         guard let qBuf = Fp16Buffer.make(ctx.device, halves: qFp16),
               let kBuf = Fp16Buffer.make(ctx.device, halves: kFp16),
@@ -152,6 +173,15 @@ import NVMAIValidationSupport
             }
             vBuf = b
         }
+        let sinkBuf: MTLBuffer?
+        if let sinkValues {
+            guard let b = Self.makeBF16Buffer(ctx.device, values: sinkValues) else {
+                Issue.record("Failed to allocate sinks buffer"); return
+            }
+            sinkBuf = b
+        } else {
+            sinkBuf = nil
+        }
 
         guard let cmd = ctx.queue.makeCommandBuffer() else {
             Issue.record("Failed to make command buffer"); return
@@ -164,14 +194,16 @@ import NVMAIValidationSupport
                              numQHeads: UInt32(numQHeads),
                              numKVHeads: UInt32(numKVHeads),
                              seqLen: UInt32(seqLen),
-                             window: UInt32(window))
+                             window: UInt32(window),
+                             sinks: sinkBuf)
         case .full:
             try kernel.encodeFull(commandBuffer: cmd,
                               q: qBuf, k: kBuf, v: vBuf, out: outBuf,
                               headDim: UInt32(headDim),
                               numQHeads: UInt32(numQHeads),
                               numKVHeads: UInt32(numKVHeads),
-                              seqLen: UInt32(seqLen))
+                              seqLen: UInt32(seqLen),
+                              sinks: sinkBuf)
         }
         cmd.commit()
         cmd.waitUntilCompleted()
@@ -186,7 +218,8 @@ import NVMAIValidationSupport
         let ref = AttentionRef.apply(
             q: qRef, k: kRef, v: vRef,
             headDim: headDim, numQHeads: numQHeads,
-            numKVHeads: numKVHeads, seqLen: seqLen, window: window
+            numKVHeads: numKVHeads, seqLen: seqLen, window: window,
+            sinks: sinkValues
         )
         let actual = Fp16Buffer.read(outBuf, count: qCount)
 
@@ -384,5 +417,46 @@ import NVMAIValidationSupport
         try Self.runAndCompare(headDim: 256, numQHeads: 16, numKVHeads: 2,
                                seqLen: 128, mode: .full, shareKV: true,
                                seed: 0x177)
+    }
+
+    // Sinks + 64-Q-head scratch (gpt-oss) ------------------------------------
+
+    @Test func attentionFull_64Heads_matchesReference() throws {
+        try Self.runAndCompare(headDim: 64, numQHeads: 64, numKVHeads: 8,
+                               seqLen: 128, mode: .full, seed: 0x178)
+    }
+
+    @Test func attentionSWA_sinks_smallShape() throws {
+        var rng = SeedTree(0x179).key("attn-sinks-small")
+        let sinks = (0..<4).map { _ in rng.uniform(-1.0, 1.0) }
+        try Self.runAndCompare(headDim: 64, numQHeads: 4, numKVHeads: 2,
+                               seqLen: 128, mode: .swa(window: 64),
+                               sinks: sinks, seed: 0x179)
+    }
+
+    @Test func attentionFull_sinks_gptOssShape() throws {
+        var rng = SeedTree(0x17a).key("attn-sinks-gptoss-full")
+        let sinks = (0..<64).map { _ in rng.uniform(-1.0, 1.0) }
+        try Self.runAndCompare(headDim: 64, numQHeads: 64, numKVHeads: 8,
+                               seqLen: 128, mode: .full,
+                               sinks: sinks, seed: 0x17a)
+    }
+
+    @Test func attentionSWA_sinks_window128_gptOssShape() throws {
+        var rng = SeedTree(0x17b).key("attn-sinks-gptoss-swa")
+        let sinks = (0..<64).map { _ in rng.uniform(-1.0, 1.0) }
+        try Self.runAndCompare(headDim: 64, numQHeads: 64, numKVHeads: 8,
+                               seqLen: 256, mode: .swa(window: 128),
+                               sinks: sinks, seed: 0x17b)
+    }
+
+    /// Scores from uniform(-0.5, 0.5) inputs stay far below +8, so the sink
+    /// carries the running max — the branch where a wrong sign in the combine
+    /// rescale would surface.
+    @Test func attention_sinkDominatesMax_smallShape() throws {
+        let sinks = [Float](repeating: 8.0, count: 4)
+        try Self.runAndCompare(headDim: 64, numQHeads: 4, numKVHeads: 2,
+                               seqLen: 96, mode: .swa(window: 64),
+                               sinks: sinks, seed: 0x17c)
     }
 }

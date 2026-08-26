@@ -318,7 +318,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.maxContext = maxContext
         try runtimeConfiguration.validate(maxContext: maxContext)
         let yarnParameters: YaRNRoPEParameters?
-        if runtimeConfiguration.ropeScalingMode == .yarn {
+        if let archYaRN = model.config.archYaRN {
+            // The architecture mandates its own YaRN; the user
+            // context-extension mode would silently fight it.
+            guard runtimeConfiguration.ropeScalingMode != .yarn else {
+                throw RuntimeConfigurationError.yaRNUnsupportedArchitecture
+            }
+            yarnParameters = archYaRN
+        } else if runtimeConfiguration.ropeScalingMode == .yarn {
             guard model.config.ropeNeoxSubdim else {
                 throw RuntimeConfigurationError.yaRNUnsupportedArchitecture
             }
@@ -340,8 +347,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.expertIOBackend = try ExpertIOBackend.environmentValue()
         let rawPrefetchEnabled = ProcessInfo.processInfo.environment[
             "NVMAI_PREDICTIVE_PREFETCH"] == "1"
-        let rawPrefetchTopM = Int(ProcessInfo.processInfo.environment[
-            "NVMAI_PREFETCH_TOP_M"] ?? "4") ?? 4
+        // The built-in default clamps to the architecture's top-k (gpt-oss
+        // routes top-4, toys fewer); only an explicit override is validated.
+        let rawPrefetchTopM = ProcessInfo.processInfo.environment[
+            "NVMAI_PREFETCH_TOP_M"].flatMap(Int.init) ?? min(4, cfg.topKExperts)
         guard (1...cfg.topKExperts).contains(rawPrefetchTopM) else {
             throw ModelError.internalInconsistency(
                 detail: "NVMAI_PREFETCH_TOP_M must be 1...\(cfg.topKExperts)")
@@ -394,7 +403,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.affine = model.attentionWeightBits == 4 ? nil
             : try AffineQuantGEMV(context: context,
                                   weightBits: model.attentionWeightBits)
-        self.attention = try Attention(context: context)
+        self.attention = try Attention(context: context,
+                                       maxQHeads: cfg.numHeads,
+                                       maxHeadDim: max(cfg.headDim, cfg.fullHeadDim),
+                                       supportsSinks: cfg.hasAttentionSinks)
         self.kvQuantizer = runtimeConfiguration.kvCachePrecision.isQuantized
             ? try KVCacheQuantizer(context: context) : nil
         self.shared    = try SharedExpertRuntime(context: context,
@@ -452,6 +464,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let needsElementwise = cfg.attnOutputGate
             || cfg.sharedExpertGated
             || cfg.hasLinearAttentionLayers
+            || cfg.hasAttentionBiases
         self.elementwise = needsElementwise ? try Elementwise(context: context) : nil
         if cfg.hasLinearAttentionLayers {
             self.gdn = try GDN(context: context, config: cfg.linearAttention,
@@ -603,17 +616,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  cols: cols)
         }
         var sharedViews: [LayerSharedExpertProjections] = []
-        sharedViews.reserveCapacity(cfg.numLayers)
-        for L in 0..<cfg.numLayers {
-            let gate = try model.sharedExpertGate(layer: L)
-            let up = try model.sharedExpertUp(layer: L)
-            let down = try model.sharedExpertDown(layer: L)
-            sharedViews.append(LayerSharedExpertProjections(
-                gate: sharedProj(gate, rows: UInt32(F), cols: UInt32(D)),
-                up: sharedProj(up, rows: UInt32(F), cols: UInt32(D)),
-                down: sharedProj(down, rows: UInt32(D), cols: UInt32(F)),
-                scalarGate: cfg.sharedExpertGated
-                    ? try model.sharedExpertScalarGate(layer: L) : nil))
+        if cfg.hasSharedExpert {
+            sharedViews.reserveCapacity(cfg.numLayers)
+            for L in 0..<cfg.numLayers {
+                let gate = try model.sharedExpertGate(layer: L)
+                let up = try model.sharedExpertUp(layer: L)
+                let down = try model.sharedExpertDown(layer: L)
+                sharedViews.append(LayerSharedExpertProjections(
+                    gate: sharedProj(gate, rows: UInt32(F), cols: UInt32(D)),
+                    up: sharedProj(up, rows: UInt32(F), cols: UInt32(D)),
+                    down: sharedProj(down, rows: UInt32(D), cols: UInt32(F)),
+                    scalarGate: cfg.sharedExpertGated
+                        ? try model.sharedExpertScalarGate(layer: L) : nil))
+            }
         }
         self.sharedExpertProjections = sharedViews
 
@@ -1888,7 +1903,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
             let inNorm   = try model.inputNorm(layer: L)
             let postAttn = try model.postAttnNorm(layer: L)
-            let sharedProj = sharedExpertProjections[L]
             let routerW  = try model.router(layer: L)
             let nextRouterW: TensorView?
             if nextLayerPredictionEnabled, L + 1 < cfg.numLayers {
@@ -2025,7 +2039,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // id list is reused host scratch (R16); the runner is single-flight
             // per generation, so it never aliases concurrent decode work.
             try await encodeDecodeRoutedMoE(
-                layer: L, position: position, sharedProj: sharedProj,
+                layer: L, position: position,
                 attnCB: attnCB, tailCB: tailCB,
                 sharedCB: sharedCB,
                 overlapCompletionClock: overlapCompletionClock,
@@ -2312,6 +2326,162 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     scales: o.buffer, scalesOffset: Int(o.scaleOffset),
                     biases: o.buffer, biasesOffset: Int(o.biasOffset),
                     x: attnOut, y: oOut, m: D, n: qDim)
+    }
+
+    /// gpt-oss q/k/v projections with their additive BF16 biases and the
+    /// arch-YaRN NeoX rotation on q and k — no QK norms, V unrotated.
+    private func encodeGptOssQKVProjection(
+        _ cb: MTLCommandBuffer,
+        layer L: Int,
+        position: Int,
+        kWrite: (buffer: MTLBuffer, offset: Int),
+        vWrite: (buffer: MTLBuffer, offset: Int),
+        qDimension qDim: UInt32,
+        kvDimension kvDim: UInt32,
+        elementwise: Elementwise,
+        rope: RoPE
+    ) throws {
+        let D = UInt32(cfg.hiddenSize)
+        let headDim = cfg.fullHeadDim
+        let qBias = try model.qProjBias(layer: L)
+        let kBias = try model.kProjBias(layer: L)
+        let vBias = try model.vProjBias(layer: L)
+        try encodePrimaryGEMV(commandBuffer: cb,
+                              projection: try model.qProj(layer: L),
+                              x: normed, y: qScratch, m: qDim, n: D)
+        try encodePrimaryGEMV(commandBuffer: cb,
+                              projection: try model.kProj(layer: L),
+                              x: normed,
+                              y: kWrite.buffer, yOffset: kWrite.offset,
+                              m: kvDim, n: D)
+        try encodePrimaryGEMV(commandBuffer: cb,
+                              projection: try model.vProj(layer: L),
+                              x: normed,
+                              y: vWrite.buffer, yOffset: vWrite.offset,
+                              m: kvDim, n: D)
+        try elementwise.encodeBiasAdd(commandBuffer: cb,
+                                      x: qScratch,
+                                      bias: qBias.buffer,
+                                      biasOffset: Int(qBias.offset),
+                                      rowElems: Int(qDim))
+        try elementwise.encodeBiasAdd(commandBuffer: cb,
+                                      x: kWrite.buffer, xOffset: kWrite.offset,
+                                      bias: kBias.buffer,
+                                      biasOffset: Int(kBias.offset),
+                                      rowElems: Int(kvDim))
+        try elementwise.encodeBiasAdd(commandBuffer: cb,
+                                      x: vWrite.buffer, xOffset: vWrite.offset,
+                                      bias: vBias.buffer,
+                                      biasOffset: Int(vBias.offset),
+                                      rowElems: Int(kvDim))
+        let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
+        try rope.encodeNeoxSubdim(commandBuffer: cb,
+                                  data: qScratch,
+                                  position: UInt32(position),
+                                  headDim: UInt32(headDim),
+                                  numHeads: UInt32(cfg.numHeads),
+                                  rotaryDim: rotaryDim,
+                                  theta: Float(cfg.fullRopeTheta))
+        try rope.encodeNeoxSubdim(commandBuffer: cb,
+                                  data: kWrite.buffer,
+                                  dataOffset: kWrite.offset,
+                                  position: UInt32(position),
+                                  headDim: UInt32(headDim),
+                                  numHeads: UInt32(cfg.numFullKVHeads),
+                                  rotaryDim: rotaryDim,
+                                  theta: Float(cfg.fullRopeTheta))
+    }
+
+    /// gpt-oss decode attention: biased QKV + YaRN via
+    /// `encodeGptOssQKVProjection`, sinks in the softmax, full or
+    /// sliding-window dispatch by the layer mask, biased o_proj. Mirrors the
+    /// non-gated branch's command-buffer split: QKV + RoPE on `attnCB`, the
+    /// softmax on its own buffer via `softmaxCB`, o_proj on `tailCB`.
+    private func encodeGptOssAttentionDecode(attnCB: MTLCommandBuffer,
+                                             tailCB: MTLCommandBuffer,
+                                             softmaxCB: inout MTLCommandBuffer?,
+                                             layer L: Int,
+                                             position: Int,
+                                             seqLen: UInt32) throws {
+        guard let elementwise, let rope else {
+            throw ModelError.internalInconsistency(
+                detail: "gpt-oss attention layer \(L) without bias/rope kernels (arch misconfiguration)")
+        }
+        guard let kv else {
+            throw ModelError.internalInconsistency(
+                detail: "attention requires a KV cache")
+        }
+        let D = UInt32(cfg.hiddenSize)
+        let headDim = cfg.fullHeadDim
+        let numKV = cfg.numFullKVHeads
+        let qDim = UInt32(cfg.numHeads * headDim)
+        let kvDim = UInt32(numKV * headDim)
+        let kSlot = kv.kSlot(layer: L, position: position)
+        let vSlot = kv.vSlot(layer: L, position: position)
+        let quantizedKV = kv.precision.isQuantized
+        let kWrite = quantizedKV ? (buffer: kStage, offset: 0) : kSlot
+        let vWrite = quantizedKV ? (buffer: vStage, offset: 0) : vSlot
+        let oBias = try model.oProjBias(layer: L)
+        let sinks = try model.attentionSinks(layer: L)
+
+        try encodeGptOssQKVProjection(attnCB, layer: L, position: position,
+                                      kWrite: kWrite, vWrite: vWrite,
+                                      qDimension: qDim, kvDimension: kvDim,
+                                      elementwise: elementwise, rope: rope)
+        if quantizedKV {
+            try encodeQuantizedKV(commandBuffer: attnCB, kv: kv, layer: L,
+                                  position: position, keySource: kStage,
+                                  valueSource: vStage, elementCount: Int(kvDim))
+        }
+        let keyView = kv.keyView(layer: L, validTokenCount: Int(seqLen))
+        let valueView = kv.valueView(layer: L, validTokenCount: Int(seqLen))
+        guard let attentionCB = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        softmaxCB = attentionCB
+        if cfg.layerIsFull(L) {
+            try attention.encodeFull(commandBuffer: attentionCB,
+                                     q: qScratch,
+                                     k: keyView.buffer, kOffset: keyView.offset,
+                                     v: valueView.buffer, vOffset: valueView.offset,
+                                     out: attnOut,
+                                     headDim: UInt32(headDim),
+                                     numQHeads: UInt32(cfg.numHeads),
+                                     numKVHeads: UInt32(numKV),
+                                     seqLen: seqLen,
+                                     scale: Float(cfg.attentionScale),
+                                     sinks: sinks.buffer,
+                                     sinksOffset: Int(sinks.offset),
+                                     kvFormat: keyView)
+        } else {
+            let ringCapacity = kv.ringCapacity(layer: L)
+            let activeRingCapacity = ringCapacity > 0 && Int(seqLen) > ringCapacity
+                ? UInt32(ringCapacity)
+                : 0
+            try attention.encodeSWA(commandBuffer: attentionCB,
+                                    q: qScratch,
+                                    k: kSlot.buffer, kOffset: 0,
+                                    v: vSlot.buffer, vOffset: 0,
+                                    out: attnOut,
+                                    headDim: UInt32(headDim),
+                                    numQHeads: UInt32(cfg.numHeads),
+                                    numKVHeads: UInt32(numKV),
+                                    seqLen: seqLen,
+                                    window: UInt32(cfg.slidingWindow),
+                                    scale: Float(cfg.attentionScale),
+                                    ringCapacity: activeRingCapacity,
+                                    sinks: sinks.buffer,
+                                    sinksOffset: Int(sinks.offset),
+                                    kvFormat: keyView)
+        }
+        try encodePrimaryGEMV(commandBuffer: tailCB,
+                              projection: try model.oProj(layer: L),
+                              x: attnOut, y: oOut, m: D, n: qDim)
+        try elementwise.encodeBiasAdd(commandBuffer: tailCB,
+                                      x: oOut,
+                                      bias: oBias.buffer,
+                                      biasOffset: Int(oBias.offset),
+                                      rowElems: Int(D))
     }
 
     private func encodePrimaryGEMV(commandBuffer cb: MTLCommandBuffer,
@@ -2832,7 +3002,43 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             attnQ = scratch.q
         }
 
-        if cfg.ropeNeoxSubdim {
+        if cfg.hasAttentionBiases {
+            let qBias = try model.qProjBias(layer: L)
+            let kBias = try model.kProjBias(layer: L)
+            let vBias = try model.vProjBias(layer: L)
+            try elementwise!.encodeBiasAdd(commandBuffer: cb,
+                                       x: attnQ,
+                                       bias: qBias.buffer,
+                                       biasOffset: Int(qBias.offset),
+                                       rowElems: qDim, rows: t)
+            try elementwise!.encodeBiasAdd(commandBuffer: cb,
+                                       x: scratch.kStage,
+                                       bias: kBias.buffer,
+                                       biasOffset: Int(kBias.offset),
+                                       rowElems: kvDim, rows: t)
+            try elementwise!.encodeBiasAdd(commandBuffer: cb,
+                                       x: scratch.vStage,
+                                       bias: vBias.buffer,
+                                       biasOffset: Int(vBias.offset),
+                                       rowElems: kvDim, rows: t)
+        }
+
+        if cfg.ropeNeoxSubdim && !cfg.hasQKNorms {
+            let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
+            try prefillQKVEpilogue.encodeNeoxSubdimNoNorm(
+                commandBuffer: cb,
+                q: attnQ,
+                k: scratch.kStage,
+                startPosition: UInt32(startPosition),
+                queryCount: UInt32(t),
+                headDim: UInt32(headDim),
+                numQHeads: UInt32(cfg.numHeads),
+                numKVHeads: UInt32(numKVHeads),
+                qTokenStrideElements: UInt32(qDim),
+                kvTokenStrideElements: UInt32(kvDim),
+                theta: Float(cfg.fullRopeTheta),
+                rotaryDim: rotaryDim)
+        } else if cfg.ropeNeoxSubdim {
             let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
             try prefillQKVEpilogue.encodeNeoxSubdimNoVNorm(
                 commandBuffer: cb,
@@ -2912,6 +3118,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 let activeRingCapacity = ringCapacity > 0 && startPosition + t > ringCapacity
                     ? UInt32(ringCapacity)
                     : 0
+                let sinks = cfg.hasAttentionSinks
+                    ? try model.attentionSinks(layer: L)
+                    : nil
                 try prefillAttention.encodeCausal(commandBuffer: cb,
                                               q: attnQ,
                                               k: keyView.buffer,
@@ -2919,6 +3128,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                               out: scratch.attentionOutput,
                                               params: params,
                                               kvRingCapacity: activeRingCapacity,
+                                              sinks: sinks?.buffer,
+                                              sinksOffset: sinks.map { Int($0.offset) } ?? 0,
                                               path: prefillAttentionPath)
         } else {
             throw PrefillError.chunkedUnsupported(
@@ -2941,6 +3152,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  xStrideElements: qDim,
                                  yStrideElements: D,
                                  useTwoRowProjection: useTwoRowProjection)
+        if cfg.hasAttentionBiases {
+            let oBias = try model.oProjBias(layer: L)
+            try elementwise!.encodeBiasAdd(commandBuffer: cb,
+                                       x: scratch.h1,
+                                       bias: oBias.buffer,
+                                       biasOffset: Int(oBias.offset),
+                                       rowElems: D, rows: t)
+        }
     }
 
     /// Resolve every layer's tensor views once, before the chunk loop.
@@ -2959,8 +3178,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         ? (try model.kProj(layer: L))
                         : (try model.vProj(layer: L))),
                 o: isLinear ? nil : try model.oProj(layer: L),
-                qNorm: isLinear ? nil : try model.qNorm(layer: L),
-                kNorm: isLinear ? nil : try model.kNorm(layer: L),
+                qNorm: (isLinear || !cfg.hasQKNorms) ? nil : try model.qNorm(layer: L),
+                kNorm: (isLinear || !cfg.hasQKNorms) ? nil : try model.kNorm(layer: L),
                 linQKV: isLinear ? try model.linearInProjQKV(layer: L) : nil,
                 linZ: isLinear ? try model.linearInProjZ(layer: L) : nil,
                 linA: isLinear ? try model.linearInProjA(layer: L) : nil,
@@ -3112,22 +3331,33 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard let sharedCB = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
-        let sharedProj = sharedExpertProjections[L]
-        try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
-                                            x: scratch.routedX,
-                                            y: scratch.h1,
-                                            gate: sharedProj.gate,
-                                            up: sharedProj.up,
-                                            down: sharedProj.down,
-                                            scratchGate: scratch.sharedGateScratch,
-                                            scratchUp: scratch.sharedUpScratch,
-                                            scratchAct: scratch.sharedActScratch,
-                                            queryCount: t,
-                                            d: D,
-                                            intermediate: cfg.intermediateSize,
-                                            xStrideElements: D,
-                                            yStrideElements: D)
+        if cfg.hasSharedExpert {
+            let sharedProj = sharedExpertProjections[L]
+            try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
+                                                x: scratch.routedX,
+                                                y: scratch.h1,
+                                                gate: sharedProj.gate,
+                                                up: sharedProj.up,
+                                                down: sharedProj.down,
+                                                scratchGate: scratch.sharedGateScratch,
+                                                scratchUp: scratch.sharedUpScratch,
+                                                scratchAct: scratch.sharedActScratch,
+                                                queryCount: t,
+                                                d: D,
+                                                intermediate: cfg.intermediateSize,
+                                                xStrideElements: D,
+                                                yStrideElements: D)
+        } else {
+            // No shared expert (gpt-oss): scratch.h1 still holds the attention
+            // branch; zero it so the MoE reduce folds nothing extra.
+            guard let blit = sharedCB.makeBlitCommandEncoder() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            blit.fill(buffer: scratch.h1, range: 0..<(t * D * halfBytes), value: 0)
+            blit.endEncoding()
+        }
         if cfg.sharedExpertGated {
+            let sharedProj = sharedExpertProjections[L]
             let gateView = sharedProj.scalarGate!
             for row in 0..<t {
                 try int8ScalarGate!.encode(
@@ -3379,8 +3609,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 guard let sharedCB = ctx.queue.makeCommandBuffer() else {
                     throw ModelError.residentBufferWrapFailed
                 }
-                let sharedProj = sharedExpertProjections[L]
-                try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
+                if cfg.hasSharedExpert {
+                    let sharedProj = sharedExpertProjections[L]
+                    try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
                                                     x: scratch.routedX,
                                                     y: scratch.h1,
                                                     gate: sharedProj.gate,
@@ -3394,9 +3625,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                     intermediate: cfg.intermediateSize,
                                                     xStrideElements: D,
                                                     yStrideElements: D)
+                } else {
+                    // No shared expert (gpt-oss): scratch.h1 still holds the
+                    // attention branch; zero it so the reduce folds nothing.
+                    guard let blit = sharedCB.makeBlitCommandEncoder() else {
+                        throw ModelError.residentBufferWrapFailed
+                    }
+                    blit.fill(buffer: scratch.h1,
+                              range: 0..<(t * D * MemoryLayout<Float16>.stride),
+                              value: 0)
+                    blit.endEncoding()
+                }
                 if cfg.sharedExpertGated {
                     // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX),
                     // per chunk row.
+                    let sharedProj = sharedExpertProjections[L]
                     let gateView = sharedProj.scalarGate!
                     let halfBytes = MemoryLayout<Float16>.stride
                     for row in 0..<t {
@@ -3658,6 +3901,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             try encodeGatedFullAttentionDecode(attnCB, layer: L,
                                                position: position,
                                                seqLen: seqLen)
+        } else if cfg.hasAttentionBiases {
+            // gpt-oss attention: biased q/k/v/o, no QK norms, no output
+            // gate, arch YaRN RoPE, sinks, full/SWA by the layer mask.
+            try encodeGptOssAttentionDecode(attnCB: attnCB, tailCB: tailCB,
+                                            softmaxCB: &softmaxCB, layer: L,
+                                            position: position, seqLen: seqLen)
         } else {
             let kSlot = kv?.kSlot(layer: L, position: position) ?? (buffer: kStage, offset: 0)
             let vSlot = kv?.vSlot(layer: L, position: position) ?? (buffer: vStage, offset: 0)
@@ -3903,11 +4152,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         layer L: Int,
         completionClock: CommandCompletionClock?
     ) throws -> MTLCommandBuffer {
-        let sharedProj = sharedExpertProjections[L]
         let D = UInt32(cfg.hiddenSize)
         guard let sharedCB = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
+        guard cfg.hasSharedExpert else {
+            // No shared expert (gpt-oss): the phase-2 reduce still seeds from
+            // h1Buf, so pin it to zero in place of the dense MLP output.
+            guard let blit = sharedCB.makeBlitCommandEncoder() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            blit.fill(buffer: h1Buf,
+                      range: 0..<(cfg.hiddenSize * MemoryLayout<Float16>.stride),
+                      value: 0)
+            blit.endEncoding()
+            completionClock?.track(sharedCB)
+            sharedCB.commit()
+            return sharedCB
+        }
+        let sharedProj = sharedExpertProjections[L]
         try shared.encode(commandBuffer: sharedCB,
                           x: routedX,
                           gate: sharedProj.gate,
@@ -3950,7 +4213,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private func encodeDecodeRoutedMoE(
         layer L: Int,
         position: Int,
-        sharedProj: LayerSharedExpertProjections,
         attnCB: MTLCommandBuffer,
         tailCB: MTLCommandBuffer,
         sharedCB: MTLCommandBuffer,

@@ -22,6 +22,9 @@ public enum PrefillAttentionRef {
         public var kvValid: Int
         public var window: Int
         public var scale: Float
+        /// Learned per-Q-head sink logit (gpt-oss): joins each row's softmax
+        /// max and denominator and contributes no value row.
+        public var sinks: [Float]?
 
         public init(q: [Float],
                     k: [Float],
@@ -36,7 +39,8 @@ public enum PrefillAttentionRef {
                     chunk: Int,
                     kvValid: Int,
                     window: Int,
-                    scale: Float) {
+                    scale: Float,
+                    sinks: [Float]? = nil) {
             self.q = q
             self.k = k
             self.v = v
@@ -51,6 +55,7 @@ public enum PrefillAttentionRef {
             self.kvValid = kvValid
             self.window = window
             self.scale = scale
+            self.sinks = sinks
         }
     }
 
@@ -79,10 +84,14 @@ public enum PrefillAttentionRef {
                     }
                     scores.append(score * fixture.scale)
                 }
-                let maxScore = scores.max() ?? -.infinity
+                var maxScore = scores.max() ?? -.infinity
+                if let sinks = fixture.sinks { maxScore = max(maxScore, sinks[qh]) }
                 var denom: Float = 0
                 for score in scores {
                     denom += Foundation.exp(score - maxScore)
+                }
+                if let sinks = fixture.sinks {
+                    denom += Foundation.exp(sinks[qh] - maxScore)
                 }
                 for d in 0..<fixture.headDim {
                     var acc: Float = 0

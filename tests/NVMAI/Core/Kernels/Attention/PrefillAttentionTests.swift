@@ -55,6 +55,26 @@ import NVMAIValidationSupport
         #expect(rel <= 2e-2, "ring prefill rel=\(rel) maxAbs=\(maxAbs)")
     }
 
+    @Test func prefillAttentionSinksMatchCPUReferenceFullAndSWA() throws {
+        let cases: [(label: String, start: Int, chunk: Int, window: Int, qHeads: Int, sinkLevel: Float)] = [
+            ("sinks-full", 4, 3, 0, 4, 0.75),
+            ("sinks-swa-128", 130, 4, 128, 4, 0.75),
+            ("sinks-dominate-max", 2, 4, 16, 4, 8.0),
+        ]
+        for (index, c) in cases.enumerated() {
+            var fixture = Self.makeFixture(start: c.start,
+                                           chunk: c.chunk,
+                                           window: c.window,
+                                           seed: 0xA950 + UInt64(index),
+                                           qHeads: c.qHeads)
+            var rng = SeedTree(0xA960 + UInt64(index)).key("prefill-sinks")
+            fixture.sinks = (0..<c.qHeads).map { _ in
+                Self.bf16Value(c.sinkLevel * rng.uniform(0.5, 1.0))
+            }
+            try Self.runAndCompare(fixture, label: c.label)
+        }
+    }
+
     @Test func prefillAttentionMasksFutureChunkTokens() throws {
         var fixture = Self.makeFixture(start: 5, chunk: 4, window: 0, seed: 0xA620)
         let qPerKV = fixture.qHeads / fixture.kvHeads
@@ -224,6 +244,14 @@ import NVMAIValidationSupport
         #expect(rel <= 2e-2, "\(label) rel=\(rel) maxAbs=\(maxAbs)")
     }
 
+    private static func bf16(_ x: Float) -> UInt16 {
+        UInt16(truncatingIfNeeded: x.bitPattern >> 16)
+    }
+
+    private static func bf16Value(_ x: Float) -> Float {
+        Float(bitPattern: UInt32(bf16(x)) << 16)
+    }
+
     private static func runKernel(
         _ fixture: Fixture,
         kvRingCapacity: UInt32 = 0,
@@ -246,6 +274,19 @@ import NVMAIValidationSupport
               let outBuf = Fp16Buffer.make(ctx.device, count: outCount) else {
             Issue.record("alloc failed")
             return []
+        }
+        let sinkBuf: MTLBuffer?
+        if let sinks = fixture.sinks {
+            let bits = sinks.map { Self.bf16($0) }
+            guard let b = ctx.device.makeBuffer(bytes: bits,
+                                                length: bits.count * 2,
+                                                options: .storageModeShared) else {
+                Issue.record("sinks alloc failed")
+                return []
+            }
+            sinkBuf = b
+        } else {
+            sinkBuf = nil
         }
 
         let params = PrefillAttentionParams(
@@ -273,6 +314,7 @@ import NVMAIValidationSupport
                              outOffset: oPrefix * MemoryLayout<Float16>.size,
                              params: params,
                              kvRingCapacity: kvRingCapacity,
+                             sinks: sinkBuf,
                              path: path)
         cb.commit()
         cb.waitUntilCompleted()

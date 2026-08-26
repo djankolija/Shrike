@@ -25,6 +25,13 @@ constant uint FC_PREFILL_ROUTER_BITS [[function_constant(79)]];
 // `(min(g,7)*sigmoid(1.702g)) * (clamp(u,+-7)+1)`.
 constant bool FC_PREFILL_EXPERT_BIAS [[function_constant(120)]];
 constant bool FC_PREFILL_ACT_CLAMPED_SWIGLU [[function_constant(121)]];
+// gpt-oss attention sinks: a learned per-Q-head logit folded into each row's
+// streaming softmax after the key loop; it contributes no value row.
+constant bool FC_PREFILL_HAS_SINKS [[function_constant(122)]];
+
+static inline bool prefill_has_sinks() {
+    return is_function_constant_defined(FC_PREFILL_HAS_SINKS) && FC_PREFILL_HAS_SINKS;
+}
 constant constexpr float kPrefillSwigluLimit = 7.0f;
 constant constexpr float kPrefillSwigluAlpha = 1.702f;
 
@@ -803,6 +810,7 @@ kernel void attention_prefill_causal_tiled(
     device const uchar* V [[buffer(2)]],
     device half* O [[buffer(3)]],
     constant PrefillAttentionParams& p [[buffer(4)]],
+    device const bfloat* sinks [[buffer(5)]],   // [numQHeads], read iff FC_PREFILL_HAS_SINKS
     uint3 tg [[threadgroup_position_in_grid]],
     uint3 tid [[thread_position_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
@@ -852,6 +860,15 @@ kernel void attention_prefill_causal_tiled(
             acc = fma(new_scale, vv, acc * old_scale);
         }
         row_sum = row_sum * old_scale + new_scale;
+        row_max = new_max;
+    }
+
+    if (prefill_has_sinks()) {
+        const float sink = float(sinks[qh]);
+        const float new_max = max(row_max, sink);
+        const float old_scale = row_sum > 0.0f ? fast::exp(row_max - new_max) : 0.0f;
+        acc *= old_scale;
+        row_sum = row_sum * old_scale + fast::exp(sink - new_max);
         row_max = new_max;
     }
 

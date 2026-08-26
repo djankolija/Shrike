@@ -387,6 +387,26 @@ public struct ArchConfig: Sendable, Equatable {
     /// (limit 7.0, alpha 1.702) with a `+1` on the linear half.
     public var expertsHaveAdditiveBiases: Bool { family == .gptOss20b }
     public var usesClampedSwiGLU: Bool { family == .gptOss20b }
+    /// gpt-oss attention carries additive q/k/v/o projection biases and a
+    /// per-Q-head sink logit, all resident BF16; no QK norms, no output gate.
+    public var hasAttentionBiases: Bool { family == .gptOss20b }
+    public var hasAttentionSinks: Bool { family == .gptOss20b }
+    /// Learned per-head Q/K RMS norms before RoPE (Qwen); gpt-oss has none.
+    public var hasQKNorms: Bool { family != .gptOss20b }
+    /// gpt-oss has no shared-expert FFN (its `intermediateSize` is 0); the
+    /// MoE reduce then folds a zeroed branch instead of a dense MLP output.
+    public var hasSharedExpert: Bool { intermediateSize > 0 }
+    /// Arch-mandated YaRN rope scaling (gpt-oss: factor 32 over original
+    /// 4096, theta 150000, full-head-dim rotation), applied unconditionally —
+    /// independent of the user context-extension mode, which stays qwen-only.
+    var archYaRN: YaRNRoPEParameters? {
+        guard family == .gptOss20b else { return nil }
+        return YaRNRoPEParameters(headDim: fullHeadDim,
+                                  partialRotaryFactor: partialRotaryFactor,
+                                  theta: fullRopeTheta,
+                                  targetContextTokens: 32 * 4_096,
+                                  originalContextTokens: 4_096)
+    }
 
     /// Layer kind helpers over the mask encoding.
     public func layerIsFull(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 1 }

@@ -168,6 +168,24 @@ public struct Model {
         guard config.family == .gptOss20b else { return nil }
         return try resident(name: "language_model.model.layers.\(L).mlp.router.bias")
     }
+    /// gpt-oss additive attention projection biases, resident BF16. Callers
+    /// gate on `config.hasAttentionBiases`; other families throw tensorNotFound.
+    public func qProjBias(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.q_proj.bias")
+    }
+    public func kProjBias(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.k_proj.bias")
+    }
+    public func vProjBias(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.v_proj.bias")
+    }
+    public func oProjBias(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.o_proj.bias")
+    }
+    /// gpt-oss learned per-Q-head attention sink logits, resident BF16.
+    public func attentionSinks(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.sinks")
+    }
     /// Qwen's shared-expert FFN keeps the source's
     /// `.mlp.shared_expert.{gate,up,down}_proj.weight` names.
     public func sharedExpertGate(layer L: Int) throws -> TensorView {
@@ -779,6 +797,12 @@ extension Model {
             let prefix = "language_model.model.layers.\(layer)"
             try checks.requireBF16("\(prefix).input_layernorm.weight", count: config.hiddenSize)
             try checks.requireBF16("\(prefix).post_attention_layernorm.weight", count: config.hiddenSize)
+            if config.family == .gptOss20b {
+                try validateGptOssLayerTensors(checks: checks, prefix: prefix,
+                                               layer: layer, config: config,
+                                               quant: quant)
+                continue
+            }
             try checks.requireAffine("\(prefix).mlp.gate.weight",
                                      rows: config.numExperts, columns: config.hiddenSize,
                                      slot: quant.router)
@@ -852,6 +876,46 @@ extension Model {
 
     }
 
+    /// gpt-oss per-layer attention + router schema: plain (not gate-packed)
+    /// q_proj, additive BF16 biases on all four projections, per-Q-head
+    /// sinks, a biased `.mlp.router` — and no QK norms, no shared expert.
+    /// Every layer (sliding and full) carries the same attention tensors.
+    private static func validateGptOssLayerTensors(
+        checks: RuntimeSchemaChecks,
+        prefix: String,
+        layer: Int,
+        config: ArchConfig,
+        quant: ManifestQuant
+    ) throws {
+        let queryDimension = try checks.checkedIntMultiply(
+            config.numHeads, config.fullHeadDim,
+            field: "layer \(layer) query")
+        let kvDimension = try checks.checkedIntMultiply(
+            config.numFullKVHeads, config.fullHeadDim,
+            field: "layer \(layer) key/value")
+        try checks.requireAffine("\(prefix).self_attn.q_proj.weight",
+                                 rows: queryDimension, columns: config.hiddenSize,
+                                 slot: quant.attention)
+        try checks.requireAffine("\(prefix).self_attn.k_proj.weight",
+                                 rows: kvDimension, columns: config.hiddenSize,
+                                 slot: quant.attention)
+        try checks.requireAffine("\(prefix).self_attn.v_proj.weight",
+                                 rows: kvDimension, columns: config.hiddenSize,
+                                 slot: quant.attention)
+        try checks.requireAffine("\(prefix).self_attn.o_proj.weight",
+                                 rows: config.hiddenSize, columns: queryDimension,
+                                 slot: quant.attention)
+        try checks.requireBF16("\(prefix).self_attn.q_proj.bias", count: queryDimension)
+        try checks.requireBF16("\(prefix).self_attn.k_proj.bias", count: kvDimension)
+        try checks.requireBF16("\(prefix).self_attn.v_proj.bias", count: kvDimension)
+        try checks.requireBF16("\(prefix).self_attn.o_proj.bias", count: config.hiddenSize)
+        try checks.requireBF16("\(prefix).self_attn.sinks", count: config.numHeads)
+        try checks.requireAffine("\(prefix).mlp.router.weight",
+                                 rows: config.numExperts, columns: config.hiddenSize,
+                                 slot: quant.router)
+        try checks.requireBF16("\(prefix).mlp.router.bias", count: config.numExperts)
+    }
+
     /// Routed-expert tensor shapes cross-checked against the packed layout.
     private static func validateRoutedExpertLayout(
         checks: RuntimeSchemaChecks,
@@ -874,7 +938,7 @@ extension Model {
                     rows: rows, columns: columns,
                     slot: quant.routedExpert,
                     field: "routed layer \(layer.layer) \(role)")
-                let expectedRoles: [(String, String, [UInt32], Int?, UInt64, UInt64)] = [
+                var expectedRoles: [(String, String, [UInt32], Int?, UInt64, UInt64)] = [
                     (role, "U32", [sizes.shape.0, sizes.shape.1],
                      quant.routedExpert.weightBits, sizes.weight,
                      UInt64(MemoryLayout<UInt32>.alignment)),
@@ -885,6 +949,11 @@ extension Model {
                      [sizes.shape.0, UInt32(columns / quant.routedExpert.groupSize)],
                      nil, sizes.aux, UInt64(MemoryLayout<UInt16>.alignment)),
                 ]
+                if config.expertsHaveAdditiveBiases {
+                    expectedRoles.append(
+                        ("\(role)_bias", "BF16", [sizes.shape.0], nil,
+                         UInt64(rows) * 2, UInt64(MemoryLayout<UInt16>.alignment)))
+                }
                 for (name, dtype, shape, bits, size, alignment) in expectedRoles {
                     guard let expected = reference.subTensors[name] else {
                         throw ModelError.indexCorrupt(

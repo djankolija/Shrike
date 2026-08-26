@@ -10,6 +10,7 @@ final class Elementwise {
     private let residualAddPSO: MTLComputePipelineState
     private let splitQGatePSO: MTLComputePipelineState
     private let concatRowsPSO: MTLComputePipelineState
+    private let biasAddPSO: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.sigmoidGateMulPSO = try context.pipeline("sigmoid_gate_mul_fp16")
@@ -17,6 +18,7 @@ final class Elementwise {
         self.residualAddPSO = try context.pipeline("residual_add_fp16")
         self.splitQGatePSO = try context.pipeline("split_q_gate_fp16")
         self.concatRowsPSO = try context.pipeline("concat_rows_fp16")
+        self.biasAddPSO = try context.pipeline("bias_add_fp16")
     }
 
     /// packed [H, 2D] per-head [query ; gate] → q [H, D], gate [H, D].
@@ -79,6 +81,26 @@ final class Elementwise {
         var elementCount = UInt32(count)
         encoder.setBytes(&elementCount, length: MemoryLayout<UInt32>.size, index: 2)
         dispatch(encoder, pipeline: sigmoidScalarMulPSO, threads: count)
+        encoder.endEncoding()
+    }
+
+    /// x[i] += bias[i % rowElems] — a resident BF16 bias row broadcast over
+    /// `rows` consecutive FP16 token rows (rows == 1 for decode).
+    func encodeBiasAdd(commandBuffer: MTLCommandBuffer,
+                       x: MTLBuffer, xOffset: Int = 0,
+                       bias: MTLBuffer, biasOffset: Int = 0,
+                       rowElems: Int, rows: Int = 1) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encoder.setComputePipelineState(biasAddPSO)
+        encoder.setBuffer(x, offset: xOffset, index: 0)
+        encoder.setBuffer(bias, offset: biasOffset, index: 1)
+        var elementCount = UInt32(rows * rowElems)
+        var rowElementCount = UInt32(rowElems)
+        encoder.setBytes(&elementCount, length: MemoryLayout<UInt32>.size, index: 2)
+        encoder.setBytes(&rowElementCount, length: MemoryLayout<UInt32>.size, index: 3)
+        dispatch(encoder, pipeline: biasAddPSO, threads: rows * rowElems)
         encoder.endEncoding()
     }
 

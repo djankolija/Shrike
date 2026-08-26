@@ -101,6 +101,7 @@ final class PrefillAttention {
                              out: MTLBuffer, outOffset: Int = 0,
                              params: PrefillAttentionParams,
                              kvRingCapacity: UInt32 = 0,
+                             sinks: MTLBuffer? = nil, sinksOffset: Int = 0,
                              path: RuntimePrefillAttentionPath = .causalTiled) throws {
         validate(params)
 
@@ -112,6 +113,7 @@ final class PrefillAttention {
         let tensorOpsShape = requestsTensorOps
             && params.kvBits == 16
             && kvRingCapacity == 0
+            && sinks == nil
             && params.headDim == 512
             && params.numQHeads == 16
             && params.numKVHeads == 2
@@ -132,7 +134,8 @@ final class PrefillAttention {
         } else {
             // Explicit mode also falls back for incompatible shapes. Benchmark
             // fixtures must use 512/16/2 to prove that TensorOps ran.
-            pipeline = causalTiledPipeline(kvRingCapacity: kvRingCapacity)
+            pipeline = causalTiledPipeline(kvRingCapacity: kvRingCapacity,
+                                           hasSinks: sinks != nil)
         }
         let headDim = Int(params.headDim)
         let threadWidth = max(1, pipeline.threadExecutionWidth)
@@ -152,6 +155,7 @@ final class PrefillAttention {
         enc.setBuffer(out, offset: outOffset, index: 3)
         var p = params
         enc.setBytes(&p, length: MemoryLayout<PrefillAttentionParams>.stride, index: 4)
+        if let sinks { enc.setBuffer(sinks, offset: sinksOffset, index: 5) }
         let groups = useTensorOps
             ? MTLSize(width: Int(params.queryCount),
                       height: Int(params.numQHeads) / 8,
@@ -195,14 +199,21 @@ final class PrefillAttention {
         ((value + multiple - 1) / multiple) * multiple
     }
 
-    private func causalTiledPipeline(kvRingCapacity: UInt32) -> MTLComputePipelineState {
-        guard kvRingCapacity > 0 else { return psoCausalTiled }
+    private func causalTiledPipeline(kvRingCapacity: UInt32,
+                                     hasSinks: Bool) -> MTLComputePipelineState {
+        guard kvRingCapacity > 0 || hasSinks else { return psoCausalTiled }
+        var constants: [MetalFunctionConstant] = []
+        if kvRingCapacity > 0 {
+            constants.append(MetalFunctionConstant(index: 76, value: .uint32(kvRingCapacity)))
+        }
+        if hasSinks {
+            constants.append(MetalFunctionConstant(index: 122, value: .bool(true)))
+        }
         do {
-            return try context.pipeline(
-                "attention_prefill_causal_tiled",
-                constants: [MetalFunctionConstant(index: 76, value: .uint32(kvRingCapacity))])
+            return try context.pipeline("attention_prefill_causal_tiled",
+                                        constants: constants)
         } catch {
-            preconditionFailure("failed to build KV ring prefill attention pipeline: \(error)")
+            preconditionFailure("failed to build prefill attention pipeline: \(error)")
         }
     }
 }

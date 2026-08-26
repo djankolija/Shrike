@@ -102,6 +102,20 @@ void residual_add_fp16(
     hidden[tid] = half(float(hidden[tid]) + float(delta[tid]));
 }
 
+// x[i] += bias[i % row_elems] — gpt-oss additive projection bias: one resident
+// BF16 row broadcast over consecutive FP16 token rows.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void bias_add_fp16(
+    device half*         x         [[buffer(0)]],
+    device const bfloat* bias      [[buffer(1)]],
+    constant uint&       count     [[buffer(2)]],
+    constant uint&       row_elems [[buffer(3)]],
+    uint                 tid       [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+    x[tid] = half(float(x[tid]) + float(bias[tid % row_elems]));
+}
+
 // Row-wise concatenation used by Qwen3.5-MoE MTP's 4096 -> 2048 adapter.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void concat_rows_fp16(

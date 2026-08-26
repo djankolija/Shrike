@@ -42,7 +42,14 @@ constant uint FC_ATTN_NUM_KV_HEADS [[function_constant(62)]];
 constant bool FC_ATTN_USE_FC [[function_constant(63)]];
 constant float FC_ATTN_SCALE [[function_constant(64)]];
 constant uint FC_ATTN_NUM_CHUNKS [[function_constant(65)]];
+// gpt-oss attention sinks: a learned per-Q-head logit that joins the combine's
+// softmax max and denominator as one extra term and contributes no value row.
+constant bool FC_ATTN_HAS_SINKS [[function_constant(66)]];
 constant uint FC_ATTN_RING_CAP [[function_constant(69)]];
+
+static inline bool attn_fc_has_sinks() {
+    return is_function_constant_defined(FC_ATTN_HAS_SINKS) && FC_ATTN_HAS_SINKS;
+}
 
 static inline uint attn_fc_head_dim(constant uint& head_dim) {
     return (is_function_constant_defined(FC_ATTN_USE_FC) &&
@@ -392,6 +399,7 @@ void attention_decode_combine(
     device       half*  out          [[buffer(3)]],    // [num_q_heads * head_dim]
     constant     uint&  head_dim     [[buffer(4)]],
     constant     uint&  num_chunks   [[buffer(5)]],
+    device const bfloat* sinks       [[buffer(6)]],    // [num_q_heads], read iff FC_ATTN_HAS_SINKS
     uint tg_id           [[threadgroup_position_in_grid]],
     uint lid             [[thread_position_in_threadgroup]],
     uint lsize           [[threads_per_threadgroup]]
@@ -407,15 +415,22 @@ void attention_decode_combine(
     // max and denominator rather than pay a threadgroup reduction + barriers.
     float m_glob = -INFINITY;
     for (uint c = 0; c < NC; ++c) { m_glob = max(m_glob, m_row[c]); }
+    float sink = 0.0f;
+    if (attn_fc_has_sinks()) {
+        sink = float(sinks[q_head]);
+        m_glob = max(m_glob, sink);
+    }
     if (m_glob == -INFINITY) {
         // All chunks empty (e.g. seq_len == kv_start): zero the row rather
-        // than producing NaN from exp(-inf - -inf).
+        // than producing NaN from exp(-inf - -inf). Unreachable with sinks
+        // (the sink is finite); there the normal path yields D=1, out=0.
         device half* out_row = out + uint(q_head) * HD;
         for (uint i = lid; i < HD; i += lsize) { out_row[i] = 0.0h; }
         return;
     }
     float D = 0.0f;
     for (uint c = 0; c < NC; ++c) { D += d_row[c] * attn_softmax_exp(m_row[c] - m_glob); }
+    if (attn_fc_has_sinks()) { D += attn_softmax_exp(sink - m_glob); }
     const float inv_d = (D > 0.0f) ? (1.0f / D) : 0.0f;
 
     device half* out_row = out + uint(q_head) * HD;

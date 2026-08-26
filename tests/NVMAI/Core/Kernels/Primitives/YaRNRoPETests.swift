@@ -19,6 +19,27 @@ import NVMAIValidationSupport
         #expect(abs(fourX.inverseFrequencies[31] - 4.1370427e-8) < 1e-12)
     }
 
+    /// The gpt-oss arch-mandated YaRN against the plan's pinned mlx-lm
+    /// semantics: factor 32 over original 4096, theta 150000, full 64-dim
+    /// rotation, mscale = 0.1·ln 32 + 1 on q and k. Frequency pins cover both
+    /// ramp boundaries (pure extrapolation through pair 8, pure interpolation
+    /// from pair 18) and a mid-ramp blend.
+    @Test func gptOssArchYaRNMatchesPinnedSemantics() throws {
+        let parameters = try #require(ArchConfig.gptOss20b.archYaRN)
+        #expect(abs(parameters.factor - 32.0) < 1e-6)
+        #expect(abs(parameters.attentionFactor - 1.3465736) < 1e-6)
+        #expect(parameters.inverseFrequencies.count == 32)
+        #expect(parameters.inverseFrequencies[0] == 1.0)
+        #expect(abs(parameters.inverseFrequencies[4] - 0.2254180) < 1e-6)
+        #expect(abs(parameters.inverseFrequencies[8] - 0.050813275) < 1e-8)
+        #expect(abs(parameters.inverseFrequencies[12] - 0.0070157139) < 1e-9)
+        #expect(abs(parameters.inverseFrequencies[18] - 3.8308812e-05) < 1e-11)
+        #expect(abs(parameters.inverseFrequencies[31] - 3.0235114e-07) < 1e-12)
+
+        #expect(ArchConfig.qwen36_35B_A3B.archYaRN == nil)
+        #expect(ArchConfig.kimiLinear48bA3b.archYaRN == nil)
+    }
+
     @Test(arguments: [524_287, 1_048_575])
     func scalarKernelMatchesCPUAtExtendedPositions(_ position: Int) throws {
         let target = position < 1_000_000 ? 524_288 : 1_048_576
