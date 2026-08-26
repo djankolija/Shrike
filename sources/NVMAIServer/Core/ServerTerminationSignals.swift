@@ -8,7 +8,11 @@ public actor ServerTerminationSignals {
     private let continuation: AsyncStream<Int32>.Continuation
     private let sources: [any DispatchSourceSignal]
 
-    public init(_ signals: [Int32] = [SIGINT, SIGTERM]) {
+    /// `forcedExit` runs on the second delivered signal (S33) — injectable
+    /// because with the real `exit(1)` a non-coalesced second delivery kills
+    /// the whole test-runner process, so tests cannot exercise that path.
+    public init(_ signals: [Int32] = [SIGINT, SIGTERM],
+                forcedExit: @escaping @Sendable () -> Void = { exit(1) }) {
         var capturedContinuation: AsyncStream<Int32>.Continuation?
         let stream = AsyncStream<Int32>(bufferingPolicy: .bufferingOldest(1)) {
             capturedContinuation = $0
@@ -20,7 +24,8 @@ public actor ServerTerminationSignals {
         self.continuation = continuation
         self.sources = signals.map {
             Darwin.signal($0, SIG_IGN)
-            return Self.makeSource(signal: $0, continuation: continuation, state: shared)
+            return Self.makeSource(signal: $0, continuation: continuation,
+                                   state: shared, forcedExit: forcedExit)
         }
         for source in sources {
             source.resume()
@@ -44,7 +49,8 @@ public actor ServerTerminationSignals {
     private nonisolated static func makeSource(
         signal: Int32,
         continuation: AsyncStream<Int32>.Continuation,
-        state: SignalState
+        state: SignalState,
+        forcedExit: @escaping @Sendable () -> Void
     ) -> any DispatchSourceSignal {
         let source = DispatchSource.makeSignalSource(signal: signal, queue: .global())
         source.setEventHandler { @Sendable [continuation, state] in
@@ -52,7 +58,7 @@ public actor ServerTerminationSignals {
                 // S33: the first signal begins a graceful shutdown; a second
                 // one during shutdown forces immediate exit instead of being
                 // silently dropped.
-                exit(1)
+                forcedExit()
             } else {
                 continuation.yield(signal)
             }
