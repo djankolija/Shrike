@@ -31,13 +31,28 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         case ended
     }
 
+    /// Kimi generation is visible content optionally followed by one
+    /// tool-call section. The five section markers are literal ByteLevel
+    /// barriers (validated non-special), so transitions key on their token
+    /// IDs while the marker text arrives at the end of the delta, exactly
+    /// like ChatML's `<tool_call>`.
+    private enum KimiState {
+        case content
+        case section
+        case callID(String)
+        case arguments(id: String, body: String)
+        case sectionEnded
+    }
+
     private static let maximumHarmonyHeaderBytes = 4096
+    private static let maximumKimiCallIDBytes = 4096
 
     private let tokenizer: GFTokenizer
     private let allowedTools: Set<String>
     private let idGenerator: @Sendable () -> String
     private var channel: Channel = .visible
     private var harmonyState: HarmonyState = .header(recipient: "")
+    private var kimiState: KimiState = .content
     private var toolTokens: [Int32]?
     private var emittedCalls = 0
     private var failed = false
@@ -60,8 +75,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         case .harmony:
             return try consumeHarmony(tokenID: tokenID, delta: delta)
         case .kimi:
-            failed = true
-            throw ToolCallParserError.malformed
+            return try consumeKimi(tokenID: tokenID, delta: delta)
         }
     }
 
@@ -188,6 +202,102 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         return grown
     }
 
+    /// Kimi transitions: between structural markers only whitespace may
+    /// stream (the template renders them adjacent; the reference parser
+    /// tolerates `\s*`), and content after the section closes fails closed
+    /// because a re-render would drop it.
+    private func consumeKimi(tokenID: Int32,
+                             delta: String) throws -> [StructuredAssistantEvent] {
+        if tokenID == tokenizer.kimiToolSectionBeginID {
+            guard case .content = kimiState else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            let prefix = try boundaryPrefix(
+                delta, marker: GFTokenizer.kimiToolSectionBeginMark)
+            kimiState = .section
+            return visibleEvents(prefix)
+        }
+        if tokenID == tokenizer.kimiToolCallBeginID {
+            let prefix = try boundaryPrefix(
+                delta, marker: GFTokenizer.kimiToolCallBeginMark)
+            guard case .section = kimiState, prefix.allSatisfy(\.isWhitespace) else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            kimiState = .callID("")
+            return []
+        }
+        if tokenID == tokenizer.kimiToolArgumentBeginID {
+            let prefix = try boundaryPrefix(
+                delta, marker: GFTokenizer.kimiToolArgumentBeginMark)
+            guard case .callID(let id) = kimiState else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            kimiState = .arguments(id: id + prefix, body: "")
+            return []
+        }
+        if tokenID == tokenizer.kimiToolCallEndID {
+            let prefix = try boundaryPrefix(
+                delta, marker: GFTokenizer.kimiToolCallEndMark)
+            guard case .arguments(let id, let body) = kimiState else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            kimiState = .section
+            do {
+                let call = try KimiToolCallParser().parse(
+                    id: id, body: body + prefix, allowedTools: allowedTools)
+                emittedCalls += 1
+                return [.toolCall(call)]
+            } catch {
+                failed = true
+                throw error
+            }
+        }
+        if tokenID == tokenizer.kimiToolSectionEndID {
+            let prefix = try boundaryPrefix(
+                delta, marker: GFTokenizer.kimiToolSectionEndMark)
+            guard case .section = kimiState, prefix.allSatisfy(\.isWhitespace) else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            kimiState = .sectionEnded
+            return []
+        }
+        return try consumeKimiText(delta)
+    }
+
+    private func consumeKimiText(_ delta: String) throws -> [StructuredAssistantEvent] {
+        switch kimiState {
+        case .content:
+            return delta.isEmpty ? [] : [.content(delta)]
+        case .section, .sectionEnded:
+            guard delta.allSatisfy(\.isWhitespace) else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            return []
+        case .callID(let id):
+            let grown = id + delta
+            guard grown.utf8.count <= Self.maximumKimiCallIDBytes else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            kimiState = .callID(grown)
+            return []
+        case .arguments(let id, let body):
+            let grown = body + delta
+            guard grown.utf8.count <= KimiToolCallParser.maximumBytes else {
+                failed = true
+                throw ToolCallParserError.oversized
+            }
+            kimiState = .arguments(id: id, body: grown)
+            return []
+        }
+    }
+
     /// ChatML transitions: `<think>`…`</think>` suppress thought text, and
     /// `<tool_call>`…`</tool_call>` buffer tokens for the Qwen parser. Everything
     /// else streams as visible content.
@@ -266,6 +376,9 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
                 return []
             }
         }
+        if tokenizer.dialect == .kimi {
+            return try consumeKimiText(text)
+        }
         guard toolTokens == nil, channel != .thought else { return [] }
         return visibleEvents(text)
     }
@@ -288,6 +401,14 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     public func finish() throws {
         guard !failed, toolTokens == nil else {
             throw ToolCallParserError.malformed
+        }
+        if tokenizer.dialect == .kimi {
+            switch kimiState {
+            case .content, .sectionEnded:
+                return
+            case .section, .callID, .arguments:
+                throw ToolCallParserError.malformed
+            }
         }
         guard tokenizer.dialect == .harmony else { return }
         switch harmonyState {

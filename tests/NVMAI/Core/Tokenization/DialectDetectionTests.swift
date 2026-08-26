@@ -63,26 +63,21 @@ struct DialectDetectionTests {
         #expect(tok.dialect == .harmony)
     }
 
-    /// The C1 fixture routes to the kimi dialect; resolution lands with C6,
-    /// so today the load must fail on that dialect rather than fall through
-    /// to ChatML.
-    @Test func kimiFixtureRoutesToKimiDialect() async throws {
+    @Test func kimiFixtureLoadsAsKimi() async throws {
         let dir = try #require(Bundle.module.url(
             forResource: "KimiTokenizer",
             withExtension: nil,
             subdirectory: "Fixtures"))
-        do {
-            _ = try await GFTokenizer.load(from: dir)
-            Issue.record("kimi resolution is not implemented yet; load must throw")
-        } catch {
-            #expect("\(error)".contains("kimi"))
-        }
+        let tok = try await GFTokenizer.load(from: dir)
+        #expect(tok.dialect == .kimi)
     }
 
     @Test func kimiMarkWinsOverChatML() async throws {
+        // The patched ChatML fixture carries only the middle mark, so a load
+        // that demands the remaining Kimi tokens proves the routing.
         let dir = try patchedFixture(rename: [:], add: ["<|im_middle|>"])
         let error = await loadError(from: dir)
-        #expect(error?.contains("kimi") == true)
+        #expect(error?.contains("[BOS]") == true)
     }
 
     @Test func unrecognizedFramingIsRejectedWithDialectError() async throws {

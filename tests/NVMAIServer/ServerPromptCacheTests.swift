@@ -100,6 +100,56 @@ struct ServerPromptCacheTests {
         #expect(match == .miss)
     }
 
+    @Test func kimiContinuationsHitTheRenderedPrefixWithoutABridge() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.kimiFolder())
+        let initial = request(messages: [
+            GFTokenizer.Message(role: .user, content: "first"),
+        ])
+        let initialPrompt = tokenizer.encode(
+            try tokenizer.applyChatTemplate(initial.messages),
+            addBOS: false)
+        let generated = tokenizer.encode("answer", addBOS: false)
+        let kvBacked = initialPrompt + generated
+        var cache = ServerPromptCache()
+        cache.publish(
+            domain: domain,
+            request: initial,
+            content: "answer",
+            calls: [],
+            result: rawResult(
+                prompt: initialPrompt,
+                kvBacked: kvBacked,
+                boundary: tokenizer.endOfTurnID,
+                reason: .endOfTurn))
+
+        let continuation = request(messages: initial.messages + [
+            GFTokenizer.Message(role: .assistant, content: "answer"),
+            GFTokenizer.Message(role: .user, content: "second"),
+        ])
+        let rendered = tokenizer.encode(
+            try tokenizer.applyChatTemplate(continuation.messages),
+            addBOS: false)
+        let match = cache.match(
+            domain: domain,
+            request: continuation,
+            renderedPromptIDs: rendered,
+            tokenizer: tokenizer)
+
+        // Kimi's template is append-only (no <think> stripping, no dropped
+        // analysis), so the re-render extends the cached KV byte-for-byte and
+        // the dialect-agnostic S12 prefix path hits — the ChatML-shaped text
+        // bridge stays unused. ServerInference still gates publish to chatml;
+        // this pins why that gate's Harmony rationale does not extend here.
+        guard case .hit(_, let effective, let cached) = match else {
+            Issue.record("expected a rendered-prefix hit")
+            return
+        }
+        #expect(cached == kvBacked.count)
+        #expect(effective == rendered)
+        #expect(rendered.prefix(kvBacked.count).elementsEqual(kvBacked))
+        #expect(effective[cached] == tokenizer.endOfTurnID)
+    }
+
     @Test func mismatchedLineageDomainAndUnsafeStopsMiss() async throws {
         let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         let initial = request(messages: [

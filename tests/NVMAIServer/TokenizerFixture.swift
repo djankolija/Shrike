@@ -18,4 +18,11 @@ enum TokenizerFixture {
             withExtension: nil,
             subdirectory: "Fixtures"))
     }
+
+    static func kimiFolder() throws -> URL {
+        try #require(Bundle.module.url(
+            forResource: "KimiTokenizer",
+            withExtension: nil,
+            subdirectory: "Fixtures"))
+    }
 }

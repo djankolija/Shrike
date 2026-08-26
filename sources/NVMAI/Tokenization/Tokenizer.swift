@@ -90,6 +90,15 @@ public struct GFTokenizer: @unchecked Sendable {
     public let harmonyConstrainID: Int32?
     public let harmonyCallID: Int32?
     public let harmonyReturnID: Int32?
+    /// Kimi tool-section markers; nil for other dialects. Literal ByteLevel
+    /// barriers (`special: false` upstream) like ChatML's `<tool_call>`, so
+    /// the streaming decoder keys on their IDs and sees their text in the
+    /// delta.
+    public let kimiToolSectionBeginID: Int32?
+    public let kimiToolSectionEndID: Int32?
+    public let kimiToolCallBeginID: Int32?
+    public let kimiToolArgumentBeginID: Int32?
+    public let kimiToolCallEndID: Int32?
     public let stopTokenIDs: Set<Int32>
     public let vocabSize: Int
     public let dialect: ChatDialect
@@ -186,8 +195,10 @@ public struct GFTokenizer: @unchecked Sendable {
                                                      tokenizer: tokenizer,
                                                      resolved: resolved)
         case .kimi:
-            throw GFTokenizerError.unsupportedForDialect(
-                "\(dialect.rawValue) special-token resolution is not implemented yet")
+            resolved = try Self.resolveKimiTokens(tokenizer)
+            try Self.validateKimiStreamingDecoder(byteLevelDecoderConfiguration,
+                                                  tokenizer: tokenizer,
+                                                  resolved: resolved)
         }
         self.bosID = resolved.bosID
         self.eosID = resolved.eosID
@@ -206,13 +217,20 @@ public struct GFTokenizer: @unchecked Sendable {
         self.harmonyConstrainID = resolved.harmonyConstrainID
         self.harmonyCallID = resolved.harmonyCallID
         self.harmonyReturnID = resolved.harmonyReturnID
+        self.kimiToolSectionBeginID = resolved.kimiToolSectionBeginID
+        self.kimiToolSectionEndID = resolved.kimiToolSectionEndID
+        self.kimiToolCallBeginID = resolved.kimiToolCallBeginID
+        self.kimiToolArgumentBeginID = resolved.kimiToolArgumentBeginID
+        self.kimiToolCallEndID = resolved.kimiToolCallEndID
         self.stopTokenIDs = resolved.stopTokenIDs
         self.vocabSize = resolved.vocabSize
         self.thinkingMode = thinkingMode
-        self.generationSuffix = dialect == .harmony
-            ? Self.harmonyGenerationSuffix
-            : Self.deriveGenerationSuffix(
-                tokenizer, thinkingEnabled: thinkingMode.isEnabled)
+        self.generationSuffix = switch dialect {
+        case .harmony: Self.harmonyGenerationSuffix
+        case .kimi: Self.kimiGenerationSuffix
+        case .chatml: Self.deriveGenerationSuffix(
+            tokenizer, thinkingEnabled: thinkingMode.isEnabled)
+        }
     }
 
     private struct ResolvedSpecialTokens {
@@ -233,6 +251,11 @@ public struct GFTokenizer: @unchecked Sendable {
         var harmonyConstrainID: Int32?
         var harmonyCallID: Int32?
         var harmonyReturnID: Int32?
+        var kimiToolSectionBeginID: Int32?
+        var kimiToolSectionEndID: Int32?
+        var kimiToolCallBeginID: Int32?
+        var kimiToolArgumentBeginID: Int32?
+        var kimiToolCallEndID: Int32?
         let stopTokenIDs: Set<Int32>
         let vocabSize: Int
     }
@@ -415,6 +438,88 @@ public struct GFTokenizer: @unchecked Sendable {
         }
     }
 
+    /// Kimi-Linear embedding/lm_head row count: the 163 584-token base vocab
+    /// plus the 256 reserved special slots.
+    private static let kimiLogitsVocabSize = 163_840
+
+    private static func resolveKimiTokens(
+        _ tokenizer: any Tokenizer
+    ) throws -> ResolvedSpecialTokens {
+        func id(_ token: String) throws -> Int32 {
+            guard let value = specialTokenID(tokenizer, token) else {
+                throw GFTokenizerError.missingSpecialToken(token)
+            }
+            return Int32(value)
+        }
+        let bos = try id("[BOS]")
+        let eos = try id("[EOS]")
+        let pad = try id("[PAD]")
+        let imEnd = try id(Self.imEndMark)
+        let middle = try id(Self.kimiMiddleMark)
+        // The role marks have no stored properties; rendering relies on the
+        // tokenizer recognizing their text.
+        _ = try id(Self.kimiUserMark)
+        _ = try id(Self.kimiAssistantMark)
+        _ = try id(Self.kimiSystemMark)
+        return ResolvedSpecialTokens(
+            bosID: bos,
+            eosID: eos,
+            padID: pad,
+            endOfTurnID: imEnd,
+            toolCallStartID: nil,
+            toolCallEndID: nil,
+            toolResponseID: nil,
+            toolResponseEndID: nil,
+            channelStartID: middle,
+            channelEndID: imEnd,
+            thinkStartID: nil,
+            thinkEndID: nil,
+            kimiToolSectionBeginID: try id(Self.kimiToolSectionBeginMark),
+            kimiToolSectionEndID: try id(Self.kimiToolSectionEndMark),
+            kimiToolCallBeginID: try id(Self.kimiToolCallBeginMark),
+            kimiToolArgumentBeginID: try id(Self.kimiToolArgumentBeginMark),
+            kimiToolCallEndID: try id(Self.kimiToolCallEndMark),
+            stopTokenIDs: [imEnd, eos],
+            vocabSize: max(Self.derivedVocabSize(tokenizer) ?? 0,
+                           Self.kimiLogitsVocabSize))
+    }
+
+    /// Kimi framing tokens must be special (filtered to empty deltas) while
+    /// the five tool-section markers must be literal ByteLevel barriers so
+    /// the structured decoder sees their text in the delta.
+    private static func validateKimiStreamingDecoder(
+        _ decoder: GFByteLevelDecoderConfiguration,
+        tokenizer: any Tokenizer,
+        resolved: ResolvedSpecialTokens
+    ) throws {
+        let specialMarkers = [resolved.bosID, resolved.eosID, resolved.padID,
+                              resolved.endOfTurnID, resolved.channelStartID]
+            + [Self.kimiUserMark, Self.kimiAssistantMark, Self.kimiSystemMark]
+                .compactMap { specialTokenID(tokenizer, $0).map(Int32.init) }
+        for id in specialMarkers {
+            guard decoder.addedTokens[id]?.special == true else {
+                let token = tokenizer.convertIdToToken(Int(id)) ?? "id \(id)"
+                throw GFTokenizerError.unsupportedForDialect(
+                    "Kimi control token \(token) must be marked special")
+            }
+        }
+        let literalMarkers: [(Int32?, String)] = [
+            (resolved.kimiToolSectionBeginID, Self.kimiToolSectionBeginMark),
+            (resolved.kimiToolSectionEndID, Self.kimiToolSectionEndMark),
+            (resolved.kimiToolCallBeginID, Self.kimiToolCallBeginMark),
+            (resolved.kimiToolArgumentBeginID, Self.kimiToolArgumentBeginMark),
+            (resolved.kimiToolCallEndID, Self.kimiToolCallEndMark),
+        ]
+        for (id, content) in literalMarkers {
+            guard let id,
+                  let added = decoder.addedTokens[id],
+                  added.content == content, !added.special else {
+                throw GFTokenizerError.unsupportedForDialect(
+                    "Kimi tool marker \(content) must be a literal ByteLevel barrier")
+            }
+        }
+    }
+
     /// Encode UTF-8 text to token IDs.
     ///
     /// ChatML has no BOS, so `addBOS` is a no-op; BOS is never prepended.
@@ -503,6 +608,15 @@ public struct GFTokenizer: @unchecked Sendable {
     private static let harmonyCallMark = "<|call|>"
     private static let harmonyReturnMark = "<|return|>"
     private static let kimiMiddleMark = "<|im_middle|>"
+    private static let kimiUserMark = "<|im_user|>"
+    private static let kimiAssistantMark = "<|im_assistant|>"
+    private static let kimiSystemMark = "<|im_system|>"
+    static let kimiToolSectionBeginMark = "<|tool_calls_section_begin|>"
+    static let kimiToolSectionEndMark = "<|tool_calls_section_end|>"
+    static let kimiToolCallBeginMark = "<|tool_call_begin|>"
+    static let kimiToolArgumentBeginMark = "<|tool_call_argument_begin|>"
+    static let kimiToolCallEndMark = "<|tool_call_end|>"
+    static let kimiGenerationSuffix = "<|im_assistant|>assistant<|im_middle|>"
     /// Generation prompt with thinking disabled, matching the Jinja template's
     /// `add_generation_prompt` + `enable_thinking=false` branch. Used only
     /// when the tokenizer has no chat template or template rendering fails
@@ -564,9 +678,7 @@ public struct GFTokenizer: @unchecked Sendable {
         switch dialect {
         case .chatml: return try chatMLChatTemplate(messages)
         case .harmony: return try harmonyChatTemplate(messages, tools: [])
-        case .kimi:
-            throw GFTokenizerError.unsupportedForDialect(
-                "\(dialect.rawValue) chat rendering is not implemented yet")
+        case .kimi: return try kimiChatTemplate(messages, tools: [])
         }
     }
 
@@ -903,10 +1015,93 @@ public struct GFTokenizer: @unchecked Sendable {
         }
     }
 
+    // MARK: - Kimi rendering
+
+    /// Hand port of the Kimi-Linear `chat_template.jinja`, byte-exact against
+    /// jinja2 renders of the shipped template — except that `tojson` output
+    /// is compact with sorted keys (JSON order does not survive decoding),
+    /// the same normalization the Harmony renderer pins.
+    func kimiChatTemplate(_ messages: [Message],
+                          tools: [FunctionDefinition]) throws -> String {
+        var s = ""
+        if !tools.isEmpty {
+            s += Self.kimiSystemMark + "tool_declare" + Self.kimiMiddleMark
+                + (try Self.kimiToolsJSON(tools)) + Self.imEndMark
+        }
+        for message in messages {
+            s += try Self.kimiMessageBlock(message)
+        }
+        s += Self.kimiGenerationSuffix
+        return s
+    }
+
+    private static func kimiMessageBlock(_ message: Message) throws -> String {
+        // The template labels each turn `name or role`, so an empty name
+        // falls back to the role.
+        let roleName = message.name.flatMap { $0.isEmpty ? nil : $0 }
+            ?? message.role.rawValue
+        let mark = switch message.role {
+        case .user: kimiUserMark
+        case .assistant: kimiAssistantMark
+        case .system, .developer, .tool: kimiSystemMark
+        }
+        return mark + roleName + kimiMiddleMark
+            + (try kimiMessageBody(message)) + imEndMark
+    }
+
+    private static func kimiMessageBody(_ message: Message) throws -> String {
+        if message.role == .assistant, !message.toolCalls.isEmpty {
+            var s = message.content ?? ""
+            s += kimiToolSectionBeginMark
+            for call in message.toolCalls {
+                s += kimiToolCallBeginMark + call.id
+                    + kimiToolArgumentBeginMark
+                    + (try kimiArgumentsText(call.arguments))
+                    + kimiToolCallEndMark
+            }
+            return s + kimiToolSectionEndMark
+        }
+        guard let content = message.content else {
+            throw GFTokenizerError.invalidChatTemplate(
+                "\(message.role.rawValue) messages require content")
+        }
+        if message.role == .tool {
+            guard let id = message.toolCallID else {
+                throw GFTokenizerError.invalidChatTemplate(
+                    "tool messages require tool_call_id")
+            }
+            return "## Return of \(id)\n" + content
+        }
+        return content
+    }
+
+    /// The template's tool declaration: the OpenAI wire shape rendered by
+    /// `tojson(separators=(',', ':'))`.
+    private static func kimiToolsJSON(_ tools: [FunctionDefinition]) throws -> String {
+        try JSONValue.array(tools.map { tool in
+            .object(["type": .string("function"),
+                     "function": .object([
+                        "name": .string(tool.name),
+                        "description": .string(tool.description),
+                        "parameters": tool.parameters,
+                     ])])
+        }).encoded()
+    }
+
+    /// Jinja renders string arguments bare and everything else via `tojson`.
+    private static func kimiArgumentsText(_ arguments: JSONValue) throws -> String {
+        if case .string(let text) = arguments { return text }
+        return try arguments.encoded()
+    }
+
     public func encodeToolChat(messages: [Message],
                                tools: [FunctionDefinition]) throws -> [Int32] {
         if dialect == .harmony {
             return encode(try harmonyChatTemplate(messages, tools: tools),
+                          addBOS: false)
+        }
+        if dialect == .kimi {
+            return encode(try kimiChatTemplate(messages, tools: tools),
                           addBOS: false)
         }
         guard tokenizer.hasChatTemplate else {

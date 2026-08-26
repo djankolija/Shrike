@@ -82,12 +82,17 @@ struct GFByteLevelDecoderConfiguration: Sendable {
             "<|audio_start|>", "<|audio_end|>", "<|audio_pad|>",
             "<tts_pad>", "<tts_text_bos>", "<tts_text_eod>",
             "<tts_text_bos_single>",
+            "[BOS]", "[EOS]", "[PAD]",
+            "<|im_user|>", "<|im_assistant|>", "<|im_system|>", "<|im_middle|>",
         ]
         let literal = [
             "<tool_call>", "</tool_call>",
             "<|fim_prefix|>", "<|fim_middle|>", "<|fim_suffix|>",
             "<|fim_pad|>", "<|repo_name|>", "<|file_sep|>",
             "<tool_response>", "</tool_response>", "<think>", "</think>",
+            "<|tool_calls_section_begin|>", "<|tool_calls_section_end|>",
+            "<|tool_call_begin|>", "<|tool_call_argument_begin|>",
+            "<|tool_call_end|>",
         ]
         var result: [Int32: AddedToken] = [:]
         for token in special {
