@@ -331,6 +331,36 @@ public struct Model {
         try resident(name: "language_model.model.layers.\(L).linear_attn.norm.weight")
     }
 
+    // MARK: - Kimi KDA linear attention
+    //
+    // Layer-mask-2 layers on Kimi-Linear share the fused `linear_attn`
+    // in_proj_qkv / in_proj_b / conv1d names above; the per-channel decay and
+    // output-gate chains keep their checkpoint names under `self_attn.`
+    // (o_proj rides the standard `oProj` accessor). A_log is FP32
+    // `[1, 1, Hv, 1]`, dt_bias FP32 `[Hv * Dk]`.
+
+    public func kimiFAProj(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.f_a_proj.weight")
+    }
+    public func kimiFBProj(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.f_b_proj.weight")
+    }
+    public func kimiGAProj(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.g_a_proj.weight")
+    }
+    public func kimiGBProj(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.g_b_proj.weight")
+    }
+    public func kimiALog(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.A_log")
+    }
+    public func kimiDtBias(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.dt_bias")
+    }
+    public func kimiONorm(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.o_norm.weight")
+    }
+
     /// Resolve a tensor name to a `TensorView` against the resident buffer.
     /// `fileOffset` (absolute) is converted to a buffer-relative offset by
     /// subtracting the resident region's file offset (which equals

@@ -234,10 +234,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let gdnQKVRaw: MTLBuffer?        // [qkvDim] raw in_proj_qkv output
     private let gdnConvOut: MTLBuffer?       // [qkvDim] conv + SiLU output
     private let gdnZ: MTLBuffer?             // [valueDim]
-    private let gdnA: MTLBuffer?             // [numVHeads]
+    private let gdnA: MTLBuffer?             // [numVHeads]; KDA [Hv * Dk]
     private let gdnB: MTLBuffer?             // [numVHeads]
     private let gdnY: MTLBuffer?             // [valueDim] delta-rule output
     private let gdnOut: MTLBuffer?           // [valueDim] gated-norm output
+    private let gdnLowRank: MTLBuffer?       // [keyHeadDim] KDA f_a/g_a stage
     private let sharedScalarGateBuf: MTLBuffer? // [1] shared-expert gate logit
     /// BF16 ones over [numExperts]; neutral per_expert_scale when the router
     /// has no auxiliary scale tensors.
@@ -468,6 +469,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.elementwise = needsElementwise ? try Elementwise(context: context) : nil
         if cfg.hasLinearAttentionLayers {
             self.gdn = try GDN(context: context, config: cfg.linearAttention,
+                               perChannelDecay: cfg.linearAttentionPerChannelDecay,
+                               sigmoidGatedNormEps: cfg.linearAttentionSigmoidGateNormEps,
                                specializedHiddenSize: cfg.hiddenSize)
             self.gdnState = try GDNStateManager(
                 device: context.device,
@@ -567,10 +570,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.gdnQKVRaw = try buf(la.qkvDim, label: "decode.gdnQKVRaw")
             self.gdnConvOut = try buf(la.qkvDim, label: "decode.gdnConvOut")
             self.gdnZ = try buf(la.valueDim, label: "decode.gdnZ")
-            self.gdnA = try buf(la.numVHeads, label: "decode.gdnA")
+            self.gdnA = try buf(cfg.linearAttentionPerChannelDecay
+                                ? la.numVHeads * la.keyHeadDim : la.numVHeads,
+                                label: "decode.gdnA")
             self.gdnB = try buf(la.numVHeads, label: "decode.gdnB")
             self.gdnY = try buf(la.valueDim, label: "decode.gdnY")
             self.gdnOut = try buf(la.valueDim, label: "decode.gdnOut")
+            self.gdnLowRank = cfg.linearAttentionPerChannelDecay
+                ? try buf(la.keyHeadDim, label: "decode.gdnLowRank") : nil
         } else {
             self.gdnQKVRaw = nil
             self.gdnConvOut = nil
@@ -579,6 +586,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.gdnB = nil
             self.gdnY = nil
             self.gdnOut = nil
+            self.gdnLowRank = nil
         }
         self.sharedScalarGateBuf = cfg.sharedExpertGated ? try buf(1, label: "decode.sharedScalarGate") : nil
         if cfg.family == .qwen36MTP {
@@ -2110,6 +2118,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Reads `normed`, updates the layer's recurrent state + conv tail in
     /// place, and leaves the attention-branch output in `oOut`.
     private func encodeLinearAttentionDecode(_ cb: MTLCommandBuffer, layer L: Int) throws {
+        if cfg.linearAttentionPerChannelDecay {
+            try encodeKDADecode(cb, layer: L)
+            return
+        }
         guard let gdn, let gdnState, let gdnQKVRaw, let gdnConvOut,
               let gdnZ, let gdnA, let gdnB, let gdnY, let gdnOut else {
             throw ModelError.internalInconsistency(
@@ -2172,6 +2184,79 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             z: gdnZ,
                             weight: gatedNormW.buffer,
                             weightOffset: Int(gatedNormW.offset),
+                            out: gdnOut)
+        try encodePrimaryGEMV(commandBuffer: cb,
+                    weights: outW.buffer, weightsOffset: Int(outW.offset),
+                    scales: outW.buffer, scalesOffset: Int(outW.scaleOffset),
+                    biases: outW.buffer, biasesOffset: Int(outW.biasOffset),
+                    x: gdnOut, y: oOut, m: D, n: UInt32(la.valueDim))
+    }
+
+    /// Kimi KDA, one decode step: fused in_proj_qkv and in_proj_b GEMVs, the
+    /// low-rank decay chain (f_a → f_b into the per-channel `a` buffer) and
+    /// output-gate chain (g_a → g_b into the z slot, staged through the same
+    /// low-rank scratch — separate encoders, so hazard tracking serializes the
+    /// reuse), then conv → qk norm → per-channel delta → sigmoid-gated norm →
+    /// o_proj.
+    private func encodeKDADecode(_ cb: MTLCommandBuffer, layer L: Int) throws {
+        guard let gdn, let gdnState, let gdnQKVRaw, let gdnConvOut,
+              let gdnZ, let gdnA, let gdnB, let gdnY, let gdnOut,
+              let gdnLowRank else {
+            throw ModelError.internalInconsistency(
+                detail: "KDA layer \(L) without GDN kernels (arch mask misconfiguration)")
+        }
+        let la = cfg.linearAttention
+        let D = UInt32(cfg.hiddenSize)
+        let low = UInt32(la.keyHeadDim)
+        let qkvW = try model.linearInProjQKV(layer: L)
+        let bW = try model.linearInProjB(layer: L)
+        let fA = try model.kimiFAProj(layer: L)
+        let fB = try model.kimiFBProj(layer: L)
+        let gA = try model.kimiGAProj(layer: L)
+        let gB = try model.kimiGBProj(layer: L)
+        let outW = try model.oProj(layer: L)
+        let convW = try model.linearConv1d(layer: L)
+        let aLog = try model.kimiALog(layer: L)
+        let dtBias = try model.kimiDtBias(layer: L)
+        let oNormW = try model.kimiONorm(layer: L)
+
+        try encodePrimaryGEMV(commandBuffer: cb, projection: qkvW,
+                          x: normed, y: gdnQKVRaw,
+                          m: UInt32(la.qkvDim), n: D)
+        try encodePrimaryGEMV(commandBuffer: cb, projection: bW,
+                          x: normed, y: gdnB,
+                          m: UInt32(la.numVHeads), n: D)
+        try encodePrimaryGEMV(commandBuffer: cb, projection: fA,
+                          x: normed, y: gdnLowRank, m: low, n: D)
+        try encodePrimaryGEMV(commandBuffer: cb, projection: fB,
+                          x: gdnLowRank, y: gdnA,
+                          m: UInt32(la.numVHeads * la.keyHeadDim), n: low)
+        try encodePrimaryGEMV(commandBuffer: cb, projection: gA,
+                          x: normed, y: gdnLowRank, m: low, n: D)
+        try encodePrimaryGEMV(commandBuffer: cb, projection: gB,
+                          x: gdnLowRank, y: gdnZ,
+                          m: UInt32(la.valueDim), n: low)
+
+        try gdn.encodeConvDecode(commandBuffer: cb,
+                             tail: gdnState.convTailBuffer(layer: L),
+                             qkv: gdnQKVRaw,
+                             convWeight: convW.buffer,
+                             convWeightOffset: Int(convW.offset),
+                             out: gdnConvOut)
+        try gdn.encodeQKNorm(commandBuffer: cb, convOut: gdnConvOut)
+        try gdn.encodeDeltaStepDecode(commandBuffer: cb,
+                                  convOut: gdnConvOut,
+                                  aProj: gdnA,
+                                  bProj: gdnB,
+                                  aLog: aLog.buffer, aLogOffset: Int(aLog.offset),
+                                  dtBias: dtBias.buffer, dtBiasOffset: Int(dtBias.offset),
+                                  state: gdnState.stateBuffer(layer: L),
+                                  y: gdnY)
+        try gdn.encodeGatedNorm(commandBuffer: cb,
+                            y: gdnY,
+                            z: gdnZ,
+                            weight: oNormW.buffer,
+                            weightOffset: Int(oNormW.offset),
                             out: gdnOut)
         try encodePrimaryGEMV(commandBuffer: cb,
                     weights: outW.buffer, weightsOffset: Int(outW.offset),
@@ -2554,7 +2639,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let o: TensorView?
         let qNorm: TensorView?
         let kNorm: TensorView?
-        // Gated-DeltaNet linear-attention layers only.
+        // Gated-DeltaNet linear-attention layers only. On per-channel-decay
+        // architectures (Kimi KDA) linZ/linA stay nil, the low-rank chains
+        // fill linFA…linGB, and linOut/linALog/linDtBias/linNorm carry the
+        // KDA-named tensors.
         let linQKV: TensorView?
         let linZ: TensorView?
         let linA: TensorView?
@@ -2564,6 +2652,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let linALog: TensorView?
         let linDtBias: TensorView?
         let linNorm: TensorView?
+        let linFA: TensorView?
+        let linFB: TensorView?
+        let linGA: TensorView?
+        let linGB: TensorView?
     }
 
     private func encodeAffineProjection(commandBuffer: MTLCommandBuffer,
@@ -2823,8 +2915,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // guard turns a future arch/view regression into a thrown
         // error instead of a force-unwrap trap.
         guard let linQKV = views.linQKV,
-              let linZ = views.linZ,
-              let linA = views.linA,
               let linB = views.linB,
               let linConv = views.linConv,
               let linALog = views.linALog,
@@ -2846,28 +2936,39 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                              xStrideElements: D,
                              yStrideElements: la.qkvDim,
                              useTwoRowProjection: useTwoRowProjection)
-        try encodeAffineProjection(commandBuffer: cb,
-                             family: .kv,
-                             weights: linZ,
-                             x: scratch.normed,
-                             y: scratch.gdnZ,
-                             rows: la.valueDim,
-                             columns: D,
-                             tokenCount: t,
-                             xStrideElements: D,
-                             yStrideElements: la.valueDim,
-                             useTwoRowProjection: useTwoRowProjection)
-        try encodeAffineProjection(commandBuffer: cb,
-                             family: .kv,
-                             weights: linA,
-                             x: scratch.normed,
-                             y: scratch.gdnA,
-                             rows: la.numVHeads,
-                             columns: D,
-                             tokenCount: t,
-                             xStrideElements: D,
-                             yStrideElements: la.numVHeads,
-                             useTwoRowProjection: useTwoRowProjection)
+        if cfg.linearAttentionPerChannelDecay {
+            try encodeKDAPrefillChains(cb: cb, layer: L, views: views,
+                                       scratch: scratch, tokenCount: t,
+                                       hiddenSize: D,
+                                       useTwoRowProjection: useTwoRowProjection)
+        } else {
+            guard let linZ = views.linZ, let linA = views.linA else {
+                throw ModelError.internalInconsistency(
+                    detail: "linear-attention layer \(L) is missing a required linear_attn tensor view")
+            }
+            try encodeAffineProjection(commandBuffer: cb,
+                                 family: .kv,
+                                 weights: linZ,
+                                 x: scratch.normed,
+                                 y: scratch.gdnZ,
+                                 rows: la.valueDim,
+                                 columns: D,
+                                 tokenCount: t,
+                                 xStrideElements: D,
+                                 yStrideElements: la.valueDim,
+                                 useTwoRowProjection: useTwoRowProjection)
+            try encodeAffineProjection(commandBuffer: cb,
+                                 family: .kv,
+                                 weights: linA,
+                                 x: scratch.normed,
+                                 y: scratch.gdnA,
+                                 rows: la.numVHeads,
+                                 columns: D,
+                                 tokenCount: t,
+                                 xStrideElements: D,
+                                 yStrideElements: la.numVHeads,
+                                 useTwoRowProjection: useTwoRowProjection)
+        }
         try encodeAffineProjection(commandBuffer: cb,
                              family: .kv,
                              weights: linB,
@@ -2935,6 +3036,68 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                              tokenCount: t,
                              xStrideElements: la.valueDim,
                              yStrideElements: D,
+                             useTwoRowProjection: useTwoRowProjection)
+    }
+
+    /// Kimi KDA prefill chains: f_a → f_b fills the per-channel `a` buffer
+    /// and g_a → g_b fills the z slot, both staged through `gdnLowRank`
+    /// (separate encoders, so hazard tracking serializes the reuse).
+    private func encodeKDAPrefillChains(
+        cb: MTLCommandBuffer, layer L: Int,
+        views: LayerPrefillQKVViews, scratch: PrefillChunkScratchBuffers,
+        tokenCount t: Int, hiddenSize D: Int,
+        useTwoRowProjection: Bool
+    ) throws {
+        guard let linFA = views.linFA, let linFB = views.linFB,
+              let linGA = views.linGA, let linGB = views.linGB else {
+            throw ModelError.internalInconsistency(
+                detail: "KDA layer \(L) is missing a low-rank chain tensor view")
+        }
+        let la = cfg.linearAttention
+        let low = la.keyHeadDim
+        try encodeAffineProjection(commandBuffer: cb,
+                             family: .kv,
+                             weights: linFA,
+                             x: scratch.normed,
+                             y: scratch.gdnLowRank,
+                             rows: low,
+                             columns: D,
+                             tokenCount: t,
+                             xStrideElements: D,
+                             yStrideElements: low,
+                             useTwoRowProjection: useTwoRowProjection)
+        try encodeAffineProjection(commandBuffer: cb,
+                             family: .kv,
+                             weights: linFB,
+                             x: scratch.gdnLowRank,
+                             y: scratch.gdnA,
+                             rows: la.numVHeads * la.keyHeadDim,
+                             columns: low,
+                             tokenCount: t,
+                             xStrideElements: low,
+                             yStrideElements: la.numVHeads * la.keyHeadDim,
+                             useTwoRowProjection: useTwoRowProjection)
+        try encodeAffineProjection(commandBuffer: cb,
+                             family: .kv,
+                             weights: linGA,
+                             x: scratch.normed,
+                             y: scratch.gdnLowRank,
+                             rows: low,
+                             columns: D,
+                             tokenCount: t,
+                             xStrideElements: D,
+                             yStrideElements: low,
+                             useTwoRowProjection: useTwoRowProjection)
+        try encodeAffineProjection(commandBuffer: cb,
+                             family: .kv,
+                             weights: linGB,
+                             x: scratch.gdnLowRank,
+                             y: scratch.gdnZ,
+                             rows: la.valueDim,
+                             columns: low,
+                             tokenCount: t,
+                             xStrideElements: low,
+                             yStrideElements: la.valueDim,
                              useTwoRowProjection: useTwoRowProjection)
     }
 
@@ -3167,6 +3330,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         try (0..<cfg.numLayers).map { L in
             let isFull = cfg.fullAttentionLayerMask[L] == 1
             let isLinear = cfg.layerIsLinear(L)
+            let isKDA = isLinear && cfg.linearAttentionPerChannelDecay
             return LayerPrefillQKVViews(
                 inputNorm: try model.inputNorm(layer: L),
                 postAttention: try model.postAttnNorm(layer: L),
@@ -3181,14 +3345,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 qNorm: (isLinear || !cfg.hasQKNorms) ? nil : try model.qNorm(layer: L),
                 kNorm: (isLinear || !cfg.hasQKNorms) ? nil : try model.kNorm(layer: L),
                 linQKV: isLinear ? try model.linearInProjQKV(layer: L) : nil,
-                linZ: isLinear ? try model.linearInProjZ(layer: L) : nil,
-                linA: isLinear ? try model.linearInProjA(layer: L) : nil,
+                linZ: (isLinear && !isKDA) ? try model.linearInProjZ(layer: L) : nil,
+                linA: (isLinear && !isKDA) ? try model.linearInProjA(layer: L) : nil,
                 linB: isLinear ? try model.linearInProjB(layer: L) : nil,
-                linOut: isLinear ? try model.linearOutProj(layer: L) : nil,
+                linOut: isLinear
+                    ? (isKDA ? try model.oProj(layer: L)
+                             : try model.linearOutProj(layer: L)) : nil,
                 linConv: isLinear ? try model.linearConv1d(layer: L) : nil,
-                linALog: isLinear ? try model.linearALog(layer: L) : nil,
-                linDtBias: isLinear ? try model.linearDtBias(layer: L) : nil,
-                linNorm: isLinear ? try model.linearNorm(layer: L) : nil)
+                linALog: isLinear
+                    ? (isKDA ? try model.kimiALog(layer: L)
+                             : try model.linearALog(layer: L)) : nil,
+                linDtBias: isLinear
+                    ? (isKDA ? try model.kimiDtBias(layer: L)
+                             : try model.linearDtBias(layer: L)) : nil,
+                linNorm: isLinear
+                    ? (isKDA ? try model.kimiONorm(layer: L)
+                             : try model.linearNorm(layer: L)) : nil,
+                linFA: isKDA ? try model.kimiFAProj(layer: L) : nil,
+                linFB: isKDA ? try model.kimiFBProj(layer: L) : nil,
+                linGA: isKDA ? try model.kimiGAProj(layer: L) : nil,
+                linGB: isKDA ? try model.kimiGBProj(layer: L) : nil)
         }
     }
 

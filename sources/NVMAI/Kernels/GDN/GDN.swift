@@ -28,12 +28,22 @@ final class GDN {
     private let inProjSpecializedPSO: MTLComputePipelineState?
 
     let config: LinearAttentionConfig
+    /// Kimi KDA: decay is per key channel (`g[head, dk]` from `a_proj
+    /// [Hv * Dk]` half, `A_log [Hv]` / `dt_bias [Hv * Dk]` FP32) instead of
+    /// one scalar per value head; selects the `_vec` delta kernels.
+    let perChannelDecay: Bool
+    /// Non-nil selects the sigmoid-gated output norm at this eps (Kimi KDA
+    /// o_norm at the arch's rms_norm_eps); nil keeps SiLU at the kernel's
+    /// baked 1e-6 (Qwen 3.6).
+    let sigmoidGatedNormEps: Float?
 
     /// `specializedHiddenSize` compiles a constant-folded variant of the fused
     /// input projection for the decode shape. Measured elsewhere in this
     /// package: an unspecialized INT4 GEMV runs ~102 GB/s against ~141 GB/s
     /// specialized, so the runtime path must not be the only one available.
     init(context: MetalContext, config: LinearAttentionConfig,
+         perChannelDecay: Bool = false,
+         sigmoidGatedNormEps: Float? = nil,
          specializedHiddenSize: Int? = nil) throws {
         precondition(config.keyHeadDim > 0 && config.keyHeadDim % 32 == 0,
                      "keyHeadDim must be a positive multiple of 32")
@@ -44,6 +54,8 @@ final class GDN {
         precondition(config.numVHeads % config.numKHeads == 0,
                      "numVHeads must be a multiple of numKHeads")
         self.config = config
+        self.perChannelDecay = perChannelDecay
+        self.sigmoidGatedNormEps = sigmoidGatedNormEps
         self.convDecodePSO = try context.pipeline("gdn_conv_mix_decode")
         self.convPrefillPSO = try context.pipeline("gdn_conv_mix_prefill")
         self.convTailUpdatePSO = try context.pipeline("gdn_conv_tail_update")
@@ -52,10 +64,12 @@ final class GDN {
             "gdn_qk_norm",
             constants: [MetalFunctionConstant(index: 95,
                                                value: .uint32(Self.normThreadsPerGroup))])
-        self.deltaDecodePSO = try context.pipeline("gdn_delta_step_decode")
-        self.deltaPrefillPSO = try context.pipeline("gdn_delta_step_prefill")
+        self.deltaDecodePSO = try context.pipeline(
+            perChannelDecay ? "gdn_delta_step_decode_vec" : "gdn_delta_step_decode")
+        self.deltaPrefillPSO = try context.pipeline(
+            perChannelDecay ? "gdn_delta_step_prefill_vec" : "gdn_delta_step_prefill")
         self.gatedNormPSO = try context.pipeline(
-            "gdn_gated_norm",
+            sigmoidGatedNormEps != nil ? "gdn_gated_norm_sigmoid" : "gdn_gated_norm",
             constants: [MetalFunctionConstant(index: 95,
                                                value: .uint32(Self.normThreadsPerGroup))])
         self.inProjPSO = try context.pipeline("gdn_in_proj_gemv_simd",
@@ -244,7 +258,9 @@ final class GDN {
     }
 
     /// Decode: one gated delta rule step. `state` is FP32 [Hv, Dv, Dk],
-    /// updated in place; `y` receives [Hv * Dv] FP16.
+    /// updated in place; `y` receives [Hv * Dv] FP16. With `perChannelDecay`,
+    /// `aProj` holds [Hv * Dk] halfs and `aLog`/`dtBias` are FP32
+    /// ([Hv] / [Hv * Dk]) instead of BF16 [Hv].
     func encodeDeltaStepDecode(commandBuffer: MTLCommandBuffer,
                                convOut: MTLBuffer, convOutOffset: Int = 0,
                                aProj: MTLBuffer, aProjOffset: Int = 0,
@@ -274,7 +290,9 @@ final class GDN {
     }
 
     /// Prefill: the recurrence runs sequentially over `rows` inside the
-    /// kernel; state persists in registers and is written back once.
+    /// kernel; state persists in registers and is written back once. Same
+    /// `perChannelDecay` buffer contract as decode, with `aProj` rows of
+    /// [Hv * Dk].
     func encodeDeltaStepPrefill(commandBuffer: MTLCommandBuffer,
                                 convOut: MTLBuffer, convOutOffset: Int = 0,
                                 aProj: MTLBuffer, aProjOffset: Int = 0,
@@ -331,6 +349,9 @@ final class GDN {
         var valueDim = UInt32(config.valueHeadDim)
         encoder.setBytes(&vHeads, length: MemoryLayout<UInt32>.size, index: 4)
         encoder.setBytes(&valueDim, length: MemoryLayout<UInt32>.size, index: 5)
+        if var eps = sigmoidGatedNormEps {
+            encoder.setBytes(&eps, length: MemoryLayout<Float>.size, index: 6)
+        }
         // K18: dispatch exactly normThreadsPerGroup threads — the kernel's
         // partial-count loop is bound to the same function constant.
         encoder.dispatchThreadgroups(

@@ -14,23 +14,35 @@ public struct GDNReference {
     public static func softplus(_ x: Float) -> Float {
         x > 20 ? x : logf(1 + expf(x))
     }
+    public static func sigmoid(_ x: Float) -> Float { 1 / (1 + expf(-x)) }
 
     public let cfg: LinearAttentionConfig
     public let convW: [Float]          // [C, K], bf16-representable
     public let aLog: [Float]           // [Hv]
-    public let dtBias: [Float]         // [Hv]
+    public let dtBias: [Float]         // [Hv]; per-channel: [Hv * Dk]
     public let normW: [Float]          // [Dv]
+    /// Kimi KDA (mlx-lm `gated_delta_ops` vectorized gating): `a` and
+    /// `dtBias` carry [Hv * Dk] and the decay applies per key channel.
+    public let perChannelDecay: Bool
+    /// Kimi KDA o_norm: sigmoid output gate at the arch's rms_norm_eps.
+    public let sigmoidGate: Bool
+    public let gatedNormEps: Float
 
     public var tail: [[Float]]         // K-1 rows of C
     public var state: [Float]          // [Hv, Dv, Dk]
 
     public init(cfg: LinearAttentionConfig, convW: [Float], aLog: [Float],
-         dtBias: [Float], normW: [Float]) {
+         dtBias: [Float], normW: [Float],
+         perChannelDecay: Bool = false, sigmoidGate: Bool = false,
+         gatedNormEps: Float = 1e-6) {
         self.cfg = cfg
         self.convW = convW
         self.aLog = aLog
         self.dtBias = dtBias
         self.normW = normW
+        self.perChannelDecay = perChannelDecay
+        self.sigmoidGate = sigmoidGate
+        self.gatedNormEps = gatedNormEps
         self.tail = Array(repeating: [Float](repeating: 0, count: cfg.qkvDim),
                           count: cfg.convKernelSize - 1)
         self.state = [Float](repeating: 0,
@@ -80,12 +92,18 @@ public struct GDNReference {
             let qBase = hk * Dk
             let kBase = Hk * Dk + hk * Dk
             let vBase = 2 * Hk * Dk + h * Dv
-            let g = expf(-expf(aLog[h]) * GDNReference.softplus(a[h] + dtBias[h]))
+            let expA = expf(aLog[h])
+            let gHead = perChannelDecay
+                ? 0 : expf(-expA * GDNReference.softplus(a[h] + dtBias[h]))
             let beta = 1 / (1 + expf(-b[h]))
             for dv in 0..<Dv {
                 let srow = (h * Dv + dv) * Dk
                 var kv: Float = 0
                 for i in 0..<Dk {
+                    let g = perChannelDecay
+                        ? expf(-expA * GDNReference.softplus(
+                            a[h * Dk + i] + dtBias[h * Dk + i]))
+                        : gHead
                     state[srow + i] *= g
                     kv += state[srow + i] * normed[kBase + i]
                 }
@@ -105,10 +123,12 @@ public struct GDNReference {
             let base = h * Dv
             var sumsq: Float = 0
             for i in 0..<Dv { sumsq += y[base + i] * y[base + i] }
-            let invRms = 1 / sqrtf(sumsq / Float(Dv) + 1e-6)
+            let invRms = 1 / sqrtf(sumsq / Float(Dv) + gatedNormEps)
             for i in 0..<Dv {
                 let normedY = y[base + i] * invRms * normW[i]
-                gated[base + i] = normedY * GDNReference.silu(z[base + i])
+                let gate = sigmoidGate ? GDNReference.sigmoid(z[base + i])
+                                       : GDNReference.silu(z[base + i])
+                gated[base + i] = normedY * gate
             }
         }
         return gated

@@ -2,9 +2,11 @@
 using namespace metal;
 
 // ============================================================================
-// gdn.metal — gated-DeltaNet linear attention (Qwen 3.6 layers with layer-mask
-// value 2). Decode processes one token; prefill processes a bounded chunk of
-// rows with the recurrence sequential inside the kernel.
+// gdn.metal — gated-DeltaNet linear attention (layer-mask value 2: Qwen 3.6
+// GDN with per-head decay, Kimi KDA with per-channel decay via the `_vec`
+// entries and a sigmoid-gated output norm). Decode processes one token;
+// prefill processes a bounded chunk of rows with the recurrence sequential
+// inside the kernel.
 //
 // Dataflow per layer (dimensions are runtime parameters; Qwen 3.6 uses
 // C = 8192 conv channels, K = 4 taps, Hk = 16 x Dk = 128, Hv = 32 x Dv = 128):
@@ -439,28 +441,30 @@ kernel void gdn_qk_norm(
 // ----------------------------------------------------------------------------
 // Gated delta rule. Decode: one token. Threadgroups (Hv, Dv/4); threads
 // (32, 4): thread (lane, dvSub) owns state[dv][lane*4 .. lane*4+3].
-// State is FP32 [Hv, Dv, Dk], persistent. a/b are the projection outputs
-// [Hv] half; A_log/dt_bias are BF16 [Hv].
+// State is FP32 [Hv, Dv, Dk], persistent.
+//
+// One shared body serves both decay parameterizations, so the recurrence can
+// never drift between them:
+//  - per head (Qwen 3.6): a_proj [Hv] half, A_log/dt_bias BF16 [Hv], one g
+//    per value head;
+//  - per channel (Kimi KDA): a_proj [Hv * Dk] half, A_log F32 [Hv], dt_bias
+//    F32 [Hv * Dk], g[h, dk] applied as `state[dk] *= g[dk]`.
+// `perChannelG` is a literal at each kernel entry, so the untaken branch
+// folds at compile time.
 // ----------------------------------------------------------------------------
-kernel void gdn_delta_step_decode(
-    device const half*   conv_out [[buffer(0)]],   // [C] normed q,k + raw v
-    device const half*   a_proj   [[buffer(1)]],   // [Hv]
-    device const half*   b_proj   [[buffer(2)]],   // [Hv]
-    device const bfloat* A_log    [[buffer(3)]],   // [Hv]
-    device const bfloat* dt_bias  [[buffer(4)]],   // [Hv]
-    device float*        state    [[buffer(5)]],   // [Hv, Dv, Dk]
-    device half*         y        [[buffer(6)]],   // [Hv * Dv]
-    constant uint&       kHeads   [[buffer(7)]],
-    constant uint&       vHeads   [[buffer(8)]],
-    constant uint&       keyDim   [[buffer(9)]],
-    constant uint&       valueDim [[buffer(10)]],
-    uint2 tg [[threadgroup_position_in_grid]],
-    uint2 tpos [[thread_position_in_threadgroup]]
+template <typename DecayT>
+static inline void gdn_delta_step_decode_body(
+    device const half*   conv_out,
+    device const half*   a_proj,
+    device const half*   b_proj,
+    device const DecayT* A_log,
+    device const DecayT* dt_bias,
+    device float*        state,
+    device half*         y,
+    uint Hk, uint Hv, uint Dk, uint Dv,
+    bool perChannelG,
+    uint2 tg, uint2 tpos
 ) {
-    const uint Hk = kHeads;
-    const uint Hv = vHeads;
-    const uint Dk = keyDim;
-    const uint Dv = valueDim;
     const uint h = tg.x;
     const uint dv = tg.y * 4u + tpos.y;
     const uint lane = tpos.x;
@@ -471,8 +475,11 @@ kernel void gdn_delta_step_decode(
     device const half* k = conv_out + Hk * Dk + hk * Dk;
     device const half* v = conv_out + 2u * Hk * Dk + h * Dv;
 
-    const float g = exp(-exp(float(A_log[h]))
-                        * gdn_softplus(float(a_proj[h]) + float(dt_bias[h])));
+    const float expA = exp(float(A_log[h]));
+    float gHead = 0.0f;
+    if (!perChannelG) {
+        gHead = exp(-expA * gdn_softplus(float(a_proj[h]) + float(dt_bias[h])));
+    }
     const float beta = 1.0f / (1.0f + exp(-float(b_proj[h])));
 
     const uint nPerLane = Dk / 32u;
@@ -482,6 +489,10 @@ kernel void gdn_delta_step_decode(
     float kv = 0.0f;
     for (uint i = 0; i < nPerLane; ++i) {
         const uint idx = lane * nPerLane + i;
+        const float g = perChannelG
+            ? exp(-expA * gdn_softplus(float(a_proj[h * Dk + idx])
+                                       + float(dt_bias[h * Dk + idx])))
+            : gHead;
         s[i] = srow[idx] * g;
         kv = fma(s[i], float(k[idx]), kv);
     }
@@ -500,34 +511,64 @@ kernel void gdn_delta_step_decode(
     if (lane == 0) y[h * Dv + dv] = half(out);
 }
 
-// Prefill: identical math with the token loop inside the kernel. q/k/v/a/b
-// advance by their row strides each step; state persists in registers across
-// the whole chunk and is written back once.
-kernel void gdn_delta_step_prefill(
-    device const half*   conv_out [[buffer(0)]],   // [T, C]
-    device const half*   a_proj   [[buffer(1)]],   // [T, Hv]
-    device const half*   b_proj   [[buffer(2)]],   // [T, Hv]
+kernel void gdn_delta_step_decode(
+    device const half*   conv_out [[buffer(0)]],   // [C] normed q,k + raw v
+    device const half*   a_proj   [[buffer(1)]],   // [Hv]
+    device const half*   b_proj   [[buffer(2)]],   // [Hv]
     device const bfloat* A_log    [[buffer(3)]],   // [Hv]
     device const bfloat* dt_bias  [[buffer(4)]],   // [Hv]
     device float*        state    [[buffer(5)]],   // [Hv, Dv, Dk]
-    device half*         y        [[buffer(6)]],   // [T, Hv * Dv]
+    device half*         y        [[buffer(6)]],   // [Hv * Dv]
     constant uint&       kHeads   [[buffer(7)]],
     constant uint&       vHeads   [[buffer(8)]],
     constant uint&       keyDim   [[buffer(9)]],
     constant uint&       valueDim [[buffer(10)]],
-    constant uint&       rows     [[buffer(11)]],
-    constant uint&       rowStride [[buffer(12)]], // C, conv_out elements/row
-    device float*        checkpointState [[buffer(13)]],
-    constant bool&       checkpointEnabled [[buffer(14)]],
     uint2 tg [[threadgroup_position_in_grid]],
     uint2 tpos [[thread_position_in_threadgroup]]
 ) {
-    const uint Hk = kHeads;
-    const uint Hv = vHeads;
-    const uint Dk = keyDim;
-    const uint Dv = valueDim;
-    const uint T = rows;
-    const uint C = rowStride;
+    gdn_delta_step_decode_body<bfloat>(conv_out, a_proj, b_proj, A_log, dt_bias,
+                                       state, y, kHeads, vHeads, keyDim,
+                                       valueDim, false, tg, tpos);
+}
+
+kernel void gdn_delta_step_decode_vec(
+    device const half*   conv_out [[buffer(0)]],   // [C] normed q,k + raw v
+    device const half*   a_proj   [[buffer(1)]],   // [Hv * Dk]
+    device const half*   b_proj   [[buffer(2)]],   // [Hv]
+    device const float*  A_log    [[buffer(3)]],   // [Hv]
+    device const float*  dt_bias  [[buffer(4)]],   // [Hv * Dk]
+    device float*        state    [[buffer(5)]],   // [Hv, Dv, Dk]
+    device half*         y        [[buffer(6)]],   // [Hv * Dv]
+    constant uint&       kHeads   [[buffer(7)]],
+    constant uint&       vHeads   [[buffer(8)]],
+    constant uint&       keyDim   [[buffer(9)]],
+    constant uint&       valueDim [[buffer(10)]],
+    uint2 tg [[threadgroup_position_in_grid]],
+    uint2 tpos [[thread_position_in_threadgroup]]
+) {
+    gdn_delta_step_decode_body<float>(conv_out, a_proj, b_proj, A_log, dt_bias,
+                                      state, y, kHeads, vHeads, keyDim,
+                                      valueDim, true, tg, tpos);
+}
+
+// Prefill: identical math with the token loop inside the kernel. q/k/v/a/b
+// advance by their row strides each step; state persists in registers across
+// the whole chunk and is written back once. Same shared-body scheme as decode.
+template <typename DecayT>
+static inline void gdn_delta_step_prefill_body(
+    device const half*   conv_out,
+    device const half*   a_proj,
+    device const half*   b_proj,
+    device const DecayT* A_log,
+    device const DecayT* dt_bias,
+    device float*        state,
+    device half*         y,
+    uint Hk, uint Hv, uint Dk, uint Dv, uint T, uint C,
+    device float*        checkpointState,
+    bool checkpointEnabled,
+    bool perChannelG,
+    uint2 tg, uint2 tpos
+) {
     const uint h = tg.x;
     const uint dv = tg.y * 4u + tpos.y;
     const uint lane = tpos.x;
@@ -535,7 +576,8 @@ kernel void gdn_delta_step_prefill(
 
     const uint hk = h / (Hv / Hk);
     const float expA = exp(float(A_log[h]));
-    const float dtb = float(dt_bias[h]);
+    const float dtb = perChannelG ? 0.0f : float(dt_bias[h]);
+    const uint aStride = perChannelG ? Hv * Dk : Hv;
 
     const uint nPerLane = Dk / 32u;
     device float* srow = state + (uint(h) * Dv + dv) * Dk;
@@ -550,12 +592,19 @@ kernel void gdn_delta_step_prefill(
         device const half* k = conv_out + t * C + Hk * Dk + hk * Dk;
         device const half* v = conv_out + t * C + 2u * Hk * Dk + h * Dv;
 
-        const float g = exp(-expA * gdn_softplus(float(a_proj[t * Hv + h]) + dtb));
+        float gHead = 0.0f;
+        if (!perChannelG) {
+            gHead = exp(-expA * gdn_softplus(float(a_proj[t * aStride + h]) + dtb));
+        }
         const float beta = 1.0f / (1.0f + exp(-float(b_proj[t * Hv + h])));
 
         float kv = 0.0f;
         for (uint i = 0; i < nPerLane; ++i) {
             const uint idx = lane * nPerLane + i;
+            const float g = perChannelG
+                ? exp(-expA * gdn_softplus(float(a_proj[t * aStride + h * Dk + idx])
+                                           + float(dt_bias[h * Dk + idx])))
+                : gHead;
             s[i] *= g;
             kv = fma(s[i], float(k[idx]), kv);
         }
@@ -584,28 +633,77 @@ kernel void gdn_delta_step_prefill(
     }
 }
 
-// ----------------------------------------------------------------------------
-// Gated output norm: out = rmsnorm(y; weight, eps) * silu(z), per value head.
-// One threadgroup per (head, row), 128 threads. Norm statistics span one
-// head's Dv elements; silu/product in FP32 (matches the reference's
-// _precise_swiglu).
-// ----------------------------------------------------------------------------
-kernel void gdn_gated_norm(
-    device const half*   y        [[buffer(0)]],   // [T, Hv * Dv]
-    device const half*   z        [[buffer(1)]],   // [T, Hv * Dv]
-    device const bfloat* weight   [[buffer(2)]],   // [Dv]
-    device half*         out      [[buffer(3)]],   // [T, Hv * Dv]
-    constant uint&       vHeads   [[buffer(4)]],
-    constant uint&       valueDim [[buffer(5)]],
-    uint2 tg  [[threadgroup_position_in_grid]],
-    uint2 tpos [[thread_position_in_threadgroup]],
-    uint  simd_lane [[thread_index_in_simdgroup]],
-    uint  simd_idx  [[simdgroup_index_in_threadgroup]]
+kernel void gdn_delta_step_prefill(
+    device const half*   conv_out [[buffer(0)]],   // [T, C]
+    device const half*   a_proj   [[buffer(1)]],   // [T, Hv]
+    device const half*   b_proj   [[buffer(2)]],   // [T, Hv]
+    device const bfloat* A_log    [[buffer(3)]],   // [Hv]
+    device const bfloat* dt_bias  [[buffer(4)]],   // [Hv]
+    device float*        state    [[buffer(5)]],   // [Hv, Dv, Dk]
+    device half*         y        [[buffer(6)]],   // [T, Hv * Dv]
+    constant uint&       kHeads   [[buffer(7)]],
+    constant uint&       vHeads   [[buffer(8)]],
+    constant uint&       keyDim   [[buffer(9)]],
+    constant uint&       valueDim [[buffer(10)]],
+    constant uint&       rows     [[buffer(11)]],
+    constant uint&       rowStride [[buffer(12)]], // C, conv_out elements/row
+    device float*        checkpointState [[buffer(13)]],
+    constant bool&       checkpointEnabled [[buffer(14)]],
+    uint2 tg [[threadgroup_position_in_grid]],
+    uint2 tpos [[thread_position_in_threadgroup]]
 ) {
-    threadgroup float partial[32];
+    gdn_delta_step_prefill_body<bfloat>(conv_out, a_proj, b_proj, A_log,
+                                        dt_bias, state, y, kHeads, vHeads,
+                                        keyDim, valueDim, rows, rowStride,
+                                        checkpointState, checkpointEnabled,
+                                        false, tg, tpos);
+}
+
+kernel void gdn_delta_step_prefill_vec(
+    device const half*   conv_out [[buffer(0)]],   // [T, C]
+    device const half*   a_proj   [[buffer(1)]],   // [T, Hv * Dk]
+    device const half*   b_proj   [[buffer(2)]],   // [T, Hv]
+    device const float*  A_log    [[buffer(3)]],   // [Hv]
+    device const float*  dt_bias  [[buffer(4)]],   // [Hv * Dk]
+    device float*        state    [[buffer(5)]],   // [Hv, Dv, Dk]
+    device half*         y        [[buffer(6)]],   // [T, Hv * Dv]
+    constant uint&       kHeads   [[buffer(7)]],
+    constant uint&       vHeads   [[buffer(8)]],
+    constant uint&       keyDim   [[buffer(9)]],
+    constant uint&       valueDim [[buffer(10)]],
+    constant uint&       rows     [[buffer(11)]],
+    constant uint&       rowStride [[buffer(12)]], // C, conv_out elements/row
+    device float*        checkpointState [[buffer(13)]],
+    constant bool&       checkpointEnabled [[buffer(14)]],
+    uint2 tg [[threadgroup_position_in_grid]],
+    uint2 tpos [[thread_position_in_threadgroup]]
+) {
+    gdn_delta_step_prefill_body<float>(conv_out, a_proj, b_proj, A_log,
+                                       dt_bias, state, y, kHeads, vHeads,
+                                       keyDim, valueDim, rows, rowStride,
+                                       checkpointState, checkpointEnabled,
+                                       true, tg, tpos);
+}
+
+// ----------------------------------------------------------------------------
+// Gated output norm: out = rmsnorm(y; weight, eps) * gate(z), per value head.
+// One threadgroup per (head, row), 128 threads. Norm statistics span one
+// head's Dv elements; gate/product in FP32 (matches the reference's
+// _precise_swiglu). One shared body serves both gates: SiLU at the module's
+// kGdnRmsEps (Qwen 3.6) and sigmoid at the architecture's rms_norm_eps
+// (Kimi KDA o_norm). `sigmoidGate` is a literal at each entry.
+// ----------------------------------------------------------------------------
+static inline void gdn_gated_norm_body(
+    device const half*   y,
+    device const half*   z,
+    device const bfloat* weight,
+    device half*         out,
+    uint Hv, uint Dv, float eps,
+    bool sigmoidGate,
+    uint2 tg, uint2 tpos, uint simd_lane, uint simd_idx,
+    threadgroup float* partial
+) {
     const uint tid = tpos.x;
-    const uint Hv = vHeads;
-    const uint Dv = valueDim;
     const uint head = tg.x;
     const uint row = tg.y;
     if (head >= Hv) return;
@@ -632,13 +730,50 @@ kernel void gdn_gated_norm(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     const float mean = partial[0] / float(Dv);
-    const float invRms = rsqrt(mean + kGdnRmsEps);
+    const float invRms = rsqrt(mean + eps);
 
     for (uint i = tid; i < Dv; i += tgThreads) {
         const float normed = float(y[base + i]) * invRms * float(weight[i]);
-        const float gate = gdn_silu(float(z[base + i]));
+        const float zi = float(z[base + i]);
+        const float gate = sigmoidGate ? (1.0f / (1.0f + exp(-zi)))
+                                       : gdn_silu(zi);
         out[base + i] = half(normed * gate);
     }
+}
+
+kernel void gdn_gated_norm(
+    device const half*   y        [[buffer(0)]],   // [T, Hv * Dv]
+    device const half*   z        [[buffer(1)]],   // [T, Hv * Dv]
+    device const bfloat* weight   [[buffer(2)]],   // [Dv]
+    device half*         out      [[buffer(3)]],   // [T, Hv * Dv]
+    constant uint&       vHeads   [[buffer(4)]],
+    constant uint&       valueDim [[buffer(5)]],
+    uint2 tg  [[threadgroup_position_in_grid]],
+    uint2 tpos [[thread_position_in_threadgroup]],
+    uint  simd_lane [[thread_index_in_simdgroup]],
+    uint  simd_idx  [[simdgroup_index_in_threadgroup]]
+) {
+    threadgroup float partial[32];
+    gdn_gated_norm_body(y, z, weight, out, vHeads, valueDim, kGdnRmsEps,
+                        false, tg, tpos, simd_lane, simd_idx, partial);
+}
+
+kernel void gdn_gated_norm_sigmoid(
+    device const half*   y        [[buffer(0)]],   // [T, Hv * Dv]
+    device const half*   z        [[buffer(1)]],   // [T, Hv * Dv]
+    device const bfloat* weight   [[buffer(2)]],   // [Dv]
+    device half*         out      [[buffer(3)]],   // [T, Hv * Dv]
+    constant uint&       vHeads   [[buffer(4)]],
+    constant uint&       valueDim [[buffer(5)]],
+    constant float&      eps      [[buffer(6)]],
+    uint2 tg  [[threadgroup_position_in_grid]],
+    uint2 tpos [[thread_position_in_threadgroup]],
+    uint  simd_lane [[thread_index_in_simdgroup]],
+    uint  simd_idx  [[simdgroup_index_in_threadgroup]]
+) {
+    threadgroup float partial[32];
+    gdn_gated_norm_body(y, z, weight, out, vHeads, valueDim, eps,
+                        true, tg, tpos, simd_lane, simd_idx, partial);
 }
 
 // ---- bench variants (NVMAIBench gdn_inproj_*) ----

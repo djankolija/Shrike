@@ -438,6 +438,11 @@ public struct ArchConfig: Sendable, Equatable {
     /// KDA's decay is per channel (`g[head, dk]`); Qwen's GDN decay is one
     /// scalar per head.
     public var linearAttentionPerChannelDecay: Bool { family == .kimiLinear48b }
+    /// KDA's o_norm gates with sigmoid at the checkpoint's rms_norm_eps;
+    /// nil keeps Qwen's SiLU gate at the GDN kernel's baked 1e-6.
+    public var linearAttentionSigmoidGateNormEps: Float? {
+        family == .kimiLinear48b ? 1e-5 : nil
+    }
     /// Kimi router: scores are sigmoid(logits); top-k selects by score plus
     /// `e_score_correction_bias`, weights are the original scores of the
     /// selected renormalized (÷ sum + 1e-20) and scaled by 2.446. Other

@@ -17,6 +17,13 @@ import NVMAIValidationSupport
         numKHeads: 2, numVHeads: 4, keyHeadDim: 32, valueHeadDim: 32,
         convKernelSize: 4)
 
+    // Kimi KDA structural mini shape (Hk == Hv), exercised with per-channel
+    // decay and the sigmoid-gated norm at the arch's rms_norm_eps.
+    private static let kdaCfg = LinearAttentionConfig(
+        numKHeads: 4, numVHeads: 4, keyHeadDim: 32, valueHeadDim: 32,
+        convKernelSize: 4)
+    private static let kdaNormEps: Float = 1e-5
+
     // MARK: - Helpers
 
     private static func bf16(_ x: Float) -> UInt16 {
@@ -41,6 +48,15 @@ import NVMAIValidationSupport
                                  options: .storageModeShared)
     }
 
+    private static func makeFloatBuffer(_ device: MTLDevice,
+                                        values: [Float]) -> MTLBuffer? {
+        values.withUnsafeBytes { bytes in
+            device.makeBuffer(bytes: bytes.baseAddress!,
+                              length: bytes.count,
+                              options: .storageModeShared)
+        }
+    }
+
     private static func readHalves(_ buffer: MTLBuffer, count: Int) -> [Float] {
         let ptr = buffer.contents().bindMemory(to: Float16.self, capacity: count)
         return (0..<count).map { Float(ptr[$0]) }
@@ -61,17 +77,25 @@ import NVMAIValidationSupport
         let bRows: [[Float]]
         let zRows: [[Float]]
 
-        init(rows: Int, seed: UInt64) {
-            let cfg = GDNKernelTests.cfg
+        /// `perChannel` sizes `a`/`dt_bias` at [Hv * Dk] and keeps A_log and
+        /// dt_bias full FP32 (the Kimi checkpoint's types); the default keeps
+        /// the Qwen fixture's BF16 rounding and draw order untouched.
+        init(rows: Int, seed: UInt64,
+             cfg: LinearAttentionConfig = GDNKernelTests.cfg,
+             perChannel: Bool = false) {
             var rng = SeedTree(seed).key("gdn-fixture-\(rows)")
+            let aDim = perChannel ? cfg.numVHeads * cfg.keyHeadDim
+                                  : cfg.numVHeads
             self.convW = (0..<(cfg.qkvDim * cfg.convKernelSize)).map { _ in
                 GDNKernelTests.bf16Value(rng.uniform(-0.4, 0.4))
             }
             self.aLog = (0..<cfg.numVHeads).map { _ in
-                GDNKernelTests.bf16Value(rng.uniform(-1.0, 1.5))
+                let raw = rng.uniform(-1.0, 1.5)
+                return perChannel ? raw : GDNKernelTests.bf16Value(raw)
             }
-            self.dtBias = (0..<cfg.numVHeads).map { _ in
-                GDNKernelTests.bf16Value(rng.uniform(-0.5, 0.5))
+            self.dtBias = (0..<aDim).map { _ in
+                let raw = rng.uniform(-0.5, 0.5)
+                return perChannel ? raw : GDNKernelTests.bf16Value(raw)
             }
             self.normW = (0..<cfg.valueHeadDim).map { _ in
                 GDNKernelTests.bf16Value(rng.uniform(0.5, 1.5))
@@ -80,7 +104,7 @@ import NVMAIValidationSupport
                 (0..<cfg.qkvDim).map { _ in Float(Float16(rng.uniform(-1.0, 1.0))) }
             }
             self.aRows = (0..<rows).map { _ in
-                (0..<cfg.numVHeads).map { _ in Float(Float16(rng.uniform(-1.0, 1.0))) }
+                (0..<aDim).map { _ in Float(Float16(rng.uniform(-1.0, 1.0))) }
             }
             self.bRows = (0..<rows).map { _ in
                 (0..<cfg.numVHeads).map { _ in Float(Float16(rng.uniform(-1.0, 1.0))) }
@@ -102,7 +126,7 @@ import NVMAIValidationSupport
                                       dtBias: MTLBuffer, normW: MTLBuffer,
                                       convOut: MTLBuffer, yBuf: MTLBuffer,
                                       outBuf: MTLBuffer) throws -> [Float] {
-        let cfg = Self.cfg
+        let cfg = gdn.config
         guard let qkv = Fp16Buffer.make(ctx.device, halves: fixture.qkvRows[row].map { Float16($0) }),
               let aProj = Fp16Buffer.make(ctx.device, halves: fixture.aRows[row].map { Float16($0) }),
               let bProj = Fp16Buffer.make(ctx.device, halves: fixture.bRows[row].map { Float16($0) }),
@@ -368,6 +392,167 @@ import NVMAIValidationSupport
         }
         #expect(maxStateError <= 1e-6,
                 "checkpoint state divergence \(maxStateError)")
+    }
+
+    // MARK: - Per-channel decay + sigmoid gate (Kimi KDA)
+
+    private static func expectPerChannelDecodeMatchesReference(
+        cfg: LinearAttentionConfig, rows: Int, seed: UInt64) throws {
+        let fixture = Fixture(rows: rows, seed: seed, cfg: cfg, perChannel: true)
+        let ctx = try MetalContext()
+        let gdn = try GDN(context: ctx, config: cfg, perChannelDecay: true,
+                          sigmoidGatedNormEps: kdaNormEps)
+
+        var reference = Reference(cfg: cfg, convW: fixture.convW,
+                                  aLog: fixture.aLog, dtBias: fixture.dtBias,
+                                  normW: fixture.normW,
+                                  perChannelDecay: true, sigmoidGate: true,
+                                  gatedNormEps: kdaNormEps)
+
+        let tailBytes = (cfg.convKernelSize - 1) * cfg.qkvDim * 2
+        let stateCount = cfg.numVHeads * cfg.valueHeadDim * cfg.keyHeadDim
+        guard let tail = ctx.device.makeBuffer(length: tailBytes, options: .storageModeShared),
+              let state = ctx.device.makeBuffer(length: stateCount * 4, options: .storageModeShared),
+              let convW = makeBF16Buffer(ctx.device, values: fixture.convW),
+              let aLog = makeFloatBuffer(ctx.device, values: fixture.aLog),
+              let dtBias = makeFloatBuffer(ctx.device, values: fixture.dtBias),
+              let normW = makeBF16Buffer(ctx.device, values: fixture.normW),
+              let convOut = Fp16Buffer.make(ctx.device, count: cfg.qkvDim),
+              let yBuf = Fp16Buffer.make(ctx.device, count: cfg.valueDim),
+              let outBuf = Fp16Buffer.make(ctx.device, count: cfg.valueDim) else {
+            Issue.record("Failed to allocate buffers"); return
+        }
+        memset(tail.contents(), 0, tailBytes)
+        memset(state.contents(), 0, stateCount * 4)
+
+        for row in 0..<rows {
+            let got = try gpuDecodeStep(
+                ctx: ctx, gdn: gdn, fixture: fixture, row: row,
+                tail: tail, state: state, convW: convW, aLog: aLog,
+                dtBias: dtBias, normW: normW, convOut: convOut,
+                yBuf: yBuf, outBuf: outBuf)
+            let want = reference.step(qkvRaw: fixture.qkvRows[row],
+                                      a: fixture.aRows[row],
+                                      b: fixture.bRows[row],
+                                      z: fixture.zRows[row])
+            for i in 0..<cfg.valueDim {
+                let tolerance = max(2e-2, abs(want[i]) * 4e-2)
+                #expect(abs(got[i] - want[i]) <= tolerance,
+                        "row \(row) element \(i): got \(got[i]), want \(want[i])")
+            }
+        }
+
+        let statePtr = state.contents().bindMemory(to: Float.self, capacity: stateCount)
+        var maxStateErr: Float = 0
+        for i in 0..<stateCount {
+            maxStateErr = max(maxStateErr, abs(statePtr[i] - reference.state[i]))
+        }
+        #expect(maxStateErr <= 5e-2, "state divergence \(maxStateErr)")
+    }
+
+    @Test func decodeChainMatchesReferencePerChannelDecay() throws {
+        try Self.expectPerChannelDecodeMatchesReference(
+            cfg: Self.kdaCfg, rows: 6, seed: 0x51DA)
+    }
+
+    @Test func decodeChainMatchesReferencePerChannelDecay_kimiShape() throws {
+        try Self.expectPerChannelDecodeMatchesReference(
+            cfg: LinearAttentionConfig(numKHeads: 32, numVHeads: 32,
+                                       keyHeadDim: 128, valueHeadDim: 128,
+                                       convKernelSize: 4),
+            rows: 2, seed: 0x51DB)
+    }
+
+    @Test func prefillChunkMatchesSequentialDecodePerChannelDecay() throws {
+        let cfg = Self.kdaCfg
+        let rows = 7
+        let fixture = Fixture(rows: rows, seed: 0xBEEA, cfg: cfg, perChannel: true)
+        let ctx = try MetalContext()
+        let gdn = try GDN(context: ctx, config: cfg, perChannelDecay: true,
+                          sigmoidGatedNormEps: Self.kdaNormEps)
+
+        let tailBytes = (cfg.convKernelSize - 1) * cfg.qkvDim * 2
+        let stateCount = cfg.numVHeads * cfg.valueHeadDim * cfg.keyHeadDim
+
+        guard let tailA = ctx.device.makeBuffer(length: tailBytes, options: .storageModeShared),
+              let stateA = ctx.device.makeBuffer(length: stateCount * 4, options: .storageModeShared),
+              let convW = Self.makeBF16Buffer(ctx.device, values: fixture.convW),
+              let aLog = Self.makeFloatBuffer(ctx.device, values: fixture.aLog),
+              let dtBias = Self.makeFloatBuffer(ctx.device, values: fixture.dtBias),
+              let normW = Self.makeBF16Buffer(ctx.device, values: fixture.normW),
+              let convOutA = Fp16Buffer.make(ctx.device, count: cfg.qkvDim),
+              let yA = Fp16Buffer.make(ctx.device, count: cfg.valueDim),
+              let outA = Fp16Buffer.make(ctx.device, count: cfg.valueDim) else {
+            Issue.record("Failed to allocate buffers"); return
+        }
+        memset(tailA.contents(), 0, tailBytes)
+        memset(stateA.contents(), 0, stateCount * 4)
+
+        var decodeOutputs: [[Float]] = []
+        for row in 0..<rows {
+            decodeOutputs.append(try Self.gpuDecodeStep(
+                ctx: ctx, gdn: gdn, fixture: fixture, row: row,
+                tail: tailA, state: stateA, convW: convW, aLog: aLog,
+                dtBias: dtBias, normW: normW, convOut: convOutA,
+                yBuf: yA, outBuf: outA))
+        }
+
+        let qkvFlat = fixture.qkvRows.flatMap { $0.map { Float16($0) } }
+        let aFlat = fixture.aRows.flatMap { $0.map { Float16($0) } }
+        let bFlat = fixture.bRows.flatMap { $0.map { Float16($0) } }
+        let zFlat = fixture.zRows.flatMap { $0.map { Float16($0) } }
+        guard let tailB = ctx.device.makeBuffer(length: tailBytes, options: .storageModeShared),
+              let stateB = ctx.device.makeBuffer(length: stateCount * 4, options: .storageModeShared),
+              let qkvRows = Fp16Buffer.make(ctx.device, halves: qkvFlat),
+              let aRows = Fp16Buffer.make(ctx.device, halves: aFlat),
+              let bRows = Fp16Buffer.make(ctx.device, halves: bFlat),
+              let zRows = Fp16Buffer.make(ctx.device, halves: zFlat),
+              let convOutB = Fp16Buffer.make(ctx.device, count: rows * cfg.qkvDim),
+              let yB = Fp16Buffer.make(ctx.device, count: rows * cfg.valueDim),
+              let outB = Fp16Buffer.make(ctx.device, count: rows * cfg.valueDim) else {
+            Issue.record("Failed to allocate buffers"); return
+        }
+        memset(tailB.contents(), 0, tailBytes)
+        memset(stateB.contents(), 0, stateCount * 4)
+
+        guard let cb = ctx.queue.makeCommandBuffer() else {
+            Issue.record("no command buffer"); return
+        }
+        try gdn.encodeConvPrefill(commandBuffer: cb, tail: tailB, qkvRows: qkvRows,
+                              convWeight: convW, convWeightOffset: 0,
+                              out: convOutB, rows: rows)
+        try gdn.encodeConvTailUpdate(commandBuffer: cb, tail: tailB,
+                                 qkvRows: qkvRows, rows: rows)
+        try gdn.encodeQKNorm(commandBuffer: cb, convOut: convOutB, rows: rows)
+        try gdn.encodeDeltaStepPrefill(commandBuffer: cb, convOut: convOutB,
+                                   aProj: aRows, bProj: bRows,
+                                   aLog: aLog, aLogOffset: 0,
+                                   dtBias: dtBias, dtBiasOffset: 0,
+                                   state: stateB, y: yB, rows: rows)
+        try gdn.encodeGatedNorm(commandBuffer: cb, y: yB, z: zRows,
+                            weight: normW, weightOffset: 0,
+                            out: outB, rows: rows)
+        cb.commit()
+        cb.waitUntilCompleted()
+
+        let prefillOut = Self.readHalves(outB, count: rows * cfg.valueDim)
+        for row in 0..<rows {
+            for i in 0..<cfg.valueDim {
+                let got = prefillOut[row * cfg.valueDim + i]
+                let want = decodeOutputs[row][i]
+                let tolerance = max(2e-2, abs(want) * 4e-2)
+                #expect(abs(got - want) <= tolerance,
+                        "row \(row) element \(i): prefill \(got), decode \(want)")
+            }
+        }
+
+        let stateAPtr = stateA.contents().bindMemory(to: Float.self, capacity: stateCount)
+        let stateBPtr = stateB.contents().bindMemory(to: Float.self, capacity: stateCount)
+        var maxErr: Float = 0
+        for i in 0..<stateCount {
+            maxErr = max(maxErr, abs(stateAPtr[i] - stateBPtr[i]))
+        }
+        #expect(maxErr <= 5e-2, "state divergence \(maxErr)")
     }
 
     // MARK: - Fused input projection

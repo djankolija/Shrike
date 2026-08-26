@@ -20,6 +20,11 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     let gdnQKVDim: Int
     let gdnValueDim: Int
     let gdnVHeads: Int
+    /// Per-token width of the decay input `a`: [Hv] scalar-decay, [Hv * Dk]
+    /// per-channel (Kimi KDA).
+    let gdnADim: Int
+    /// Kimi KDA low-rank stage (f_a / g_a output, keyHeadDim); zero otherwise.
+    let gdnLowRankDim: Int
     /// Non-zero when the shared expert output is scalar-gated (Qwen).
     let sharedScalarGateElements: Int
 
@@ -43,6 +48,11 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
         self.gdnQKVDim = hasLinear ? config.linearAttention.qkvDim : 0
         self.gdnValueDim = hasLinear ? config.linearAttention.valueDim : 0
         self.gdnVHeads = hasLinear ? config.linearAttention.numVHeads : 0
+        let perChannel = hasLinear && config.linearAttentionPerChannelDecay
+        self.gdnADim = perChannel
+            ? config.linearAttention.numVHeads * config.linearAttention.keyHeadDim
+            : (hasLinear ? config.linearAttention.numVHeads : 0)
+        self.gdnLowRankDim = perChannel ? config.linearAttention.keyHeadDim : 0
         self.sharedScalarGateElements = config.sharedExpertGated ? 1 : 0
     }
 
@@ -59,9 +69,10 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     var attnGateElements: Int { attnQElements }
     var gdnConvOutElements: Int { chunkTokens * gdnQKVDim }
     var gdnZElements: Int { chunkTokens * gdnValueDim }
-    var gdnAElements: Int { chunkTokens * gdnVHeads }
-    var gdnBElements: Int { gdnAElements }
+    var gdnAElements: Int { chunkTokens * gdnADim }
+    var gdnBElements: Int { chunkTokens * gdnVHeads }
     var gdnYElements: Int { gdnZElements }
+    var gdnLowRankElements: Int { chunkTokens * gdnLowRankDim }
     var sharedScalarGateBufferElements: Int { chunkTokens * sharedScalarGateElements }
     var kStageElements: Int { chunkTokens * maxKVElementsPerToken }
     var vStageElements: Int { kStageElements }
@@ -101,6 +112,7 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
             + gdnAElements
             + gdnBElements
             + gdnYElements
+            + gdnLowRankElements
             + sharedScalarGateBufferElements
         return fp16Elements * MemoryLayout<Float16>.stride
     }
@@ -145,6 +157,7 @@ struct PrefillChunkScratchBuffers {
     let gdnA: MTLBuffer
     let gdnB: MTLBuffer
     let gdnY: MTLBuffer
+    let gdnLowRank: MTLBuffer
     let sharedScalarGate: MTLBuffer
 
     static func allocate(device: MTLDevice,
@@ -204,6 +217,8 @@ struct PrefillChunkScratchBuffers {
             gdnA: try privateBuffer(layout.gdnAElements, label: "prefill.gdnA"),
             gdnB: try privateBuffer(layout.gdnBElements, label: "prefill.gdnB"),
             gdnY: try privateBuffer(layout.gdnYElements, label: "prefill.gdnY"),
+            gdnLowRank: try privateBuffer(layout.gdnLowRankElements,
+                                          label: "prefill.gdnLowRank"),
             sharedScalarGate: try privateBuffer(layout.sharedScalarGateBufferElements,
                                                 label: "prefill.sharedScalarGate"))
     }
