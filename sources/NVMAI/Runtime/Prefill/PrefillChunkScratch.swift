@@ -42,7 +42,8 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
         self.maxQElementsPerToken = config.numHeads * max(config.headDim, config.fullHeadDim)
         self.maxKVElementsPerToken = max(config.numKVHeads * config.headDim,
                                          config.numFullKVHeads * config.fullHeadDim)
-        self.sharedIntermediate = config.intermediateSize
+        self.sharedIntermediate = max(config.intermediateSize,
+                                      config.denseIntermediateSize)
         self.routedIntermediate = config.moeIntermediateSize
         self.topK = config.topKExperts
         self.routedPairMicrobatchRows = max(1, min(routedPairMicrobatchRows, 128))

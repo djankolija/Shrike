@@ -45,6 +45,10 @@ final class MoE {
     static let maxStagedHiddenD: UInt32 = 2880
 
     private let realDecodeD: UInt32
+    /// Kimi router: selection on sigmoid(logit) + correction bias, weights
+    /// renormalized original sigmoid scores × `routedScalingFactor`.
+    private let sigmoidRouterScores: Bool
+    private let routedScalingFactor: Float
     private let realDecodeF: UInt32
     private let realDecodeTopK: UInt32
     private let realDecodeNumExperts: UInt32
@@ -80,11 +84,15 @@ final class MoE {
          specializedNumExperts: UInt32 = 128,
          specializedTopK: UInt32 = 8,
          expertAdditiveBiases: Bool = false,
-         clampedSwiGLU: Bool = false) throws {
+         clampedSwiGLU: Bool = false,
+         sigmoidRouterScores: Bool = false,
+         routedScalingFactor: Float = 1.0) throws {
         self.realDecodeD = specializedD
         self.realDecodeF = specializedF
         self.realDecodeNumExperts = specializedNumExperts
         self.realDecodeTopK = specializedTopK
+        self.sigmoidRouterScores = sigmoidRouterScores
+        self.routedScalingFactor = routedScalingFactor
         precondition([4, 8].contains(routedWeightBits))
         precondition([4, 8].contains(routerWeightBits))
         precondition((1...UInt32(Self.maxStreamedExperts)).contains(specializedTopK))
@@ -126,9 +134,11 @@ final class MoE {
             routerName,
             constants: routerConstants,
             maxTotalThreadsPerThreadgroup: 512)
-        self.routerSelectK8PSO = try context.pipeline("router_topk_select_k8")
+        let selectName = sigmoidRouterScores
+            ? "router_topk_select_sigmoid_k8" : "router_topk_select_k8"
+        self.routerSelectK8PSO = try context.pipeline(selectName)
         self.routerSelectK8SpecializedPSO = try context.pipeline(
-            "router_topk_select_k8",
+            selectName,
             constants: routerConstants)
         self.residencyClassifyPSO = try context.pipeline("moe_classify_expert_residency")
         let phase1Name = routedWeightBits == 4
@@ -240,6 +250,10 @@ final class MoE {
         selector.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
         selector.setBytes(&topKValue, length: MemoryLayout<UInt32>.stride, index: 5)
         selector.setBuffer(logitBias, offset: logitBiasOffset, index: 6)
+        if sigmoidRouterScores {
+            var scaling = routedScalingFactor
+            selector.setBytes(&scaling, length: MemoryLayout<Float>.stride, index: 7)
+        }
         selector.dispatchThreadgroups(
             MTLSize(width: 1, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))

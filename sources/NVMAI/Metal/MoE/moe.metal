@@ -283,20 +283,26 @@ kernel void router_gemv_r4(
                             out_logits, num_experts, D, 4, tg_idx, sg_idx, lane);
 }
 
-// "k8" is the array capacity, not the selected count: `top_k` may be 1...8.
-kernel void router_topk_select_k8(
-    device const float* logits [[buffer(0)]],
-    device const bfloat* per_expert_scale [[buffer(1)]],
-    device uint* out_indices [[buffer(2)]],
-    device half* out_weights [[buffer(3)]],
-    constant uint& num_experts [[buffer(4)]],
-    constant uint& top_k [[buffer(5)]],
-    device const bfloat* logit_bias [[buffer(6)]],
-    uint tid [[thread_position_in_threadgroup]]
+static inline float router_sigmoid(float x) {
+    return 1.0f / (1.0f + exp(-x));
+}
+
+// Shared selection body. Softmax families (Qwen, gpt-oss) select on
+// `logits + bias` and weight by softmax over the selected; sigmoid scoring
+// (Kimi) selects on `sigmoid(logit) + bias` but weights by the ORIGINAL
+// sigmoid scores of the selected, renormalized (÷ sum + 1e-20) and scaled.
+// `sigmoid_scores` is a literal at each entry so the untaken tail folds.
+static inline void router_topk_select_body(
+    device const float* logits,
+    device const bfloat* per_expert_scale,
+    device uint* out_indices,
+    device half* out_weights,
+    uint NE,
+    uint K,
+    device const bfloat* bias,
+    bool sigmoid_scores,
+    float scaling
 ) {
-    if (tid != 0) return;
-    const uint NE = router_fc_num_experts(num_experts);
-    const uint K = min(router_fc_top_k(top_k), kMaxStreamedExperts);
     uint top_idx[8];
     float top_score[8];
     for (uint i = 0; i < 8; ++i) {
@@ -305,7 +311,9 @@ kernel void router_topk_select_k8(
     }
 
     for (uint e = 0; e < NE; ++e) {
-        const float s = logits[e] + float(logit_bias[e]);
+        const float raw = logits[e];
+        const float s = (sigmoid_scores ? router_sigmoid(raw) : raw)
+            + float(bias[e]);
         // Equal scores at the boundary are still considered so the inner
         // loop's lower-index tie-break (matching the reference) applies.
         if (s < top_score[K - 1]) continue;
@@ -325,6 +333,23 @@ kernel void router_topk_select_k8(
         top_score[pos] = s;
     }
 
+    if (sigmoid_scores) {
+        float orig[8];
+        float sum = 0.0f;
+        for (uint i = 0; i < K; ++i) {
+            orig[i] = router_sigmoid(logits[top_idx[i]]);
+            sum += orig[i];
+        }
+        const float inv = scaling / (sum + 1e-20f);
+        for (uint i = 0; i < K; ++i) {
+            const uint expert_idx = top_idx[i];
+            out_indices[i] = expert_idx;
+            out_weights[i] = half(orig[i] * inv
+                                  * float(per_expert_scale[expert_idx]));
+        }
+        return;
+    }
+
     const float max_s = top_score[0];
     float sum_exp = 0.0f;
     float exps[8];
@@ -339,6 +364,42 @@ kernel void router_topk_select_k8(
         out_indices[i] = expert_idx;
         out_weights[i] = half(weight * float(per_expert_scale[expert_idx]));
     }
+}
+
+// "k8" is the array capacity, not the selected count: `top_k` may be 1...8.
+kernel void router_topk_select_k8(
+    device const float* logits [[buffer(0)]],
+    device const bfloat* per_expert_scale [[buffer(1)]],
+    device uint* out_indices [[buffer(2)]],
+    device half* out_weights [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    constant uint& top_k [[buffer(5)]],
+    device const bfloat* logit_bias [[buffer(6)]],
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    if (tid != 0) return;
+    const uint NE = router_fc_num_experts(num_experts);
+    const uint K = min(router_fc_top_k(top_k), kMaxStreamedExperts);
+    router_topk_select_body(logits, per_expert_scale, out_indices, out_weights,
+                            NE, K, logit_bias, false, 1.0f);
+}
+
+kernel void router_topk_select_sigmoid_k8(
+    device const float* logits [[buffer(0)]],
+    device const bfloat* per_expert_scale [[buffer(1)]],
+    device uint* out_indices [[buffer(2)]],
+    device half* out_weights [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    constant uint& top_k [[buffer(5)]],
+    device const bfloat* score_bias [[buffer(6)]],
+    constant float& scaling [[buffer(7)]],
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    if (tid != 0) return;
+    const uint NE = router_fc_num_experts(num_experts);
+    const uint K = min(router_fc_top_k(top_k), kMaxStreamedExperts);
+    router_topk_select_body(logits, per_expert_scale, out_indices, out_weights,
+                            NE, K, score_bias, true, scaling);
 }
 
 // Each SIMD computes one affine INT4 row. Four adjacent groups are loaded as

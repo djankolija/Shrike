@@ -29,11 +29,18 @@ public struct PrefillTokenExpertPair: Equatable, Sendable {
 
 final class PrefillRouter {
     private let pso: MTLComputePipelineState
+    private let sigmoidRouterScores: Bool
+    private let routedScalingFactor: Float
 
-    init(context: MetalContext, weightBits: Int = 8) throws {
+    init(context: MetalContext, weightBits: Int = 8,
+         sigmoidRouterScores: Bool = false,
+         routedScalingFactor: Float = 1.0) throws {
         precondition([4, 8].contains(weightBits))
+        self.sigmoidRouterScores = sigmoidRouterScores
+        self.routedScalingFactor = routedScalingFactor
         self.pso = try context.pipeline(
-            "prefill_router_block",
+            sigmoidRouterScores ? "prefill_router_block_sigmoid"
+                                : "prefill_router_block",
             constants: [MetalFunctionConstant(index: 79,
                                               value: .uint32(UInt32(weightBits)))])
     }
@@ -91,6 +98,10 @@ final class PrefillRouter {
         enc.setBytes(&topKVar, length: MemoryLayout<UInt32>.size, index: 11)
         enc.setBytes(&strideVar, length: MemoryLayout<UInt32>.size, index: 12)
         enc.setBuffer(logitBias, offset: logitBiasOffset, index: 13)
+        if sigmoidRouterScores {
+            var scaling = routedScalingFactor
+            enc.setBytes(&scaling, length: MemoryLayout<Float>.size, index: 14)
+        }
         let tgWidth = min(max(Int(numExperts), 32), pso.maxTotalThreadsPerThreadgroup)
         enc.dispatchThreadgroups(MTLSize(width: Int(queryCount), height: 1, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))

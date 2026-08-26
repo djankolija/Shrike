@@ -430,7 +430,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  specializedNumExperts: UInt32(cfg.numExperts),
                                  specializedTopK: UInt32(cfg.topKExperts),
                                  expertAdditiveBiases: cfg.expertsHaveAdditiveBiases,
-                                 clampedSwiGLU: cfg.usesClampedSwiGLU)
+                                 clampedSwiGLU: cfg.usesClampedSwiGLU,
+                                 sigmoidRouterScores: cfg.routerUsesSigmoidScores,
+                                 routedScalingFactor: Float(cfg.routedScalingFactor))
         self.fusionHead = try LMHeadChainInt4(context: context,
                                               maxD: cfg.hiddenSize,
                                               maxVocab: cfg.vocabSize)
@@ -450,8 +452,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                          yarn: yarnParameters)
         self.prefillAttention = try PrefillAttention(context: context,
                                                      supportsMLA: cfg.hasMLALayers)
-        self.prefillRouter = try PrefillRouter(context: context,
-                                               weightBits: model.routerWeightBits)
+        self.prefillRouter = try PrefillRouter(
+            context: context,
+            weightBits: model.routerWeightBits,
+            sigmoidRouterScores: cfg.routerUsesSigmoidScores,
+            routedScalingFactor: Float(cfg.routedScalingFactor))
         self.prefillSharedExpert = try PrefillSharedExpert(
             context: context,
             weightBits: model.sharedExpertWeightBits,
@@ -529,9 +534,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.h2Buf         = try buf(D, label: "decode.h2")
         self.routedX       = try buf(D, label: "decode.routedX")
         self.denseX        = try buf(D, label: "decode.denseX")
-        self.denseScratchGate = try buf(F, label: "decode.denseScratchGate")
-        self.denseScratchUp   = try buf(F, label: "decode.denseScratchUp")
-        self.denseScratchAct  = try buf(F, label: "decode.denseScratchAct")
+        let sharedScratchF = max(F, cfg.denseIntermediateSize)
+        self.denseScratchGate = try buf(sharedScratchF, label: "decode.denseScratchGate")
+        self.denseScratchUp   = try buf(sharedScratchF, label: "decode.denseScratchUp")
+        self.denseScratchAct  = try buf(sharedScratchF, label: "decode.denseScratchAct")
         self.routerInput   = try buf(D, label: "decode.routerInput")
         self.zeroResidual  = try buf(D, label: "decode.zeroResidual")
         // The routed MoE kernel seeds y[d] = residual[d]; pinning this buffer
@@ -656,14 +662,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if cfg.hasSharedExpert {
             sharedViews.reserveCapacity(cfg.numLayers)
             for L in 0..<cfg.numLayers {
-                let gate = try model.sharedExpertGate(layer: L)
-                let up = try model.sharedExpertUp(layer: L)
-                let down = try model.sharedExpertDown(layer: L)
+                // Leading dense layers (Kimi layer 0) carry a plain MLP in
+                // this slot: same SwiGLU kernels, per-layer intermediate.
+                let isDense = L < cfg.numLeadingDenseLayers
+                let FL = isDense ? cfg.denseIntermediateSize : F
+                let gate = isDense ? try model.denseMLPGate(layer: L)
+                                   : try model.sharedExpertGate(layer: L)
+                let up = isDense ? try model.denseMLPUp(layer: L)
+                                 : try model.sharedExpertUp(layer: L)
+                let down = isDense ? try model.denseMLPDown(layer: L)
+                                   : try model.sharedExpertDown(layer: L)
                 sharedViews.append(LayerSharedExpertProjections(
-                    gate: sharedProj(gate, rows: UInt32(F), cols: UInt32(D)),
-                    up: sharedProj(up, rows: UInt32(F), cols: UInt32(D)),
-                    down: sharedProj(down, rows: UInt32(D), cols: UInt32(F)),
-                    scalarGate: cfg.sharedExpertGated
+                    gate: sharedProj(gate, rows: UInt32(FL), cols: UInt32(D)),
+                    up: sharedProj(up, rows: UInt32(FL), cols: UInt32(D)),
+                    down: sharedProj(down, rows: UInt32(D), cols: UInt32(FL)),
+                    scalarGate: (cfg.sharedExpertGated && !isDense)
                         ? try model.sharedExpertScalarGate(layer: L) : nil))
             }
         }
@@ -707,8 +720,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             memset(zeros.contents(), 0, zeros.length)
             zeros.label = "router_logit_bias.zeros"
-            self.routerLogitBias = [(buffer: MTLBuffer, offset: Int)](
-                repeating: (zeros, 0), count: cfg.numLayers)
+            if cfg.routerHasCorrectionBias {
+                // Kimi: the sigmoid selector reads the correction bias
+                // through the logit-bias slot; dense layers keep the zeros
+                // placeholder (their router never runs).
+                self.routerLogitBias = try (0..<cfg.numLayers).map { layer in
+                    guard layer >= cfg.numLeadingDenseLayers else {
+                        return (zeros, 0)
+                    }
+                    let view = try model.routerCorrectionBias(layer: layer)
+                    return (view.buffer, Int(view.offset))
+                }
+            } else {
+                self.routerLogitBias = [(buffer: MTLBuffer, offset: Int)](
+                    repeating: (zeros, 0), count: cfg.numLayers)
+            }
         }
     }
 
@@ -1774,7 +1800,30 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                    t: UInt32(t),
                                    d: UInt32(D),
                                    eps: eps)
-            if pairRoutedMoE, t == 2 {
+            if L < cfg.numLeadingDenseLayers {
+                // Leading dense-MLP layer (Kimi layer 0): no router, no
+                // routed experts — one SwiGLU block at the layer's own
+                // intermediate, folded like the shared branch.
+                let dense = sharedExpertProjections[L]
+                try prefillSharedExpert.encodeBlock(commandBuffer: cb,
+                                                x: scratch.routedX,
+                                                y: scratch.h1,
+                                                gate: dense.gate,
+                                                up: dense.up,
+                                                down: dense.down,
+                                                scratchGate: scratch.sharedGateScratch,
+                                                scratchUp: scratch.sharedUpScratch,
+                                                scratchAct: scratch.sharedActScratch,
+                                                queryCount: t,
+                                                d: D,
+                                                intermediate: cfg.denseIntermediateSize,
+                                                xStrideElements: D,
+                                                yStrideElements: D)
+                try elementwise!.encodeResidualAdd(commandBuffer: cb,
+                                               hidden: scratch.hidden,
+                                               delta: scratch.h1,
+                                               count: t * D)
+            } else if pairRoutedMoE, t == 2 {
                 try await encodeRoutedMoEVerifyPair(
                     cb: &cb, layer: L, views: views, scratch: scratch,
                     hiddenSize: D)
@@ -1943,17 +1992,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         for L in 0..<cfg.numLayers {
             let tBodyStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let isLinear = cfg.layerIsLinear(L)
+            let isDense = L < cfg.numLeadingDenseLayers
 
             let inNorm   = try model.inputNorm(layer: L)
             let postAttn = try model.postAttnNorm(layer: L)
-            let routerW  = try model.router(layer: L)
+            let routerW  = isDense ? nil : try model.router(layer: L)
             let nextRouterW: TensorView?
-            if nextLayerPredictionEnabled, L + 1 < cfg.numLayers {
+            if nextLayerPredictionEnabled, L + 1 < cfg.numLayers,
+               L + 1 >= cfg.numLeadingDenseLayers {
                 nextRouterW = try model.router(layer: L + 1)
             } else {
                 nextRouterW = nil
             }
-            let residencyResources = decodeExpertExecution == .gpuResidency
+            let residencyResources = (!isDense && decodeExpertExecution == .gpuResidency)
                 ? try model.routedExpertResidency(layer: L) : nil
             let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
                 (onesPerExpertScale!, 0)
@@ -1993,6 +2044,43 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             out: routedX,
                             d: D, eps: eps)
 
+            if isDense {
+                // Leading dense-MLP layer (Kimi layer 0): no router, no
+                // routed experts — the shared-expert kernels run the layer's
+                // own SwiGLU and the residual folds here.
+                let dense = sharedExpertProjections[L]
+                try shared.encode(commandBuffer: tailCB,
+                                  x: routedX,
+                                  gate: dense.gate,
+                                  up: dense.up,
+                                  down: dense.down,
+                                  y: h1Buf,
+                                  scratchGate: denseScratchGate,
+                                  scratchUp: denseScratchUp,
+                                  scratchAct: denseScratchAct)
+                try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
+                                               hidden: hidden,
+                                               delta: h1Buf,
+                                               count: cfg.hiddenSize)
+                attnCB.commit()
+                if let attentionCB = softmaxCB {
+                    attentionCB.commit()
+                }
+                tailCB.commit()
+                try waitForCompletion(tailCB)
+                recordKernelGPU(role: "attn_norm_qkv", attnCB)
+                if let attentionCB = softmaxCB {
+                    recordKernelGPU(role: "attn_softmax", attentionCB)
+                }
+                recordKernelGPU(role: "attn_tail_router", tailCB)
+                totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start
+                totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
+                continue
+            }
+            guard let routerW else {
+                throw ModelError.internalInconsistency(
+                    detail: "layer \(L) has no router view outside the dense prefix")
+            }
             try moe.encodeRouter(commandBuffer: tailCB,
                 weights: routerW.buffer, weightsOffset: Int(routerW.offset),
                 scales:  routerW.buffer, scalesOffset:  Int(routerW.scaleOffset),
@@ -2726,7 +2814,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private struct LayerPrefillQKVViews {
         let inputNorm: TensorView
         let postAttention: TensorView
-        let router: TensorView
+        // nil on leading dense-MLP layers (no routed experts).
+        let router: TensorView?
         // Softmax-attention layers only (nil on linear-attention layers).
         let q: TensorView?
         let k: TensorView?
@@ -3528,7 +3617,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             return LayerPrefillQKVViews(
                 inputNorm: try model.inputNorm(layer: L),
                 postAttention: try model.postAttnNorm(layer: L),
-                router: try model.router(layer: L),
+                router: L < cfg.numLeadingDenseLayers
+                    ? nil : try model.router(layer: L),
                 q: isLinear ? nil : try model.qProj(layer: L),
                 k: (isLinear || isMLAL) ? nil : try model.kProj(layer: L),
                 v: (isLinear || isMLAL) ? nil
@@ -3653,14 +3743,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let halfBytes = MemoryLayout<Float16>.stride
         let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
             (onesPerExpertScale!, 0)
+        guard let router = views.router else {
+            throw ModelError.internalInconsistency(
+                detail: "routed-MoE verify pair on layer \(L) without a router view")
+        }
         try prefillRouter.encodeBlock(
                     commandBuffer: cb,
-                    weights: views.router.buffer,
-                    weightsOffset: Int(views.router.offset),
-                    scales: views.router.buffer,
-                    scalesOffset: Int(views.router.scaleOffset),
-                    biases: views.router.buffer,
-                    biasesOffset: Int(views.router.biasOffset),
+                    weights: router.buffer,
+                    weightsOffset: Int(router.offset),
+                    scales: router.buffer,
+                    scalesOffset: Int(router.scaleOffset),
+                    biases: router.buffer,
+                    biasesOffset: Int(router.biasOffset),
                     hidden: scratch.routedX,
                     effectiveScale: effectiveScaleBuffers[L],
                     perExpertScale: perExpertScale.buffer,
@@ -3898,14 +3992,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         var prefillTileEnd = prefillLayerStart
         let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
             (onesPerExpertScale!, 0)
+        guard let router = views.router else {
+            throw ModelError.internalInconsistency(
+                detail: "routed-MoE prefill on layer \(L) without a router view")
+        }
         try prefillRouter.encodeBlock(
                     commandBuffer: cb,
-                    weights: views.router.buffer,
-                    weightsOffset: Int(views.router.offset),
-                    scales: views.router.buffer,
-                    scalesOffset: Int(views.router.scaleOffset),
-                    biases: views.router.buffer,
-                    biasesOffset: Int(views.router.biasOffset),
+                    weights: router.buffer,
+                    weightsOffset: Int(router.offset),
+                    scales: router.buffer,
+                    scalesOffset: Int(router.scaleOffset),
+                    biases: router.buffer,
+                    biasesOffset: Int(router.biasOffset),
                     hidden: scratch.routedX,
                     effectiveScale: effectiveScaleBuffers[L],
                     perExpertScale: perExpertScale.buffer,

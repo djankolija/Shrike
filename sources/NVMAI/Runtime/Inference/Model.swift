@@ -186,8 +186,8 @@ public struct Model {
     public func attentionSinks(layer L: Int) throws -> TensorView {
         try resident(name: "language_model.model.layers.\(L).self_attn.sinks")
     }
-    /// Qwen's shared-expert FFN keeps the source's
-    /// `.mlp.shared_expert.{gate,up,down}_proj.weight` names.
+    /// Shared-expert FFN, source-named `.mlp.shared_expert.` (Qwen) or
+    /// `.mlp.shared_experts.` (Kimi's ungated single shared expert).
     public func sharedExpertGate(layer L: Int) throws -> TensorView {
         try resident(name: sharedExpertName("gate_proj", layer: L))
     }
@@ -198,7 +198,23 @@ public struct Model {
         try resident(name: sharedExpertName("down_proj", layer: L))
     }
     private func sharedExpertName(_ proj: String, layer L: Int) -> String {
-        "language_model.model.layers.\(L).mlp.shared_expert.\(proj).weight"
+        let container = config.family == .kimiLinear48b
+            ? "shared_experts" : "shared_expert"
+        return "language_model.model.layers.\(L).mlp.\(container).\(proj).weight"
+    }
+    /// Leading dense-MLP layers (Kimi layer 0): plain `.mlp.{proj}.weight`.
+    public func denseMLPGate(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).mlp.gate_proj.weight")
+    }
+    public func denseMLPUp(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).mlp.up_proj.weight")
+    }
+    public func denseMLPDown(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).mlp.down_proj.weight")
+    }
+    /// Kimi sigmoid-router selection bias, BF16 `[numExperts]`.
+    public func routerCorrectionBias(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).mlp.e_score_correction_bias")
     }
     /// Qwen3.5-MoE scalar gate on the shared-expert branch: a `[1, hidden]`
     /// 8-bit projection whose sigmoid multiplies the shared FFN output.
@@ -448,6 +464,7 @@ public struct Model {
     /// (`streamersBox`) is confined behind the serial `streamersQueue` and the
     /// remaining members are immutable values.
     public func beginOpeningRoutedExpertStreamer(layer L: Int) {
+        guard !packedExpertsLayout.layers[L].experts.isEmpty else { return }
         nonisolated(unsafe) let model = self
         streamersQueue.async {
             do {

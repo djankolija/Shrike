@@ -52,6 +52,51 @@ import NVMAIValidationSupport
         #expect(error < Tolerance.quantInt4 * 4, "shared-expert int4 rel=\(error)")
     }
 
+    /// Kimi's ungated shared expert and dense layer 0 run this kernel with
+    /// SiLU at F = 1024 (and 9216); pin the SiLU path at the real MoE width.
+    @Test func sharedExpertInt4SiLUMatchesReferenceAtKimiWidth() throws {
+        let d = 128, f = 1024
+        var rng = SeedTree(0x605).key("shared-expert-int4-silu")
+        let x = (0..<d).map { _ in rng.uniform(-0.4, 0.4) }
+        let gate = (0..<f).map { _ in (0..<d).map { _ in rng.uniform(-0.4, 0.4) } }
+        let up = (0..<f).map { _ in (0..<d).map { _ in rng.uniform(-0.4, 0.4) } }
+        let down = (0..<d).map { _ in (0..<f).map { _ in rng.uniform(-0.4, 0.4) } }
+        let gatePack = Self.pack(gate)
+        let upPack = Self.pack(up)
+        let downPack = Self.pack(down)
+        let x16 = x.map { Float(Float16($0)) }
+        let gateOut = DequantInt4GemvRef.apply(weightRows: gatePack.rows, x: x16, n: d)
+        let upOut = DequantInt4GemvRef.apply(weightRows: upPack.rows, x: x16, n: d)
+        let act = zip(gateOut, upOut).map { gateValue, upValue in
+            Float(Float16(gateValue / (1 + exp(-gateValue)) * upValue))
+        }
+        let reference = DequantInt4GemvRef.apply(weightRows: downPack.rows, x: act, n: f)
+
+        let context = try MetalContext()
+        let runtime = try SharedExpertInt4(context: context, siluActivation: true)
+        let xBuffer = try #require(Fp16Buffer.make(context.device, values: x))
+        let yBuffer = try #require(Fp16Buffer.make(context.device, count: d))
+        let gateScratch = try #require(Fp16Buffer.make(context.device, count: f))
+        let upScratch = try #require(Fp16Buffer.make(context.device, count: f))
+        let actScratch = try #require(Fp16Buffer.make(context.device, count: f))
+        let commandBuffer = try #require(context.queue.makeCommandBuffer())
+        try runtime.encode(commandBuffer: commandBuffer,
+                           x: xBuffer,
+                           gate: Self.projection(context, gatePack, rows: f, cols: d),
+                           up: Self.projection(context, upPack, rows: f, cols: d),
+                           down: Self.projection(context, downPack, rows: d, cols: f),
+                           y: yBuffer,
+                           scratchGate: gateScratch,
+                           scratchUp: upScratch,
+                           scratchAct: actScratch)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        #expect(commandBuffer.status == .completed)
+        let actual = Fp16Buffer.read(yBuffer, count: d)
+        let error = RelError.compute(actual: actual, reference: reference)
+        #expect(error < Tolerance.quantInt4 * 4, "shared-expert silu@1024 rel=\(error)")
+    }
+
     private static func pack(_ values: [[Float]]) ->
         (rows: [Quantization.Int4AffineRow], packed: [UInt8], scales: [UInt16], biases: [UInt16]) {
         let rows = values.map(Quantization.quantizeInt4Affine)
