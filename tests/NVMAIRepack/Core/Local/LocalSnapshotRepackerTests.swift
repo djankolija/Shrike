@@ -32,6 +32,34 @@ import Testing
             .appendingPathComponent("verified-install.json")) == .regular)
         #expect(try Posix.entryKind((output as NSString)
             .appendingPathComponent("packed_experts/layer_00.bin")) == .regular)
+        for sidecar in ["tokenizer/config.json", "tokenizer/tokenizer.json",
+                        "tokenizer/tokenizer_config.json"] {
+            #expect(try Posix.entryKind((output as NSString)
+                .appendingPathComponent(sidecar)) == .regular)
+        }
+        let receiptData = try Data(contentsOf: URL(fileURLWithPath:
+            (output as NSString).appendingPathComponent("verified-install.json")))
+        #expect(String(decoding: receiptData, as: UTF8.self)
+            .contains("tokenizer/tokenizer.json"))
+    }
+
+    @Test func rejectsSnapshotWithoutTokenizerSidecar() async throws {
+        let root = temporaryRoot("local-no-tokenizer")
+        let snapshot = (root as NSString).appendingPathComponent("snapshot")
+        let output = (root as NSString).appendingPathComponent("model.gturbo")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        _ = try SyntheticSnapshot.buildQwenMTP(at: snapshot)
+        try FileManager.default.removeItem(atPath:
+            (snapshot as NSString).appendingPathComponent("tokenizer.json"))
+
+        await #expect(throws: RepackError.self) {
+            _ = try await RemoteStreamingRepacker.runLocalSnapshot(
+                options: LocalSnapshotRepackOptions(
+                    inputSnapshotDir: snapshot,
+                    outputDir: output,
+                    modelID: "ornith-1.5-35b-a3b-mtp-4bit",
+                    minFreeReserveBytes: 0))
+        }
     }
 
     @Test func importsGptOssSnapshotWithBiasSlicesAndNormalizedNames() async throws {

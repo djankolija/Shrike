@@ -830,6 +830,52 @@ public extension RemoteStreamingRepacker {
             dryRun: false)
     }
 
+    /// The local-import twin of `copyRemoteMetadataSidecars`: the same
+    /// `tokenizer/` sidecar set with the same required/optional split, copied
+    /// from the snapshot directory instead of fetched, so a snapshot import
+    /// loads without a tokenizer-directory override.
+    private func copyLocalMetadataSidecars(
+        source: LocalSnapshot,
+        local: LocalSnapshotRepackOptions,
+        partialDir: String,
+        progress: @Sendable (ModelInstallProgress) -> Void
+    ) throws {
+        let tokenizerDir = (partialDir as NSString).appendingPathComponent("tokenizer")
+        try Posix.mkdirP(tokenizerDir)
+        let configData = try Posix.readBoundedData(source.metadata.configPath,
+                                                   maximumBytes: 1024 * 1024)
+        let dstConfig = (tokenizerDir as NSString).appendingPathComponent("config.json")
+        try Posix.atomicWrite(configData, to: dstConfig, durableIn: tokenizerDir)
+        try recordOutputFile(relativePath: "tokenizer/config.json",
+                             path: dstConfig,
+                             progress: progress)
+
+        let tokenizerFiles: [(name: String, cap: UInt64, required: Bool)] = [
+            ("tokenizer.json", 64 * 1024 * 1024, true),
+            ("tokenizer_config.json", 4 * 1024 * 1024, true),
+            ("special_tokens_map.json", 1 * 1024 * 1024, false),
+            ("chat_template.jinja", 4 * 1024 * 1024, false),
+            ("chat_template.json", 4 * 1024 * 1024, false),
+        ]
+        let root = URL(fileURLWithPath: local.inputSnapshotDir).standardizedFileURL.path
+        for file in tokenizerFiles {
+            let src = (root as NSString).appendingPathComponent(file.name)
+            guard (try? Posix.entryKind(src)) == .regular else {
+                if file.required {
+                    throw RepackError.configurationInvalid(
+                        detail: "local snapshot is missing required \(file.name)")
+                }
+                continue
+            }
+            let data = try Posix.readBoundedData(src, maximumBytes: file.cap)
+            let dst = (tokenizerDir as NSString).appendingPathComponent(file.name)
+            try Posix.atomicWrite(data, to: dst, durableIn: tokenizerDir)
+            try recordOutputFile(relativePath: "tokenizer/\(file.name)",
+                                 path: dst,
+                                 progress: progress)
+        }
+    }
+
     private func validateLocalModelID(_ modelID: String) throws {
         guard !modelID.isEmpty,
               modelID.utf8.count <= 256,
@@ -951,6 +997,10 @@ public extension RemoteStreamingRepacker {
             try recordOutputFile(relativePath: "packed_experts/layout.json",
                                  path: layoutPath,
                                  progress: progress)
+            try copyLocalMetadataSidecars(source: source,
+                                          local: local,
+                                          partialDir: paths.partialDirectory,
+                                          progress: progress)
             progress(.finalizing)
             try writeManifest(
                 plan: plan,

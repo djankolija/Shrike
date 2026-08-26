@@ -236,7 +236,30 @@ enum SyntheticSnapshot {
         let indexData = try JSONSerialization.data(withJSONObject: indexObj, options: [.sortedKeys])
         let indexPath = (dir as NSString).appendingPathComponent("model.safetensors.index.json")
         try indexData.write(to: URL(fileURLWithPath: indexPath))
+        try writeTokenizerStubs(at: dir)
         return Snapshot(shardPath: shardPath)
+    }
+
+
+    /// Minimal tokenizer sidecar files so local-import tests exercise the
+    /// same required-sidecar policy as a real snapshot.
+    static func writeTokenizerStubs(at dir: String) throws {
+        let tokenizer: [String: Any] = [
+            "version": "1.0",
+            "added_tokens": [],
+            "decoder": ["type": "ByteLevel"],
+            "model": ["type": "BPE", "vocab": [:], "merges": []],
+        ]
+        try JSONSerialization.data(withJSONObject: tokenizer, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath: (dir as NSString)
+                .appendingPathComponent("tokenizer.json")))
+        let config: [String: Any] = [
+            "tokenizer_class": "TokenizersBackend",
+            "clean_up_tokenization_spaces": false,
+        ]
+        try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath: (dir as NSString)
+                .appendingPathComponent("tokenizer_config.json")))
     }
 
     /// Tiny one-layer native-MTP sidecar with the same flattened tensor names
@@ -366,6 +389,7 @@ enum SyntheticSnapshot {
         try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys])
             .write(to: URL(fileURLWithPath:
                 (dir as NSString).appendingPathComponent("model.safetensors.index.json")))
+        try writeTokenizerStubs(at: dir)
         return Snapshot(shardPath: shardPath)
     }
 
@@ -500,6 +524,7 @@ enum SyntheticSnapshot {
         try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys])
             .write(to: URL(fileURLWithPath:
                 (dir as NSString).appendingPathComponent("model.safetensors.index.json")))
+        try writeTokenizerStubs(at: dir)
         return Snapshot(shardPath: shardPath)
     }
 
