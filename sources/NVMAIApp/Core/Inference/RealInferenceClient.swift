@@ -202,9 +202,15 @@ actor RealInferenceSession {
                 context = try MetalContext()
                 ctx = context
             }
+            let family = try ManifestReader.peekFamily(directoryURL: key.directory)
+            guard let expectedArch = ArchConfig.knownArchitectures[family] else {
+                throw ModelError.unsupportedArchitecture(
+                    detail: "no compiled baseline for family \(family.rawValue)")
+            }
             let loadedModel = try Model.load(
                 directoryURL: key.directory,
                 device: context.device,
+                expecting: expectedArch,
                 streamingMode: .pread(slotCount: runtimeConfiguration.expertCacheSlots),
                 expertCachePolicy: runtimeConfiguration.modelExpertCachePolicy,
                 integrityPolicy: key.options.modelVerification.runtimeValue)
@@ -310,9 +316,13 @@ actor RealInferenceSession {
             if request.runtimeOptions.conciseMode {
                 // Concise mode injects the per-quantization system prompt.
                 // The routed expert bit width comes from the manifest.
-                let bits = (try? ManifestReader.load(
-                    directoryURL: request.modelDirectory,
-                    expecting: .qwen36_35B_A3B).quant?.routedExpert.weightBits) ?? 4
+                let bits = ((try? ManifestReader.peekFamily(
+                        directoryURL: request.modelDirectory))
+                    .flatMap { ArchConfig.knownArchitectures[$0] }
+                    .flatMap { expected in
+                        try? ManifestReader.load(
+                            directoryURL: request.modelDirectory,
+                            expecting: expected).quant?.routedExpert.weightBits }) ?? 4
                 messages = ConcisePrompt.appendingSystemPrompt(
                     ConcisePrompt.prompt(forRoutedExpertBits: bits),
                     to: messages)

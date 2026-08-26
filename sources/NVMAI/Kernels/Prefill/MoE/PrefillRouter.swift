@@ -51,6 +51,8 @@ final class PrefillRouter {
                                   effectiveScaleOffset: Int = 0,
                                   perExpertScale: MTLBuffer,
                                   perExpertScaleOffset: Int = 0,
+                                  logitBias: MTLBuffer,
+                                  logitBiasOffset: Int = 0,
                                   outIndices: MTLBuffer,
                                   outIndicesOffset: Int = 0,
                                   outWeights: MTLBuffer,
@@ -88,6 +90,7 @@ final class PrefillRouter {
         enc.setBytes(&dVar, length: MemoryLayout<UInt32>.size, index: 10)
         enc.setBytes(&topKVar, length: MemoryLayout<UInt32>.size, index: 11)
         enc.setBytes(&strideVar, length: MemoryLayout<UInt32>.size, index: 12)
+        enc.setBuffer(logitBias, offset: logitBiasOffset, index: 13)
         let tgWidth = min(max(Int(numExperts), 32), pso.maxTotalThreadsPerThreadgroup)
         enc.dispatchThreadgroups(MTLSize(width: Int(queryCount), height: 1, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))

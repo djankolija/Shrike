@@ -54,7 +54,7 @@ enum GTurboJSON {
             "hiddenActivation": arch.hiddenActivation,
             "fullAttentionLayerMask": arch.fullAttentionLayerMask.map { Int($0) }
         ]
-        // Family extension fields. Always written for the Qwen families.
+        // Family extension fields. Always written, for every family.
         archDict["family"] = arch.family.rawValue
         archDict["attnOutputGate"] = arch.attnOutputGate
         archDict["attentionScale"] = arch.attentionScale
@@ -68,6 +68,12 @@ enum GTurboJSON {
         archDict["linearKeyHeadDim"] = arch.linearKeyHeadDim
         archDict["linearValueHeadDim"] = arch.linearValueHeadDim
         archDict["linearConvKernelSize"] = arch.linearConvKernelSize
+        archDict["numLeadingDenseLayers"] = arch.numLeadingDenseLayers
+        archDict["denseIntermediateSize"] = arch.denseIntermediateSize
+        archDict["mlaKVLoraRank"] = arch.mlaKVLoraRank
+        archDict["mlaQKNopeDim"] = arch.mlaQKNopeDim
+        archDict["mlaQKRopeDim"] = arch.mlaQKRopeDim
+        archDict["mlaVHeadDim"] = arch.mlaVHeadDim
         let quantBits = [
             "embedding": bitWidths.embedding,
             "attention": bitWidths.attention,

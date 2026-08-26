@@ -197,9 +197,108 @@ import NVMAIValidationSupport
             < Tolerance.fp16ChainedReduction)
     }
 
+    @Test func gptOssRoutedPipelineWithBiasesMatchesReference() throws {
+        let topK = 4
+        var rng = SeedTree(0x6F55).key("gptoss-routed-moe")
+        func matrix(rows: Int, columns: Int) -> [[Float]] {
+            (0..<rows).map { _ in
+                (0..<columns).map { _ in rng.uniform(-0.4, 0.4) }
+            }
+        }
+        func bf16RoundTrip(_ v: Float) -> Float {
+            Float(bitPattern: UInt32(Quantization.bf16Bits(v)) << 16)
+        }
+
+        var gates = [[[Float]]](), ups = [[[Float]]](), downs = [[[Float]]]()
+        var gateBiases = [[Float]](), upBiases = [[Float]](), downBiases = [[Float]]()
+        for _ in 0..<topK {
+            gates.append(matrix(rows: Self.intermediate, columns: Self.dimension))
+            ups.append(matrix(rows: Self.intermediate, columns: Self.dimension))
+            downs.append(matrix(rows: Self.dimension, columns: Self.intermediate))
+            gateBiases.append((0..<Self.intermediate).map { _ in
+                bf16RoundTrip(rng.uniform(-0.3, 0.3)) })
+            upBiases.append((0..<Self.intermediate).map { _ in
+                bf16RoundTrip(rng.uniform(-0.3, 0.3)) })
+            downBiases.append((0..<Self.dimension).map { _ in
+                bf16RoundTrip(rng.uniform(-0.3, 0.3)) })
+        }
+        let x = (0..<Self.dimension).map { _ in Float(Float16(rng.uniform(-0.5, 0.5))) }
+        let residual = (0..<Self.dimension).map { _ in Float(Float16(rng.uniform(-0.5, 0.5))) }
+        let routingWeights = (0..<topK).map { Float(Float16(0.1 + Float($0) * 0.05)) }
+
+        var expected = residual
+        for slot in 0..<topK {
+            let out = MoeRef.runFFNGptOss(
+                gateRows: gates[slot].map { Quantization.quantizeInt4Affine($0) },
+                upRows: ups[slot].map { Quantization.quantizeInt4Affine($0) },
+                downRows: downs[slot].map { Quantization.quantizeInt4Affine($0) },
+                gateBias: gateBiases[slot],
+                upBias: upBiases[slot],
+                downBias: downBiases[slot],
+                x: x, d: Self.dimension, f: Self.intermediate)
+            for r in 0..<Self.dimension {
+                expected[r] += routingWeights[slot] * out[r]
+            }
+        }
+
+        let blobs = (0..<topK).map {
+            Self.makeBlob(gate: gates[$0], up: ups[$0], down: downs[$0],
+                          gateBias: gateBiases[$0], upBias: upBiases[$0],
+                          downBias: downBiases[$0])
+        }
+        let context = try MetalContext()
+        let kernel = try MoE(context: context,
+                             siluActivation: true,
+                             specializedD: UInt32(Self.dimension),
+                             specializedF: UInt32(Self.intermediate),
+                             specializedNumExperts: 32,
+                             specializedTopK: UInt32(topK),
+                             expertAdditiveBiases: true,
+                             clampedSwiGLU: true)
+        let routedBuffers = blobs.compactMap {
+            context.device.makeBuffer(bytes: $0.bytes, length: $0.bytes.count,
+                                      options: .storageModeShared)
+        }
+        guard routedBuffers.count == topK,
+              let xBuffer = Fp16Buffer.make(context.device, values: x),
+              let residualBuffer = Fp16Buffer.make(context.device, values: residual),
+              let routingBuffer = Fp16Buffer.make(context.device, values: routingWeights),
+              let acts = Fp16Buffer.make(context.device, count: topK * Self.intermediate),
+              let output = Fp16Buffer.make(context.device, count: Self.dimension),
+              let argumentBuffer = kernel.makeRoutedArgumentBuffer(
+                routedBlobs: routedBuffers, topK: UInt32(topK)) else {
+            Issue.record("buffer allocation failed")
+            return
+        }
+        let cb = context.queue.makeCommandBuffer()!
+        try kernel.encodeRoutedPersistentPhase1U16Load(
+            commandBuffer: cb, routedArgBuffer: argumentBuffer,
+            routedBlobs: routedBuffers, routedOffsets: blobs[0].offsets,
+            x: xBuffer, acts: acts,
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
+            topK: UInt32(topK))
+        try kernel.encodeRoutedPersistentPhase2Reduce(
+            commandBuffer: cb, routedArgBuffer: argumentBuffer,
+            routedBlobs: routedBuffers, routedOffsets: blobs[0].offsets,
+            acts: acts, routingWeights: routingBuffer,
+            residual: residualBuffer, y: output,
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
+            topK: UInt32(topK))
+        cb.commit()
+        cb.waitUntilCompleted()
+        #expect(cb.error == nil)
+
+        let actual = Fp16Buffer.read(output, count: Self.dimension)
+        #expect(RelError.compute(actual: actual, reference: expected)
+            < Tolerance.fp16ChainedReduction)
+    }
+
     private static func makeBlob(gate: [[Float]],
                                  up: [[Float]],
-                                 down: [[Float]]) -> RoutedBlob {
+                                 down: [[Float]],
+                                 gateBias: [Float]? = nil,
+                                 upBias: [Float]? = nil,
+                                 downBias: [Float]? = nil) -> RoutedBlob {
         func packed(_ rows: [[Float]])
             -> (weights: [UInt8], scales: [UInt16], biases: [UInt16]) {
             let quantized = rows.map { Quantization.quantizeInt4Affine($0) }
@@ -227,12 +326,22 @@ import NVMAIValidationSupport
         let downW = UInt32(bytes.count); append(downValues.weights)
         let downS = UInt32(bytes.count); append(downValues.scales)
         let downB = UInt32(bytes.count); append(downValues.biases)
+        var gateAB: UInt32 = 0, upAB: UInt32 = 0, downAB: UInt32 = 0
+        if let gateBias, let upBias, let downBias {
+            gateAB = UInt32(bytes.count)
+            append(gateBias.map { Quantization.bf16Bits($0) })
+            upAB = UInt32(bytes.count)
+            append(upBias.map { Quantization.bf16Bits($0) })
+            downAB = UInt32(bytes.count)
+            append(downBias.map { Quantization.bf16Bits($0) })
+        }
         return RoutedBlob(
             bytes: bytes,
             offsets: MoEExpertOffsets(
                 gateWOff: gateW, gateSOff: gateS, gateBOff: gateB,
                 upWOff: upW, upSOff: upS, upBOff: upB,
-                downWOff: downW, downSOff: downS, downBOff: downB))
+                downWOff: downW, downSOff: downS, downBOff: downB,
+                gateABOff: gateAB, upABOff: upAB, downABOff: downAB))
     }
 
     private static func makeConstantBlob(bits: Int) -> RoutedBlob {

@@ -39,6 +39,8 @@ enum ServerModelIdentity {
         switch family {
         case .qwen36: return "qwen3.6-35b-a3b"
         case .qwen36MTP: return "qwen3.6-35b-a3b-mtp"
+        case .gptOss20b: return "gpt-oss-20b"
+        case .kimiLinear48b: return "kimi-linear-48b-a3b"
         }
     }
 }

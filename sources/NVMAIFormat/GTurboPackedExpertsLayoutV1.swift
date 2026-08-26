@@ -99,7 +99,10 @@ package enum GTurboV1StructuralValidator {
                     field: "layout.layers[\(layer.layer)].file",
                     reason: "duplicate layer filename")
             }
-            guard layer.experts.count == layout.expertsPerLayer else {
+            // A layer with no routed experts (a dense-MLP layer) carries an
+            // empty expert list and no layer file.
+            guard layer.experts.count == layout.expertsPerLayer
+                    || layer.experts.isEmpty else {
                 throw NVMAIFormatError.invalid(field: "layout.layers[\(layer.layer)].experts",
                                                 reason: "wrong expert count")
             }
@@ -187,7 +190,7 @@ package enum GTurboV1StructuralValidator {
         let expectedLayerSize = try gturboCheckedMultiply(UInt64(layout.expertsPerLayer),
                                                           layout.expertStride,
                                                           field: "layout.layerSize")
-        for layer in layout.layers {
+        for layer in layout.layers where !layer.experts.isEmpty {
             let path = "packed_experts/\(layer.file)"
             guard manifestFileSizes[path] == expectedLayerSize else {
                 throw NVMAIFormatError.invalid(field: "manifest.files.\(path)",

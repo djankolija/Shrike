@@ -109,6 +109,56 @@ import Foundation
         #expect(m.expertStride == 16384)
     }
 
+    @Test func peekFamilyReadsExplicitFamilyField() throws {
+        let (dir, _) = try Self.writeToyManifest(
+            archOverrides: ["family": "gpt_oss_20b"])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(try ManifestReader.peekFamily(directoryURL: dir) == .gptOss20b)
+    }
+
+    @Test func peekFamilyRejectsUnknownFamilyString() throws {
+        let (dir, _) = try Self.writeToyManifest(
+            archOverrides: ["family": "llama"])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(throws: ModelError.self) {
+            _ = try ManifestReader.peekFamily(directoryURL: dir)
+        }
+    }
+
+    @Test func familyFieldMismatchThrowsArchMismatch() throws {
+        let (dir, toy) = try Self.writeToyManifest(
+            archOverrides: ["family": "gpt_oss_20b"])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(throws: ModelError.archMismatch(
+            field: "family",
+            expected: ModelFamily.qwen36.rawValue,
+            actual: ModelFamily.gptOss20b.rawValue)) {
+            _ = try ManifestReader.load(directoryURL: dir, expecting: toy)
+        }
+    }
+
+    @Test func gptOssToyManifestLoadsWithZeroSharedExpertFFN() throws {
+        let toy = ArchConfig.gptOssToy()
+        let (dir, _) = try Self.writeToyManifest(
+            archOverrides: ["family": "gpt_oss_20b"],
+            config: toy)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let m = try ManifestReader.load(directoryURL: dir, expecting: toy)
+        #expect(m.arch.ffnIntermediate == 0)
+        #expect(m.arch.family == .gptOss20b)
+        #expect(m.arch.fullAttentionLayerMask == [0, 1, 0, 1])
+    }
+
+    @Test func maskValueThreeDecodesWithKimiFamily() throws {
+        var mask = [Int](repeating: 2, count: 2)
+        mask[1] = 3
+        let (dir, _) = try Self.writeToyManifest(
+            archOverrides: ["family": "kimi_linear_48b",
+                            "fullAttentionLayerMask": mask])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(try ManifestReader.peekFamily(directoryURL: dir) == .kimiLinear48b)
+    }
+
     @Test func peekFamilyKeepsFullQwenWhenBitWidthOverridesPresent() throws {
         let arch = ArchConfig.qwen36_35B_A3B
         var files: [String: [String: Any]] = [
@@ -425,5 +475,41 @@ extension ArchConfig {
                 keyHeadDim: 32, valueHeadDim: 32,
                 convKernelSize: 4)
         )
+    }
+
+    /// Toy gpt-oss shape: alternating sliding/full mask, no shared expert
+    /// (intermediateSize 0), top-2 of 2 experts, full-dim RoPE.
+    static func gptOssToy() -> ArchConfig {
+        ArchConfig(
+            hiddenSize: 128,
+            intermediateSize: 0,
+            moeIntermediateSize: 64,
+            numHeads: 2,
+            numKVHeads: 2,
+            numFullKVHeads: 2,
+            headDim: 64,
+            fullHeadDim: 64,
+            vocabSize: 256,
+            slidingWindow: 8,
+            finalLogitSoftcap: 0.0,
+            ropeTheta: 150_000.0,
+            fullRopeTheta: 150_000.0,
+            partialRotaryFactor: 1.0,
+            numLayers: 4,
+            numExperts: 2,
+            topKExperts: 2,
+            tieWordEmbeddings: false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: [0, 1, 0, 1],
+            hiddenActivation: "silu",
+            family: .gptOss20b,
+            attnOutputGate: false,
+            attentionScale: 0.125,   // 64^-0.5
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: true,
+            linearAttention: .none)
     }
 }

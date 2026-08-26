@@ -507,9 +507,18 @@ public actor ServerModelSession: ServerInferenceBackend {
         // measured optima for each. The previous fixed default of 64 was slower
         // *and* larger than either -- benchmarked at the shipped 262144 context,
         // 4-bit managed 9.85 tok/s at 64 slots against 13.61 at 16.
+        let expectedArch: ArchConfig
+        do {
+            let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
+            guard let baseline = ArchConfig.knownArchitectures[family] else {
+                throw ModelError.unsupportedArchitecture(
+                    detail: "no compiled baseline for family \(family.rawValue)")
+            }
+            expectedArch = baseline
+        }
         let derivedSlots: Int
         if let manifest = try? ManifestReader.load(directoryURL: modelDirectory,
-                                                  expecting: .qwen36_35B_A3B) {
+                                                  expecting: expectedArch) {
             derivedSlots = RuntimeConfiguration.expertCacheSlots(
                 expertStrideBytes: manifest.expertStride,
                 layers: manifest.arch.numLayers,
@@ -524,7 +533,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,
-            expecting: .qwen36_35B_A3B,
+            expecting: expectedArch,
             streamingMode: .pread(slotCount: loadSlots),
             expertCachePolicy: loadRuntime.modelExpertCachePolicy,
             integrityPolicy: .resolved(directoryURL: modelDirectory))

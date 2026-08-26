@@ -28,6 +28,9 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let attentionKEqV: Bool
     public let hiddenActivation: String
     public let fullAttentionLayerMask: [Int]
+    /// Absent in pre-family manifests; the reader then falls back to the
+    /// shape heuristic in `peekIdentity`.
+    public let family: ModelFamily?
 }
 
 public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
@@ -153,6 +156,12 @@ public enum ManifestReader {
             throw ModelError.unsupportedArchitecture(
                 detail: "hiddenActivation=\(wire.arch.hiddenActivation)")
         }
+        if let raw = wire.arch.family {
+            guard let family = ModelFamily(rawValue: raw) else {
+                throw ModelError.unsupportedArchitecture(detail: "family=\(raw)")
+            }
+            return ManifestIdentity(modelID: wire.modelID, family: family)
+        }
         let mtp = ArchConfig.qwen36MTP
         if wire.arch.numLayers == mtp.numLayers,
            wire.arch.slidingWindow == mtp.slidingWindow,
@@ -180,7 +189,8 @@ public enum ManifestReader {
         }
         // Validate that all expected layer files are listed in the manifest.
         // Accept both `layer_0.bin` and `layer_00.bin` naming conventions.
-        for L in 0..<m.numLayers {
+        // Leading dense-MLP layers have no routed experts and no layer file.
+        for L in expected.numLeadingDenseLayers..<m.numLayers {
             let layerFileShort = String(format: "packed_experts/layer_%d.bin", L)
             let layerFilePadded = String(format: "packed_experts/layer_%02d.bin", L)
             if m.files[layerFileShort] == nil && m.files[layerFilePadded] == nil {
@@ -193,7 +203,7 @@ public enum ManifestReader {
                                       family: ModelFamily) throws {
         let allowedRouterBits: Set<Int>
         switch family {
-        case .qwen36MTP:
+        case .qwen36MTP, .gptOss20b, .kimiLinear48b:
             allowedRouterBits = [4, 8]
         case .qwen36:
             allowedRouterBits = [8]
@@ -259,6 +269,9 @@ public enum ManifestReader {
         try check("tieWordEmbeddings",   a.tieWordEmbeddings,   e.tieWordEmbeddings)
         try check("attentionKEqV",       a.attentionKEqV,       e.attentionKEqV)
         try check("hiddenActivation",    a.hiddenActivation,    e.hiddenActivation)
+        if let family = a.family {
+            try check("family", family.rawValue, e.family.rawValue)
+        }
         let actualMask = a.fullAttentionLayerMask.map { UInt8($0) }
         try check("fullAttentionLayerMask",
                   actualMask.description,
@@ -294,7 +307,8 @@ private extension ManifestArch {
                   tieWordEmbeddings: wire.tieWordEmbeddings,
                   attentionKEqV: wire.attentionKEqV,
                   hiddenActivation: wire.hiddenActivation,
-                  fullAttentionLayerMask: wire.fullAttentionLayerMask)
+                  fullAttentionLayerMask: wire.fullAttentionLayerMask,
+                  family: wire.family.flatMap(ModelFamily.init(rawValue:)))
     }
 }
 

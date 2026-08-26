@@ -115,7 +115,8 @@ import NVMAIValidationSupport
     static func makeSyntheticExpertPool(numExperts: Int,
                                         d: Int,
                                         f: Int,
-                                        weightBits: Int = 4) -> SyntheticExpertPool {
+                                        weightBits: Int = 4,
+                                        additiveBiases: Bool = false) -> SyntheticExpertPool {
         precondition([4, 8].contains(weightBits))
         var allBytes: [UInt8] = []
         var offsets: MoEExpertOffsets?
@@ -170,6 +171,18 @@ import NVMAIValidationSupport
                                   component: .biases,
                                   weightBits: weightBits)
 
+            var gateABOff: UInt32 = 0, upABOff: UInt32 = 0, downABOff: UInt32 = 0
+            if additiveBiases {
+                gateABOff = UInt32(bytes.count)
+                Self.appendU16(Self.syntheticBiasVector(count: f, expert: expert, role: 0),
+                               to: &bytes)
+                upABOff = UInt32(bytes.count)
+                Self.appendU16(Self.syntheticBiasVector(count: f, expert: expert, role: 1),
+                               to: &bytes)
+                downABOff = UInt32(bytes.count)
+                Self.appendU16(Self.syntheticBiasVector(count: d, expert: expert, role: 2),
+                               to: &bytes)
+            }
             let currentOffsets = MoEExpertOffsets(gateWOff: gateWOff,
                                                   gateSOff: gateSOff,
                                                   gateBOff: gateBOff,
@@ -178,7 +191,10 @@ import NVMAIValidationSupport
                                                   upBOff: upBOff,
                                                   downWOff: downWOff,
                                                   downSOff: downSOff,
-                                                  downBOff: downBOff)
+                                                  downBOff: downBOff,
+                                                  gateABOff: gateABOff,
+                                                  upABOff: upABOff,
+                                                  downABOff: downABOff)
             if offsets == nil {
                 offsets = currentOffsets
                 stride = bytes.count
@@ -193,6 +209,14 @@ import NVMAIValidationSupport
                                    offsets: offsets!,
                                    stride: stride,
                                    weightBits: weightBits)
+    }
+
+    static func syntheticBiasVector(count: Int, expert: Int, role: Int) -> [UInt16] {
+        (0..<count).map { i in
+            Quantization.bf16Bits(Float(expert + 1) * 0.02
+                + Float(role + 1) * 0.01
+                + Float((i % 5) - 2) * 0.015)
+        }
     }
 
     enum ProjectionComponent {
@@ -296,7 +320,9 @@ import NVMAIValidationSupport
                                                   pool: SyntheticExpertPool,
                                                   topK: Int,
                                                   d: Int,
-                                                  f: Int) -> [Float16] {
+                                                  f: Int,
+                                                  additiveBiases: Bool = false,
+                                                  clampedSwiGLU: Bool = false) -> [Float16] {
         var out = [Float16](repeating: -99, count: routes.queryCount * topK * d)
         for pair in routes.sortedPairs {
             let expertBase = Int(pair.expert) * pool.stride
@@ -322,12 +348,26 @@ import NVMAIValidationSupport
                                          n: d,
                                          x: x,
                                          bits: pool.weightBits)
-                act[row] = Float16(MoeRef.geluTanh([gate])[0] * up)
+                var g = gate
+                var u = up
+                if additiveBiases {
+                    g += Quantization.bf16ToFloat(Self.readU16(
+                        pool.bytes, expertBase + Int(pool.offsets.gateABOff) + row * 2))
+                    u += Quantization.bf16ToFloat(Self.readU16(
+                        pool.bytes, expertBase + Int(pool.offsets.upABOff) + row * 2))
+                }
+                if clampedSwiGLU {
+                    let gc = min(g, 7.0)
+                    let uc = max(-7.0, min(u, 7.0))
+                    act[row] = Float16((gc / (1.0 + expf(-1.702 * gc))) * (uc + 1.0))
+                } else {
+                    act[row] = Float16(MoeRef.geluTanh([g])[0] * u)
+                }
             }
             let actFloat = act.map { Float($0) }
             let outBase = (Int(pair.token) * topK + Int(pair.rank)) * d
             for row in 0..<d {
-                let value = Self.cpuAffineDot(bytes: pool.bytes,
+                var value = Self.cpuAffineDot(bytes: pool.bytes,
                                             base: expertBase,
                                             wOff: Int(pool.offsets.downWOff),
                                             sOff: Int(pool.offsets.downSOff),
@@ -336,6 +376,10 @@ import NVMAIValidationSupport
                                             n: f,
                                             x: actFloat,
                                             bits: pool.weightBits)
+                if additiveBiases {
+                    value += Quantization.bf16ToFloat(Self.readU16(
+                        pool.bytes, expertBase + Int(pool.offsets.downABOff) + row * 2))
+                }
                 out[outBase + row] = Float16(value)
             }
         }

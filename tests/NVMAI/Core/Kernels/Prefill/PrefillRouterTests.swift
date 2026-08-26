@@ -78,6 +78,7 @@ import NVMAIValidationSupport
                                   hidden: buffers.hidden,
                                   effectiveScale: buffers.effectiveScale,
                                   perExpertScale: buffers.perExpertScale,
+                                  logitBias: buffers.logitBias,
                                   outIndices: buffers.blockIndices,
                                   outWeights: buffers.blockWeights,
                                   queryCount: UInt32(rows),
@@ -130,6 +131,7 @@ import NVMAIValidationSupport
                                   hidden: buffers.hidden,
                                   effectiveScale: buffers.effectiveScale,
                                   perExpertScale: buffers.perExpertScale,
+                                  logitBias: buffers.logitBias,
                                   outIndices: buffers.blockIndices,
                                   outWeights: buffers.blockWeights,
                                   queryCount: 1,
@@ -152,6 +154,7 @@ import NVMAIValidationSupport
         let hidden: MTLBuffer
         let effectiveScale: MTLBuffer
         let perExpertScale: MTLBuffer
+        let logitBias: MTLBuffer
         let blockIndices: MTLBuffer
         let blockWeights: MTLBuffer
     }
@@ -183,6 +186,11 @@ import NVMAIValidationSupport
               let pBuf = ctx.device.makeBuffer(bytes: pesBits,
                                                length: pesBits.count * MemoryLayout<UInt16>.size,
                                                options: .storageModeShared),
+              let lbBuf = ctx.device.makeBuffer(
+                  bytes: [Float](repeating: 0, count: Self.experts)
+                      .map { Quantization.bf16Bits($0) },
+                  length: Self.experts * MemoryLayout<UInt16>.size,
+                  options: .storageModeShared),
               let idxBuf = ctx.device.makeBuffer(length: rows * Self.topK * MemoryLayout<UInt32>.size,
                                                  options: .storageModeShared),
               let wtBuf = ctx.device.makeBuffer(length: rows * Self.topK * MemoryLayout<Float16>.size,
@@ -195,6 +203,7 @@ import NVMAIValidationSupport
                              hidden: hBuf,
                              effectiveScale: eBuf,
                              perExpertScale: pBuf,
+                             logitBias: lbBuf,
                              blockIndices: idxBuf,
                              blockWeights: wtBuf)
     }
@@ -220,6 +229,7 @@ import NVMAIValidationSupport
                                hidden: hBuf,
                                effectiveScale: buffers.effectiveScale,
                                perExpertScale: buffers.perExpertScale,
+                               logitBias: buffers.logitBias,
                                outIndices: idxBuf,
                                outWeights: wtBuf,
                                numExperts: UInt32(Self.experts),

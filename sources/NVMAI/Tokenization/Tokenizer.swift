@@ -19,6 +19,16 @@ public enum GFTokenizerError: Error, CustomStringConvertible {
     }
 }
 
+/// Chat framing dialect, resolved from the loaded tokenizer's special tokens.
+/// The case set is the extension point for a non-ChatML architecture; a
+/// tokenizer matching no case is rejected at load rather than rendered as
+/// ChatML by default.
+public enum ChatDialect: String, Sendable {
+    case chatml
+    case harmony
+    case kimi
+}
+
 /// The binary reasoning switch exposed by compatible Qwen/Ornith chat
 /// templates. Ornith 1.5 accepts `enable_thinking=true|false`; it does not
 /// define low/medium/high effort levels or a thinking-token budget.
@@ -73,6 +83,7 @@ public struct GFTokenizer: @unchecked Sendable {
     public let thinkEndID: Int32?
     public let stopTokenIDs: Set<Int32>
     public let vocabSize: Int
+    public let dialect: ChatDialect
     public let thinkingMode: ModelThinkingMode
 
     /// Generation-prompt suffix appended after the last message: derived from
@@ -152,10 +163,18 @@ public struct GFTokenizer: @unchecked Sendable {
         self.tokenizer = tokenizer
         self.byteLevelDecoderConfiguration = byteLevelDecoderConfiguration
 
-        let resolved = try Self.resolveChatMLTokens(tokenizer)
-        try Self.validateStreamingDecoder(byteLevelDecoderConfiguration,
-                                          tokenizer: tokenizer,
-                                          resolved: resolved)
+        self.dialect = try Self.resolveDialect(tokenizer)
+        let resolved: ResolvedSpecialTokens
+        switch dialect {
+        case .chatml:
+            resolved = try Self.resolveChatMLTokens(tokenizer)
+            try Self.validateStreamingDecoder(byteLevelDecoderConfiguration,
+                                              tokenizer: tokenizer,
+                                              resolved: resolved)
+        case .harmony, .kimi:
+            throw GFTokenizerError.unsupportedForDialect(
+                "\(dialect.rawValue) special-token resolution is not implemented yet")
+        }
         self.bosID = resolved.bosID
         self.eosID = resolved.eosID
         self.padID = resolved.padID
@@ -221,6 +240,18 @@ public struct GFTokenizer: @unchecked Sendable {
                     "ChatML stop token \(token) must be marked special")
             }
         }
+    }
+
+    /// Identifies the chat dialect from the tokenizer's framing tokens,
+    /// most-specific-first: a Kimi vocabulary could also carry ChatML-like
+    /// tokens, so its `<|im_middle|>` is tested before `<|im_start|>`.
+    private static func resolveDialect(_ tokenizer: any Tokenizer) throws -> ChatDialect {
+        if specialTokenID(tokenizer, Self.harmonyChannelMark) != nil { return .harmony }
+        if specialTokenID(tokenizer, Self.kimiMiddleMark) != nil { return .kimi }
+        if specialTokenID(tokenizer, Self.imStartMark) != nil { return .chatml }
+        throw GFTokenizerError.unsupportedForDialect(
+            "no recognized chat framing tokens (\(Self.harmonyChannelMark), "
+                + "\(Self.kimiMiddleMark), or \(Self.imStartMark))")
     }
 
     /// Resolves a token string to its ID, rejecting the unk-token fallback
@@ -365,6 +396,8 @@ public struct GFTokenizer: @unchecked Sendable {
     /// unsupported tool/media behavior explicit instead of approximating it.
     private static let imStartMark = "<|im_start|>"
     private static let imEndMark   = "<|im_end|>"
+    private static let harmonyChannelMark = "<|channel|>"
+    private static let kimiMiddleMark = "<|im_middle|>"
     /// Generation prompt with thinking disabled, matching the Jinja template's
     /// `add_generation_prompt` + `enable_thinking=false` branch. Used only
     /// when the tokenizer has no chat template or template rendering fails
@@ -423,9 +456,12 @@ public struct GFTokenizer: @unchecked Sendable {
     }
 
     public func applyChatTemplate(_ messages: [Message]) throws -> String {
-        // Every message is rendered through the ChatML template before
-        // encoding; there is no other prompt path.
-        try chatMLChatTemplate(messages)
+        switch dialect {
+        case .chatml: return try chatMLChatTemplate(messages)
+        case .harmony, .kimi:
+            throw GFTokenizerError.unsupportedForDialect(
+                "\(dialect.rawValue) chat rendering is not implemented yet")
+        }
     }
 
     private func chatMLChatTemplate(_ messages: [Message]) throws -> String {

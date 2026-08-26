@@ -61,7 +61,9 @@ struct LayerFilePlan: Sendable {
     let path: String
     let expertsPerLayer: Int
     let expertStride: UInt64
-    let subTensors: [PerExpertTensorSlice]  // 9 entries: gate/up/down × {weights, scales, biases}
+    /// gate/up/down × {weights, scales, biases}; families with additive expert
+    /// biases append a "bias" component per role (9 or 12 entries).
+    let subTensors: [PerExpertTensorSlice]
     var fileSize: UInt64 { UInt64(expertsPerLayer) * expertStride }
 
     func physicalRank(for logicalExpert: Int) -> Int {
@@ -108,7 +110,7 @@ enum RepackPlanner {
                          family: RepackModelFamily) -> Bucket {
         if family == .qwen36MTP {
             if name.hasPrefix("layers.") {
-                if let role = routedExpertRole(in: name),
+                if let role = routedExpertRole(in: name, family: family),
                    let layer = layerIndex(in: name),
                    layer >= 0 && layer < numLayers {
                     return .routedExpert(role: role, layer: layer)
@@ -121,9 +123,20 @@ enum RepackPlanner {
             }
             return .unknown
         }
+        if family == .gptOss20b || family == .kimiLinear48b {
+            if name.hasPrefix("model.") || name.hasPrefix("lm_head.") {
+                if let role = routedExpertRole(in: name, family: family),
+                   let layer = layerIndex(in: name),
+                   layer >= 0 && layer < numLayers {
+                    return .routedExpert(role: role, layer: layer)
+                }
+                return .lmResident
+            }
+            return .unknown
+        }
         if name.hasPrefix("language_model.") {
             // Routed expert?
-            if let role = routedExpertRole(in: name),
+            if let role = routedExpertRole(in: name, family: family),
                let layer = layerIndex(in: name),
                layer >= 0 && layer < numLayers {
                 return .routedExpert(role: role, layer: layer)
@@ -136,8 +149,18 @@ enum RepackPlanner {
         return .unknown
     }
 
-    private static func routedExpertRole(in name: String) -> String? {
-        guard name.contains(".mlp.switch_mlp.") else { return nil }
+    /// gpt-oss experts carry an additive `.bias` alongside the quantization
+    /// companions; it travels with the expert blob, never the resident file.
+    static func isRoutedExpertAdditiveBias(_ name: String,
+                                           family: RepackModelFamily) -> Bool {
+        family == .gptOss20b && name.contains(".mlp.experts.") && name.hasSuffix(".bias")
+    }
+
+    private static func routedExpertRole(in name: String,
+                                         family: RepackModelFamily) -> String? {
+        let container = family == .gptOss20b ? ".mlp.experts." : ".mlp.switch_mlp."
+        guard name.contains(container) else { return nil }
+        if family == .gptOss20b && !name.hasSuffix(".weight") { return nil }
         if name.contains(".gate_proj.") { return "gate" }
         if name.contains(".up_proj.")   { return "up" }
         if name.contains(".down_proj.") { return "down" }
@@ -181,6 +204,7 @@ enum RepackPlanner {
             // `excludedMultimodalTensorNames` mention tensors that are never
             // planned on their own.
             if name.hasSuffix(".scales") || name.hasSuffix(".biases") { continue }
+            if isRoutedExpertAdditiveBias(name, family: arch.family) { continue }
             if isMultimodalTensorName(name) {
                 excludedMultimodalNames.append(name)
             }
@@ -423,6 +447,30 @@ enum RepackPlanner {
             blobCursor += perExpertBiasSize
 
             subs.append(wSlice); subs.append(sSlice); subs.append(bSlice)
+
+            if arch.family == .gptOss20b {
+                guard let ab = registry[base + ".bias"] else {
+                    throw RepackError.missingTensor(name: base + ".bias")
+                }
+                if ab.dtype != .bf16 || ab.shape.count != 2
+                    || Int(ab.shape[0]) != expertCount {
+                    throw RepackError.shapeMismatch(name: base + ".bias",
+                        detail: "expected BF16 rank-2 with leading \(expertCount), "
+                            + "got \(ab.dtype) \(ab.shape)")
+                }
+                let perExpertABSize = ab.sizeBytes / UInt64(expertCount)
+                guard perExpertABSize * UInt64(expertCount) == ab.sizeBytes else {
+                    throw RepackError.shapeMismatch(name: base + ".bias",
+                        detail: "source bytes not evenly divisible by \(expertCount) experts")
+                }
+                subs.append(PerExpertTensorSlice(
+                    role: role, component: "bias", dtype: 1,
+                    logicalShape: Array(ab.shape.dropFirst()),
+                    offsetInExpertBlob: blobCursor, sizeInExpertBlob: perExpertABSize,
+                    sourceOffsetPerExpert: perExpertABSize, sourceTensor: ab,
+                    bitsForWeights: nil))
+                blobCursor += perExpertABSize
+            }
         }
 
         let expertStride = roundUpToPage(blobCursor)
@@ -485,13 +533,25 @@ enum RepackPlanner {
     /// families with an untied head, `lm_head` last).
     private static func lmResidentOrdering(family: RepackModelFamily)
         -> (String, String) -> Bool {
+        let flatNames = family == .gptOss20b || family == .kimiLinear48b
+        let embedName = flatNames
+            ? "model.embed_tokens.weight" : "language_model.model.embed_tokens.weight"
+        let normName = flatNames
+            ? "model.norm.weight" : "language_model.model.norm.weight"
+        let headName = flatNames
+            ? "lm_head.weight" : "language_model.lm_head.weight"
         // Compute a sort key per name; we order by (group rank, layer, slot rank, name).
         func key(_ n: String) -> (Int, Int, Int, String) {
-            if n == "language_model.model.embed_tokens.weight" { return (0, 0, 0, n) }
-            if n == "language_model.model.norm.weight"          { return (3, 0, 0, n) }
-            if n == "language_model.lm_head.weight"             { return (4, 0, 0, n) }
+            if n == embedName { return (0, 0, 0, n) }
+            if n == normName  { return (3, 0, 0, n) }
+            if n == headName  { return (4, 0, 0, n) }
             if let li = layerIndex(in: n) {
-                let slot = qwenSlotRank(in: n)
+                let slot: Int
+                switch family {
+                case .gptOss20b:     slot = gptOssSlotRank(in: n)
+                case .kimiLinear48b: slot = kimiSlotRank(in: n)
+                case .qwen36, .qwen36MTP: slot = qwenSlotRank(in: n)
+                }
                 return (1, li, slot, n)
             }
             return (2, 0, 0, n)
@@ -534,17 +594,82 @@ enum RepackPlanner {
         return 100
     }
 
-    /// Normalize the sidecar's single decoder layer to the target tensor-name
-    /// contract. MTP-only adapter tensors retain their upstream names.
-    private static func residentDestinationName(_ source: String,
-                                                family: RepackModelFamily) -> String {
-        guard family == .qwen36MTP else { return source }
-        if source.hasPrefix("layers.") {
-            return "language_model.model." + source
+    /// Normalize source names to the runtime tensor-name contract
+    /// (`language_model.model.…`). MTP prefixes its bare layer names; the flat
+    /// families prefix their `model.` / `lm_head.` names; Qwen names already
+    /// carry the contract prefix.
+    static func residentDestinationName(_ source: String,
+                                        family: RepackModelFamily) -> String {
+        switch family {
+        case .qwen36:
+            return source
+        case .qwen36MTP:
+            if source.hasPrefix("layers.") {
+                return "language_model.model." + source
+            }
+            if source == "norm.weight" {
+                return "language_model.model.norm.weight"
+            }
+            return source
+        case .gptOss20b, .kimiLinear48b:
+            if source.hasPrefix("model.") || source.hasPrefix("lm_head.") {
+                return "language_model." + source
+            }
+            return source
         }
-        if source == "norm.weight" {
-            return "language_model.model.norm.weight"
-        }
-        return source
+    }
+
+    /// Within-layer slot order for gpt-oss: attention projections with their
+    /// additive biases, sinks, router, then the two layer norms.
+    private static func gptOssSlotRank(in n: String) -> Int {
+        if n.contains(".self_attn.q_proj.weight")   { return 0 }
+        if n.contains(".self_attn.q_proj.bias")     { return 1 }
+        if n.contains(".self_attn.k_proj.weight")   { return 2 }
+        if n.contains(".self_attn.k_proj.bias")     { return 3 }
+        if n.contains(".self_attn.v_proj.weight")   { return 4 }
+        if n.contains(".self_attn.v_proj.bias")     { return 5 }
+        if n.contains(".self_attn.o_proj.weight")   { return 6 }
+        if n.contains(".self_attn.o_proj.bias")     { return 7 }
+        if n.hasSuffix(".self_attn.sinks")          { return 8 }
+        if n.contains(".mlp.router.weight")         { return 9 }
+        if n.contains(".mlp.router.bias")           { return 10 }
+        if n.hasSuffix(".input_layernorm.weight")   { return 11 }
+        if n.hasSuffix(".post_attention_layernorm.weight") { return 12 }
+        return 100
+    }
+
+    /// Within-layer slot order for Kimi-Linear: the KDA bundle, the MLA
+    /// bundle, router + correction bias, shared-expert MLP, the dense-layer
+    /// MLP, then the two layer norms.
+    private static func kimiSlotRank(in n: String) -> Int {
+        if n.contains(".self_attn.q_proj.weight")        { return 0 }
+        if n.contains(".self_attn.k_proj.weight")        { return 1 }
+        if n.contains(".self_attn.v_proj.weight")        { return 2 }
+        if n.contains(".self_attn.q_conv.conv.weight")   { return 3 }
+        if n.contains(".self_attn.k_conv.conv.weight")   { return 4 }
+        if n.contains(".self_attn.v_conv.conv.weight")   { return 5 }
+        if n.contains(".self_attn.f_a_proj.weight")      { return 6 }
+        if n.contains(".self_attn.f_b_proj.weight")      { return 7 }
+        if n.contains(".self_attn.g_a_proj.weight")      { return 8 }
+        if n.contains(".self_attn.g_b_proj.weight")      { return 9 }
+        if n.contains(".self_attn.b_proj.weight")        { return 10 }
+        if n.hasSuffix(".self_attn.A_log")               { return 11 }
+        if n.hasSuffix(".self_attn.dt_bias")             { return 12 }
+        if n.contains(".self_attn.o_norm.weight")        { return 13 }
+        if n.contains(".self_attn.kv_a_proj_with_mqa.weight") { return 14 }
+        if n.contains(".self_attn.kv_a_layernorm.weight") { return 15 }
+        if n.contains(".self_attn.kv_b_proj.weight")     { return 16 }
+        if n.contains(".self_attn.o_proj.weight")        { return 17 }
+        if n.contains(".mlp.gate.weight")                { return 18 }
+        if n.hasSuffix(".mlp.e_score_correction_bias")   { return 19 }
+        if n.contains(".mlp.shared_experts.gate_proj.weight") { return 20 }
+        if n.contains(".mlp.shared_experts.up_proj.weight")   { return 21 }
+        if n.contains(".mlp.shared_experts.down_proj.weight") { return 22 }
+        if n.contains(".mlp.gate_proj.weight")           { return 23 }
+        if n.contains(".mlp.up_proj.weight")             { return 24 }
+        if n.contains(".mlp.down_proj.weight")           { return 25 }
+        if n.hasSuffix(".input_layernorm.weight")        { return 26 }
+        if n.hasSuffix(".post_attention_layernorm.weight") { return 27 }
+        return 100
     }
 }

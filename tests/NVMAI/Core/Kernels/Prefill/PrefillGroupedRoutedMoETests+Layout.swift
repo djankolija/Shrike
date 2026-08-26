@@ -5,8 +5,8 @@ import Testing
 
 extension PrefillGroupedRoutedMoETests {
   @Test func streamedParamsLayoutIsStable() {
-    #expect(MemoryLayout<PrefillGroupedRoutedMoEStreamedParams>.size == 128)
-    #expect(MemoryLayout<PrefillGroupedRoutedMoEStreamedParams>.stride == 128)
+    #expect(MemoryLayout<PrefillGroupedRoutedMoEStreamedParams>.size == 140)
+    #expect(MemoryLayout<PrefillGroupedRoutedMoEStreamedParams>.stride == 140)
     #expect(MemoryLayout.offset(of: \PrefillGroupedRoutedMoEStreamedParams.pairStart) == .some(0))
     #expect(MemoryLayout.offset(of: \PrefillGroupedRoutedMoEStreamedParams.pairCount) == .some(4))
     #expect(MemoryLayout.offset(of: \PrefillGroupedRoutedMoEStreamedParams.d) == .some(8))
@@ -25,6 +25,8 @@ extension PrefillGroupedRoutedMoETests {
       MemoryLayout.offset(of: \PrefillGroupedRoutedMoEStreamedParams.localExpert15) == .some(88))
     #expect(MemoryLayout.offset(of: \PrefillGroupedRoutedMoEStreamedParams.gateWOff) == .some(92))
     #expect(MemoryLayout.offset(of: \PrefillGroupedRoutedMoEStreamedParams.downBOff) == .some(124))
+    #expect(MemoryLayout.offset(of: \PrefillGroupedRoutedMoEStreamedParams.gateABOff) == .some(128))
+    #expect(MemoryLayout.offset(of: \PrefillGroupedRoutedMoEStreamedParams.downABOff) == .some(136))
   }
 
   @Test func streamedMetadataAllocatesOnlySortedPairs() throws {

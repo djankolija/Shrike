@@ -21,6 +21,12 @@ constant bool FC_PREFILL_ACT_SILU [[function_constant(77)]];
 // experts. Leaving it unset preserves the original INT4 specialization.
 constant uint FC_PREFILL_AFFINE_BITS [[function_constant(78)]];
 constant uint FC_PREFILL_ROUTER_BITS [[function_constant(79)]];
+// gpt-oss: per-expert additive biases and the clamped SwiGLU
+// `(min(g,7)*sigmoid(1.702g)) * (clamp(u,+-7)+1)`.
+constant bool FC_PREFILL_EXPERT_BIAS [[function_constant(120)]];
+constant bool FC_PREFILL_ACT_CLAMPED_SWIGLU [[function_constant(121)]];
+constant constexpr float kPrefillSwigluLimit = 7.0f;
+constant constexpr float kPrefillSwigluAlpha = 1.702f;
 
 static inline uint prefill_affine_bits() {
     return is_function_constant_defined(FC_PREFILL_AFFINE_BITS)
@@ -55,6 +61,21 @@ static inline float prefill_hidden_activation(float x) {
         return x / (1.0f + exp(-x));
     }
     return prefill_gelu_pytorch_tanh(x);
+}
+
+static inline float prefill_glu(float gate, float up) {
+    if (is_function_constant_defined(FC_PREFILL_ACT_CLAMPED_SWIGLU)
+        && FC_PREFILL_ACT_CLAMPED_SWIGLU) {
+        const float g = min(gate, kPrefillSwigluLimit);
+        const float u = clamp(up, -kPrefillSwigluLimit, kPrefillSwigluLimit);
+        return (g / (1.0f + exp(-kPrefillSwigluAlpha * g))) * (u + 1.0f);
+    }
+    return prefill_hidden_activation(gate) * up;
+}
+
+static inline bool prefill_expert_bias_enabled() {
+    return is_function_constant_defined(FC_PREFILL_EXPERT_BIAS)
+        && FC_PREFILL_EXPERT_BIAS;
 }
 kernel void prefill_embed_lookup_affine_block(
     device const uint8_t* table     [[buffer(0)]],
@@ -261,6 +282,9 @@ struct PrefillGroupedRoutedMoEStreamedParamsMSL {
     uint down_W_off;
     uint down_s_off;
     uint down_b_off;
+    uint gate_ab_off;
+    uint up_ab_off;
+    uint down_ab_off;
 };
 
 static inline uint prefill_streamed_local_expert_id(
@@ -348,6 +372,7 @@ kernel void prefill_router_block(
     constant uint&        D                [[buffer(10)]],
     constant uint&        top_k            [[buffer(11)]],
     constant uint&        hidden_stride    [[buffer(12)]],
+    device const bfloat*  logit_bias       [[buffer(13)]],
     uint                  row              [[threadgroup_position_in_grid]],
     uint                  tid              [[thread_position_in_threadgroup]],
     uint                  tg_size          [[threads_per_threadgroup]]
@@ -385,7 +410,7 @@ kernel void prefill_router_block(
             acc = fma(s, dot_qx, acc);
             acc = fma(b, sum_x, acc);
         }
-        scores[e] = acc;
+        scores[e] = acc + float(logit_bias[e]);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -488,16 +513,19 @@ kernel void prefill_grouped_routed_moe_batched_phase1(
     device const bfloat* up_s = reinterpret_cast<device const bfloat*>(expert + p.up_s_off);
     device const bfloat* up_b = reinterpret_cast<device const bfloat*>(expert + p.up_b_off);
 
-    const float gate = prefill_moe_affine_gemv_row_dev(gate_W, gate_s, gate_b, x, f, p.D);
-    const float up = prefill_moe_affine_gemv_row_dev(up_W, up_s, up_b, x, f, p.D);
+    float gate = prefill_moe_affine_gemv_row_dev(gate_W, gate_s, gate_b, x, f, p.D);
+    float up = prefill_moe_affine_gemv_row_dev(up_W, up_s, up_b, x, f, p.D);
+    if (prefill_expert_bias_enabled()) {
+        gate += float(reinterpret_cast<device const bfloat*>(expert + p.gate_ab_off)[f]);
+        up += float(reinterpret_cast<device const bfloat*>(expert + p.up_ab_off)[f]);
+    }
     const uint row_elements = p.pair_count * p.F;
     const uint index = pair_local * p.F + f;
     // Only the activated third region is ever read: batched_down consumes
     // `gate_up_act_scratch + 2 * pair_count * F`. The raw gate/up halves were
     // dead traffic — skip those stores (the layout offset stays so the
     // reader's math is unchanged).
-    gate_up_act_scratch[2u * row_elements + index] =
-        half(prefill_hidden_activation(gate) * up);
+    gate_up_act_scratch[2u * row_elements + index] = half(prefill_glu(gate, up));
 }
 
 kernel void prefill_grouped_routed_moe_batched_down(
@@ -528,7 +556,11 @@ kernel void prefill_grouped_routed_moe_batched_down(
     device const bfloat* down_s = reinterpret_cast<device const bfloat*>(expert + p.down_s_off);
     device const bfloat* down_b = reinterpret_cast<device const bfloat*>(expert + p.down_b_off);
     device const half* act = gate_up_act_scratch + 2u * p.pair_count * p.F + pair_local * p.F;
-    const half value = half(prefill_moe_affine_gemv_row_dev(down_W, down_s, down_b, act, d, p.F));
+    float value_f = prefill_moe_affine_gemv_row_dev(down_W, down_s, down_b, act, d, p.F);
+    if (prefill_expert_bias_enabled()) {
+        value_f += float(reinterpret_cast<device const bfloat*>(expert + p.down_ab_off)[d]);
+    }
+    const half value = half(value_f);
     down_scratch[pair_local * p.D + d] = value;
     route_partials[(pair.token * p.top_k + pair.rank) * p.D + d] = value;
 }

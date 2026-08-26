@@ -69,6 +69,13 @@ extension Model {
         func offset(_ role: String) -> UInt32 {
             UInt32(expert.subTensors[role]?.offset ?? 0)
         }
+        if config.expertsHaveAdditiveBiases {
+            for role in ["gate_bias", "up_bias", "down_bias"]
+            where expert.subTensors[role] == nil {
+                throw ModelError.indexCorrupt(
+                    detail: "layer \(layer) expert blob is missing \(role)")
+            }
+        }
         return MoEExpertOffsets(
             gateWOff: offset("gate"),
             gateSOff: offset("gate_scales"),
@@ -78,7 +85,10 @@ extension Model {
             upBOff: offset("up_biases"),
             downWOff: offset("down"),
             downSOff: offset("down_scales"),
-            downBOff: offset("down_biases"))
+            downBOff: offset("down_biases"),
+            gateABOff: offset("gate_bias"),
+            upABOff: offset("up_bias"),
+            downABOff: offset("down_bias"))
     }
 
     public func routedExpertPhysicalOffsets(layer: Int) -> [UInt64] {

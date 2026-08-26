@@ -690,6 +690,13 @@ public final class RemoteStreamingRepacker {
                 || e.name.hasSuffix(".self_attn.k_proj.weight")
                 || e.name.hasSuffix(".self_attn.v_proj.weight")
                 || e.name.hasSuffix(".self_attn.o_proj.weight")
+                || e.name.hasSuffix(".self_attn.kv_a_proj_with_mqa.weight")
+                || e.name.hasSuffix(".self_attn.kv_b_proj.weight")
+                || e.name.hasSuffix(".self_attn.b_proj.weight")
+                || e.name.hasSuffix(".self_attn.f_a_proj.weight")
+                || e.name.hasSuffix(".self_attn.f_b_proj.weight")
+                || e.name.hasSuffix(".self_attn.g_a_proj.weight")
+                || e.name.hasSuffix(".self_attn.g_b_proj.weight")
                 || e.name.hasSuffix(".linear_attn.in_proj_qkv.weight")
                 || e.name.hasSuffix(".linear_attn.in_proj_z.weight")
                 || e.name.hasSuffix(".linear_attn.in_proj_a.weight")
@@ -697,18 +704,28 @@ public final class RemoteStreamingRepacker {
                 || e.name.hasSuffix(".linear_attn.out_proj.weight") {
                 bits.attention = quantSpec.bits
             }
-            // Router slot: the Qwen router tensor is `.mlp.gate.weight`.
+            // Router slot: `.mlp.gate.weight` (Qwen, Kimi) or
+            // `.mlp.router.weight` (gpt-oss).
             if e.name.hasSuffix(".router.proj.weight")
-                || e.name.hasSuffix(".mlp.gate.weight") {
+                || e.name.hasSuffix(".mlp.gate.weight")
+                || e.name.hasSuffix(".mlp.router.weight") {
                 bits.router = quantSpec.bits
             }
-            // Shared-expert slot: the sigmoid-gated shared expert MLP. Routed
-            // experts (`.mlp.switch_mlp.*`) are deliberately excluded here —
-            // their bits land in `bits.routedExpert` below from the layer
-            // sub-tensors, so no tensor feeds more than one slot.
+            // Shared-expert slot: the shared expert MLP (gated Qwen singular,
+            // ungated Kimi plural) and Kimi's dense layer-0 MLP. Routed
+            // experts (`.mlp.switch_mlp.*` / `.mlp.experts.*`) are
+            // deliberately excluded here — their bits land in
+            // `bits.routedExpert` below from the layer sub-tensors, so no
+            // tensor feeds more than one slot.
             if e.name.hasSuffix(".mlp.shared_expert.gate_proj.weight")
                 || e.name.hasSuffix(".mlp.shared_expert.up_proj.weight")
-                || e.name.hasSuffix(".mlp.shared_expert.down_proj.weight") {
+                || e.name.hasSuffix(".mlp.shared_expert.down_proj.weight")
+                || e.name.hasSuffix(".mlp.shared_experts.gate_proj.weight")
+                || e.name.hasSuffix(".mlp.shared_experts.up_proj.weight")
+                || e.name.hasSuffix(".mlp.shared_experts.down_proj.weight")
+                || e.name.hasSuffix(".mlp.gate_proj.weight")
+                || e.name.hasSuffix(".mlp.up_proj.weight")
+                || e.name.hasSuffix(".mlp.down_proj.weight") {
                 bits.sharedExpert = quantSpec.bits
             }
         }

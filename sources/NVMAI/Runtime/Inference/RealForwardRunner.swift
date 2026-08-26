@@ -242,6 +242,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// BF16 ones over [numExperts]; neutral per_expert_scale when the router
     /// has no auxiliary scale tensors.
     private let onesPerExpertScale: MTLBuffer?
+    /// Per-layer additive router logit bias views (gpt-oss); a shared BF16
+    /// zeros buffer for families without one. The selector always reads it.
+    private var routerLogitBias: [(buffer: MTLBuffer, offset: Int)] = []
     private var prefillChunkState = PrefillChunkCommitState()
     private var prefillScratch: PrefillChunkScratchBuffers?
     private static let mtpChunkCapacity = 32
@@ -404,7 +407,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  eventGatedIO: expertIOSynchronization == .event,
                                  specializedD: UInt32(cfg.hiddenSize),
                                  specializedF: UInt32(cfg.moeIntermediateSize),
-                                 specializedNumExperts: UInt32(cfg.numExperts))
+                                 specializedNumExperts: UInt32(cfg.numExperts),
+                                 specializedTopK: UInt32(cfg.topKExperts),
+                                 expertAdditiveBiases: cfg.expertsHaveAdditiveBiases,
+                                 clampedSwiGLU: cfg.usesClampedSwiGLU)
         self.fusionHead = try LMHeadChainInt4(context: context,
                                               maxD: cfg.hiddenSize,
                                               maxVocab: cfg.vocabSize)
@@ -432,7 +438,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.prefillGroupedMoE = try PrefillGroupedRoutedMoE(
             context: context,
             siluActivation: silu,
-            weightBits: model.routedExpertWeightBits)
+            weightBits: model.routedExpertWeightBits,
+            expertAdditiveBiases: cfg.expertsHaveAdditiveBiases,
+            clampedSwiGLU: cfg.usesClampedSwiGLU)
         self.prefillMoE = try PrefillMoE(context: context)
         self.prefillFinalRowHead = try PrefillFinalRowHeadInt4(
             context: context,
@@ -630,6 +638,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                  count: cfg.numLayers)
         self.onesPerExpertScale = try bf16OnesBuffer(count: cfg.numExperts,
                                                      label: "per_expert_scale.ones")
+
+        if cfg.family == .gptOss20b {
+            self.routerLogitBias = try (0..<cfg.numLayers).map { layer in
+                guard let view = try model.routerBias(layer: layer) else {
+                    throw ModelError.tensorNotFound(
+                        name: "language_model.model.layers.\(layer).mlp.router.bias")
+                }
+                return (view.buffer, Int(view.offset))
+            }
+        } else {
+            guard let zeros = device.makeBuffer(
+                length: cfg.numExperts * MemoryLayout<UInt16>.size,
+                options: .storageModeShared) else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            memset(zeros.contents(), 0, zeros.length)
+            zeros.label = "router_logit_bias.zeros"
+            self.routerLogitBias = [(buffer: MTLBuffer, offset: Int)](
+                repeating: (zeros, 0), count: cfg.numLayers)
+        }
     }
 
     public func reset() {
@@ -1916,6 +1944,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 effectiveScale: effectiveScaleBuffers[L],
                 perExpertScale: perExpertScale.buffer,
                 perExpertScaleOffset: perExpertScale.offset,
+                logitBias: routerLogitBias[L].buffer,
+                logitBiasOffset: routerLogitBias[L].offset,
                 outIndices: outIndices, outWeights: outWeights,
                 numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
             if let nextRouterW {
@@ -1931,6 +1961,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     effectiveScale: effectiveScaleBuffers[L + 1],
                     perExpertScale: perExpertScale.buffer,
                     perExpertScaleOffset: perExpertScale.offset,
+                    logitBias: routerLogitBias[L + 1].buffer,
+                    logitBiasOffset: routerLogitBias[L + 1].offset,
                     outIndices: prefetchPredictionIndices,
                     outWeights: prefetchPredictionWeights,
                     numExperts: UInt32(cfg.numExperts), d: D,
@@ -3038,6 +3070,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     effectiveScale: effectiveScaleBuffers[L],
                     perExpertScale: perExpertScale.buffer,
                     perExpertScaleOffset: perExpertScale.offset,
+                    logitBias: routerLogitBias[L].buffer,
+                    logitBiasOffset: routerLogitBias[L].offset,
                     outIndices: scratch.routeIDs,
                     outWeights: scratch.routeWeights,
                     queryCount: UInt32(t),
@@ -3270,6 +3304,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     effectiveScale: effectiveScaleBuffers[L],
                     perExpertScale: perExpertScale.buffer,
                     perExpertScaleOffset: perExpertScale.offset,
+                    logitBias: routerLogitBias[L].buffer,
+                    logitBiasOffset: routerLogitBias[L].offset,
                     outIndices: scratch.routeIDs,
                     outWeights: scratch.routeWeights,
                     queryCount: UInt32(t),

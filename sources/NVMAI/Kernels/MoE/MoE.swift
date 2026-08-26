@@ -12,10 +12,17 @@ public struct MoEExpertOffsets {
     public var downWOff: UInt32
     public var downSOff: UInt32
     public var downBOff: UInt32
+    /// Additive per-expert bias offsets (gpt-oss); zero when the family has
+    /// none. Must mirror `ExpertOffsets` in moe.metal field-for-field.
+    public var gateABOff: UInt32
+    public var upABOff: UInt32
+    public var downABOff: UInt32
 
     public init(gateWOff: UInt32, gateSOff: UInt32, gateBOff: UInt32,
                 upWOff: UInt32, upSOff: UInt32, upBOff: UInt32,
-                downWOff: UInt32, downSOff: UInt32, downBOff: UInt32) {
+                downWOff: UInt32, downSOff: UInt32, downBOff: UInt32,
+                gateABOff: UInt32 = 0, upABOff: UInt32 = 0,
+                downABOff: UInt32 = 0) {
         self.gateWOff = gateWOff
         self.gateSOff = gateSOff
         self.gateBOff = gateBOff
@@ -25,15 +32,21 @@ public struct MoEExpertOffsets {
         self.downWOff = downWOff
         self.downSOff = downSOff
         self.downBOff = downBOff
+        self.gateABOff = gateABOff
+        self.upABOff = upABOff
+        self.downABOff = downABOff
     }
 }
 
 final class MoE {
     static let maxStreamedExperts = 8
+    /// Ceiling for the phase-1 threadgroup-staged hidden vector; must match
+    /// `kMoEXMaxD` in moe.metal.
+    static let maxStagedHiddenD: UInt32 = 2880
 
     private let realDecodeD: UInt32
     private let realDecodeF: UInt32
-    private static let realDecodeTopK: UInt32 = 8
+    private let realDecodeTopK: UInt32
     private let realDecodeNumExperts: UInt32
 
     private let routerGemvPSO: MTLComputePipelineState
@@ -64,29 +77,42 @@ final class MoE {
          eventGatedIO: Bool = false,
          specializedD: UInt32 = 2816,
          specializedF: UInt32 = 704,
-         specializedNumExperts: UInt32 = 128) throws {
+         specializedNumExperts: UInt32 = 128,
+         specializedTopK: UInt32 = 8,
+         expertAdditiveBiases: Bool = false,
+         clampedSwiGLU: Bool = false) throws {
         self.realDecodeD = specializedD
         self.realDecodeF = specializedF
         self.realDecodeNumExperts = specializedNumExperts
+        self.realDecodeTopK = specializedTopK
         precondition([4, 8].contains(routedWeightBits))
         precondition([4, 8].contains(routerWeightBits))
-        let activationConstants: [MetalFunctionConstant] = siluActivation
+        precondition((1...UInt32(Self.maxStreamedExperts)).contains(specializedTopK))
+        precondition(specializedD <= Self.maxStagedHiddenD)
+        let biasConstants: [MetalFunctionConstant] = expertAdditiveBiases
+            ? [MetalFunctionConstant(index: 7, value: .bool(true))]
+            : []
+        var activationConstants: [MetalFunctionConstant] = siluActivation
             ? [MetalFunctionConstant(index: 4, value: .bool(true))]
             : []
-        let weightConstants = routedWeightBits == 4 ? [] : [
+        if clampedSwiGLU {
+            activationConstants.append(
+                MetalFunctionConstant(index: 8, value: .bool(true)))
+        }
+        let weightConstants = (routedWeightBits == 4 ? [] : [
             MetalFunctionConstant(index: 5, value: .uint32(UInt32(routedWeightBits)))
-        ]
+        ]) + biasConstants
         let ioConstants = [MetalFunctionConstant(index: 6, value: .bool(eventGatedIO))]
         let moeConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 0, value: .uint32(specializedD)),
             MetalFunctionConstant(index: 1, value: .uint32(specializedF)),
-            MetalFunctionConstant(index: 2, value: .uint32(Self.realDecodeTopK)),
+            MetalFunctionConstant(index: 2, value: .uint32(specializedTopK)),
             MetalFunctionConstant(index: 3, value: .bool(true)),
         ] + activationConstants + weightConstants + ioConstants
         let routerConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 40, value: .uint32(specializedNumExperts)),
             MetalFunctionConstant(index: 41, value: .uint32(specializedD)),
-            MetalFunctionConstant(index: 42, value: .uint32(Self.realDecodeTopK)),
+            MetalFunctionConstant(index: 42, value: .uint32(specializedTopK)),
             MetalFunctionConstant(index: 43, value: .bool(true)),
             MetalFunctionConstant(index: 44, value: .uint32(UInt32(routerWeightBits))),
         ]
@@ -155,6 +181,7 @@ final class MoE {
                                    hidden: MTLBuffer,
                                    effectiveScale: MTLBuffer, effectiveScaleOffset: Int = 0,
                                    perExpertScale: MTLBuffer, perExpertScaleOffset: Int = 0,
+                                   logitBias: MTLBuffer, logitBiasOffset: Int = 0,
                                    outIndices: MTLBuffer,
                                    outWeights: MTLBuffer,
                                    numExperts: UInt32,
@@ -162,7 +189,8 @@ final class MoE {
                                    topK: UInt32) throws {
         precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
         precondition(numExperts <= 256)
-        precondition(topK == UInt32(Self.maxStreamedExperts))
+        precondition((1...UInt32(Self.maxStreamedExperts)).contains(topK))
+        precondition(topK <= numExperts)
         // K16: `router_gemv_r4` multiplies every hidden element by
         // `effective_scale[idx]` and `router_topk_select_k8` multiplies every
         // weight by `per_expert_scale[expert]`. Qwen 3.6 has no router scale
@@ -173,11 +201,15 @@ final class MoE {
                      "encodeRouter: effectiveScale must cover [d] BF16 (runner synthesizes a 1.0 buffer for Qwen; the kernel always reads it)")
         precondition(perExpertScale.length >= Int(numExperts) * MemoryLayout<UInt16>.stride,
                      "encodeRouter: perExpertScale must cover [numExperts] BF16 (runner synthesizes a 1.0 buffer for Qwen; router_topk_select_k8 always dereferences it)")
+        precondition(logitBias.length >= Int(numExperts) * MemoryLayout<UInt16>.stride,
+                     "encodeRouter: logitBias must cover [numExperts] BF16 (runner synthesizes a 0.0 buffer for families without a router bias; the selector always dereferences it)")
 
         var expertCount = numExperts
         var dimension = d
+        var topKValue = topK
         let useSpecialized = numExperts == realDecodeNumExperts
             && d == realDecodeD
+            && topK == realDecodeTopK
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
@@ -206,6 +238,8 @@ final class MoE {
         selector.setBuffer(outIndices, offset: 0, index: 2)
         selector.setBuffer(outWeights, offset: 0, index: 3)
         selector.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
+        selector.setBytes(&topKValue, length: MemoryLayout<UInt32>.stride, index: 5)
+        selector.setBuffer(logitBias, offset: logitBiasOffset, index: 6)
         selector.dispatchThreadgroups(
             MTLSize(width: 1, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
@@ -308,6 +342,7 @@ final class MoE {
         ioStatusOffset: Int = 0
     ) throws {
         validate(routedBlobs: routedBlobs, topK: topK)
+        precondition(d <= Self.maxStagedHiddenD)
         var dimension = d
         var intermediate = f
         var expertCount = topK
@@ -315,7 +350,7 @@ final class MoE {
             throw MetalError.commandEncoderFailed
         }
         encoder.setComputePipelineState(
-            useRealDecodeConstants(d: d, f: f)
+            useRealDecodeConstants(d: d, f: f, topK: topK)
                 ? phase1U16SpecializedPSO
                 : phase1U16PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
@@ -365,7 +400,7 @@ final class MoE {
             throw MetalError.commandEncoderFailed
         }
         encoder.setComputePipelineState(
-            useRealDecodeConstants(d: d, f: f)
+            useRealDecodeConstants(d: d, f: f, topK: topK)
                 ? phase1SubsetU16SpecializedPSO
                 : phase1SubsetU16PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
@@ -413,11 +448,12 @@ final class MoE {
         validate(routedBlobs: routedBlobs, topK: topK)
         var dimension = d
         var intermediate = f
+        var topKValue = topK
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
         encoder.setComputePipelineState(
-            useRealDecodeConstants(d: d, f: f)
+            useRealDecodeConstants(d: d, f: f, topK: topK)
                 ? phase2ReduceK8SpecializedPSO
                 : phase2ReduceK8PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
@@ -433,14 +469,16 @@ final class MoE {
         encoder.setBuffer(ioStatus ?? alwaysReadyIOStatus,
                           offset: ioStatus == nil ? 0 : ioStatusOffset,
                           index: 8)
+        encoder.setBytes(&topKValue, length: MemoryLayout<UInt32>.stride, index: 9)
+        // One simdgroup per selected expert; the kernel reduces partial[0..<topK].
         encoder.dispatchThreadgroups(
             MTLSize(width: Int(d), height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            threadsPerThreadgroup: MTLSize(width: 32 * Int(topK), height: 1, depth: 1))
         encoder.endEncoding()
     }
 
     private func validate(routedBlobs: [MTLBuffer], topK: UInt32) {
-        precondition(topK == UInt32(Self.maxStreamedExperts))
+        precondition((1...UInt32(Self.maxStreamedExperts)).contains(topK))
         precondition(routedBlobs.count == Int(topK))
     }
 
@@ -458,7 +496,7 @@ final class MoE {
         }
     }
 
-    private func useRealDecodeConstants(d: UInt32, f: UInt32) -> Bool {
-        d == realDecodeD && f == realDecodeF
+    private func useRealDecodeConstants(d: UInt32, f: UInt32, topK: UInt32) -> Bool {
+        d == realDecodeD && f == realDecodeF && topK == realDecodeTopK
     }
 }

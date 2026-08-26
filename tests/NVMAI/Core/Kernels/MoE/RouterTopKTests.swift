@@ -43,6 +43,61 @@ import NVMAIValidationSupport
         #expect(maxError < 5e-3)
     }
 
+    @Test func topFourRouterMatchesReference() throws {
+        var rng = SplitMix64(seed: 0xB44D_5678)
+        let weights = (0..<Self.experts).map { expert in
+            (0..<Self.dimension).map { _ in
+                rng.uniform(-0.05, 0.05) + Float(expert) * 0.01
+            }
+        }
+        let hidden = (0..<Self.dimension).map { _ in rng.uniform(-1.0, 1.0) }
+        let effectiveScale = [Float](repeating: 1.0, count: Self.dimension)
+        let expertScale = (0..<Self.experts).map { _ in rng.uniform(0.6, 1.4) }
+
+        let expected = Self.reference(weights: weights,
+                                      hidden: hidden,
+                                      effectiveScale: effectiveScale,
+                                      expertScale: expertScale,
+                                      topK: 4)
+        let actual = try Self.run(weights: weights,
+                                  hidden: hidden,
+                                  effectiveScale: effectiveScale,
+                                  expertScale: expertScale,
+                                  topK: 4)
+        #expect(actual.indices == expected.indices)
+        #expect(actual.indices.count == 4)
+        let maxError = zip(actual.weights, expected.weights)
+            .map { abs($0 - $1) }
+            .max() ?? 0
+        #expect(maxError < 5e-3)
+    }
+
+    @Test func additiveLogitBiasShiftsSelectionAndWeights() throws {
+        var rng = SplitMix64(seed: 0x0B1A_5EED)
+        let weights = (0..<Self.experts).map { expert in
+            (0..<Self.dimension).map { _ in
+                rng.uniform(-0.05, 0.05) + Float(expert) * 0.01
+            }
+        }
+        let hidden = (0..<Self.dimension).map { _ in rng.uniform(0.5, 1.5) }
+        let effectiveScale = [Float](repeating: 1.0, count: Self.dimension)
+        let expertScale = [Float](repeating: 1.0, count: Self.experts)
+        // A large bias on expert 0 (otherwise the weakest) must put it first.
+        var bias = [Float](repeating: 0, count: Self.experts)
+        bias[0] = 100.0
+
+        let unbiased = try Self.run(weights: weights, hidden: hidden,
+                                    effectiveScale: effectiveScale,
+                                    expertScale: expertScale, topK: 4)
+        let biased = try Self.run(weights: weights, hidden: hidden,
+                                  effectiveScale: effectiveScale,
+                                  expertScale: expertScale, topK: 4,
+                                  logitBias: bias)
+        #expect(!unbiased.indices.contains(0))
+        #expect(biased.indices.first == 0)
+        #expect(biased.weights.first.map { $0 > 0.99 } == true)
+    }
+
     @Test func productionRouterResolvesNearTieLikeReference() throws {
         var rng = SplitMix64(seed: 0x71E_0F4A)
         let pattern = (0..<Self.dimension).map { _ in rng.uniform(0.2, 1.0) }
@@ -72,7 +127,8 @@ import NVMAIValidationSupport
     private static func reference(weights: [[Float]],
                                   hidden: [Float],
                                   effectiveScale: [Float],
-                                  expertScale: [Float]) -> Result {
+                                  expertScale: [Float],
+                                  topK: Int = RouterTopKTests.topK) -> Result {
         let scaled = zip(hidden, effectiveScale).map { $0 * $1 }
         let rows = weights.map { Quantization.quantizeInt8Affine($0) }
         let logits = DequantInt8GemvRef.apply(weightRows: rows,
@@ -86,7 +142,7 @@ import NVMAIValidationSupport
         paired.sort { lhs, rhs in
             lhs.0 == rhs.0 ? lhs.1 < rhs.1 : lhs.0 > rhs.0
         }
-        let selected = Array(paired.prefix(Self.topK))
+        let selected = Array(paired.prefix(topK))
         let maximum = selected.first?.0 ?? 0
         let exponents = selected.map { exp($0.0 - maximum) }
         let sum = exponents.reduce(0, +)
@@ -99,7 +155,9 @@ import NVMAIValidationSupport
     private static func run(weights: [[Float]],
                             hidden: [Float],
                             effectiveScale: [Float],
-                            expertScale: [Float]) throws -> Result {
+                            expertScale: [Float],
+                            topK: Int = RouterTopKTests.topK,
+                            logitBias: [Float]? = nil) throws -> Result {
         let packedRows = weights.map { Quantization.quantizeInt8Affine($0) }
         let groupsPerRow = Self.dimension / Quantization.groupSize
         let packed = packedRows.flatMap(\.packed)
@@ -128,10 +186,15 @@ import NVMAIValidationSupport
                   bytes: expertScale.map(Quantization.bf16Bits),
                   length: expertScale.count * MemoryLayout<UInt16>.stride,
                   options: .storageModeShared),
-              let indexBuffer = context.device.makeBuffer(
-                  length: Self.topK * MemoryLayout<UInt32>.stride,
+              let logitBiasBuffer = context.device.makeBuffer(
+                  bytes: (logitBias ?? [Float](repeating: 0, count: Self.experts))
+                      .map(Quantization.bf16Bits),
+                  length: Self.experts * MemoryLayout<UInt16>.stride,
                   options: .storageModeShared),
-              let outputWeightBuffer = Fp16Buffer.make(context.device, count: Self.topK),
+              let indexBuffer = context.device.makeBuffer(
+                  length: topK * MemoryLayout<UInt32>.stride,
+                  options: .storageModeShared),
+              let outputWeightBuffer = Fp16Buffer.make(context.device, count: topK),
               let commandBuffer = context.queue.makeCommandBuffer() else {
             throw CocoaError(.fileReadUnknown)
         }
@@ -143,19 +206,20 @@ import NVMAIValidationSupport
             hidden: hiddenBuffer,
             effectiveScale: effectiveBuffer,
             perExpertScale: expertScaleBuffer,
+            logitBias: logitBiasBuffer,
             outIndices: indexBuffer,
             outWeights: outputWeightBuffer,
             numExperts: UInt32(Self.experts),
             d: UInt32(Self.dimension),
-            topK: UInt32(Self.topK))
+            topK: UInt32(topK))
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         #expect(commandBuffer.error == nil)
 
         let indexPointer = indexBuffer.contents().bindMemory(
-            to: UInt32.self, capacity: Self.topK)
+            to: UInt32.self, capacity: topK)
         return Result(
-            indices: (0..<Self.topK).map { indexPointer[$0] },
-            weights: Fp16Buffer.read(outputWeightBuffer, count: Self.topK))
+            indices: (0..<topK).map { indexPointer[$0] },
+            weights: Fp16Buffer.read(outputWeightBuffer, count: topK))
     }
 }

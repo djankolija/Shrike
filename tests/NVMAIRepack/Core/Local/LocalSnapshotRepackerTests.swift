@@ -34,6 +34,45 @@ import Testing
             .appendingPathComponent("packed_experts/layer_00.bin")) == .regular)
     }
 
+    @Test func importsGptOssSnapshotWithBiasSlicesAndNormalizedNames() async throws {
+        let root = temporaryRoot("local-gptoss-import")
+        let snapshot = (root as NSString).appendingPathComponent("snapshot")
+        let output = (root as NSString).appendingPathComponent("model.gturbo")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        _ = try SyntheticSnapshot.buildGptOss(at: snapshot)
+
+        let result = try await RemoteStreamingRepacker.runLocalSnapshot(
+            options: LocalSnapshotRepackOptions(
+                inputSnapshotDir: snapshot,
+                outputDir: output,
+                modelID: "gpt-oss-20b-toy-4bit",
+                minFreeReserveBytes: 0))
+        #expect(result.outputDir == output)
+
+        let manifestData = try Data(contentsOf: URL(fileURLWithPath:
+            (output as NSString).appendingPathComponent("manifest.json")))
+        let manifest = try #require(
+            try JSONSerialization.jsonObject(with: manifestData) as? [String: Any])
+        let arch = try #require(manifest["arch"] as? [String: Any])
+        #expect(arch["family"] as? String == "gpt_oss_20b")
+        #expect(arch["slidingWindow"] as? Int == 8)
+        #expect(arch["topKExperts"] as? Int == 2)
+        #expect(arch["fullAttentionLayerMask"] as? [Int] == [0, 1, 0, 1])
+
+        let layoutData = try Data(contentsOf: URL(fileURLWithPath:
+            (output as NSString).appendingPathComponent("packed_experts/layout.json")))
+        let layout = try #require(
+            try JSONSerialization.jsonObject(with: layoutData) as? [String: Any])
+        let layers = try #require(layout["layers"] as? [[String: Any]])
+        let firstExpert = try #require(
+            (layers[0]["experts"] as? [[String: Any]])?.first)
+        let tensorKeys = Set(try #require(
+            firstExpert["tensors"] as? [String: Any]).keys)
+        #expect(tensorKeys == ["gate", "gate_scales", "gate_biases", "gate_bias",
+                               "up", "up_scales", "up_biases", "up_bias",
+                               "down", "down_scales", "down_biases", "down_bias"])
+    }
+
     @Test func rejectsUnsafeShardPathBeforeCopying() throws {
         let root = temporaryRoot("local-mtp-unsafe")
         let snapshot = (root as NSString).appendingPathComponent("snapshot")

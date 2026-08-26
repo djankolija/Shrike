@@ -58,11 +58,22 @@ public func run(args: Args,
         // Concise mode injects a per-quantization system prompt. The routed
         // expert bit width comes from the manifest so the right prompt
         // variant is selected before the full model load.
+        let expectedArch: ArchConfig
+        do {
+            let family = try ManifestReader.peekFamily(directoryURL: modelURL)
+            guard let baseline = ArchConfig.knownArchitectures[family] else {
+                return errored(stderr,
+                               "no compiled baseline for family \(family.rawValue)", 1)
+            }
+            expectedArch = baseline
+        } catch {
+            return errored(stderr, "cannot read model manifest: \(error)", 1)
+        }
         let concisePrompt: String?
         if args.concise {
             let bits = (try? ManifestReader.load(
                 directoryURL: modelURL,
-                expecting: .qwen36_35B_A3B).quant?.routedExpert.weightBits) ?? 4
+                expecting: expectedArch).quant?.routedExpert.weightBits) ?? 4
             concisePrompt = ConcisePrompt.prompt(forRoutedExpertBits: bits)
         } else {
             concisePrompt = nil
@@ -129,6 +140,7 @@ public func run(args: Args,
         let model = try Model.load(
             directoryURL: modelURL,
             device: context.device,
+            expecting: expectedArch,
             streamingMode: .pread(slotCount: loadRuntime.expertCacheSlots),
             expertCachePolicy: loadRuntime.modelExpertCachePolicy,
             integrityPolicy: .resolved(directoryURL: modelURL))

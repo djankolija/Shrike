@@ -5,9 +5,11 @@ import Metal
 /// graph shape, and family-specific kernel behavior. Stored in
 /// `manifest.json -> arch.family`; absent means the compatible Qwen3.5-MoE
 /// 35B-A3B baseline used by Qwen 3.6 and Ornith 1.5.
-public enum ModelFamily: String, Sendable, Equatable {
+public enum ModelFamily: String, Sendable, Equatable, Codable, CaseIterable {
     case qwen36 = "qwen36"
     case qwen36MTP = "qwen36_mtp"
+    case gptOss20b = "gpt_oss_20b"
+    case kimiLinear48b = "kimi_linear_48b"
 }
 
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
@@ -44,7 +46,8 @@ public struct LinearAttentionConfig: Sendable, Equatable {
 /// field-by-field at load time; mismatches throw `ModelError.archMismatch`.
 ///
 /// `fullAttentionLayerMask` values: 0 = sliding-window attention,
-/// 1 = full attention, 2 = gated-DeltaNet linear attention.
+/// 1 = full attention, 2 = gated-DeltaNet linear attention,
+/// 3 = multi-head latent attention (MLA).
 public struct ArchConfig: Sendable, Equatable {
     public let hiddenSize: Int
     public let intermediateSize: Int          // shared expert FFN (== ffnIntermediate in manifest)
@@ -94,6 +97,9 @@ public struct ArchConfig: Sendable, Equatable {
     public let ropeNeoxSubdim: Bool
     /// Gated-DeltaNet dimensions for layers with mask value 2.
     public let linearAttention: LinearAttentionConfig
+    /// Leading layers whose MLP is dense rather than routed; they have no
+    /// packed-expert layer file.
+    public let numLeadingDenseLayers: Int
 
     public init(
         hiddenSize: Int,
@@ -125,7 +131,8 @@ public struct ArchConfig: Sendable, Equatable {
         ffnSandwichNorms: Bool = false,
         sharedExpertGated: Bool = true,
         ropeNeoxSubdim: Bool = true,
-        linearAttention: LinearAttentionConfig = .none
+        linearAttention: LinearAttentionConfig = .none,
+        numLeadingDenseLayers: Int = 0
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -157,6 +164,7 @@ public struct ArchConfig: Sendable, Equatable {
         self.sharedExpertGated = sharedExpertGated
         self.ropeNeoxSubdim = ropeNeoxSubdim
         self.linearAttention = linearAttention
+        self.numLeadingDenseLayers = numLeadingDenseLayers
     }
 
     /// Canonical Qwen3.6-35B-A3B baseline: a 40-layer hybrid of 30
@@ -247,10 +255,99 @@ public struct ArchConfig: Sendable, Equatable {
         return mask
     }
 
+    /// gpt-oss-20b: 24 alternating sliding-window(128)/full-attention layers
+    /// starting sliding, 32 routed experts (top-4) with additive expert and
+    /// router biases, attention sinks, q/k/v/o biases, no QK-norm, no output
+    /// gate, no shared expert, YaRN RoPE (factor 32 over original 4096) over
+    /// the full head dim, clamped SwiGLU (limit 7.0, alpha 1.702).
+    public static let gptOss20b = ArchConfig(
+        hiddenSize: 2880,
+        intermediateSize: 0,
+        moeIntermediateSize: 2880,
+        numHeads: 64,
+        numKVHeads: 8,
+        numFullKVHeads: 8,
+        headDim: 64,
+        fullHeadDim: 64,
+        vocabSize: 201_088,
+        slidingWindow: 128,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 150_000.0,
+        fullRopeTheta: 150_000.0,
+        partialRotaryFactor: 1.0,
+        numLayers: 24,
+        numExperts: 32,
+        topKExperts: 4,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: (0..<24).map { UInt8($0 % 2 == 0 ? 0 : 1) },
+        hiddenActivation: "silu",
+        family: .gptOss20b,
+        attnOutputGate: false,
+        attentionScale: 0.125,    // 64^-0.5
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: true,
+        linearAttention: .none)
+
+    /// Kimi-Linear-48B-A3B: 27 layers — KDA (per-channel-decay gated DeltaNet)
+    /// on 20, NoPE MLA on 7 (every 4th and the last) run as MQA over one
+    /// [latent 512 | rope 64] row (headDim 576; score scale stays 192^-0.5,
+    /// the original per-head q dim). Layer 0's MLP is dense (9216); the other
+    /// 26 carry 256 routed experts (top-8, sigmoid router with correction
+    /// bias, renormalized, scaled 2.446) plus one ungated shared expert.
+    public static let kimiLinear48bA3b = ArchConfig(
+        hiddenSize: 2304,
+        intermediateSize: 1024,
+        moeIntermediateSize: 1024,
+        numHeads: 32,
+        numKVHeads: 1,
+        numFullKVHeads: 1,
+        headDim: 576,
+        fullHeadDim: 576,
+        vocabSize: 163_840,
+        slidingWindow: 0,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 10_000.0,
+        fullRopeTheta: 10_000.0,
+        partialRotaryFactor: 0.0,
+        numLayers: 27,
+        numExperts: 256,
+        topKExperts: 8,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.kimiLinearLayerMask(),
+        hiddenActivation: "silu",
+        family: .kimiLinear48b,
+        attnOutputGate: false,
+        attentionScale: 0.07216878364870323,   // 192^-0.5
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: false,
+        linearAttention: LinearAttentionConfig(
+            numKHeads: 32, numVHeads: 32,
+            keyHeadDim: 128, valueHeadDim: 128,
+            convKernelSize: 4),
+        numLeadingDenseLayers: 1)
+
+    private static func kimiLinearLayerMask() -> [UInt8] {
+        // MLA (3) on 1-indexed layers {4, 8, 12, 16, 20, 24, 27}; KDA (2)
+        // everywhere else.
+        var mask = [UInt8](repeating: 2, count: 27)
+        for oneIndexed in [4, 8, 12, 16, 20, 24, 27] { mask[oneIndexed - 1] = 3 }
+        return mask
+    }
+
     /// Registry keyed by `manifest.arch.family` for auto-detection at load.
     public static let knownArchitectures: [ModelFamily: ArchConfig] = [
         .qwen36: .qwen36_35B_A3B,
         .qwen36MTP: .qwen36MTP,
+        .gptOss20b: .gptOss20b,
+        .kimiLinear48b: .kimiLinear48bA3b,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for
@@ -271,8 +368,10 @@ public struct ArchConfig: Sendable, Equatable {
             shapes.append((m: la.valueDim, n: hiddenSize))
             shapes.append((m: hiddenSize, n: la.valueDim))
         }
-        shapes.append((m: intermediateSize, n: hiddenSize))
-        shapes.append((m: hiddenSize, n: intermediateSize))
+        if intermediateSize > 0 {
+            shapes.append((m: intermediateSize, n: hiddenSize))
+            shapes.append((m: hiddenSize, n: intermediateSize))
+        }
         return shapes
     }
 
@@ -284,14 +383,23 @@ public struct ArchConfig: Sendable, Equatable {
         return shapes
     }
 
+    /// gpt-oss expert FFNs carry additive biases and use the clamped SwiGLU
+    /// (limit 7.0, alpha 1.702) with a `+1` on the linear half.
+    public var expertsHaveAdditiveBiases: Bool { family == .gptOss20b }
+    public var usesClampedSwiGLU: Bool { family == .gptOss20b }
+
     /// Layer kind helpers over the mask encoding.
     public func layerIsFull(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 1 }
+    public func layerIsSWA(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 0 }
     public func layerIsLinear(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 2 }
+    public func layerIsMLA(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 3 }
     public var hasLinearAttentionLayers: Bool { fullAttentionLayerMask.contains(2) }
+    public var hasMLALayers: Bool { fullAttentionLayerMask.contains(3) }
+    public var hasSlidingWindowLayers: Bool { fullAttentionLayerMask.contains(0) }
 }
 
 /// Failure modes for the validation gates in `Model.load`.
-enum ModelError: Error, CustomStringConvertible, Equatable {
+public enum ModelError: Error, CustomStringConvertible, Equatable {
     case partialInstall(path: String)
     case notAGTurboDirectory
     case unsupportedVersion(major: Int, minor: Int)

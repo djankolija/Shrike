@@ -32,6 +32,9 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
     package let attentionKEqV: Bool
     package let hiddenActivation: String
     package let fullAttentionLayerMask: [Int]
+    /// Raw family tag. The repacker has always written it; readers before v1.1
+    /// ignored it, so it stays optional for their manifests.
+    package let family: String?
 
     package init(hiddenSize: Int, ffnIntermediate: Int, moeIntermediateSize: Int,
                  numHeads: Int, numKVHeads: Int, numFullKVHeads: Int,
@@ -40,7 +43,8 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
                  ropeTheta: Double, fullRopeTheta: Double,
                  partialRotaryFactor: Double, numLayers: Int, numExperts: Int,
                  topKExperts: Int, tieWordEmbeddings: Bool, attentionKEqV: Bool,
-                 hiddenActivation: String, fullAttentionLayerMask: [Int]) {
+                 hiddenActivation: String, fullAttentionLayerMask: [Int],
+                 family: String? = nil) {
         self.hiddenSize = hiddenSize
         self.ffnIntermediate = ffnIntermediate
         self.moeIntermediateSize = moeIntermediateSize
@@ -62,6 +66,7 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
         self.attentionKEqV = attentionKEqV
         self.hiddenActivation = hiddenActivation
         self.fullAttentionLayerMask = fullAttentionLayerMask
+        self.family = family
     }
 }
 
@@ -179,7 +184,8 @@ package enum GTurboManifestCodec {
                 field: "manifest.arch", reason: "dimensions disagree with streaming metadata")
         }
         let arch = manifest.arch
-        guard arch.hiddenSize > 0, arch.ffnIntermediate > 0,
+        // ffnIntermediate 0 = no shared-expert FFN (gpt-oss).
+        guard arch.hiddenSize > 0, arch.ffnIntermediate >= 0,
               arch.moeIntermediateSize > 0, arch.numHeads > 0,
               arch.numKVHeads > 0, arch.numFullKVHeads > 0,
               arch.headDim > 0, arch.fullHeadDim > 0,
@@ -192,7 +198,7 @@ package enum GTurboManifestCodec {
               arch.partialRotaryFactor >= 0, arch.partialRotaryFactor <= 1,
               !arch.hiddenActivation.isEmpty,
               arch.fullAttentionLayerMask.count == arch.numLayers,
-              arch.fullAttentionLayerMask.allSatisfy({ $0 == 0 || $0 == 1 || $0 == 2 }) else {
+              arch.fullAttentionLayerMask.allSatisfy({ (0...3).contains($0) }) else {
             throw NVMAIFormatError.invalid(
                 field: "manifest.arch", reason: "invalid architecture values")
         }

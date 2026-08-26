@@ -134,6 +134,9 @@ struct PrefillGroupedRoutedMoEStreamedParams: Equatable, Sendable {
     var downWOff: UInt32
     var downSOff: UInt32
     var downBOff: UInt32
+    var gateABOff: UInt32
+    var upABOff: UInt32
+    var downABOff: UInt32
 
     init(pairStart: UInt32,
                 pairCount: UInt32,
@@ -179,6 +182,9 @@ struct PrefillGroupedRoutedMoEStreamedParams: Equatable, Sendable {
         self.downWOff = offsets.downWOff
         self.downSOff = offsets.downSOff
         self.downBOff = offsets.downBOff
+        self.gateABOff = offsets.gateABOff
+        self.upABOff = offsets.upABOff
+        self.downABOff = offsets.downABOff
     }
 }
 
@@ -360,15 +366,24 @@ final class PrefillGroupedRoutedMoE {
 
     init(context: MetalContext,
          siluActivation: Bool = false,
-         weightBits: Int = 4) throws {
+         weightBits: Int = 4,
+         expertAdditiveBiases: Bool = false,
+         clampedSwiGLU: Bool = false) throws {
         precondition([4, 8].contains(weightBits))
+        let biasConstants: [MetalFunctionConstant] = expertAdditiveBiases
+            ? [MetalFunctionConstant(index: 120, value: .bool(true))]
+            : []
         var activationConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 78,
                                   value: .uint32(UInt32(weightBits)))
-        ]
+        ] + biasConstants
         if siluActivation {
             activationConstants.append(
                 MetalFunctionConstant(index: 77, value: .bool(true)))
+        }
+        if clampedSwiGLU {
+            activationConstants.append(
+                MetalFunctionConstant(index: 121, value: .bool(true)))
         }
         self.batchedPhase1PSO = try context.pipeline(
             "prefill_grouped_routed_moe_batched_phase1",
@@ -376,7 +391,8 @@ final class PrefillGroupedRoutedMoE {
         self.batchedDownPSO = try context.pipeline(
             "prefill_grouped_routed_moe_batched_down",
             constants: [MetalFunctionConstant(index: 78,
-                                               value: .uint32(UInt32(weightBits)))])
+                                               value: .uint32(UInt32(weightBits)))]
+                + biasConstants)
         guard let streamedFn = context.library.makeFunction(name: "prefill_grouped_routed_moe_batched_phase1") else {
             throw MetalError.missingFunction("prefill_grouped_routed_moe_batched_phase1")
         }

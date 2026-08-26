@@ -369,6 +369,140 @@ enum SyntheticSnapshot {
         return Snapshot(shardPath: shardPath)
     }
 
+    // MARK: - gpt-oss variant
+
+    /// Tiny gpt_oss-shaped architecture: four alternating sliding/full
+    /// attention layers, additive biases on attention, router, and experts,
+    /// attention sinks, and flat (`model.`-prefixed) tensor names.
+    struct GptOssArch {
+        let hidden: Int = 128
+        let intermediate: Int = 64
+        let numHeads: Int = 2
+        let numKVHeads: Int = 2
+        let headDim: Int = 64
+        let vocab: Int = 256
+        let numLayers: Int = 4
+        let numExperts: Int = 2
+        let topK: Int = 2
+        let groupSize: Int = 64
+        let slidingWindow: Int = 8
+        let layerTypes: [String] = ["sliding_attention", "full_attention",
+                                    "sliding_attention", "full_attention"]
+    }
+
+    static func buildGptOss(at dir: String,
+                            weightBits: Int = 4,
+                            seed: UInt64 = 0x6F55_20B0_0000_0001) throws -> Snapshot {
+        precondition([4, 8].contains(weightBits))
+        try? FileManager.default.removeItem(atPath: dir)
+        try FileManager.default.createDirectory(atPath: dir,
+                                                withIntermediateDirectories: true)
+
+        let arch = GptOssArch()
+        var rng = SplitMix64(seed: seed)
+        var tensors: [(String, String, [Int], [UInt8])] = []
+
+        appendQuantizedWeight(name: "model.embed_tokens",
+                              outerShape: [arch.vocab],
+                              innerLogical: arch.hidden, bits: weightBits,
+                              groupSize: arch.groupSize, into: &tensors, rng: &rng)
+        appendQuantizedWeight(name: "lm_head",
+                              outerShape: [arch.vocab],
+                              innerLogical: arch.hidden, bits: weightBits,
+                              groupSize: arch.groupSize, into: &tensors, rng: &rng)
+
+        for li in 0..<arch.numLayers {
+            let prefix = "model.layers.\(li)"
+            let qDim = arch.numHeads * arch.headDim
+            let kvDim = arch.numKVHeads * arch.headDim
+            for (proj, rows, inner) in [("q_proj", qDim, arch.hidden),
+                                        ("k_proj", kvDim, arch.hidden),
+                                        ("v_proj", kvDim, arch.hidden),
+                                        ("o_proj", arch.hidden, qDim)] {
+                appendQuantizedWeight(name: prefix + ".self_attn." + proj,
+                                      outerShape: [rows], innerLogical: inner,
+                                      bits: weightBits, groupSize: arch.groupSize,
+                                      into: &tensors, rng: &rng)
+                appendUnquantizedBF16(name: prefix + ".self_attn.\(proj).bias",
+                                      shape: [rows], into: &tensors, rng: &rng)
+            }
+            appendUnquantizedBF16(name: prefix + ".self_attn.sinks",
+                                  shape: [arch.numHeads], into: &tensors, rng: &rng)
+
+            appendQuantizedWeight(name: prefix + ".mlp.router",
+                                  outerShape: [arch.numExperts], innerLogical: arch.hidden,
+                                  bits: weightBits, groupSize: arch.groupSize,
+                                  into: &tensors, rng: &rng)
+            appendUnquantizedBF16(name: prefix + ".mlp.router.bias",
+                                  shape: [arch.numExperts], into: &tensors, rng: &rng)
+
+            for (role, rows, inner) in [("gate_proj", arch.intermediate, arch.hidden),
+                                        ("up_proj", arch.intermediate, arch.hidden),
+                                        ("down_proj", arch.hidden, arch.intermediate)] {
+                appendQuantizedWeight(name: prefix + ".mlp.experts." + role,
+                                      outerShape: [arch.numExperts, rows],
+                                      innerLogical: inner, bits: weightBits,
+                                      groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                appendUnquantizedBF16(name: prefix + ".mlp.experts.\(role).bias",
+                                      shape: [arch.numExperts, rows],
+                                      into: &tensors, rng: &rng)
+            }
+
+            appendUnquantizedBF16(name: prefix + ".input_layernorm.weight",
+                                  shape: [arch.hidden], into: &tensors, rng: &rng)
+            appendUnquantizedBF16(name: prefix + ".post_attention_layernorm.weight",
+                                  shape: [arch.hidden], into: &tensors, rng: &rng)
+        }
+        appendUnquantizedBF16(name: "model.norm.weight",
+                              shape: [arch.hidden], into: &tensors, rng: &rng)
+
+        let shardName = "model-00001-of-00001.safetensors"
+        let shardPath = (dir as NSString).appendingPathComponent(shardName)
+        try writeShard(path: shardPath, tensors: tensors)
+
+        let config: [String: Any] = [
+            "architectures": ["GptOssForCausalLM"],
+            "model_type": "gpt_oss",
+            "hidden_size": arch.hidden,
+            "intermediate_size": arch.intermediate,
+            "head_dim": arch.headDim,
+            "num_attention_heads": arch.numHeads,
+            "num_key_value_heads": arch.numKVHeads,
+            "vocab_size": arch.vocab,
+            "num_hidden_layers": arch.numLayers,
+            "num_local_experts": arch.numExperts,
+            "num_experts_per_tok": arch.topK,
+            "sliding_window": arch.slidingWindow,
+            "layer_types": arch.layerTypes,
+            "rope_theta": 150_000.0,
+            "rope_scaling": [
+                "rope_type": "yarn", "factor": 32.0,
+                "original_max_position_embeddings": 4096,
+                "beta_fast": 32.0, "beta_slow": 1.0,
+            ],
+            "swiglu_limit": 7.0,
+            "tie_word_embeddings": false,
+            "hidden_act": "silu",
+            "rms_norm_eps": 1e-5,
+            "quantization": [
+                "bits": weightBits, "group_size": arch.groupSize, "mode": "affine",
+            ],
+        ]
+        try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath:
+                (dir as NSString).appendingPathComponent("config.json")))
+
+        let weightMap = Dictionary(uniqueKeysWithValues: tensors.map { ($0.0, shardName) })
+        let index: [String: Any] = [
+            "metadata": ["format": "mlx"],
+            "weight_map": weightMap,
+        ]
+        try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath:
+                (dir as NSString).appendingPathComponent("model.safetensors.index.json")))
+        return Snapshot(shardPath: shardPath)
+    }
+
     // MARK: - Tensor builders
 
     private static func appendQuantizedWeight(name: String,

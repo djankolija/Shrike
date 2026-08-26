@@ -157,9 +157,16 @@ public struct Model {
     public func oProj(layer L: Int) throws -> TensorView {
         try resident(name: "language_model.model.layers.\(L).self_attn.o_proj.weight")
     }
-    /// Qwen's router is the source-named `.mlp.gate.weight`.
+    /// The router projection: source-named `.mlp.gate.weight` (Qwen, Kimi) or
+    /// `.mlp.router.weight` (gpt-oss).
     public func router(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
+        let suffix = config.family == .gptOss20b ? "mlp.router.weight" : "mlp.gate.weight"
+        return try resident(name: "language_model.model.layers.\(L).\(suffix)")
+    }
+    /// Additive router logit bias; only gpt-oss carries one.
+    public func routerBias(layer L: Int) throws -> TensorView? {
+        guard config.family == .gptOss20b else { return nil }
+        return try resident(name: "language_model.model.layers.\(L).mlp.router.bias")
     }
     /// Qwen's shared-expert FFN keeps the source's
     /// `.mlp.shared_expert.{gate,up,down}_proj.weight` names.
@@ -390,6 +397,10 @@ public struct Model {
     private func openLayerLocked(_ L: Int) throws {
         if streamersBox.streamers[L] != nil {
             return
+        }
+        guard !packedExpertsLayout.layers[L].experts.isEmpty else {
+            throw ModelError.internalInconsistency(
+                detail: "routed expert requested on dense layer \(L)")
         }
         let basename = packedExpertsLayout.layers[L].file
         let manifestRel = "packed_experts/\(basename)"
@@ -709,7 +720,7 @@ extension Model {
         let checks = RuntimeSchemaChecks(residentIndex: residentIndex, quant: quant)
 
         switch config.family {
-        case .qwen36:
+        case .qwen36, .gptOss20b, .kimiLinear48b:
             try checks.requireAffine(
                                      "language_model.model.embed_tokens.weight",
                                      rows: config.vocabSize,

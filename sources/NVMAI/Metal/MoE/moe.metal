@@ -6,8 +6,9 @@ constant constexpr uint kMaxStreamedExperts = 8;
 constant constexpr float kGeluSqrt2OverPi = 0.7978845608028654f;
 constant constexpr float kGeluCubicCoeff = 0.044715f;
 // Max hidden size for the phase-1 threadgroup-staged activation (covers
-// qwen36_35B_A3B's 2048; the cooperative load is guarded for smaller D).
-constant constexpr uint kMoEXMaxD = 2816;
+// qwen36_35B_A3B's 2048 and gpt-oss-20b's 2880; the cooperative load is
+// guarded for smaller D).
+constant constexpr uint kMoEXMaxD = 2880;
 
 constant uint FC_ROUTER_NUM_EXPERTS [[function_constant(40)]];
 constant uint FC_ROUTER_D [[function_constant(41)]];
@@ -24,6 +25,12 @@ constant bool FC_MOE_USE_FC [[function_constant(3)]];
 constant bool FC_MOE_ACT_SILU [[function_constant(4)]];
 constant uint FC_MOE_WEIGHT_BITS [[function_constant(5)]];
 constant bool FC_MOE_EVENT_GATED [[function_constant(6)]];
+// gpt-oss: per-expert additive biases on gate/up/down (the `*_ab_off` slices)
+// and the clamped SwiGLU `(min(g,7)·σ(1.702g)) · (clamp(u,±7)+1)`.
+constant bool FC_MOE_EXPERT_BIAS [[function_constant(7)]];
+constant bool FC_MOE_ACT_CLAMPED_SWIGLU [[function_constant(8)]];
+constant constexpr float kMoESwigluLimit = 7.0f;
+constant constexpr float kMoESwigluAlpha = 1.702f;
 
 static inline bool moe_io_ready(device const uint* io_status) {
     return !(is_function_constant_defined(FC_MOE_EVENT_GATED) && FC_MOE_EVENT_GATED)
@@ -59,6 +66,14 @@ static inline uint router_fc_d(constant uint& D) {
             is_function_constant_defined(FC_ROUTER_D))
         ? FC_ROUTER_D
         : D;
+}
+
+static inline uint router_fc_top_k(constant uint& top_k) {
+    return (is_function_constant_defined(FC_ROUTER_USE_FC) &&
+            FC_ROUTER_USE_FC &&
+            is_function_constant_defined(FC_ROUTER_TOP_K))
+        ? FC_ROUTER_TOP_K
+        : top_k;
 }
 
 static inline uint moe_fc_d(constant uint& D) {
@@ -148,7 +163,45 @@ struct ExpertOffsets {
     uint down_W_off;
     uint down_s_off;
     uint down_b_off;
+    // Additive (not zero-point) per-expert biases; valid only when
+    // FC_MOE_EXPERT_BIAS is set.
+    uint gate_ab_off;
+    uint up_ab_off;
+    uint down_ab_off;
 };
+
+static inline bool moe_expert_bias_enabled() {
+    return is_function_constant_defined(FC_MOE_EXPERT_BIAS) && FC_MOE_EXPERT_BIAS;
+}
+
+static inline float2 moe_gate_up_bias(float2 gu,
+                                      device const uint8_t* base,
+                                      const ExpertOffsets re,
+                                      uint row) {
+    if (!moe_expert_bias_enabled()) return gu;
+    device const bfloat* gAB = (device const bfloat*)(base + re.gate_ab_off);
+    device const bfloat* uAB = (device const bfloat*)(base + re.up_ab_off);
+    return float2(gu.x + float(gAB[row]), gu.y + float(uAB[row]));
+}
+
+static inline float moe_down_bias(float value,
+                                  device const uint8_t* base,
+                                  const ExpertOffsets re,
+                                  uint row) {
+    if (!moe_expert_bias_enabled()) return value;
+    device const bfloat* dAB = (device const bfloat*)(base + re.down_ab_off);
+    return value + float(dAB[row]);
+}
+
+static inline float moe_glu(float2 gu) {
+    if (is_function_constant_defined(FC_MOE_ACT_CLAMPED_SWIGLU)
+        && FC_MOE_ACT_CLAMPED_SWIGLU) {
+        const float g = min(gu.x, kMoESwigluLimit);
+        const float u = clamp(gu.y, -kMoESwigluLimit, kMoESwigluLimit);
+        return (g / (1.0f + exp(-kMoESwigluAlpha * g))) * (u + 1.0f);
+    }
+    return moe_hidden_activation(gu.x) * gu.y;
+}
 
 struct RoutedBlobs {
     device const uint8_t* blob[kMaxStreamedExperts];
@@ -230,16 +283,20 @@ kernel void router_gemv_r4(
                             out_logits, num_experts, D, 4, tg_idx, sg_idx, lane);
 }
 
+// "k8" is the array capacity, not the selected count: `top_k` may be 1...8.
 kernel void router_topk_select_k8(
     device const float* logits [[buffer(0)]],
     device const bfloat* per_expert_scale [[buffer(1)]],
     device uint* out_indices [[buffer(2)]],
     device half* out_weights [[buffer(3)]],
     constant uint& num_experts [[buffer(4)]],
+    constant uint& top_k [[buffer(5)]],
+    device const bfloat* logit_bias [[buffer(6)]],
     uint tid [[thread_position_in_threadgroup]]
 ) {
     if (tid != 0) return;
     const uint NE = router_fc_num_experts(num_experts);
+    const uint K = min(router_fc_top_k(top_k), kMaxStreamedExperts);
     uint top_idx[8];
     float top_score[8];
     for (uint i = 0; i < 8; ++i) {
@@ -248,19 +305,19 @@ kernel void router_topk_select_k8(
     }
 
     for (uint e = 0; e < NE; ++e) {
-        const float s = logits[e];
+        const float s = logits[e] + float(logit_bias[e]);
         // Equal scores at the boundary are still considered so the inner
         // loop's lower-index tie-break (matching the reference) applies.
-        if (s < top_score[7]) continue;
-        uint pos = 8u;
-        for (uint i = 0; i < 8; ++i) {
+        if (s < top_score[K - 1]) continue;
+        uint pos = K;
+        for (uint i = 0; i < K; ++i) {
             if (s > top_score[i] || (s == top_score[i] && e < top_idx[i])) {
                 pos = i;
                 break;
             }
         }
-        if (pos >= 8u) continue;
-        for (uint i = 7; i > pos; --i) {
+        if (pos >= K) continue;
+        for (uint i = K - 1; i > pos; --i) {
             top_idx[i] = top_idx[i - 1];
             top_score[i] = top_score[i - 1];
         }
@@ -271,12 +328,12 @@ kernel void router_topk_select_k8(
     const float max_s = top_score[0];
     float sum_exp = 0.0f;
     float exps[8];
-    for (uint i = 0; i < 8; ++i) {
+    for (uint i = 0; i < K; ++i) {
         const float ex = fast::exp(top_score[i] - max_s);
         exps[i] = ex;
         sum_exp += ex;
     }
-    for (uint i = 0; i < 8; ++i) {
+    for (uint i = 0; i < K; ++i) {
         const uint expert_idx = top_idx[i];
         const float weight = exps[i] / sum_exp;
         out_indices[i] = expert_idx;
@@ -600,7 +657,7 @@ static inline void moe_phase1_gate_up_act_u16load_body(
 
     const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(
         gW, gS, gB, uW, uS, uB, x, f, D, lane);
-    if (lane == 0) acts[slot * F + f] = half(moe_hidden_activation(gu.x) * gu.y);
+    if (lane == 0) acts[slot * F + f] = half(moe_glu(moe_gate_up_bias(gu, base, re, f)));
 }
 
 static inline void moe_phase1_gate_up_act_subset_u16load_body(
@@ -636,7 +693,7 @@ static inline void moe_phase1_gate_up_act_subset_u16load_body(
 
     const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(
         gW, gS, gB, uW, uS, uB, x, f, D, lane);
-    if (lane == 0) acts[slot * F + f] = half(moe_hidden_activation(gu.x) * gu.y);
+    if (lane == 0) acts[slot * F + f] = half(moe_glu(moe_gate_up_bias(gu, base, re, f)));
 }
 
 kernel void moe_phase1_gate_up_act_u16load(
@@ -679,7 +736,7 @@ kernel void moe_phase1_gate_up_act_u16load(
         (device const bfloat*)(base + re.up_s_off),
         (device const bfloat*)(base + re.up_b_off),
         f, DD, lane);
-    if (lane == 0) acts[slot * moe_fc_f(F) + f] = half(moe_hidden_activation(gu.x) * gu.y);
+    if (lane == 0) acts[slot * moe_fc_f(F) + f] = half(moe_glu(moe_gate_up_bias(gu, base, re, f)));
 }
 
 kernel void moe_phase1_gate_up_act_subset_u16load(
@@ -723,7 +780,7 @@ kernel void moe_phase1_gate_up_act_subset_u16load(
         (device const bfloat*)(base + re.up_s_off),
         (device const bfloat*)(base + re.up_b_off),
         f, DD, lane);
-    if (lane == 0) acts[slot * moe_fc_f(F) + f] = half(moe_hidden_activation(gu.x) * gu.y);
+    if (lane == 0) acts[slot * moe_fc_f(F) + f] = half(moe_glu(moe_gate_up_bias(gu, base, re, f)));
 }
 
 kernel void moe_phase1_gate_up_act_u16load_r16(
@@ -766,6 +823,8 @@ kernel void moe_phase1_gate_up_act_u16load_r8(
         moe_fc_top_k(top_k), rows_per_tg, tg_idx, sg_idx, lane);
 }
 
+// Dispatched with `top_k` simdgroups (host passes 32*top_k threads); "k8" is
+// the capacity of `partial` and `RoutedBlobs`, not the simdgroup count.
 kernel void moe_phase2_down_reduce_k8(
     device const RoutedBlobs& routed [[buffer(0)]],
     constant ExpertOffsets& routed_offsets [[buffer(1)]],
@@ -776,6 +835,7 @@ kernel void moe_phase2_down_reduce_k8(
     constant uint& D [[buffer(6)]],
     constant uint& F [[buffer(7)]],
     device const uint* io_status [[buffer(8)]],
+    constant uint& top_k [[buffer(9)]],
     uint d [[threadgroup_position_in_grid]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
@@ -783,6 +843,7 @@ kernel void moe_phase2_down_reduce_k8(
     threadgroup float partial[8];
     const uint DD = moe_fc_d(D);
     const uint FF = moe_fc_f(F);
+    const uint TK = min(moe_fc_top_k(top_k), kMaxStreamedExperts);
     if (d >= DD) return;
     if (!moe_io_ready(io_status)) {
         if (sg_idx == 0 && lane == 0) y[d] = residual[d];
@@ -796,15 +857,15 @@ kernel void moe_phase2_down_reduce_k8(
     device const bfloat* dB = (device const bfloat*)(base + re.down_b_off);
     device const half* act_slot = acts + sg_idx * FF;
 
-    const float value = moe_int4_gemv_row_simd_dev_vec(
-        dW, dS, dB, act_slot, d, FF, lane);
+    const float value = moe_down_bias(
+        moe_int4_gemv_row_simd_dev_vec(dW, dS, dB, act_slot, d, FF, lane),
+        base, re, d);
     if (lane == 0) partial[sg_idx] = float(routing_w[sg_idx]) * value;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (sg_idx == 0 && lane == 0) {
         float acc = float(residual[d]);
-        acc += partial[0]; acc += partial[1]; acc += partial[2]; acc += partial[3];
-        acc += partial[4]; acc += partial[5]; acc += partial[6]; acc += partial[7];
+        for (uint i = 0; i < TK; ++i) acc += partial[i];
         y[d] = half(acc);
     }
 }
@@ -830,7 +891,7 @@ kernel void moe_affine_phase1_gate_up_act(
         (device const bfloat*)(base + re.gate_b_off), base + re.up_W_off,
         (device const bfloat*)(base + re.up_s_off),
         (device const bfloat*)(base + re.up_b_off), x, row, DD, lane);
-    if (lane == 0) acts[slot * FF + row] = half(moe_hidden_activation(gu.x) * gu.y);
+    if (lane == 0) acts[slot * FF + row] = half(moe_glu(moe_gate_up_bias(gu, base, re, row)));
 }
 
 kernel void moe_affine_phase1_gate_up_act_subset(
@@ -857,7 +918,7 @@ kernel void moe_affine_phase1_gate_up_act_subset(
         (device const bfloat*)(base + re.gate_b_off), base + re.up_W_off,
         (device const bfloat*)(base + re.up_s_off),
         (device const bfloat*)(base + re.up_b_off), x, row, DD, lane);
-    if (lane == 0) acts[slot * FF + row] = half(moe_hidden_activation(gu.x) * gu.y);
+    if (lane == 0) acts[slot * FF + row] = half(moe_glu(moe_gate_up_bias(gu, base, re, row)));
 }
 
 kernel void moe_affine_phase2_down_reduce_k8(
@@ -867,26 +928,30 @@ kernel void moe_affine_phase2_down_reduce_k8(
     device const half* residual [[buffer(4)]], device half* y [[buffer(5)]],
     constant uint& D [[buffer(6)]], constant uint& F [[buffer(7)]],
     device const uint* io_status [[buffer(8)]],
+    constant uint& top_k [[buffer(9)]],
     uint d [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
     threadgroup float partial[8];
     const uint DD = moe_fc_d(D), FF = moe_fc_f(F);
+    const uint TK = min(moe_fc_top_k(top_k), kMaxStreamedExperts);
     if (d >= DD) return;
     if (!moe_io_ready(io_status)) {
         if (sg == 0 && lane == 0) y[d] = residual[d];
         return;
     }
     device const uint8_t* base = routed.blob[sg];
-    const float value = moe_affine_gemv_row_simd(
-        base + re.down_W_off, (device const bfloat*)(base + re.down_s_off),
-        (device const bfloat*)(base + re.down_b_off), acts + sg * FF,
-        d, FF, lane);
+    const float value = moe_down_bias(
+        moe_affine_gemv_row_simd(
+            base + re.down_W_off, (device const bfloat*)(base + re.down_s_off),
+            (device const bfloat*)(base + re.down_b_off), acts + sg * FF,
+            d, FF, lane),
+        base, re, d);
     if (lane == 0) partial[sg] = float(routing_w[sg]) * value;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (sg == 0 && lane == 0) {
         float acc = float(residual[d]);
-        for (uint i = 0; i < 8u; ++i) acc += partial[i];
+        for (uint i = 0; i < TK; ++i) acc += partial[i];
         y[d] = half(acc);
     }
 }

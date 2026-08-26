@@ -51,6 +51,35 @@ public enum MoeRef {
         return DequantInt4GemvRef.apply(weightRows: downRows, x: act, n: f)
     }
 
+    /// gpt-oss expert FFN: additive per-expert biases on every projection and
+    /// the clamped SwiGLU `(min(g,7)·σ(1.702·min(g,7))) · (clamp(u,±7)+1)`.
+    public static func runFFNGptOss(
+        gateRows: [Quantization.Int4AffineRow],
+        upRows:   [Quantization.Int4AffineRow],
+        downRows: [Quantization.Int4AffineRow],
+        gateBias: [Float],
+        upBias: [Float],
+        downBias: [Float],
+        x: [Float],
+        d: Int,
+        f: Int
+    ) -> [Float] {
+        precondition(gateBias.count == f && upBias.count == f && downBias.count == d)
+        let limit: Float = 7.0
+        let alpha: Float = 1.702
+        let gateOut = DequantInt4GemvRef.apply(weightRows: gateRows, x: x, n: d)
+        let upOut   = DequantInt4GemvRef.apply(weightRows: upRows,   x: x, n: d)
+        var act = [Float](repeating: 0, count: f)
+        for i in 0..<f {
+            let g = min(gateOut[i] + gateBias[i], limit)
+            let u = max(-limit, min(upOut[i] + upBias[i], limit))
+            act[i] = (g / (1.0 + Foundation.exp(-alpha * g))) * (u + 1.0)
+        }
+        var out = DequantInt4GemvRef.apply(weightRows: downRows, x: act, n: f)
+        for r in 0..<d { out[r] += downBias[r] }
+        return out
+    }
+
     /// Routed-only sibling of `applyStreamed`. The parallel-MoE block
     /// computes dense MLP and routed branches separately, then sums; this is
     /// the routed-only half.
