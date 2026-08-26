@@ -12,6 +12,25 @@ public enum ModelFamily: String, Sendable, Equatable, Codable, CaseIterable {
     case kimiLinear48b = "kimi_linear_48b"
 }
 
+/// Multi-head latent attention projection split for layers with mask value 3.
+/// The runtime's MQA form derives from these: one cache row per token is
+/// [latent | rope] (headDim = latentDim + qkRopeDim), and the per-head
+/// embed/unembed GEMVs use qkNopeDim / valueHeadDim.
+public struct MLAConfig: Sendable, Equatable {
+    public let latentDim: Int
+    public let qkNopeDim: Int
+    public let qkRopeDim: Int
+    public let valueHeadDim: Int
+
+    public init(latentDim: Int, qkNopeDim: Int, qkRopeDim: Int,
+                valueHeadDim: Int) {
+        self.latentDim = latentDim
+        self.qkNopeDim = qkNopeDim
+        self.qkRopeDim = qkRopeDim
+        self.valueHeadDim = valueHeadDim
+    }
+}
+
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
 /// without linear-attention layers.
 public struct LinearAttentionConfig: Sendable, Equatable {
@@ -407,6 +426,25 @@ public struct ArchConfig: Sendable, Equatable {
                                   targetContextTokens: 32 * 4_096,
                                   originalContextTokens: 4_096)
     }
+
+    /// MLA projection split for layers with mask value 3; nil for
+    /// architectures without them. Kimi-Linear's [128 nope | 64 rope] query
+    /// halves against a 512-latent cache row.
+    public var mla: MLAConfig? {
+        guard family == .kimiLinear48b else { return nil }
+        return MLAConfig(latentDim: 512, qkNopeDim: 128, qkRopeDim: 64,
+                         valueHeadDim: 128)
+    }
+    /// KDA's decay is per channel (`g[head, dk]`); Qwen's GDN decay is one
+    /// scalar per head.
+    public var linearAttentionPerChannelDecay: Bool { family == .kimiLinear48b }
+    /// Kimi router: scores are sigmoid(logits); top-k selects by score plus
+    /// `e_score_correction_bias`, weights are the original scores of the
+    /// selected renormalized (÷ sum + 1e-20) and scaled by 2.446. Other
+    /// families keep their softmax-over-selected routers.
+    public var routerUsesSigmoidScores: Bool { family == .kimiLinear48b }
+    public var routerHasCorrectionBias: Bool { family == .kimiLinear48b }
+    public var routedScalingFactor: Double { family == .kimiLinear48b ? 2.446 : 1.0 }
 
     /// Layer kind helpers over the mask encoding.
     public func layerIsFull(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 1 }

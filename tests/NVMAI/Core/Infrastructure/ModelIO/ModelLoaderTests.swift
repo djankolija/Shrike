@@ -317,9 +317,8 @@ import Metal
                 biasOffset: biasOffset,
                 biasSize: spec.biasBytes,
                 quantSpec: nil,
-                sourceWeight: Self.dummySource(spec.name),
-                sourceScales: nil,
-                sourceBiases: nil))
+                copies: [],
+                computed: nil))
             payloadCursor += spec.weightBytes + spec.scaleBytes + spec.biasBytes
         }
         let residentSize = payloadCursor - alignedIndexBytes

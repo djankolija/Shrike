@@ -124,9 +124,8 @@ enum GptOssToySynthetic {
                 biasOffset: biasOffset,
                 biasSize: spec.biasBytes,
                 quantSpec: nil,
-                sourceWeight: ModelLoaderTests.dummySource(spec.name),
-                sourceScales: nil,
-                sourceBiases: nil))
+                copies: [],
+                computed: nil))
             let tensorSize = spec.weightBytes + spec.scaleBytes + spec.biasBytes
             payloadCursor = weightOffset + tensorSize
         }

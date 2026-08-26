@@ -263,8 +263,9 @@ struct QwenRepackPlannerTests {
             })
             #expect(entry.dtype == 1)
             #expect(entry.quantSpec == nil)
-            #expect(entry.sourceScales == nil)
-            #expect(entry.sourceBiases == nil)
+            #expect(entry.scaleSize == 0)
+            #expect(entry.biasSize == 0)
+            #expect(entry.copies.count == 1)
         }
         // The fused qkv projection is a quantized U32 entry with companions.
         let qkv = try #require(plan.resident.entries.first {
@@ -272,8 +273,9 @@ struct QwenRepackPlannerTests {
         })
         #expect(qkv.dtype == 0)
         #expect(qkv.quantSpec?.bits == 4)
-        #expect(qkv.sourceScales != nil)
-        #expect(qkv.sourceBiases != nil)
+        #expect(qkv.scaleSize > 0)
+        #expect(qkv.biasSize > 0)
+        #expect(qkv.copies.count == 3)
 
         // Every layer slices two experts into the fixed 9-slice blob.
         #expect(plan.layers.count == 4)

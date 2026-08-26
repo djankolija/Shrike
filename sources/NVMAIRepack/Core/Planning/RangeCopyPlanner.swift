@@ -52,24 +52,12 @@ public enum RangeCopyPlanner {
         copies.reserveCapacity(repackPlan.resident.entries.count * 3)
 
         for entry in repackPlan.resident.entries {
-            copies.append(RangeCopy(shardID: entry.sourceWeight.shardPath,
-                                    sourceOffset: entry.sourceWeight.absoluteOffset,
-                                    size: entry.sizeBytes,
-                                    destinationPath: entry.fileOffsetPath(in: repackPlan.resident),
-                                    destinationOffset: entry.fileOffset))
-            if let scales = entry.sourceScales {
-                copies.append(RangeCopy(shardID: scales.shardPath,
-                                        sourceOffset: scales.absoluteOffset,
-                                        size: entry.scaleSize,
+            for copy in entry.copies {
+                copies.append(RangeCopy(shardID: copy.shardPath,
+                                        sourceOffset: copy.sourceOffset,
+                                        size: copy.size,
                                         destinationPath: repackPlan.resident.path,
-                                        destinationOffset: entry.scaleOffset))
-            }
-            if let biases = entry.sourceBiases {
-                copies.append(RangeCopy(shardID: biases.shardPath,
-                                        sourceOffset: biases.absoluteOffset,
-                                        size: entry.biasSize,
-                                        destinationPath: repackPlan.resident.path,
-                                        destinationOffset: entry.biasOffset))
+                                        destinationOffset: copy.destinationOffset))
             }
         }
 
@@ -324,12 +312,6 @@ public enum RangeCopyPlanner {
             return lhs.destinationOffset < rhs.destinationOffset
         }
         return lhs.sourceOffset < rhs.sourceOffset
-    }
-}
-
-private extension ResidentEntry {
-    func fileOffsetPath(in plan: ResidentFilePlan) -> String {
-        plan.path
     }
 }
 

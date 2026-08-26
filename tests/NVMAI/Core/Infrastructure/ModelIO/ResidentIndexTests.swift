@@ -45,8 +45,8 @@ import NVMAIFormat
                 scaleOffset: UInt64(alignedIndexBytes) + 32, scaleSize: 16,
                 biasOffset:  UInt64(alignedIndexBytes) + 48, biasSize:  16,
                 quantSpec: nil,
-                sourceWeight: Self.dummySource(names[0]),
-                sourceScales: nil, sourceBiases: nil),
+                copies: [],
+                computed: nil),
             ResidentEntry(
                 name: names[1], dtype: 0,
                 logicalShape4: [256, 64, 0, 0],
@@ -54,8 +54,8 @@ import NVMAIFormat
                 scaleOffset: 0, scaleSize: 0,
                 biasOffset:  0, biasSize:  0,
                 quantSpec: nil,
-                sourceWeight: Self.dummySource(names[1]),
-                sourceScales: nil, sourceBiases: nil),
+                copies: [],
+                computed: nil),
         ]
 
         var fileBuf = [UInt8](repeating: 0, count: alignedIndexBytes + residentBytes)

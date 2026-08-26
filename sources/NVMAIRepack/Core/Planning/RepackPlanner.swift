@@ -8,6 +8,46 @@ enum Layout {
 
 // MARK: - Plan data types
 
+/// One resolved byte range from a source shard into the resident file.
+struct ResidentCopy: Sendable {
+    let shardPath: String
+    let sourceOffset: UInt64
+    let destinationOffset: UInt64
+    let size: UInt64
+}
+
+/// A byte range within one source tensor's payload.
+struct SourceSlice: Sendable {
+    let tensor: SourceTensor
+    let offset: UInt64
+    let size: UInt64
+
+    init(whole tensor: SourceTensor) {
+        self.tensor = tensor
+        self.offset = 0
+        self.size = tensor.sizeBytes
+    }
+
+    init(tensor: SourceTensor, offset: UInt64, size: UInt64) {
+        self.tensor = tensor
+        self.offset = offset
+        self.size = size
+    }
+}
+
+/// Resident tensors whose bytes are synthesized at write time instead of
+/// range-copied. Only local snapshot imports may carry these.
+enum ComputedResident: Sendable {
+    /// Kimi `kv_b_proj` K-halves (`W_UK`), dequantized per head, transposed,
+    /// and requantized 8-bit g64 as [heads * latent, nope] so the absorbed
+    /// q-embedding GEMV reads rows of `W_UK^T`. 8-bit because the transpose
+    /// crosses the source's quantization grouping axis, so these values eat a
+    /// second quantization the straight-copied tensors never see.
+    case kimiEmbedQ(weight: SourceTensor, scales: SourceTensor,
+                    biases: SourceTensor, heads: Int, nopeDim: Int,
+                    vDim: Int, latentDim: Int, groupSize: Int)
+}
+
 struct ResidentEntry: Sendable {
     let name: String
     /// dtype byte for IndexEntry: 0 = U32, 1 = BF16, 2 = FP16, 3 = FP32.
@@ -27,10 +67,11 @@ struct ResidentEntry: Sendable {
     /// Quantization spec (nil for unquantized scalars/norms).
     let quantSpec: QuantSpec?
 
-    /// Source tensors that supply this entry's bytes.
-    let sourceWeight: SourceTensor
-    let sourceScales: SourceTensor?
-    let sourceBiases: SourceTensor?
+    /// Resolved source ranges that fill this entry's regions; empty for a
+    /// computed entry.
+    let copies: [ResidentCopy]
+    /// Set when the writer must synthesize this entry's bytes.
+    let computed: ComputedResident?
 }
 
 struct ResidentFilePlan: Sendable {
@@ -231,7 +272,7 @@ enum RepackPlanner {
         let residentPath = (outputDir as NSString).appendingPathComponent("model_weights.bin")
         let resident = try planResidentFile(path: residentPath,
                                             baseNames: lmResidentBases,
-                                            family: arch.family,
+                                            arch: arch,
                                             registry: registry, meta: meta)
 
         let layersDir = (outputDir as NSString).appendingPathComponent("packed_experts")
@@ -280,88 +321,93 @@ enum RepackPlanner {
 
     // MARK: - Resident planning
 
+    /// A resident destination before file offsets exist: straight per-tensor
+    /// copies, a concatenation of source slices, or a computed tensor.
+    private struct ResidentBlueprint {
+        let name: String
+        let dtype: UInt8
+        let logicalShape4: [UInt32]
+        let quantSpec: QuantSpec?
+        let weightSlices: [SourceSlice]
+        let scaleSlices: [SourceSlice]
+        let biasSlices: [SourceSlice]
+        let computed: ComputedResident?
+        let computedSizes: (weight: UInt64, scale: UInt64, bias: UInt64)?
+    }
+
     private static func planResidentFile(path: String,
                                          baseNames: [String],
-                                         family: RepackModelFamily,
+                                         arch: ArchInfo,
                                          registry: [String: SourceTensor],
                                          meta: IndexLoader.SourceMetadata) throws
                                         -> ResidentFilePlan {
-        let entryCount = baseNames.count
+        let blueprints: [ResidentBlueprint]
+        if arch.family == .kimiLinear48b {
+            blueprints = try kimiResidentBlueprints(sortedNames: baseNames,
+                                                    registry: registry,
+                                                    meta: meta, arch: arch)
+        } else {
+            blueprints = try baseNames.map {
+                try identityBlueprint(
+                    sourceName: $0,
+                    destinationName: residentDestinationName($0, family: arch.family),
+                    registry: registry, meta: meta)
+            }
+        }
 
         var stringTable: [UInt8] = []
         var offsets: [UInt32] = []
-        offsets.reserveCapacity(entryCount)
-        let destinationNames = baseNames.map { residentDestinationName($0, family: family) }
-        for n in destinationNames {
+        offsets.reserveCapacity(blueprints.count)
+        for bp in blueprints {
             offsets.append(UInt32(stringTable.count))
-            stringTable.append(contentsOf: n.utf8)
+            stringTable.append(contentsOf: bp.name.utf8)
         }
 
         // Index size includes the fixed header, fixed-width entries, and the
         // string table, padded to a 16 KB page boundary.
         let rawIdx = UInt64(GTurboBinary.indexHeaderBytes
-            + entryCount * GTurboBinary.indexEntryBytes
+            + blueprints.count * GTurboBinary.indexEntryBytes
             + stringTable.count)
         let indexSize = roundUpToPage(rawIdx)
 
         var fileCursor = indexSize
         var entries: [ResidentEntry] = []
-        entries.reserveCapacity(entryCount)
+        entries.reserveCapacity(blueprints.count)
 
-        for (sourceName, name) in zip(baseNames, destinationNames) {
-            guard let weight = registry[sourceName] else {
-                throw RepackError.missingTensor(name: sourceName)
+        for bp in blueprints {
+            let wSize = bp.computedSizes?.weight
+                ?? bp.weightSlices.reduce(UInt64(0)) { $0 + $1.size }
+            let sSize = bp.computedSizes?.scale
+                ?? bp.scaleSlices.reduce(UInt64(0)) { $0 + $1.size }
+            let bSize = bp.computedSizes?.bias
+                ?? bp.biasSlices.reduce(UInt64(0)) { $0 + $1.size }
+            let wOff = fileCursor
+            let sOff = wOff + wSize
+            let bOff = sOff + sSize
+            fileCursor = bOff + bSize
+
+            var copies: [ResidentCopy] = []
+            copies.reserveCapacity(bp.weightSlices.count
+                + bp.scaleSlices.count + bp.biasSlices.count)
+            var destination = wOff
+            for slice in bp.weightSlices + bp.scaleSlices + bp.biasSlices {
+                copies.append(ResidentCopy(
+                    shardPath: slice.tensor.shardPath,
+                    sourceOffset: slice.tensor.absoluteOffset + slice.offset,
+                    destinationOffset: destination,
+                    size: slice.size))
+                destination += slice.size
             }
-            let dtype = ietnyDtype(weight.dtype)
-            let isQuantizedPacked = (weight.dtype == .u32) && sourceName.hasSuffix(".weight")
 
-            if isQuantizedPacked {
-                let base = String(sourceName.dropLast(".weight".count))
-                guard let scales = registry[base + ".scales"] else {
-                    throw RepackError.missingScalesCompanion(name: name)
-                }
-                guard let biases = registry[base + ".biases"] else {
-                    throw RepackError.missingBiasesCompanion(name: name)
-                }
-                if scales.dtype != .bf16 || biases.dtype != .bf16 {
-                    throw RepackError.dtypeMismatch(name: name,
-                        detail: "expected BF16 scales/biases, got \(scales.dtype)/\(biases.dtype)")
-                }
-                let spec = IndexLoader.quantSpec(forTensor: sourceName, meta: meta)
-                let logical = try logicalShape(forPackedSource: weight.shape,
-                                               scalesShape: scales.shape)
-
-                let wOff = fileCursor
-                let wSize = weight.sizeBytes
-                let sOff = wOff + wSize
-                let sSize = scales.sizeBytes
-                let bOff = sOff + sSize
-                let bSize = biases.sizeBytes
-                fileCursor = bOff + bSize
-
-                entries.append(ResidentEntry(
-                    name: name, dtype: 0,
-                    logicalShape4: try padTo4(logical),
-                    fileOffset: wOff, sizeBytes: wSize,
-                    scaleOffset: sOff, scaleSize: sSize,
-                    biasOffset: bOff, biasSize: bSize,
-                    quantSpec: spec,
-                    sourceWeight: weight, sourceScales: scales, sourceBiases: biases))
-            } else {
-                // Unquantized (BF16 norm / scalar) — no companions.
-                let off = fileCursor
-                let size = weight.sizeBytes
-                fileCursor = off + size
-
-                entries.append(ResidentEntry(
-                    name: name, dtype: dtype,
-                    logicalShape4: try padTo4(weight.shape),
-                    fileOffset: off, sizeBytes: size,
-                    scaleOffset: 0, scaleSize: 0,
-                    biasOffset: 0, biasSize: 0,
-                    quantSpec: nil,
-                    sourceWeight: weight, sourceScales: nil, sourceBiases: nil))
-            }
+            entries.append(ResidentEntry(
+                name: bp.name, dtype: bp.dtype,
+                logicalShape4: bp.logicalShape4,
+                fileOffset: wOff, sizeBytes: wSize,
+                scaleOffset: sSize > 0 ? sOff : 0, scaleSize: sSize,
+                biasOffset: bSize > 0 ? bOff : 0, biasSize: bSize,
+                quantSpec: bp.quantSpec,
+                copies: copies,
+                computed: bp.computed))
         }
 
         let residentSize = fileCursor - indexSize
@@ -372,6 +418,306 @@ enum RepackPlanner {
                                 stringTableOffsets: offsets,
                                 indexSize: indexSize,
                                 residentSize: residentSize)
+    }
+
+    private static func identityBlueprint(
+        sourceName: String,
+        destinationName: String,
+        registry: [String: SourceTensor],
+        meta: IndexLoader.SourceMetadata
+    ) throws -> ResidentBlueprint {
+        guard let weight = registry[sourceName] else {
+            throw RepackError.missingTensor(name: sourceName)
+        }
+        let isQuantizedPacked = (weight.dtype == .u32) && sourceName.hasSuffix(".weight")
+        guard isQuantizedPacked else {
+            // Unquantized (BF16/FP32 norm / scalar) — no companions.
+            return ResidentBlueprint(
+                name: destinationName,
+                dtype: ietnyDtype(weight.dtype),
+                logicalShape4: try padTo4(weight.shape),
+                quantSpec: nil,
+                weightSlices: [SourceSlice(whole: weight)],
+                scaleSlices: [], biasSlices: [],
+                computed: nil, computedSizes: nil)
+        }
+        let (scales, biases) = try quantCompanions(
+            of: sourceName, reportedAs: destinationName, registry: registry)
+        let spec = IndexLoader.quantSpec(forTensor: sourceName, meta: meta)
+        let logical = try logicalShape(forPackedSource: weight.shape,
+                                       scalesShape: scales.shape)
+        return ResidentBlueprint(
+            name: destinationName,
+            dtype: 0,
+            logicalShape4: try padTo4(logical),
+            quantSpec: spec,
+            weightSlices: [SourceSlice(whole: weight)],
+            scaleSlices: [SourceSlice(whole: scales)],
+            biasSlices: [SourceSlice(whole: biases)],
+            computed: nil, computedSizes: nil)
+    }
+
+    private static func quantCompanions(
+        of sourceName: String,
+        reportedAs name: String,
+        registry: [String: SourceTensor]
+    ) throws -> (scales: SourceTensor, biases: SourceTensor) {
+        let base = String(sourceName.dropLast(".weight".count))
+        guard let scales = registry[base + ".scales"] else {
+            throw RepackError.missingScalesCompanion(name: name)
+        }
+        guard let biases = registry[base + ".biases"] else {
+            throw RepackError.missingBiasesCompanion(name: name)
+        }
+        if scales.dtype != .bf16 || biases.dtype != .bf16 {
+            throw RepackError.dtypeMismatch(name: name,
+                detail: "expected BF16 scales/biases, got \(scales.dtype)/\(biases.dtype)")
+        }
+        return (scales, biases)
+    }
+
+    // MARK: - Kimi resident fusions
+
+    /// Rewrites the sorted Kimi source-name list into destination blueprints:
+    /// KDA q/k/v and their convs row-concatenate into the engine's fused
+    /// `linear_attn.in_proj_qkv` / `linear_attn.conv1d` layouts (q, k, v
+    /// order), `b_proj` renames to `linear_attn.in_proj_b`, and MLA
+    /// `kv_b_proj` splits into `embed_q` (computed) + `unembed_out` (sliced).
+    /// Everything else passes through under its own prefixed name.
+    private static func kimiResidentBlueprints(
+        sortedNames: [String],
+        registry: [String: SourceTensor],
+        meta: IndexLoader.SourceMetadata,
+        arch: ArchInfo
+    ) throws -> [ResidentBlueprint] {
+        var consumed: Set<String> = []
+        var blueprints: [ResidentBlueprint] = []
+        blueprints.reserveCapacity(sortedNames.count)
+
+        func layerKind(_ name: String) -> UInt8? {
+            guard let layer = layerIndex(in: name),
+                  arch.fullAttentionLayerMask.indices.contains(layer) else {
+                return nil
+            }
+            return arch.fullAttentionLayerMask[layer]
+        }
+
+        for name in sortedNames {
+            if consumed.contains(name) { continue }
+            let kind = layerKind(name)
+            if kind == 2, name.hasSuffix(".self_attn.q_proj.weight") {
+                blueprints.append(try kimiFusedQKVBlueprint(
+                    qName: name, registry: registry, meta: meta,
+                    consumed: &consumed))
+                continue
+            }
+            if kind == 2, name.hasSuffix(".self_attn.q_conv.conv.weight") {
+                blueprints.append(try kimiFusedConvBlueprint(
+                    qName: name, registry: registry, consumed: &consumed))
+                continue
+            }
+            if kind == 2, name.hasSuffix(".self_attn.b_proj.weight") {
+                blueprints.append(try identityBlueprint(
+                    sourceName: name,
+                    destinationName: residentDestinationName(
+                        name.replacingOccurrences(
+                            of: ".self_attn.b_proj.",
+                            with: ".linear_attn.in_proj_b."),
+                        family: arch.family),
+                    registry: registry, meta: meta))
+                continue
+            }
+            if kind == 3, name.hasSuffix(".self_attn.kv_b_proj.weight") {
+                blueprints.append(contentsOf: try kimiKVBSplitBlueprints(
+                    kvbName: name, registry: registry, meta: meta, arch: arch))
+                continue
+            }
+            blueprints.append(try identityBlueprint(
+                sourceName: name,
+                destinationName: residentDestinationName(name, family: arch.family),
+                registry: registry, meta: meta))
+        }
+        return blueprints
+    }
+
+    private static func kimiFusedQKVBlueprint(
+        qName: String,
+        registry: [String: SourceTensor],
+        meta: IndexLoader.SourceMetadata,
+        consumed: inout Set<String>
+    ) throws -> ResidentBlueprint {
+        let destinationName = residentDestinationName(
+            qName.replacingOccurrences(of: ".self_attn.q_proj.",
+                                       with: ".linear_attn.in_proj_qkv."),
+            family: .kimiLinear48b)
+        var weightSlices: [SourceSlice] = []
+        var scaleSlices: [SourceSlice] = []
+        var biasSlices: [SourceSlice] = []
+        var totalRows: UInt64 = 0
+        var columns: UInt64 = 0
+        var spec: QuantSpec?
+        for proj in ["q_proj", "k_proj", "v_proj"] {
+            let sourceName = qName.replacingOccurrences(
+                of: ".self_attn.q_proj.", with: ".self_attn.\(proj).")
+            guard let weight = registry[sourceName], weight.dtype == .u32,
+                  weight.shape.count == 2 else {
+                throw RepackError.shapeMismatch(name: sourceName,
+                    detail: "expected a quantized rank-2 KDA \(proj) to fuse")
+            }
+            let (scales, biases) = try quantCompanions(
+                of: sourceName, reportedAs: destinationName, registry: registry)
+            let logical = try logicalShape(forPackedSource: weight.shape,
+                                           scalesShape: scales.shape)
+            let projSpec = IndexLoader.quantSpec(forTensor: sourceName, meta: meta)
+            if columns == 0 { columns = logical[1] }
+            if let spec, (spec != projSpec || columns != logical[1]) {
+                throw RepackError.shapeMismatch(name: sourceName,
+                    detail: "KDA q/k/v disagree on quantization or width; cannot fuse")
+            }
+            spec = projSpec
+            totalRows += logical[0]
+            weightSlices.append(SourceSlice(whole: weight))
+            scaleSlices.append(SourceSlice(whole: scales))
+            biasSlices.append(SourceSlice(whole: biases))
+            consumed.insert(sourceName)
+        }
+        return ResidentBlueprint(
+            name: destinationName,
+            dtype: 0,
+            logicalShape4: try padTo4([totalRows, columns]),
+            quantSpec: spec,
+            weightSlices: weightSlices,
+            scaleSlices: scaleSlices,
+            biasSlices: biasSlices,
+            computed: nil, computedSizes: nil)
+    }
+
+    private static func kimiFusedConvBlueprint(
+        qName: String,
+        registry: [String: SourceTensor],
+        consumed: inout Set<String>
+    ) throws -> ResidentBlueprint {
+        let destinationName = residentDestinationName(
+            qName.replacingOccurrences(of: ".self_attn.q_conv.conv.",
+                                       with: ".linear_attn.conv1d."),
+            family: .kimiLinear48b)
+        var slices: [SourceSlice] = []
+        var channels: UInt64 = 0
+        var tail: [UInt64] = []
+        for conv in ["q_conv", "k_conv", "v_conv"] {
+            let sourceName = qName.replacingOccurrences(
+                of: ".self_attn.q_conv.", with: ".self_attn.\(conv).")
+            guard let weight = registry[sourceName], weight.dtype == .bf16,
+                  weight.shape.count == 3 else {
+                throw RepackError.shapeMismatch(name: sourceName,
+                    detail: "expected a BF16 rank-3 KDA \(conv) to fuse")
+            }
+            let weightTail = Array(weight.shape.dropFirst())
+            if tail.isEmpty { tail = weightTail }
+            guard weightTail == tail else {
+                throw RepackError.shapeMismatch(name: sourceName,
+                    detail: "KDA convs disagree on kernel shape; cannot fuse")
+            }
+            channels += weight.shape[0]
+            slices.append(SourceSlice(whole: weight))
+            consumed.insert(sourceName)
+        }
+        return ResidentBlueprint(
+            name: destinationName,
+            dtype: 1,
+            logicalShape4: try padTo4([channels] + tail),
+            quantSpec: nil,
+            weightSlices: slices,
+            scaleSlices: [], biasSlices: [],
+            computed: nil, computedSizes: nil)
+    }
+
+    static let kimiEmbedQBits = 8
+
+    private static func kimiKVBSplitBlueprints(
+        kvbName: String,
+        registry: [String: SourceTensor],
+        meta: IndexLoader.SourceMetadata,
+        arch: ArchInfo
+    ) throws -> [ResidentBlueprint] {
+        guard let weight = registry[kvbName], weight.dtype == .u32,
+              weight.shape.count == 2 else {
+            throw RepackError.shapeMismatch(name: kvbName,
+                detail: "expected a quantized rank-2 kv_b_proj to split")
+        }
+        let (scales, biases) = try quantCompanions(
+            of: kvbName, reportedAs: kvbName, registry: registry)
+        let spec = IndexLoader.quantSpec(forTensor: kvbName, meta: meta)
+        let heads = UInt64(arch.numHeads)
+        let nope = UInt64(arch.mlaQKNopeDim)
+        let vDim = UInt64(arch.mlaVHeadDim)
+        let latent = UInt64(arch.mlaKVLoraRank)
+        let group = UInt64(meta.baseGroupSize)
+        let logical = try logicalShape(forPackedSource: weight.shape,
+                                       scalesShape: scales.shape)
+        guard logical == [heads * (nope + vDim), latent],
+              latent.isMultiple(of: group),
+              nope.isMultiple(of: group),
+              latent.isMultiple(of: UInt64(32 / spec.bits)) else {
+            throw RepackError.shapeMismatch(name: kvbName,
+                detail: "kv_b_proj \(logical) does not split at "
+                    + "heads \(heads), nope \(nope), v \(vDim), latent \(latent)")
+        }
+
+        let weightRowBytes = latent * UInt64(spec.bits) / 8
+        let companionRowBytes = latent / group * 2
+        var unembedWeights: [SourceSlice] = []
+        var unembedScales: [SourceSlice] = []
+        var unembedBiases: [SourceSlice] = []
+        for head in 0..<heads {
+            let firstVRow = head * (nope + vDim) + nope
+            unembedWeights.append(SourceSlice(
+                tensor: weight,
+                offset: firstVRow * weightRowBytes,
+                size: vDim * weightRowBytes))
+            unembedScales.append(SourceSlice(
+                tensor: scales,
+                offset: firstVRow * companionRowBytes,
+                size: vDim * companionRowBytes))
+            unembedBiases.append(SourceSlice(
+                tensor: biases,
+                offset: firstVRow * companionRowBytes,
+                size: vDim * companionRowBytes))
+        }
+        let unembed = ResidentBlueprint(
+            name: residentDestinationName(
+                kvbName.replacingOccurrences(of: ".kv_b_proj.",
+                                             with: ".unembed_out."),
+                family: .kimiLinear48b),
+            dtype: 0,
+            logicalShape4: try padTo4([heads * vDim, latent]),
+            quantSpec: spec,
+            weightSlices: unembedWeights,
+            scaleSlices: unembedScales,
+            biasSlices: unembedBiases,
+            computed: nil, computedSizes: nil)
+
+        let embedRows = heads * latent
+        let embedBits = UInt64(Self.kimiEmbedQBits)
+        let embed = ResidentBlueprint(
+            name: residentDestinationName(
+                kvbName.replacingOccurrences(of: ".kv_b_proj.",
+                                             with: ".embed_q."),
+                family: .kimiLinear48b),
+            dtype: 0,
+            logicalShape4: try padTo4([embedRows, nope]),
+            quantSpec: QuantSpec(bits: Self.kimiEmbedQBits),
+            weightSlices: [], scaleSlices: [], biasSlices: [],
+            computed: .kimiEmbedQ(weight: weight, scales: scales,
+                                  biases: biases, heads: Int(heads),
+                                  nopeDim: Int(nope), vDim: Int(vDim),
+                                  latentDim: Int(latent),
+                                  groupSize: Int(group)),
+            computedSizes: (
+                weight: embedRows * nope * embedBits / 8,
+                scale: embedRows * (nope / group) * 2,
+                bias: embedRows * (nope / group) * 2))
+        return [embed, unembed]
     }
 
     // MARK: - Layer planning

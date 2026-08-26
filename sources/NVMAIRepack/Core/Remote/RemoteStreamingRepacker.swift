@@ -228,6 +228,12 @@ public final class RemoteStreamingRepacker {
                                           arch: snapshot.arch,
                                           shardHeaders: snapshot.shardHeaders,
                                           outputDir: paths.partialDirectory)
+        guard plan.resident.entries.allSatisfy({ $0.computed == nil }) else {
+            throw RepackError.configurationInvalid(
+                detail: "computed resident tensors require a local snapshot "
+                    + "import (--input-snapshot); the remote installer only "
+                    + "streams byte ranges")
+        }
         let rangePlan = try RangeCopyPlanner.plan(repackPlan: plan,
                                                   rangeChunkBytes: options.rangeChunkBytes,
                                                   layoutMode: "identity",
@@ -973,6 +979,10 @@ public extension RemoteStreamingRepacker {
                 },
                 commit: { _ in })
 
+            try ComputedResidentMaterializer.materialize(
+                plan: plan,
+                snapshotDirectory: local.inputSnapshotDir,
+                residentPath: plan.resident.path)
             try recordOutputFile(relativePath: "model_weights.bin",
                                  path: plan.resident.path,
                                  progress: progress)

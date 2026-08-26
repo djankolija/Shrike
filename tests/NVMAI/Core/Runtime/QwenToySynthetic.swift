@@ -184,9 +184,8 @@ enum QwenToySynthetic {
                 biasOffset: biasOffset,
                 biasSize: spec.biasBytes,
                 quantSpec: nil,
-                sourceWeight: ModelLoaderTests.dummySource(spec.name),
-                sourceScales: nil,
-                sourceBiases: nil))
+                copies: [],
+                computed: nil))
             // Advance past this tensor's data, aligned to 4 bytes.
             let tensorSize = spec.weightBytes + spec.scaleBytes + spec.biasBytes
             payloadCursor = weightOffset + tensorSize
@@ -549,9 +548,8 @@ enum QwenToySynthetic {
                 biasOffset: biasOffset,
                 biasSize: spec.biasBytes,
                 quantSpec: nil,
-                sourceWeight: ModelLoaderTests.dummySource(spec.name),
-                sourceScales: nil,
-                sourceBiases: nil))
+                copies: [],
+                computed: nil))
             let tensorSize = spec.weightBytes + spec.scaleBytes + spec.biasBytes
             payloadCursor = weightOffset + tensorSize
         }

@@ -546,15 +546,32 @@ enum SyntheticSnapshot {
         for i in 0..<bytes.count { bytes[i] = UInt8(rng.next() & 0xFF) }
         tensors.append((name + ".weight", "U32", shape, bytes))
 
+        // Companions are finite BF16 values, not raw random bytes: random bit
+        // patterns include NaN/Inf, which would poison numeric checks that
+        // dequantize synthetic tensors.
         let groups = innerLogical / groupSize
         let companionShape = outerShape + [groups]
         let companionElems = companionShape.reduce(1, *)
-        var sb = [UInt8](repeating: 0, count: companionElems * 2)
-        for i in 0..<sb.count { sb[i] = UInt8(rng.next() & 0xFF) }
+        var sb = [UInt8]()
+        sb.reserveCapacity(companionElems * 2)
+        for _ in 0..<companionElems {
+            let half = bf16Bits(Float(1 + (rng.next() % 255)) / 128.0)
+            sb.append(UInt8(half & 0xFF))
+            sb.append(UInt8(half >> 8))
+        }
         tensors.append((name + ".scales", "BF16", companionShape, sb))
-        var bb = [UInt8](repeating: 0, count: companionElems * 2)
-        for i in 0..<bb.count { bb[i] = UInt8(rng.next() & 0xFF) }
+        var bb = [UInt8]()
+        bb.reserveCapacity(companionElems * 2)
+        for _ in 0..<companionElems {
+            let half = bf16Bits(Float(Int64(rng.next() % 255) - 127) / 256.0)
+            bb.append(UInt8(half & 0xFF))
+            bb.append(UInt8(half >> 8))
+        }
         tensors.append((name + ".biases", "BF16", companionShape, bb))
+    }
+
+    private static func bf16Bits(_ value: Float) -> UInt16 {
+        UInt16(truncatingIfNeeded: value.bitPattern >> 16)
     }
 
     private static func appendUnquantizedBF16(name: String, shape: [Int],
@@ -564,6 +581,236 @@ enum SyntheticSnapshot {
         var bytes = [UInt8](repeating: 0, count: elements * 2)
         for i in 0..<bytes.count { bytes[i] = UInt8(rng.next() & 0xFF) }
         tensors.append((name, "BF16", shape, bytes))
+    }
+
+    private static func appendUnquantizedF32(name: String, shape: [Int],
+                                             into tensors: inout [(String, String, [Int], [UInt8])],
+                                             rng: inout SplitMix64) {
+        let elements = shape.reduce(1, *)
+        var bytes = [UInt8](repeating: 0, count: elements * 4)
+        for element in 0..<elements {
+            // Small finite values keep F32 payloads NaN-free for references.
+            var value = Float(Int64(rng.next() & 0xFF) - 128) / 64.0
+            withUnsafeBytes(of: &value) { raw in
+                for (i, b) in raw.enumerated() { bytes[element * 4 + i] = b }
+            }
+        }
+        tensors.append((name, "F32", shape, bytes))
+    }
+
+    // MARK: - Kimi-Linear variant
+
+    /// Tiny kimi_linear-shaped architecture: five layers — four KDA and one
+    /// MLA (1-indexed layer 4) — with a dense layer 0, four routed experts
+    /// behind an 8-bit sigmoid router, and one ungated shared expert.
+    struct KimiArch {
+        let hidden: Int = 64
+        let denseIntermediate: Int = 128
+        let moeIntermediate: Int = 64
+        let numHeads: Int = 2
+        let vocab: Int = 256
+        let numLayers: Int = 5
+        let numExperts: Int = 4
+        let topK: Int = 2
+        let groupSize: Int = 64
+        let linearHeads: Int = 2
+        let linearHeadDim: Int = 32
+        let convKernel: Int = 4
+        let lowRank: Int = 64
+        let kvLoraRank: Int = 64
+        let qkNope: Int = 64
+        let qkRope: Int = 64
+        let vHeadDim: Int = 64
+        let kdaLayers1Indexed: [Int] = [1, 2, 3, 5]
+        let mlaLayers1Indexed: [Int] = [4]
+        var kdaDim: Int { linearHeads * linearHeadDim }
+    }
+
+    static func buildKimiLinear(at dir: String,
+                                weightBits: Int = 4,
+                                seed: UInt64 = 0x4B12_11FE_A123_0007) throws -> Snapshot {
+        precondition([4, 8].contains(weightBits))
+        try? FileManager.default.removeItem(atPath: dir)
+        try FileManager.default.createDirectory(atPath: dir,
+                                                withIntermediateDirectories: true)
+
+        let arch = KimiArch()
+        var rng = SplitMix64(seed: seed)
+        var tensors: [(String, String, [Int], [UInt8])] = []
+
+        appendQuantizedWeight(name: "model.embed_tokens",
+                              outerShape: [arch.vocab],
+                              innerLogical: arch.hidden, bits: weightBits,
+                              groupSize: arch.groupSize, into: &tensors, rng: &rng)
+        appendQuantizedWeight(name: "lm_head",
+                              outerShape: [arch.vocab],
+                              innerLogical: arch.hidden, bits: weightBits,
+                              groupSize: arch.groupSize, into: &tensors, rng: &rng)
+
+        for li in 0..<arch.numLayers {
+            let prefix = "model.layers.\(li)"
+            if arch.mlaLayers1Indexed.contains(li + 1) {
+                appendQuantizedWeight(
+                    name: prefix + ".self_attn.q_proj",
+                    outerShape: [arch.numHeads * (arch.qkNope + arch.qkRope)],
+                    innerLogical: arch.hidden, bits: weightBits,
+                    groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                appendQuantizedWeight(
+                    name: prefix + ".self_attn.kv_a_proj_with_mqa",
+                    outerShape: [arch.kvLoraRank + arch.qkRope],
+                    innerLogical: arch.hidden, bits: weightBits,
+                    groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                appendUnquantizedBF16(name: prefix + ".self_attn.kv_a_layernorm.weight",
+                                      shape: [arch.kvLoraRank], into: &tensors, rng: &rng)
+                appendQuantizedWeight(
+                    name: prefix + ".self_attn.kv_b_proj",
+                    outerShape: [arch.numHeads * (arch.qkNope + arch.vHeadDim)],
+                    innerLogical: arch.kvLoraRank, bits: weightBits,
+                    groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                appendQuantizedWeight(
+                    name: prefix + ".self_attn.o_proj",
+                    outerShape: [arch.hidden],
+                    innerLogical: arch.numHeads * arch.vHeadDim, bits: weightBits,
+                    groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            } else {
+                for proj in ["q_proj", "k_proj", "v_proj"] {
+                    appendQuantizedWeight(
+                        name: prefix + ".self_attn." + proj,
+                        outerShape: [arch.kdaDim],
+                        innerLogical: arch.hidden, bits: weightBits,
+                        groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                }
+                for conv in ["q_conv", "k_conv", "v_conv"] {
+                    appendUnquantizedBF16(name: prefix + ".self_attn.\(conv).conv.weight",
+                                          shape: [arch.kdaDim, arch.convKernel, 1],
+                                          into: &tensors, rng: &rng)
+                }
+                for (proj, rows, inner) in [("f_a_proj", arch.lowRank, arch.hidden),
+                                            ("f_b_proj", arch.kdaDim, arch.lowRank),
+                                            ("g_a_proj", arch.lowRank, arch.hidden),
+                                            ("g_b_proj", arch.kdaDim, arch.lowRank),
+                                            ("b_proj", arch.linearHeads, arch.hidden)] {
+                    appendQuantizedWeight(
+                        name: prefix + ".self_attn." + proj,
+                        outerShape: [rows], innerLogical: inner, bits: weightBits,
+                        groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                }
+                appendUnquantizedF32(name: prefix + ".self_attn.A_log",
+                                     shape: [1, 1, arch.linearHeads, 1],
+                                     into: &tensors, rng: &rng)
+                appendUnquantizedF32(name: prefix + ".self_attn.dt_bias",
+                                     shape: [arch.kdaDim], into: &tensors, rng: &rng)
+                appendUnquantizedBF16(name: prefix + ".self_attn.o_norm.weight",
+                                      shape: [arch.linearHeadDim], into: &tensors, rng: &rng)
+                appendQuantizedWeight(
+                    name: prefix + ".self_attn.o_proj",
+                    outerShape: [arch.hidden],
+                    innerLogical: arch.kdaDim, bits: weightBits,
+                    groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            }
+
+            if li == 0 {
+                for (role, rows, inner) in [("gate_proj", arch.denseIntermediate, arch.hidden),
+                                            ("up_proj", arch.denseIntermediate, arch.hidden),
+                                            ("down_proj", arch.hidden, arch.denseIntermediate)] {
+                    appendQuantizedWeight(
+                        name: prefix + ".mlp." + role,
+                        outerShape: [rows], innerLogical: inner, bits: weightBits,
+                        groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                }
+            } else {
+                appendQuantizedWeight(
+                    name: prefix + ".mlp.gate",
+                    outerShape: [arch.numExperts], innerLogical: arch.hidden,
+                    bits: 8, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                appendUnquantizedBF16(name: prefix + ".mlp.e_score_correction_bias",
+                                      shape: [arch.numExperts], into: &tensors, rng: &rng)
+                for (role, rows, inner) in [("gate_proj", arch.moeIntermediate, arch.hidden),
+                                            ("up_proj", arch.moeIntermediate, arch.hidden),
+                                            ("down_proj", arch.hidden, arch.moeIntermediate)] {
+                    appendQuantizedWeight(
+                        name: prefix + ".mlp.switch_mlp." + role,
+                        outerShape: [arch.numExperts, rows], innerLogical: inner,
+                        bits: weightBits, groupSize: arch.groupSize,
+                        into: &tensors, rng: &rng)
+                    appendQuantizedWeight(
+                        name: prefix + ".mlp.shared_experts." + role,
+                        outerShape: [rows], innerLogical: inner, bits: weightBits,
+                        groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                }
+            }
+
+            appendUnquantizedBF16(name: prefix + ".input_layernorm.weight",
+                                  shape: [arch.hidden], into: &tensors, rng: &rng)
+            appendUnquantizedBF16(name: prefix + ".post_attention_layernorm.weight",
+                                  shape: [arch.hidden], into: &tensors, rng: &rng)
+        }
+        appendUnquantizedBF16(name: "model.norm.weight",
+                              shape: [arch.hidden], into: &tensors, rng: &rng)
+
+        let shardName = "model-00001-of-00001.safetensors"
+        let shardPath = (dir as NSString).appendingPathComponent(shardName)
+        try writeShard(path: shardPath, tensors: tensors)
+
+        var quantization: [String: Any] = [
+            "bits": weightBits, "group_size": arch.groupSize, "mode": "affine",
+        ]
+        for li in 1..<arch.numLayers {
+            quantization["model.layers.\(li).mlp.gate"] = [
+                "bits": 8, "group_size": arch.groupSize,
+            ]
+        }
+        let config: [String: Any] = [
+            "architectures": ["KimiLinearForCausalLM"],
+            "model_type": "kimi_linear",
+            "hidden_size": arch.hidden,
+            "intermediate_size": arch.denseIntermediate,
+            "moe_intermediate_size": arch.moeIntermediate,
+            "num_shared_experts": 1,
+            "num_attention_heads": arch.numHeads,
+            "num_key_value_heads": arch.numHeads,
+            "num_hidden_layers": arch.numLayers,
+            "num_experts": arch.numExperts,
+            "num_experts_per_token": arch.topK,
+            "first_k_dense_replace": 1,
+            "kv_lora_rank": arch.kvLoraRank,
+            "qk_nope_head_dim": arch.qkNope,
+            "qk_rope_head_dim": arch.qkRope,
+            "v_head_dim": arch.vHeadDim,
+            "vocab_size": arch.vocab,
+            "rope_theta": 10_000.0,
+            "rms_norm_eps": 1e-5,
+            "mla_use_nope": true,
+            "moe_renormalize": true,
+            "moe_router_activation_func": "sigmoid",
+            "routed_scaling_factor": 2.446,
+            "num_expert_group": 1,
+            "topk_group": 1,
+            "tie_word_embeddings": false,
+            "hidden_act": "silu",
+            "linear_attn_config": [
+                "full_attn_layers": arch.mlaLayers1Indexed,
+                "kda_layers": arch.kdaLayers1Indexed,
+                "head_dim": arch.linearHeadDim,
+                "num_heads": arch.linearHeads,
+                "short_conv_kernel_size": arch.convKernel,
+            ],
+            "quantization": quantization,
+        ]
+        try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath:
+                (dir as NSString).appendingPathComponent("config.json")))
+
+        let weightMap = Dictionary(uniqueKeysWithValues: tensors.map { ($0.0, shardName) })
+        let index: [String: Any] = [
+            "metadata": ["format": "mlx"],
+            "weight_map": weightMap,
+        ]
+        try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath:
+                (dir as NSString).appendingPathComponent("model.safetensors.index.json")))
+        try writeTokenizerStubs(at: dir)
+        return Snapshot(shardPath: shardPath)
     }
 
     // MARK: - Safetensors writer
