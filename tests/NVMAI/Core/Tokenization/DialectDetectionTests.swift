@@ -50,9 +50,17 @@ struct DialectDetectionTests {
     }
 
     @Test func harmonyMarkRoutesToHarmonyDialect() async throws {
+        // The patched ChatML fixture carries only the channel mark, so a load
+        // that demands the remaining Harmony tokens proves the routing.
         let dir = try patchedFixture(rename: ["<|im_start|>": "<|channel|>"])
         let error = await loadError(from: dir)
-        #expect(error?.contains("harmony") == true)
+        #expect(error?.contains("<|startoftext|>") == true)
+    }
+
+    @Test func harmonyFixtureLoadsAsHarmony() async throws {
+        let tok = try await GFTokenizer.load(
+            from: HarmonyTemplateTests.fixtureFolder())
+        #expect(tok.dialect == .harmony)
     }
 
     @Test func kimiMarkWinsOverChatML() async throws {

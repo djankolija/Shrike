@@ -69,9 +69,11 @@ struct GFByteLevelDecoderConfiguration: Sendable {
     /// Compatibility initializer for callers that construct `GFTokenizer`
     /// directly instead of loading its sidecar. Production loads always use
     /// `load(from:tokenizer:)`, which validates every added token.
-    static func knownChatMLTokens(tokenizer: any Tokenizer) -> Self {
+    static func knownFramingTokens(tokenizer: any Tokenizer) -> Self {
         let special = [
             "<|endoftext|>", "<|im_start|>", "<|im_end|>",
+            "<|startoftext|>", "<|return|>", "<|constrain|>", "<|channel|>",
+            "<|start|>", "<|end|>", "<|message|>", "<|call|>",
             "<|object_ref_start|>", "<|object_ref_end|>",
             "<|box_start|>", "<|box_end|>",
             "<|quad_start|>", "<|quad_end|>",

@@ -94,9 +94,9 @@ struct ChatMLDecoderTests {
     @Test("Nested tool-call start is malformed")
     func nestedToolCallStart() throws {
         let d = decoder()
-        _ = try d.consume(tokenID: tok.toolCallStartID, delta: "<tool_call>")
+        _ = try d.consume(tokenID: tok.toolCallStartID!, delta: "<tool_call>")
         #expect(throws: ToolCallParserError.malformed) {
-            _ = try d.consume(tokenID: tok.toolCallStartID, delta: "<tool_call>")
+            _ = try d.consume(tokenID: tok.toolCallStartID!, delta: "<tool_call>")
         }
     }
 
@@ -104,14 +104,14 @@ struct ChatMLDecoderTests {
     func endWithoutStart() {
         let d = decoder()
         #expect(throws: ToolCallParserError.malformed) {
-            _ = try d.consume(tokenID: tok.toolCallEndID, delta: "")
+            _ = try d.consume(tokenID: tok.toolCallEndID!, delta: "")
         }
     }
 
     @Test("Finish with an unterminated tool call is malformed")
     func unterminatedToolCall() throws {
         let d = decoder()
-        _ = try d.consume(tokenID: tok.toolCallStartID, delta: "<tool_call>")
+        _ = try d.consume(tokenID: tok.toolCallStartID!, delta: "<tool_call>")
         #expect(throws: ToolCallParserError.malformed) {
             try d.finish()
         }
@@ -139,7 +139,7 @@ struct ChatMLDecoderTests {
     @Test("Detokenizer tail inside an unfinished tool call is never visible")
     func toolTailIsSuppressed() throws {
         let d = decoder()
-        _ = try d.consume(tokenID: tok.toolCallStartID, delta: "<tool_call>")
+        _ = try d.consume(tokenID: tok.toolCallStartID!, delta: "<tool_call>")
         #expect(try d.consumeTail("hidden") == [])
         #expect(throws: ToolCallParserError.malformed) {
             try d.finish()

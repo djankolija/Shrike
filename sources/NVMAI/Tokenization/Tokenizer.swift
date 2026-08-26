@@ -71,16 +71,25 @@ public struct GFTokenizer: @unchecked Sendable {
     public let eosID: Int32
     public let padID: Int32
     public let endOfTurnID: Int32
-    public let toolCallStartID: Int32
-    public let toolCallEndID: Int32
-    public let toolResponseID: Int32
-    public let toolResponseEndID: Int32
-    /// Alias of the `<think>` / `</think>` markers.
+    /// ChatML `<tool_call>` / `</tool_call>` / `<tool_response>` markers.
+    /// Harmony frames tool calls with headers instead, so these are nil there.
+    public let toolCallStartID: Int32?
+    public let toolCallEndID: Int32?
+    public let toolResponseID: Int32?
+    public let toolResponseEndID: Int32?
+    /// Channel framing: ChatML `<think>` / `</think>`, Harmony `<|channel|>` /
+    /// `<|end|>`.
     public let channelStartID: Int32
     public let channelEndID: Int32
     /// ChatML `<think>` / `</think>` special-token IDs.
     public let thinkStartID: Int32?
     public let thinkEndID: Int32?
+    /// Harmony framing tokens; nil for other dialects.
+    public let harmonyStartID: Int32?
+    public let harmonyMessageID: Int32?
+    public let harmonyConstrainID: Int32?
+    public let harmonyCallID: Int32?
+    public let harmonyReturnID: Int32?
     public let stopTokenIDs: Set<Int32>
     public let vocabSize: Int
     public let dialect: ChatDialect
@@ -153,7 +162,7 @@ public struct GFTokenizer: @unchecked Sendable {
     ) throws {
         try self.init(
             tokenizer: tokenizer,
-            byteLevelDecoderConfiguration: .knownChatMLTokens(tokenizer: tokenizer),
+            byteLevelDecoderConfiguration: .knownFramingTokens(tokenizer: tokenizer),
             thinkingMode: thinkingMode)
     }
 
@@ -171,7 +180,12 @@ public struct GFTokenizer: @unchecked Sendable {
             try Self.validateStreamingDecoder(byteLevelDecoderConfiguration,
                                               tokenizer: tokenizer,
                                               resolved: resolved)
-        case .harmony, .kimi:
+        case .harmony:
+            resolved = try Self.resolveHarmonyTokens(tokenizer)
+            try Self.validateHarmonyStreamingDecoder(byteLevelDecoderConfiguration,
+                                                     tokenizer: tokenizer,
+                                                     resolved: resolved)
+        case .kimi:
             throw GFTokenizerError.unsupportedForDialect(
                 "\(dialect.rawValue) special-token resolution is not implemented yet")
         }
@@ -187,11 +201,18 @@ public struct GFTokenizer: @unchecked Sendable {
         self.channelEndID = resolved.channelEndID
         self.thinkStartID = resolved.thinkStartID
         self.thinkEndID = resolved.thinkEndID
+        self.harmonyStartID = resolved.harmonyStartID
+        self.harmonyMessageID = resolved.harmonyMessageID
+        self.harmonyConstrainID = resolved.harmonyConstrainID
+        self.harmonyCallID = resolved.harmonyCallID
+        self.harmonyReturnID = resolved.harmonyReturnID
         self.stopTokenIDs = resolved.stopTokenIDs
         self.vocabSize = resolved.vocabSize
         self.thinkingMode = thinkingMode
-        self.generationSuffix = Self.deriveGenerationSuffix(
-            tokenizer, thinkingEnabled: thinkingMode.isEnabled)
+        self.generationSuffix = dialect == .harmony
+            ? Self.harmonyGenerationSuffix
+            : Self.deriveGenerationSuffix(
+                tokenizer, thinkingEnabled: thinkingMode.isEnabled)
     }
 
     private struct ResolvedSpecialTokens {
@@ -199,14 +220,19 @@ public struct GFTokenizer: @unchecked Sendable {
         let eosID: Int32
         let padID: Int32
         let endOfTurnID: Int32
-        let toolCallStartID: Int32
-        let toolCallEndID: Int32
-        let toolResponseID: Int32
-        let toolResponseEndID: Int32
+        let toolCallStartID: Int32?
+        let toolCallEndID: Int32?
+        let toolResponseID: Int32?
+        let toolResponseEndID: Int32?
         let channelStartID: Int32
         let channelEndID: Int32
         let thinkStartID: Int32?
         let thinkEndID: Int32?
+        var harmonyStartID: Int32?
+        var harmonyMessageID: Int32?
+        var harmonyConstrainID: Int32?
+        var harmonyCallID: Int32?
+        var harmonyReturnID: Int32?
         let stopTokenIDs: Set<Int32>
         let vocabSize: Int
     }
@@ -216,7 +242,7 @@ public struct GFTokenizer: @unchecked Sendable {
         tokenizer: any Tokenizer,
         resolved: ResolvedSpecialTokens
     ) throws {
-        let literalMarkers: [(Int32, String)] = [
+        let literalMarkers: [(Int32?, String)] = [
             (resolved.toolCallStartID, "<tool_call>"),
             (resolved.toolCallEndID, "</tool_call>"),
             (resolved.toolResponseID, "<tool_response>"),
@@ -225,7 +251,8 @@ public struct GFTokenizer: @unchecked Sendable {
             (resolved.channelEndID, "</think>"),
         ]
         for (id, content) in literalMarkers {
-            guard let added = decoder.addedTokens[id],
+            guard let id,
+                  let added = decoder.addedTokens[id],
                   added.content == content, !added.special else {
                 throw GFTokenizerError.unsupportedForDialect(
                     "ChatML control token \(content) must be a literal ByteLevel barrier")
@@ -322,6 +349,72 @@ public struct GFTokenizer: @unchecked Sendable {
                            Self.paddedLogitsVocabSize))
     }
 
+    /// gpt-oss embedding/lm_head row count; the o200k_harmony vocab is dense
+    /// up to it, so no separate padding applies.
+    private static let harmonyLogitsVocabSize = 201_088
+
+    private static func resolveHarmonyTokens(
+        _ tokenizer: any Tokenizer
+    ) throws -> ResolvedSpecialTokens {
+        func id(_ token: String) throws -> Int32 {
+            guard let value = specialTokenID(tokenizer, token) else {
+                throw GFTokenizerError.missingSpecialToken(token)
+            }
+            return Int32(value)
+        }
+        let startOfText = try id("<|startoftext|>")
+        let endOfText = try id("<|endoftext|>")
+        let returnMark = try id(Self.harmonyReturnMark)
+        let constrain = try id(Self.harmonyConstrainMark)
+        let channel = try id(Self.harmonyChannelMark)
+        let start = try id(Self.harmonyStartMark)
+        let end = try id(Self.harmonyEndMark)
+        let message = try id(Self.harmonyMessageMark)
+        let call = try id(Self.harmonyCallMark)
+        return ResolvedSpecialTokens(
+            bosID: startOfText,
+            eosID: returnMark,
+            padID: endOfText,
+            endOfTurnID: end,
+            toolCallStartID: nil,
+            toolCallEndID: nil,
+            toolResponseID: nil,
+            toolResponseEndID: nil,
+            channelStartID: channel,
+            channelEndID: end,
+            thinkStartID: nil,
+            thinkEndID: nil,
+            harmonyStartID: start,
+            harmonyMessageID: message,
+            harmonyConstrainID: constrain,
+            harmonyCallID: call,
+            harmonyReturnID: returnMark,
+            stopTokenIDs: [returnMark, call],
+            vocabSize: max(Self.derivedVocabSize(tokenizer) ?? 0,
+                           Self.harmonyLogitsVocabSize))
+    }
+
+    /// Every Harmony framing token must be a special added token so the
+    /// streaming detokenizer filters it and the structured decoder sees an
+    /// empty delta for it.
+    private static func validateHarmonyStreamingDecoder(
+        _ decoder: GFByteLevelDecoderConfiguration,
+        tokenizer: any Tokenizer,
+        resolved: ResolvedSpecialTokens
+    ) throws {
+        let markers = [resolved.bosID, resolved.padID, resolved.eosID,
+                       resolved.endOfTurnID, resolved.channelStartID]
+            + [resolved.harmonyStartID, resolved.harmonyMessageID,
+               resolved.harmonyConstrainID, resolved.harmonyCallID].compactMap { $0 }
+        for id in markers {
+            guard decoder.addedTokens[id]?.special == true else {
+                let token = tokenizer.convertIdToToken(Int(id)) ?? "id \(id)"
+                throw GFTokenizerError.unsupportedForDialect(
+                    "Harmony control token \(token) must be marked special")
+            }
+        }
+    }
+
     /// Encode UTF-8 text to token IDs.
     ///
     /// ChatML has no BOS, so `addBOS` is a no-op; BOS is never prepended.
@@ -369,6 +462,9 @@ public struct GFTokenizer: @unchecked Sendable {
         public let toolCalls: [HistoricalToolCall]
         public let toolCallID: String?
         public let name: String?
+        /// Harmony analysis text replayed inside a tool loop
+        /// (`reasoning_content` on the wire); other dialects ignore it.
+        public let thinking: String?
 
         public init(role: Role, content: String) {
             self.role = role
@@ -376,18 +472,21 @@ public struct GFTokenizer: @unchecked Sendable {
             self.toolCalls = []
             self.toolCallID = nil
             self.name = nil
+            self.thinking = nil
         }
 
         public init(role: Role,
                     content: String?,
                     toolCalls: [HistoricalToolCall] = [],
                     toolCallID: String? = nil,
-                    name: String? = nil) {
+                    name: String? = nil,
+                    thinking: String? = nil) {
             self.role = role
             self.content = content
             self.toolCalls = toolCalls
             self.toolCallID = toolCallID
             self.name = name
+            self.thinking = thinking
         }
     }
 
@@ -397,6 +496,12 @@ public struct GFTokenizer: @unchecked Sendable {
     private static let imStartMark = "<|im_start|>"
     private static let imEndMark   = "<|im_end|>"
     private static let harmonyChannelMark = "<|channel|>"
+    private static let harmonyStartMark = "<|start|>"
+    private static let harmonyEndMark = "<|end|>"
+    private static let harmonyMessageMark = "<|message|>"
+    private static let harmonyConstrainMark = "<|constrain|>"
+    private static let harmonyCallMark = "<|call|>"
+    private static let harmonyReturnMark = "<|return|>"
     private static let kimiMiddleMark = "<|im_middle|>"
     /// Generation prompt with thinking disabled, matching the Jinja template's
     /// `add_generation_prompt` + `enable_thinking=false` branch. Used only
@@ -458,7 +563,8 @@ public struct GFTokenizer: @unchecked Sendable {
     public func applyChatTemplate(_ messages: [Message]) throws -> String {
         switch dialect {
         case .chatml: return try chatMLChatTemplate(messages)
-        case .harmony, .kimi:
+        case .harmony: return try harmonyChatTemplate(messages, tools: [])
+        case .kimi:
             throw GFTokenizerError.unsupportedForDialect(
                 "\(dialect.rawValue) chat rendering is not implemented yet")
         }
@@ -483,8 +589,326 @@ public struct GFTokenizer: @unchecked Sendable {
         return s
     }
 
+    // MARK: - Harmony rendering
+
+    /// Hand port of the gpt-oss `chat_template.jinja` (Harmony), byte-exact
+    /// against jinja2 renders of the real template — including its whitespace
+    /// artifacts in nested TypeScript types — except that object properties
+    /// render in sorted key order (JSON order does not survive decoding) and
+    /// `tojson` output is compact with sorted keys.
+    static let harmonyModelIdentity =
+        "You are ChatGPT, a large language model trained by OpenAI."
+    static let harmonyGenerationSuffix = "<|start|>assistant"
+    /// Template-source indentation retained by non-trimming Jinja tags inside
+    /// nested type renders.
+    private static let harmonyNestedTypeBreak = "\n                "
+
+    func harmonyChatTemplate(_ messages: [Message],
+                             tools: [FunctionDefinition],
+                             currentDate: String? = nil) throws -> String {
+        var s = Self.harmonySystemBlock(
+            hasTools: !tools.isEmpty,
+            currentDate: currentDate ?? Self.harmonyCurrentDate())
+        var loop = messages[...]
+        var developerInstructions: String?
+        if let first = loop.first, first.role == .system || first.role == .developer {
+            guard let content = first.content else {
+                throw GFTokenizerError.invalidChatTemplate(
+                    "system messages require content")
+            }
+            developerInstructions = content
+            loop = loop.dropFirst()
+        }
+        s += Self.harmonyDeveloperBlock(instructions: developerInstructions,
+                                        tools: tools)
+        var lastToolCallName: String?
+        for message in loop {
+            s += try Self.harmonyMessageBlock(
+                message, lastToolCallName: &lastToolCallName)
+        }
+        s += Self.harmonyGenerationSuffix
+        return s
+    }
+
+    private static func harmonyCurrentDate() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
+    private static func harmonySystemBlock(hasTools: Bool,
+                                           currentDate: String) -> String {
+        var s = "<|start|>system<|message|>"
+        s += Self.harmonyModelIdentity + "\n"
+        s += "Knowledge cutoff: 2024-06\n"
+        s += "Current date: " + currentDate + "\n\n"
+        s += "Reasoning: medium\n\n"
+        s += "# Valid channels: analysis, commentary, final. "
+        s += "Channel must be included for every message."
+        if hasTools {
+            s += "\nCalls to these tools must go to the commentary channel: 'functions'."
+        }
+        s += "<|end|>"
+        return s
+    }
+
+    private static func harmonyDeveloperBlock(
+        instructions: String?,
+        tools: [FunctionDefinition]
+    ) -> String {
+        let hasInstructions = !(instructions ?? "").isEmpty
+        guard hasInstructions || !tools.isEmpty else { return "" }
+        var s = "<|start|>developer<|message|>"
+        if hasInstructions, let instructions {
+            s += "# Instructions\n\n" + instructions
+        }
+        if !tools.isEmpty {
+            s += "\n\n# Tools\n\n" + Self.harmonyToolNamespace(tools)
+        }
+        s += "<|end|>"
+        return s
+    }
+
+    private static func harmonyMessageBlock(
+        _ message: Message,
+        lastToolCallName: inout String?
+    ) throws -> String {
+        switch message.role {
+        case .system, .developer:
+            throw GFTokenizerError.invalidChatTemplate("system message must be first")
+        case .user:
+            guard let content = message.content else {
+                throw GFTokenizerError.invalidChatTemplate("user messages require content")
+            }
+            return "<|start|>user<|message|>" + content + "<|end|>"
+        case .assistant:
+            return try harmonyAssistantBlock(
+                message, lastToolCallName: &lastToolCallName)
+        case .tool:
+            guard let name = lastToolCallName else {
+                throw GFTokenizerError.invalidChatTemplate(
+                    "tool message without a preceding assistant tool call")
+            }
+            guard let content = message.content else {
+                throw GFTokenizerError.invalidChatTemplate("tool messages require content")
+            }
+            return "<|start|>functions.\(name) to=assistant<|channel|>commentary<|message|>"
+                + (try JSONValue.string(content).encoded()) + "<|end|>"
+        }
+    }
+
+    private static func harmonyAssistantBlock(
+        _ message: Message,
+        lastToolCallName: inout String?
+    ) throws -> String {
+        for field in [message.content, message.thinking] {
+            guard let field else { continue }
+            if field.contains("<|channel|>analysis<|message|>")
+                || field.contains("<|channel|>final<|message|>") {
+                throw GFTokenizerError.invalidChatTemplate(
+                    "assistant analysis belongs in thinking and final text in "
+                        + "content, not inline <|channel|> markup")
+            }
+        }
+        guard !message.toolCalls.isEmpty else {
+            guard let content = message.content else {
+                throw GFTokenizerError.invalidChatTemplate(
+                    "assistant messages require content")
+            }
+            lastToolCallName = nil
+            return "<|start|>assistant<|channel|>final<|message|>" + content + "<|end|>"
+        }
+        guard message.toolCalls.count == 1 else {
+            throw GFTokenizerError.invalidChatTemplate(
+                "at most one tool call per assistant message")
+        }
+        let content = message.content ?? ""
+        let thinking = message.thinking ?? ""
+        if !content.isEmpty, !thinking.isEmpty {
+            throw GFTokenizerError.invalidChatTemplate(
+                "assistant tool-call messages take analysis in content or "
+                    + "thinking, not both")
+        }
+        var s = ""
+        let analysis = content.isEmpty ? thinking : content
+        if !analysis.isEmpty {
+            s += "<|start|>assistant<|channel|>analysis<|message|>" + analysis + "<|end|>"
+        }
+        let call = message.toolCalls[0]
+        s += "<|start|>assistant to=functions.\(call.name)"
+        s += "<|channel|>commentary json<|message|>"
+        s += try call.arguments.encoded()
+        s += "<|call|>"
+        lastToolCallName = call.name
+        return s
+    }
+
+    private static func harmonyToolNamespace(_ tools: [FunctionDefinition]) -> String {
+        var s = "## functions\n\nnamespace functions {\n\n"
+        for tool in tools {
+            s += "// " + tool.description + "\n"
+            s += "type " + tool.name + " = "
+            let parameters = tool.parameters.objectValue ?? [:]
+            let properties = parameters["properties"]?.objectValue ?? [:]
+            if !parameters.isEmpty, !properties.isEmpty {
+                s += "(_: {\n"
+                s += harmonyParameterLines(properties, requiredValue: parameters["required"])
+                s += "}) => any;\n\n"
+            } else {
+                s += "() => any;\n\n"
+            }
+        }
+        s += "} // namespace functions"
+        return s
+    }
+
+    private static func harmonyParameterLines(
+        _ properties: [String: JSONValue],
+        requiredValue: JSONValue?
+    ) -> String {
+        let required = harmonyRequiredNames(requiredValue)
+        var s = ""
+        let sorted = properties.sorted { $0.key < $1.key }
+        for (index, (name, spec)) in sorted.enumerated() {
+            let object = spec.objectValue ?? [:]
+            if case .string(let description) = object["description"], !description.isEmpty {
+                s += "// " + description + "\n"
+            }
+            s += name
+            if !required.contains(name) { s += "?" }
+            s += ": "
+            s += harmonyTypeScriptType(spec)
+            if let defaultValue = object["default"] {
+                if harmonyTruthy(object["enum"]) {
+                    s += ", // default: " + harmonyRawText(defaultValue)
+                } else if harmonyTruthy(object["oneOf"]) {
+                    s += "// default: " + harmonyRawText(defaultValue)
+                } else {
+                    s += ", // default: " + ((try? defaultValue.encoded()) ?? "null")
+                }
+            }
+            s += index == sorted.count - 1 ? "\n" : ",\n"
+        }
+        return s
+    }
+
+    private static func harmonyTypeScriptType(_ spec: JSONValue) -> String {
+        let object = spec.objectValue ?? [:]
+        let type = object["type"]
+        if case .string("array") = type {
+            return harmonyArrayType(object)
+        }
+        if case .array(let types) = type, !types.isEmpty {
+            return types.map(harmonyRawText).joined(separator: " | ")
+        }
+        if case .array(let variants) = object["oneOf"], !variants.isEmpty {
+            return harmonyOneOfType(variants)
+        }
+        switch type {
+        case .string("string"):
+            if case .array(let values) = object["enum"], !values.isEmpty {
+                return "\"" + values.map(harmonyRawText).joined(separator: "\" | \"") + "\""
+            }
+            return harmonyTruthy(object["nullable"]) ? "string | null" : "string"
+        case .string("number"), .string("integer"):
+            return "number"
+        case .string("boolean"):
+            return "boolean"
+        case .string("object"):
+            guard let properties = object["properties"]?.objectValue,
+                  !properties.isEmpty else { return "object" }
+            let sorted = properties.sorted { $0.key < $1.key }
+            let required = harmonyRequiredNames(object["required"])
+            var s = "{\n"
+            for (index, (name, propertySpec)) in sorted.enumerated() {
+                s += name
+                if !required.contains(name) { s += "?" }
+                s += ": " + Self.harmonyNestedTypeBreak
+                s += harmonyTypeScriptType(propertySpec)
+                if index != sorted.count - 1 { s += ", " }
+            }
+            return s + "}"
+        default:
+            return "any"
+        }
+    }
+
+    private static func harmonyArrayType(_ object: [String: JSONValue]) -> String {
+        let nullable = harmonyTruthy(object["nullable"]) ? " | null" : ""
+        guard harmonyTruthy(object["items"]), let items = object["items"] else {
+            return "any[]" + nullable
+        }
+        switch items.objectValue?["type"] {
+        case .string("string"): return "string[]" + nullable
+        case .string("number"), .string("integer"): return "number[]" + nullable
+        case .string("boolean"): return "boolean[]" + nullable
+        default:
+            let inner = harmonyTypeScriptType(items)
+            let collapsed = inner == "object | object" || inner.count > 50
+            return (collapsed ? "any[]" : inner + "[]") + nullable
+        }
+    }
+
+    private static func harmonyOneOfType(_ variants: [JSONValue]) -> String {
+        let hasObjectVariants = variants.contains {
+            $0.objectValue?["type"] == .string("object")
+        }
+        if hasObjectVariants, variants.count > 1 { return "any" }
+        var s = ""
+        for (index, variant) in variants.enumerated() {
+            s += harmonyTypeScriptType(variant)
+            let object = variant.objectValue ?? [:]
+            if case .string(let description) = object["description"], !description.isEmpty {
+                s += "// " + description
+            }
+            if let defaultValue = object["default"] {
+                s += "\n                    // default: "
+                    + ((try? defaultValue.encoded()) ?? "null")
+            }
+            if index != variants.count - 1 {
+                s += " | " + Self.harmonyNestedTypeBreak
+            }
+        }
+        return s
+    }
+
+    private static func harmonyRequiredNames(_ value: JSONValue?) -> Set<String> {
+        guard case .array(let names) = value else { return [] }
+        return Set(names.compactMap {
+            if case .string(let name) = $0 { return name }
+            return nil
+        })
+    }
+
+    /// Jinja string concatenation of a template value (`+ param_spec.default`):
+    /// strings pass through bare, everything else via its JSON text.
+    private static func harmonyRawText(_ value: JSONValue) -> String {
+        if case .string(let text) = value { return text }
+        return (try? value.encoded()) ?? "null"
+    }
+
+    /// Jinja truthiness for the template's `if` checks.
+    private static func harmonyTruthy(_ value: JSONValue?) -> Bool {
+        switch value {
+        case .none, .null: return false
+        case .bool(let value): return value
+        case .string(let value): return !value.isEmpty
+        case .array(let value): return !value.isEmpty
+        case .object(let value): return !value.isEmpty
+        case .integer(let value): return value != 0
+        case .unsignedInteger(let value): return value != 0
+        case .number(let value): return value != 0
+        case .decimal(let value): return value != 0
+        }
+    }
+
     public func encodeToolChat(messages: [Message],
                                tools: [FunctionDefinition]) throws -> [Int32] {
+        if dialect == .harmony {
+            return encode(try harmonyChatTemplate(messages, tools: tools),
+                          addBOS: false)
+        }
         guard tokenizer.hasChatTemplate else {
             throw GFTokenizerError.missingToolTemplate
         }

@@ -231,7 +231,7 @@ struct TokenizerTests {
             if !detok.pendingBytes.isEmpty { break }
         }
         #expect(!detok.pendingBytes.isEmpty)
-        sequence.append(tok.toolCallStartID)
+        sequence.append(tok.toolCallStartID!)
 
         detok = GFDetokenizer(tokenizer: tok)
         var streamed = ""
@@ -255,7 +255,7 @@ struct TokenizerTests {
     @Test("Structured markers must remain literal ByteLevel barriers")
     func structuredMarkerContract() {
         var added = tok.byteLevelDecoderConfiguration.addedTokens
-        added[tok.toolCallStartID] = .init(content: "<tool_call>", special: true)
+        added[tok.toolCallStartID!] = .init(content: "<tool_call>", special: true)
         let incompatible = GFByteLevelDecoderConfiguration(addedTokens: added)
         #expect(throws: GFTokenizerError.self) {
             _ = try GFTokenizer(

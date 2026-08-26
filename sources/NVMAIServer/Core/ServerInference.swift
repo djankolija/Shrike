@@ -95,10 +95,10 @@ struct StructuredOutputFailureDiagnostics: Equatable, Sendable {
         decodedCalls: Int,
         visibleBytes: Int,
         stopStringMatched: Bool,
-        toolStartID: Int32,
-        toolEndID: Int32,
-        toolResponseID: Int32,
-        toolResponseEndID: Int32
+        toolStartID: Int32?,
+        toolEndID: Int32?,
+        toolResponseID: Int32?,
+        toolResponseEndID: Int32?
     ) {
         let safePrefillCount = min(
             max(result.prefillTokens, 0),
@@ -962,6 +962,10 @@ public actor ServerModelSession: ServerInferenceBackend {
                         onEvent(.content(visible))
                     }
                     if stopMatcher.isStopped { shouldStop = true }
+                case .thinking:
+                    // Harmony analysis deltas; surfaced as reasoning_content
+                    // by the B5 server surface, dropped until then.
+                    break
                 case .toolCall(let call):
                     calls.append(call)
                     onEvent(.toolCall(call))
