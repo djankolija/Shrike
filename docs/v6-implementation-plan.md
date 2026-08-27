@@ -39,7 +39,13 @@ this plan only sequences it. Baseline already landed: `d7acd76` (tools-path
 - On-box probes: temperature 0, `NVMAI_CACHE_DIAG=1`, conditions recorded (model, thinking
   mode, `--max-context`, `--ram-budget`). Deploy is build-on-MacBook → binary to the mini's
   `nvmai-runtime/bin`; the pre-fix binary is preserved as `NVMAIServer.prefix-baseline`.
-- `tools/golden-baseline.sh --check 4` at deploy time for any runtime-path change.
+- Generation numerics unchanged at deploy time for any runtime-path change: pre-change
+  vs post-change `NVMAICLI`, same machine, same model, the golden-baseline contract
+  parameters (`--temperature 0 --seed 1234 --max-new 96`, the script's prompt),
+  byte-identical. The committed `tools/golden-baseline.sh` file is MacBook-provenance
+  and its 4-bit ornith now lives on the mini; the script's own scope note rules out
+  cross-GPU-family diffs, so the same-machine A/B replaces `--check 4` until the
+  committed baseline is re-homed (future work, not a sweep gate).
 - No hit-rate targets anywhere: retained thinking inflates numerator and denominator both.
   The objective is eliminating zero-cache turns, not moving fractions.
 
@@ -181,7 +187,8 @@ On-box, deploy per the constraints above. qwen36, thinking on, temperature 0, di
   next turn cold-prefills from there; no structural, no fuzz.
 - **Kimi canary:** profile unchanged from 2026-08-27.
 - **Harmony (gpt-oss):** caches for the first time — record its numbers as the new baseline.
-- `tools/golden-baseline.sh --check 4` green.
+- Generation numerics unchanged: pre-v6 vs v6 `NVMAICLI` on the mini, ornith15, the
+  golden-baseline contract parameters, byte-identical (see Global constraints).
 
 Any structural hit in these runs is a finding, not noise — stop and diagnose before Task 7.
 
