@@ -200,6 +200,18 @@ fall back on. `rg` confirms none of the five symbols remain under `sources/`.
 
 ## Task 8 (gated — not scheduled): gemma
 
-Only if gemma-4-26b-a4b is adopted: verify its shipped template against the gemma-4-12B-it
-read (spec: *Not established*), wire its conjunction boundary predicate into Task 2, and pass
-tool-call arguments as a string to defeat its `dictsort` (spec: *What this needs*).
+Only if gemma-4-26b-a4b is adopted — and the gate is **"does gemma have a cache path at
+all"**, not adoption alone. Gemma is 25-of-30 sliding-window layers (turbo's ArchConfig;
+verify on the real checkpoint), so the ring-backed storage that makes
+`supportsPartialRewind` refuse gpt-oss refuses gemma harder — normalization cannot run —
+while its template both drops reasoning (normalization mandatory) and exposes no
+`preserve_thinking`-style replay flag (`enable_thinking` gates generation, not history).
+With thinking on, that leaves no working cache path. Three options to cost at bring-up:
+disable the fp16 ring so SWA storage stays linear and rewindable
+(`KVCacheManager.swift:263`) — SWA layers then allocate against `maxContext` instead of
+their window, a real memory price on a 16 GB box, and no launch flag currently exposes
+the toggle; run gemma with thinking off, where the blob carries no reasoning to drop and
+pure prefix matching should carry it (Kimi's shape); or accept cold prefills. Then, as
+before: verify the shipped template against the gemma-4-12B-it read (spec: *Not
+established*), wire the conjunction boundary predicate into Task 2's scan, and pass
+tool-call arguments as a string to defeat `dictsort` (spec: *What this needs*).
