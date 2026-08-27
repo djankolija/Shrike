@@ -453,7 +453,14 @@ private enum KVNormalizationPlan: Sendable, Equatable {
     /// can rewind goes back to before prefilling the remainder. A settle's
     /// target and a degenerate turn's truncation are both sequences, so both
     /// arrive here. The target is what the next request arbitrates against.
-    case reconstruct(target: [Int32], rewindTo: Int)
+    ///
+    /// `announcement` is the line this plan owes only once something dispatches
+    /// it. A drop's `drop_emission` asserts the KV was cut to its target, which
+    /// stays false until the rewrite is in flight — and a turn whose publish is
+    /// refused has nothing to rewrite, so the plan is discarded and the line
+    /// would have described a truncation that never happened. A settle's line is
+    /// a record of the decision and is already out by the time it gets here.
+    case reconstruct(target: [Int32], rewindTo: Int, announcement: String?)
 
     /// What the KV holds at publish time. A pending reconstruction has not moved
     /// it yet, so its entry is published against the bytes the generation left.
@@ -1187,7 +1194,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             normalization: plan.completedNormalization)
         // Nothing suspends between the publish and this, so no request can see
         // the entry before the rewrite that will replace it is arbitrable.
-        if case .reconstruct(let target, let rewindTo) = plan, let publishedEntryID {
+        if case .reconstruct(let target, let rewindTo, let announcement) = plan,
+           let publishedEntryID {
+            if let announcement { cacheDiag(announcement) }
             startRewrite(target: target, rewindTo: rewindTo, entryID: publishedEntryID)
         }
         completed = true
@@ -1280,11 +1289,13 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// Drop this generation's suffix and emission, keeping the request history
     /// the next render still reproduces.
     ///
-    /// A cursor move where the runner can rewind. Where it cannot, the
-    /// truncation is a target like any other and the background rewrite reaches
-    /// it — a degenerate turn left standing keeps its blob under every later
-    /// boundary in the conversation, so every downstream settle would splice
-    /// onto bytes no render produces.
+    /// A cursor move where the runner can rewind, and the line goes out with it.
+    /// Where it cannot, the truncation is a target like any other and the
+    /// background rewrite reaches it — a degenerate turn left standing keeps its
+    /// blob under every later boundary in the conversation, so every downstream
+    /// settle would splice onto bytes no render produces — but the line then
+    /// belongs to whoever dispatches the plan, since the cut has not happened
+    /// yet and a refused publish means it never will.
     private func dropEmission(result: RawDecodeResult,
                               promptTokenCount: Int) -> KVNormalizationPlan {
         guard let target = KVRewrite.droppedPrefixLength(
@@ -1300,8 +1311,9 @@ public actor ServerModelSession: ServerInferenceBackend {
         let line = "NVMAI prompt_cache normalize kind=drop_emission "
             + "target=\(target) kv=\(result.kvPosition)"
         guard runner.supportsPartialRewind else {
-            cacheDiag(line)
-            return .reconstruct(target: dropped, rewindTo: target)
+            return .reconstruct(target: dropped,
+                                rewindTo: target,
+                                announcement: line)
         }
         do {
             try runner.rewind(to: target)
@@ -1361,7 +1373,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             // with an empty remainder to prefill.
             guard runner.supportsPartialRewind else {
                 cacheDiag(line)
-                return .reconstruct(target: settled, rewindTo: common)
+                return .reconstruct(target: settled,
+                                    rewindTo: common,
+                                    announcement: nil)
             }
             do {
                 try runner.rewind(to: common)
@@ -1372,7 +1386,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             return .done(.rewritten(settled))
         }
         cacheDiag(line)
-        return .reconstruct(target: settled, rewindTo: common)
+        return .reconstruct(target: settled, rewindTo: common, announcement: nil)
     }
 
     /// Run a reconstruction's forward pass between requests, so the response the
