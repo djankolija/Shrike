@@ -36,6 +36,12 @@ struct ChatMLDecoderTests {
         }
     }
 
+    private func thinkingText(_ events: [StructuredAssistantEvent]) -> String {
+        events.reduce(into: "") { result, event in
+            if case .thinking(let delta) = event { result += delta }
+        }
+    }
+
     @Test("Visible text streams through unchanged")
     func plainText() throws {
         let d = decoder()
@@ -45,13 +51,14 @@ struct ChatMLDecoderTests {
         #expect(!d.hasToolCalls)
     }
 
-    @Test("Think spans are suppressed, text after them is visible")
+    @Test("Think spans route to thinking events, text after them is visible")
     func thinkSuppression() throws {
         let d = decoder()
         let events = try feed("<think>\nhidden reasoning\n</think>\n\nvisible answer", into: d)
         let text = visibleText(events)
         #expect(!text.contains("hidden reasoning"))
         #expect(text.contains("visible answer"))
+        #expect(thinkingText(events).contains("hidden reasoning"))
         try d.finish()
     }
 
@@ -132,7 +139,7 @@ struct ChatMLDecoderTests {
         let d = decoder()
         #expect(try d.consumeTail("visible") == [.content("visible")])
         _ = try d.consume(tokenID: tok.thinkStartID!, delta: "<think>")
-        #expect(try d.consumeTail("hidden") == [])
+        #expect(try d.consumeTail("hidden") == [.thinking("hidden")])
         try d.finish()
     }
 
@@ -152,5 +159,72 @@ struct ChatMLDecoderTests {
         #expect(throws: ToolCallParserError.malformed) {
             _ = try d.consume(tokenID: tok.thinkStartID!, delta: "missing marker")
         }
+    }
+
+    private func modeDecoder(
+        _ mode: ModelThinkingMode
+    ) async throws -> (GFTokenizer, StructuredAssistantDecoder) {
+        let tokenizer = try await GFTokenizer.load(
+            from: ChatMLTemplateTests.fixtureFolder(), thinkingMode: mode)
+        return (tokenizer,
+                StructuredAssistantDecoder(tokenizer: tokenizer,
+                                           allowedTools: ["get_weather"],
+                                           idGenerator: { "call_fixed" }))
+    }
+
+    private func feed(_ text: String,
+                      into decoder: StructuredAssistantDecoder,
+                      tokenizer: GFTokenizer) throws -> [StructuredAssistantEvent] {
+        var events: [StructuredAssistantEvent] = []
+        var detok = GFDetokenizer(tokenizer: tokenizer)
+        for id in tokenizer.encode(text, addBOS: false) {
+            events += try decoder.consume(tokenID: id, delta: detok.push(id))
+        }
+        return events
+    }
+
+    /// The thinking-on prompt ends `…assistant\n<think>\n`, so generation
+    /// starts mid-thought and the opening marker is never generated — the
+    /// injected-prefix priming is what keeps the reasoning out of content.
+    @Test("Injected-open thinking routes reasoning to thinking, not content")
+    func injectedOpenThinking() async throws {
+        let (tokenizer, d) = try await modeDecoder(.on)
+        let events = try feed("hidden plan\n</think>\n\nvisible answer",
+                              into: d, tokenizer: tokenizer)
+        #expect(thinkingText(events).contains("hidden plan"))
+        #expect(!visibleText(events).contains("hidden plan"))
+        #expect(visibleText(events).contains("visible answer"))
+        try d.finish()
+    }
+
+    @Test("Injected-open thinking still parses a tool call after the close")
+    func injectedThinkingThenToolCall() async throws {
+        let (tokenizer, d) = try await modeDecoder(.on)
+        let events = try feed(
+            "plan\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>",
+            into: d, tokenizer: tokenizer)
+        #expect(thinkingText(events).contains("plan"))
+        #expect(d.hasToolCalls)
+        try d.finish()
+    }
+
+    @Test("Adaptive mode handles a model-opened think span")
+    func adaptiveGeneratedThink() async throws {
+        let (tokenizer, d) = try await modeDecoder(.adaptive)
+        let events = try feed("<think>\nweighing it\n</think>\n\nanswer",
+                              into: d, tokenizer: tokenizer)
+        #expect(thinkingText(events).contains("weighing it"))
+        #expect(!visibleText(events).contains("weighing it"))
+        #expect(visibleText(events).contains("answer"))
+        try d.finish()
+    }
+
+    @Test("Adaptive mode streams a think-free reply as plain content")
+    func adaptivePlainReply() async throws {
+        let (tokenizer, d) = try await modeDecoder(.adaptive)
+        let events = try feed("Just the answer.", into: d, tokenizer: tokenizer)
+        #expect(visibleText(events) == "Just the answer.")
+        #expect(thinkingText(events).isEmpty)
+        try d.finish()
     }
 }

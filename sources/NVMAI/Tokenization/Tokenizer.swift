@@ -29,12 +29,15 @@ public enum ChatDialect: String, Sendable {
     case kimi
 }
 
-/// The binary reasoning switch exposed by compatible Qwen/Ornith chat
-/// templates. Ornith 1.5 accepts `enable_thinking=true|false`; it does not
-/// define low/medium/high effort levels or a thinking-token budget.
+/// The reasoning switch for compatible Qwen/Ornith chat templates. `off`
+/// injects a closed empty think block, `on` injects an open `<think>` (the
+/// bundled template's `enable_thinking` branches), and `adaptive` injects
+/// nothing so the model decides per prompt. The models do not define
+/// low/medium/high effort levels or a thinking-token budget.
 public enum ModelThinkingMode: String, Codable, CaseIterable, Sendable {
     case off
     case on
+    case adaptive
 
     public var isEnabled: Bool { self == .on }
 
@@ -46,6 +49,7 @@ public enum ModelThinkingMode: String, Codable, CaseIterable, Sendable {
     ) -> ModelThinkingMode {
         switch environment["NVMAI_THINKING_MODE"]?.lowercased() {
         case "1", "on", "true", "yes": return .on
+        case "adaptive": return .adaptive
         default: return .off
         }
     }
@@ -106,9 +110,10 @@ public struct GFTokenizer: @unchecked Sendable {
 
     /// Generation-prompt suffix appended after the last message: derived from
     /// the tokenizer's bundled `chat_template.jinja`
-    /// (`add_generation_prompt` with thinking disabled) when available,
-    /// falling back to the pinned constant otherwise (R6).
-    private let generationSuffix: String
+    /// (`add_generation_prompt` per the thinking mode) when available,
+    /// falling back to the pinned constant otherwise (R6). Internal so the
+    /// structured decoder can prime itself with the injected prefix.
+    let generationSuffix: String
 
     @usableFromInline
     let tokenizer: any Tokenizer
@@ -228,8 +233,10 @@ public struct GFTokenizer: @unchecked Sendable {
         self.generationSuffix = switch dialect {
         case .harmony: Self.harmonyGenerationSuffix
         case .kimi: Self.kimiGenerationSuffix
-        case .chatml: Self.deriveGenerationSuffix(
-            tokenizer, thinkingEnabled: thinkingMode.isEnabled)
+        case .chatml: thinkingMode == .adaptive
+            ? Self.adaptiveChatMLGenerationSuffix
+            : Self.deriveGenerationSuffix(
+                tokenizer, thinkingEnabled: thinkingMode.isEnabled)
         }
     }
 
@@ -628,6 +635,11 @@ public struct GFTokenizer: @unchecked Sendable {
     /// block open so the model must reason before answering.
     private static let fallbackChatMLGenerationSuffixThinking =
         "<|im_start|>assistant\n<think>\n"
+    /// Adaptive thinking injects nothing after the role header — the model
+    /// decides whether to open a `<think>` block. Pinned rather than derived:
+    /// the template's `enable_thinking` boolean can only choose between the
+    /// two injected forms.
+    static let adaptiveChatMLGenerationSuffix = "<|im_start|>assistant\n"
 
     /// Derive the generation-prompt suffix from the tokenizer's bundled
     /// `chat_template.jinja` (`add_generation_prompt` with thinking per
@@ -1138,15 +1150,22 @@ public struct GFTokenizer: @unchecked Sendable {
                 ] as [String: any Sendable],
             ]
         }
-        return try tokenizer.applyChatTemplate(
+        let rendered = try tokenizer.applyChatTemplate(
             messages: upstreamMessages,
             chatTemplate: nil,
-            addGenerationPrompt: true,
+            // Adaptive appends the bare role header itself: the template's
+            // `enable_thinking` boolean can only pick an injected form, and
+            // the generation prompt is appended after the message loop, so
+            // the split render is a token-exact substitute (same property the
+            // suffix derivation probe relies on).
+            addGenerationPrompt: thinkingMode != .adaptive,
             truncation: false,
             maxLength: nil,
             tools: upstreamTools,
             additionalContext: ["enable_thinking": thinkingMode.isEnabled]
         ).map(Int32.init)
+        guard thinkingMode == .adaptive else { return rendered }
+        return rendered + encode(generationSuffix, addBOS: false)
     }
 
     public func encodeTextContinuation(userContent: String) -> [Int32] {

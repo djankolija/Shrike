@@ -138,12 +138,13 @@ struct InspectorView: View {
                 Picker("Thinking", selection: $model.runtimeOptions.thinkingMode) {
                     Text("Off").tag(ModelThinkingMode.off)
                     Text("On").tag(ModelThinkingMode.on)
+                    Text("Adaptive").tag(ModelThinkingMode.adaptive)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .fixedSize()
             }
-            Text("Ornith and Qwen expose a binary thinking switch; they do not define Low, Medium, or High effort levels. This setting applies after reloading the model.")
+            Text("Ornith and Qwen expose a thinking switch; Adaptive lets the model decide per prompt. They do not define Low, Medium, or High effort levels. This setting applies after reloading the model.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             LabeledContent("Temperature") {

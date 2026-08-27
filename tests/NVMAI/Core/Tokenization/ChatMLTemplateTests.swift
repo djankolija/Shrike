@@ -71,13 +71,43 @@ struct ChatMLTemplateTests {
         #expect(!prompt.hasSuffix("<think>\n\n</think>\n\n"))
     }
 
-    @Test("Environment compatibility resolves only the documented binary modes")
+    @Test("Environment compatibility resolves only the documented modes")
     func thinkingModeEnvironmentCompatibility() {
         #expect(ModelThinkingMode.resolved(environment: [:]) == .off)
         #expect(ModelThinkingMode.resolved(
             environment: ["NVMAI_THINKING_MODE": "on"]) == .on)
         #expect(ModelThinkingMode.resolved(
+            environment: ["NVMAI_THINKING_MODE": "adaptive"]) == .adaptive)
+        #expect(ModelThinkingMode.resolved(
             environment: ["NVMAI_THINKING_MODE": "medium"]) == .off)
+    }
+
+    @Test("Adaptive mode injects nothing after the role header")
+    func adaptiveModeGenerationPrompt() async throws {
+        let adaptive = try await GFTokenizer.load(
+            from: Self.fixtureFolder(), thinkingMode: .adaptive)
+        let prompt = try adaptive.applyChatTemplate([
+            Message(role: .user, content: "Hi"),
+        ])
+        #expect(adaptive.thinkingMode == .adaptive)
+        #expect(prompt.hasSuffix("<|im_start|>assistant\n"))
+        #expect(!prompt.hasSuffix("<think>\n"))
+        #expect(!prompt.hasSuffix("</think>\n\n"))
+    }
+
+    @Test("Adaptive tool chat appends the bare header after the jinja render")
+    func adaptiveToolChat() async throws {
+        let adaptive = try await GFTokenizer.load(
+            from: Self.fixtureFolder(), thinkingMode: .adaptive)
+        let ids = try adaptive.encodeToolChat(
+            messages: [Message(role: .user, content: "Weather?")],
+            tools: [GFTokenizer.FunctionDefinition(
+                name: "get_weather",
+                description: "Look up weather",
+                parameters: .object(["type": .string("object")]))])
+        let text = adaptive.decode(ids, skipSpecialTokens: false)
+        #expect(text.hasSuffix("<|im_start|>assistant\n"))
+        #expect(!text.hasSuffix("<think>\n"))
     }
 
     @Test("Multi-turn renders roles verbatim with assistant unrenamed")

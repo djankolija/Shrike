@@ -65,6 +65,27 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         self.tokenizer = tokenizer
         self.allowedTools = allowedTools
         self.idGenerator = idGenerator
+        if tokenizer.dialect == .chatml {
+            primeChatMLInjectedPrefix()
+        }
+    }
+
+    /// The ChatML generation prompt may inject think markup (`<think>` open
+    /// for thinking-on, a closed empty block for off, nothing for adaptive).
+    /// Feeding those prompt tokens through the same consume path makes the
+    /// decoder indifferent to whether a marker was injected or generated —
+    /// the stream simply starts prefilled. Prompt-echo events are discarded;
+    /// without this, injected-open thinking streamed as visible content.
+    private func primeChatMLInjectedPrefix() {
+        var detokenizer = GFDetokenizer(tokenizer: tokenizer)
+        for id in tokenizer.encode(tokenizer.generationSuffix, addBOS: false) {
+            guard let delta = try? detokenizer.push(id),
+                  (try? consumeChatML(tokenID: id, delta: delta)) != nil else {
+                assertionFailure("generation prompt failed to parse")
+                failed = true
+                return
+            }
+        }
     }
 
     public func consume(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
@@ -298,9 +319,9 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         }
     }
 
-    /// ChatML transitions: `<think>`…`</think>` suppress thought text, and
-    /// `<tool_call>`…`</tool_call>` buffer tokens for the Qwen parser. Everything
-    /// else streams as visible content.
+    /// ChatML transitions: `<think>`…`</think>` route thought text to
+    /// thinking events, and `<tool_call>`…`</tool_call>` buffer tokens for
+    /// the Qwen parser. Everything else streams as visible content.
     private func consumeChatML(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
         if tokenID == tokenizer.toolCallStartID {
             guard toolTokens == nil else {
@@ -350,7 +371,9 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             channel = .visible
             return []
         }
-        guard channel != .thought else { return [] }
+        guard channel != .thought else {
+            return delta.isEmpty ? [] : [.thinking(delta)]
+        }
         return delta.isEmpty ? [] : [.content(delta)]
     }
 
@@ -379,7 +402,10 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         if tokenizer.dialect == .kimi {
             return try consumeKimiText(text)
         }
-        guard toolTokens == nil, channel != .thought else { return [] }
+        guard toolTokens == nil else { return [] }
+        if channel == .thought {
+            return text.isEmpty ? [] : [.thinking(text)]
+        }
         return visibleEvents(text)
     }
 

@@ -125,8 +125,11 @@ extension Args {
       --concise                 Inject the per-quantization concise-mode
                                 system prompt (answers without preamble,
                                 filler, or closing codas).
-      --thinking <off|on>       Ornith/Qwen reasoning mode (default off).
-                                These models do not define effort levels.
+      --thinking <off|on|adaptive>
+                                Ornith/Qwen reasoning mode (default off).
+                                Adaptive injects nothing and lets the model
+                                decide. These models do not define effort
+                                levels.
       --quiet                   Suppress the timing footer.
       --help                    Show this message.
     """

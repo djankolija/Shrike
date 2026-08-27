@@ -73,9 +73,11 @@ public struct ServerArguments: Equatable, Sendable {
                              1024, 2048, or 4096 (default 4096 for supported
                              35B-A3B text models).
       --kv-bits <4|8|16>     KV-cache storage precision (default 8).
-      --thinking <off|on>    Ornith/Qwen reasoning mode (default off, or
-                             NVMAI_THINKING_MODE). The model does not expose
-                             low/medium/high effort levels.
+      --thinking <off|on|adaptive>
+                             Ornith/Qwen reasoning mode (default off, or
+                             NVMAI_THINKING_MODE). Adaptive injects nothing
+                             and lets the model decide. The model does not
+                             expose low/medium/high effort levels.
       --expert-cache-slots <count>
                              Routed-expert cache slots per layer: 8, 16, 24,
                              32, 64, 96, or 128 (default 64). Environment
@@ -230,7 +232,8 @@ public struct ServerArguments: Equatable, Sendable {
                 kvCachePrecision = parsed
             case "--thinking":
                 guard let parsed = ModelThinkingMode(rawValue: value) else {
-                    throw ServerArgumentError.invalid("--thinking must be off or on")
+                    throw ServerArgumentError.invalid(
+                        "--thinking must be off, on or adaptive")
                 }
                 thinkingMode = parsed
             case "--expert-cache-slots":

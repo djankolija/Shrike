@@ -936,8 +936,11 @@ public actor ServerModelSession: ServerInferenceBackend {
         config.stopStrings = []
 
         // Harmony always decodes structurally: without the decoder, analysis
-        // text would leak into visible content on tool-free requests.
+        // text would leak into visible content on tool-free requests. ChatML
+        // needs the same whenever thinking may occur — an injected-open or
+        // model-opened <think> must route to reasoning, not content.
         let decoder = needsToolTemplate || tokenizer.dialect == .harmony
+            || (tokenizer.dialect == .chatml && tokenizer.thinkingMode != .off)
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
                 allowedTools: Set(request.tools.map(\.name)))
