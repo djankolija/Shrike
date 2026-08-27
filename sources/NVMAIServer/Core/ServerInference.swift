@@ -826,6 +826,12 @@ public actor ServerModelSession: ServerInferenceBackend {
                         let tier = try await promptStateStore.restore(
                             entryID: entryID,
                             into: runner)
+                        // The snapshot seats the KV where the entry was
+                        // published; a partial-prefix salvage kept less than
+                        // that, so the cursor moves back to what still matches.
+                        if runner.continuationPosition != cached {
+                            try runner.rewind(to: cached)
+                        }
                         print(
                             "NVMAI prompt_cache hit tier=\(tier) "
                                 + "cached_tokens=\(cached) entry=\(entryID.uuidString.lowercased())")

@@ -760,6 +760,31 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         resetTransientState()
     }
 
+    /// Seat the continuation cursor on a shorter prefix of the KV already held.
+    /// Refused when state cannot follow the cursor back: recurrent GDN absorbed
+    /// every token it advanced over, and a wrapped ring stores position `p` at
+    /// slot `p % capacity`, so the rows a shorter window reads are already gone.
+    public func rewind(to position: Int) throws {
+        guard let kv else {
+            throw PrefillError.prefillCursorMismatch(
+                "rewind requires an initialized KV cache")
+        }
+        guard gdnState == nil else {
+            throw PrefillError.prefillCursorMismatch(
+                "recurrent state cannot rewind from \(kv.position) to \(position)")
+        }
+        let wrapped = (0..<cfg.numLayers).contains { layer in
+            let capacity = kv.ringCapacity(layer: layer)
+            return capacity > 0 && kv.position > capacity
+        }
+        guard !wrapped else {
+            throw PrefillError.prefillCursorMismatch(
+                "ring-backed KV has wrapped, cannot rewind to \(position)")
+        }
+        try kv.rewind(to: position)
+        resetTransientState()
+    }
+
     public func captureInferenceState(
         maximumBytes: Int? = nil
     ) throws -> InferenceStateSnapshot {

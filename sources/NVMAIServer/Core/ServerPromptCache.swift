@@ -27,18 +27,20 @@ struct ServerPromptCacheEntry: Codable, Sendable, Equatable {
     let domain: ServerPromptCacheDomain
     let inputMessages: [GFTokenizer.Message]
     let tools: [GFTokenizer.FunctionDefinition]
-    let assistantTurn: CachedAssistantTurn
+    let assistantTurn: CachedAssistantTurn?
     let kvBackedTokenIDs: [Int32]
     let uncommittedBoundaryTokenIDs: [Int32]
     let kvPosition: Int
 
+    /// The structural description goes with the bytes it described: a bridge
+    /// spliced onto a truncated blob would be a render nothing produced.
     func truncated(to position: Int) -> ServerPromptCacheEntry {
         ServerPromptCacheEntry(
             id: id,
             domain: domain,
-            inputMessages: inputMessages,
+            inputMessages: [],
             tools: tools,
-            assistantTurn: assistantTurn,
+            assistantTurn: nil,
             kvBackedTokenIDs: Array(kvBackedTokenIDs.prefix(position)),
             uncommittedBoundaryTokenIDs: uncommittedBoundaryTokenIDs,
             kvPosition: position)
@@ -240,12 +242,13 @@ struct ServerPromptCache: Sendable {
         tokenizer: GFTokenizer
     ) -> (effective: [Int32], cached: Int)? {
         let inputCount = entry.inputMessages.count
-        guard request.messages.count > inputCount + 1,
+        guard let assistantTurn = entry.assistantTurn,
+              request.messages.count > inputCount + 1,
               request.messages.prefix(inputCount)
                 .elementsEqual(entry.inputMessages),
               assistantMatches(
                 request.messages[inputCount],
-                entry.assistantTurn.message) else {
+                assistantTurn.message) else {
             NVMAICacheDiag.log(
                 "structural_reject inputCount=\(inputCount) "
                     + "reqMsgs=\(request.messages.count)")
@@ -255,17 +258,19 @@ struct ServerPromptCache: Sendable {
         NVMAICacheDiag.log(
             "structural inputCount=\(inputCount) reqMsgs=\(request.messages.count) "
                 + "continuation=\(continuation.count) "
-                + "entryCalls=\(entry.assistantTurn.message.toolCalls.count) "
-                + "stopReason=\(entry.assistantTurn.rawStopReason)")
+                + "entryCalls=\(assistantTurn.message.toolCalls.count) "
+                + "stopReason=\(assistantTurn.rawStopReason)")
 
-        if entry.assistantTurn.message.toolCalls.isEmpty {
+        if assistantTurn.message.toolCalls.isEmpty {
             return matchTextContinuation(
                 entry: entry,
+                assistantTurn: assistantTurn,
                 continuation: continuation,
                 tokenizer: tokenizer)
         }
         return matchToolContinuation(
             entry: entry,
+            assistantTurn: assistantTurn,
             request: request,
             continuation: continuation,
             tokenizer: tokenizer)
@@ -291,6 +296,7 @@ struct ServerPromptCache: Sendable {
 
     private func matchTextContinuation(
         entry: ServerPromptCacheEntry,
+        assistantTurn: CachedAssistantTurn,
         continuation: [GFTokenizer.Message],
         tokenizer: GFTokenizer
     ) -> (effective: [Int32], cached: Int)? {
@@ -310,8 +316,8 @@ struct ServerPromptCache: Sendable {
               continuation.allSatisfy({
                   $0.role != .tool && $0.toolCallID == nil && $0.toolCalls.isEmpty
               }),
-              entry.assistantTurn.rawStopReason == .endOfTurn
-                || entry.assistantTurn.rawStopReason == .maxTokens,
+              assistantTurn.rawStopReason == .endOfTurn
+                || assistantTurn.rawStopReason == .maxTokens,
               let renderedTail = try? tokenizer.applyChatTemplate(continuation)
         else {
             return nil
@@ -320,7 +326,7 @@ struct ServerPromptCache: Sendable {
         // the rendered tail (which includes the generation suffix).
         var bridge = [tokenizer.endOfTurnID]
             + tokenizer.encode("\n" + renderedTail, addBOS: false)
-        if entry.assistantTurn.rawStopReason == .maxTokens {
+        if assistantTurn.rawStopReason == .maxTokens {
             // S14: the uncommitted boundary token (the last generated token,
             // never committed to KV) must be replayed first — but apply the
             // same first-token dedup as the endOfTurn branch so a bridge that
@@ -336,12 +342,13 @@ struct ServerPromptCache: Sendable {
 
     private func matchToolContinuation(
         entry: ServerPromptCacheEntry,
+        assistantTurn: CachedAssistantTurn,
         request: ValidatedChatRequest,
         continuation: [GFTokenizer.Message],
         tokenizer: GFTokenizer
     ) -> (effective: [Int32], cached: Int)? {
-        let calls = entry.assistantTurn.message.toolCalls
-        guard entry.assistantTurn.rawStopReason == .toolCalls,
+        let calls = assistantTurn.message.toolCalls
+        guard assistantTurn.rawStopReason == .toolCalls,
               continuation.count == calls.count,
               zip(continuation, calls).allSatisfy({ message, call in
                   message.role == .tool
@@ -354,7 +361,7 @@ struct ServerPromptCache: Sendable {
         }
         guard let bridge = try? tokenizer.encodeToolResultContinuation(
             cachedMessages: entry.inputMessages,
-            assistant: entry.assistantTurn.message,
+            assistant: assistantTurn.message,
             incomingMessages: request.messages,
             tools: request.tools),
               bridge.first == entry.uncommittedBoundaryTokenIDs.first else {

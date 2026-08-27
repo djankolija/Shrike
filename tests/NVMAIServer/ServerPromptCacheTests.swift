@@ -568,6 +568,64 @@ struct ServerPromptCacheTests {
         #expect(entry.kvPosition == entry.kvBackedTokenIDs.count)
     }
 
+    @Test func aTruncatedEntryCanNoLongerServeAStructuralBridge() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let initial = request(messages: [
+            GFTokenizer.Message(role: .user, content: "first"),
+        ])
+        let initialPrompt = tokenizer.encode(
+            try tokenizer.applyChatTemplate(initial.messages),
+            addBOS: false)
+        let kvBacked = initialPrompt + tokenizer.encode("answer", addBOS: false)
+        var cache = ServerPromptCache()
+        cache.publish(
+            domain: domain,
+            request: initial,
+            content: "answer",
+            calls: [],
+            result: rawResult(
+                prompt: initialPrompt,
+                kvBacked: kvBacked,
+                boundary: tokenizer.endOfTurnID,
+                reason: .endOfTurn))
+
+        // A one-message request cannot continue structurally, so this salvages
+        // everything but the last token and truncates the entry there.
+        _ = cache.match(
+            domain: domain,
+            request: initial,
+            renderedPromptIDs: Array(kvBacked.dropLast()) + [Int32.max],
+            tokenizer: tokenizer)
+        let truncated = try #require(cache.entries.last)
+        #expect(truncated.kvBackedTokenIDs == Array(kvBacked.dropLast()))
+        #expect(truncated.inputMessages.isEmpty)
+        #expect(truncated.assistantTurn == nil)
+
+        let continuation = request(messages: initial.messages + [
+            GFTokenizer.Message(role: .assistant, content: "answer"),
+            GFTokenizer.Message(role: .user, content: "second"),
+        ])
+        let rendered = tokenizer.encode(
+            try tokenizer.applyChatTemplate(continuation.messages),
+            addBOS: false)
+        let match = cache.match(
+            domain: domain,
+            request: continuation,
+            renderedPromptIDs: rendered,
+            tokenizer: tokenizer)
+
+        guard case .hit(_, let effective, let cached) = match else {
+            Issue.record("expected a common-prefix salvage")
+            return
+        }
+        // Short of the truncated length, so the structural path was reached and
+        // refused rather than splicing a bridge onto bytes that are gone.
+        #expect(cached < truncated.kvPosition)
+        #expect(effective == rendered)
+        #expect(effective != truncated.kvBackedTokenIDs
+            + tokenizer.encodeTextContinuation(userContent: "second"))
+    }
+
     @Test func aRenderWithNoCommonPrefixMissesAndLeavesTheEntryWhole() async throws {
         let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         let initial = request(messages: [
