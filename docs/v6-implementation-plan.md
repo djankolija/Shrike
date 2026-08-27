@@ -210,8 +210,13 @@ With thinking on, that leaves no working cache path. Three options to cost at br
 disable the fp16 ring so SWA storage stays linear and rewindable
 (`KVCacheManager.swift:263`) — SWA layers then allocate against `maxContext` instead of
 their window, a real memory price on a 16 GB box, and no launch flag currently exposes
-the toggle; run gemma with thinking off, where the blob carries no reasoning to drop and
-pure prefix matching should carry it (Kimi's shape); or accept cold prefills. Then, as
+the toggle; run gemma with thinking off — text turns then carry unmodified (the template
+injects a closed empty thought block, so the blob holds no reasoning to drop) but tool
+loops still need the string-arguments lever below, since `dictsort` reorders arguments
+independently of thinking mode and NVMAI hands the template a mapping, so the string
+branch never fires without it (whether the reorder bites depends on the model's emission
+order — unknown, and the lever removes the need to find out); or accept cold prefills.
+Then, as
 before: verify the shipped template against the gemma-4-12B-it read (spec: *Not
 established*), wire the conjunction boundary predicate into Task 2's scan, and pass
 tool-call arguments as a string to defeat `dictsort` (spec: *What this needs*).
