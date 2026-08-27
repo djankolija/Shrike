@@ -46,6 +46,31 @@ struct QwenToolCallParserTests {
         #expect(call.argumentsJSON == #"{"unit":"c","city":"Paris"}"#)
     }
 
+    @Test("argumentsJSON embeds a structural value's own text, not a re-encoding")
+    func argumentsJSONKeepsStructuralValuesVerbatim() throws {
+        let call = try parse("""
+
+        <function=run_query>
+        <parameter=window>
+        {"start":"2026-09-01",  "end":"2026-09-07"}
+        </parameter>
+        <parameter=depths>
+        [1.5, 3.25]
+        </parameter>
+        <parameter=cursor>
+        null
+        </parameter>
+        <parameter=note>
+        a/b
+        </parameter>
+        </function>
+
+        """)
+        #expect(call.argumentsJSON == #"{"window":{"start":"2026-09-01",  "end":"2026-09-07"},"#
+            + #""depths":[1.5, 3.25],"cursor":null,"note":"a\/b"}"#)
+        #expect(call.arguments.objectValue?["cursor"] == .null)
+    }
+
     @Test("JSON values become typed, non-JSON stays string")
     func jsonAndStringValues() throws {
         let call = try parse("""

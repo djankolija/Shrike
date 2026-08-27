@@ -264,6 +264,34 @@ struct ChatMLTemplateTests {
         #expect(!text.contains("\"end\":\"2026-09-07\",\"start\""))
     }
 
+    /// The same call as the model writes it: parameters in non-sorted order, a
+    /// nested object whose members are also non-sorted and spaced, and an array
+    /// with interior spacing.
+    private static let emittedParameterBlock =
+        "<parameter=window>\n{\"start\":\"2026-09-01\",  \"end\":\"2026-09-07\"}\n</parameter>\n"
+        + "<parameter=depths>\n[1.5, 3.25]\n</parameter>\n"
+        + "<parameter=site>\nharbour\n</parameter>\n"
+
+    @Test("A tool call survives emission, parse and re-render byte for byte")
+    func toolCallRoundTripsFromEmissionToRender() throws {
+        let call = try QwenToolCallParser().parse(
+            "\n<function=plan_survey>\n" + Self.emittedParameterBlock + "</function>\n",
+            allowedTools: ["plan_survey"],
+            id: "call_1")
+        let ids = try tok.encodeToolChat(
+            messages: [
+                Message(role: .user, content: "Survey harbour."),
+                Message(role: .assistant, content: "", toolCalls: [
+                    .init(id: call.id, name: call.name, arguments: call.argumentsJSON),
+                ], thinking: "The first week."),
+                Message(role: .tool, content: "{\"ok\":true}", toolCallID: call.id),
+            ],
+            tools: [Self.surveyTool])
+        let text = tok.decode(ids, skipSpecialTokens: false)
+        #expect(text.contains("<tool_call>\n<function=plan_survey>\n"
+            + Self.emittedParameterBlock + "</function>\n</tool_call>"))
+    }
+
     @Test("Tool chat uses the same explicit thinking mode as text chat")
     func thinkingToolChatRendersJinja() async throws {
         let thinking = try await GFTokenizer.load(

@@ -101,15 +101,18 @@ public indirect enum JSONValue: Codable, Equatable, Sendable {
 
 extension JSONValue {
     /// Serialise key/value pairs in the given order, which `[String: JSONValue]`
-    /// cannot express.
-    public static func encodedObject(_ pairs: [(String, JSONValue)]) throws -> String {
+    /// cannot express, embedding each value's JSON text as the caller wrote it.
+    ///
+    /// The caller supplies that text so a value the model emitted can be
+    /// carried through whole: encoding a parsed value instead sorts nested
+    /// object keys, drops the source's spacing and normalises number lexemes,
+    /// none of which the KV holds.
+    public static func encodedObject(_ pairs: [(String, String)]) throws -> String {
         let encoder = JSONEncoder()
         var parts: [String] = []
-        for (key, value) in pairs {
+        for (key, valueText) in pairs {
             let keyData = try encoder.encode(key)
-            let valueData = try encoder.encode(value)
-            guard let keyText = String(data: keyData, encoding: .utf8),
-                  let valueText = String(data: valueData, encoding: .utf8) else {
+            guard let keyText = String(data: keyData, encoding: .utf8) else {
                 throw ToolCallParserError.malformed
             }
             parts.append("\(keyText):\(valueText)")

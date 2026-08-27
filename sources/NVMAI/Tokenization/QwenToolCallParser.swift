@@ -59,11 +59,11 @@ public struct QwenToolCallParser: Sendable {
             throw ToolCallParserError.unknownTool(name)
         }
 
-        var ordered: [(String, JSONValue)] = []
+        var ordered: [(String, String)] = []
         var arguments: [String: JSONValue] = [:]
         while !body.hasPrefix("</function>") {
-            let (key, value) = try parameter(&body)
-            ordered.append((key, value))
+            let (key, value, json) = try parameter(&body)
+            ordered.append((key, json))
             arguments[key] = value
         }
         body.removeFirst("</function>".count)
@@ -74,8 +74,9 @@ public struct QwenToolCallParser: Sendable {
         return ParsedToolCall(id: id,
                               name: name,
                               arguments: argumentsValue,
-                              // Emission order, not sorted: the re-rendered
-                              // history must reproduce the KV's bytes.
+                              // Emission order and emitted text, neither sorted
+                              // nor re-encoded: the re-rendered history must
+                              // reproduce the KV's bytes.
                               argumentsJSON: try JSONValue.encodedObject(ordered))
     }
 
@@ -99,7 +100,9 @@ public struct QwenToolCallParser: Sendable {
         return name
     }
 
-    private func parameter(_ body: inout Substring) throws -> (String, JSONValue) {
+    private func parameter(
+        _ body: inout Substring
+    ) throws -> (key: String, value: JSONValue, json: String) {
         guard body.hasPrefix("<parameter=") else {
             throw ToolCallParserError.malformed
         }
@@ -134,7 +137,18 @@ public struct QwenToolCallParser: Sendable {
         }
         let value = String(body[..<closeRange.lowerBound])
         body = body[closeRange.upperBound...]
-        return (key, parsedValue(value))
+        let parsed = parsedValue(value)
+        return (key, parsed, try encodedValue(value, parsed))
+    }
+
+    /// The JSON text the parameter carries on the wire. For anything but a
+    /// string that is the model's own lexeme, which is already valid JSON:
+    /// encoding the parsed value instead sorts nested object keys, drops the
+    /// source's spacing and normalises number lexemes, and the KV holds what
+    /// was emitted.
+    private func encodedValue(_ raw: String, _ value: JSONValue) throws -> String {
+        if case .string = value { return try value.encoded(sortedKeys: false) }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Handles `<parameter=k>\n</parameter>\n` where the single newline both
