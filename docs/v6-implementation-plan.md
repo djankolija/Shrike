@@ -245,6 +245,37 @@ bytes must not change), and confirm the settled render inherits the fix through 
 shared render path. If the raw-slice representation cannot pass Jinja's `is string`
 test, or a golden breaks in a way that reveals a real constraint, stop and report.
 
+## Task 6d (from the qwen36 matrix): degenerate turns reconstruct, and no branch declines silently
+
+- [ ] implemented, tests green, committed
+
+The matrix passed 6a and 6b but found the contagion the 6a ruling missed: a `finish=length`
+turn on a non-rewindable runner declines `dropEmission` silently, its blob (partial
+emission, retained reasoning) stays in KV and in its entry, and every DOWNSTREAM settle in
+that conversation then fails its splice check — also silently. One truncated turn poisons
+the conversation (measured: turns 2 and 3 both diverging at the truncation's k=23, four
+structural hits all truncated-rooted, zero in clean runs).
+
+**Contract, two halves:**
+1. **Degenerate becomes a target for the same rewrite engine.** `dropEmission`'s target —
+   the prompt minus the generation suffix, whose bytes are already settled-form (the
+   request's own render) — is reachable by reconstruction exactly like a settle's:
+   `forCompletion`'s degenerate arm becomes available when `supportsRewind || canRestore`,
+   and the drop defers to the background rewrite (restore best prefix snapshot / reset)
+   when it cannot rewind. The suffix byte-verification stays. Arbitration needs nothing:
+   the target is a byte sequence like any other.
+2. **Every chain-breaking decline names itself.** A `normalize kind=declined reason=` line
+   for: splice mismatch (`settledSequence` nil), render failure (the `try?` arms), target
+   past `maxContext`, and capability-degenerate declines. By-design-live outcomes
+   (`.toolCalls`, `emittedToolCalls`) stay silent — they are not chain breaks. And the
+   snapshot store logs evictions (`prompt_cache evict entry= bytes= reason=` at the
+   over-budget drop), since ~3 snapshots fit the 256 MiB default and eviction is currently
+   inferable only from a later `settle_reset reason=no_prefix_snapshot`.
+
+**Task 7's gate, restated against the measured run:** post-6d, the literal wording —
+structural fires zero times — must hold on the run-B shape (a mid-conversation
+`finish=length` turn) as well as the clean and tool-loop shapes.
+
 ## Task 7: deletions + final verification
 
 - [ ] deleted, probes re-pass, committed
