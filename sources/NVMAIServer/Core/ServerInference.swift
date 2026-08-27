@@ -1239,7 +1239,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             thoughtChannelClosed: thoughtChannelClosed,
             emittedToolCalls: emittedToolCalls,
             stopStringFiltered: stopStringFiltered,
-            supportsRewind: runner.supportsPartialRewind) {
+            supportsRewind: runner.supportsPartialRewind,
+            canRestore: canSnapshotForRestore) {
         case .none:
             return .done(.unchanged)
         case .dropEmission:
@@ -1335,17 +1336,26 @@ public actor ServerModelSession: ServerInferenceBackend {
     }
 
     /// Run a settle's forward pass between requests, so the response the
-    /// rewrite belongs to has already closed. Cancellation lands in a
-    /// `checkCancellation` or in `prefillChunked`'s catch, which resets the
-    /// runner: an aborted rewrite leaves no live KV it claims to describe, and
-    /// the entry published before it started is what the aborting request falls
-    /// back to.
+    /// rewrite belongs to has already closed. Cancelled before it seats
+    /// anything, it skips and leaves the KV as the generation left it; cancelled
+    /// after, it lands in a `checkCancellation` or in `prefillChunked`'s catch,
+    /// which resets the runner — an aborted rewrite then leaves no live KV it
+    /// claims to describe, and the entry published before it started is what
+    /// the aborting request falls back to.
     private func startRewrite(target: [Int32], rewindTo: Int, entryID: UUID) {
         pendingRewrite = PendingRewrite(
             target: target,
             task: Task { await self.runRewrite(target: target,
                                                rewindTo: rewindTo,
                                                entryID: entryID) })
+    }
+
+    /// Whether this session can build a restore chain at all: a store that is
+    /// present and whose budgets leave room for one snapshot. A store that can
+    /// hold nothing captures nothing, so every entry ends up unbacked and the
+    /// inventory is permanently empty — the same condition as having no store.
+    private var canSnapshotForRestore: Bool {
+        (promptStateStore?.maximumSnapshotBytes ?? 0) > 0
     }
 
     /// Every snapshot a settle could seat on. The entry under rewrite is not
@@ -1418,11 +1428,18 @@ public actor ServerModelSession: ServerInferenceBackend {
 
     private func runRewrite(target: [Int32], rewindTo: Int, entryID: UUID) async {
         defer { pendingRewrite = nil }
+        // Nothing has been seated, so the KV still holds what the generation
+        // left and the entry published against it still describes it exactly.
+        // Disowning that would cost the aborting request its live tier — and in
+        // single-prefix the whole cache — for work that never began.
+        guard !Task.isCancelled else {
+            print("NVMAI prompt_cache normalize kind=settle_skipped "
+                    + "reason=cancelled settled=\(target.count) "
+                    + "entry=\(entryID.uuidString.lowercased())")
+            return
+        }
         var lost = false
         do {
-            // Before anything is seated: a rewrite cancelled before it starts
-            // must not reset a runner it never needed to touch.
-            try Task.checkCancellation()
             let start = try await seatForRewrite(
                 KVReconstruction.plan(
                     supportsRewind: runner.supportsPartialRewind,

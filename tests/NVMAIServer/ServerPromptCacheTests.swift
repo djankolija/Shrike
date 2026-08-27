@@ -792,13 +792,19 @@ struct KVRewriteTests {
         .endOfTurn, .eos, .toolCalls, .maxTokens, .stopString, .external,
     ]
 
-    /// The spec's trigger table, once per rewind capability. The settle column
-    /// is the same either way — it names a sequence, and reconstruction reaches
-    /// one on any runner — while the degenerate column is not: dropping this
-    /// generation's emission is a truncation of the live KV and nothing else
-    /// expresses it.
+    /// Every capability a session can have, since 6a made the trigger depend on
+    /// two of them. The settle asks only that *some* mechanism reaches its
+    /// target, so a rewind or a store will do; the degenerate turn asks for the
+    /// rewind specifically. A session with neither is offered nothing at all —
+    /// its only remaining mechanism is a reset whose abort would take the cache
+    /// with it.
+    private static let everyCapability: [(supportsRewind: Bool, canRestore: Bool)] = [
+        (true, true), (true, false), (false, true), (false, false),
+    ]
+
     @Test func theTriggerIsTheSpecsTableOverEveryStopReasonAndCapability() throws {
-        let rewinding: [StopReason: (closed: KVRewrite, open: KVRewrite)] = [
+        typealias Row = (closed: KVRewrite, open: KVRewrite)
+        let rewinding: [StopReason: Row] = [
             .endOfTurn: (.settleLiveRegion, .dropEmission),
             .eos: (.settleLiveRegion, .dropEmission),
             .toolCalls: (.none, .none),
@@ -806,7 +812,7 @@ struct KVRewriteTests {
             .stopString: (.dropEmission, .dropEmission),
             .external: (.dropEmission, .dropEmission),
         ]
-        let reconstructing: [StopReason: (closed: KVRewrite, open: KVRewrite)] = [
+        let restoringOnly: [StopReason: Row] = [
             .endOfTurn: (.settleLiveRegion, .none),
             .eos: (.settleLiveRegion, .none),
             .toolCalls: (.none, .none),
@@ -814,39 +820,81 @@ struct KVRewriteTests {
             .stopString: (.none, .none),
             .external: (.none, .none),
         ]
-        #expect(rewinding.count == Self.everyStopReason.count)
-        #expect(reconstructing.count == Self.everyStopReason.count)
+        let neither: [StopReason: Row] = [
+            .endOfTurn: (.none, .none),
+            .eos: (.none, .none),
+            .toolCalls: (.none, .none),
+            .maxTokens: (.none, .none),
+            .stopString: (.none, .none),
+            .external: (.none, .none),
+        ]
+        // A rewind reaches the target with or without a store, so the two
+        // rewinding rows are the same table.
+        let tables: [[StopReason: Row]] = [rewinding, rewinding, restoringOnly, neither]
+        #expect(tables.count == Self.everyCapability.count)
+        for table in tables { #expect(table.count == Self.everyStopReason.count) }
         for reason in Self.everyStopReason {
-            for (supportsRewind, table) in [(true, rewinding), (false, reconstructing)] {
-                let row = try #require(table[reason])
+            for (index, capability) in Self.everyCapability.enumerated() {
+                let row = try #require(tables[index][reason])
                 #expect(KVRewrite.forCompletion(
                     reason: reason,
                     thoughtChannelClosed: true,
                     emittedToolCalls: false,
                     stopStringFiltered: false,
-                    supportsRewind: supportsRewind) == row.closed,
-                        "\(reason) closed rewind=\(supportsRewind)")
+                    supportsRewind: capability.supportsRewind,
+                    canRestore: capability.canRestore) == row.closed,
+                        "\(reason) closed \(capability)")
                 #expect(KVRewrite.forCompletion(
                     reason: reason,
                     thoughtChannelClosed: false,
                     emittedToolCalls: false,
                     stopStringFiltered: false,
-                    supportsRewind: supportsRewind) == row.open,
-                        "\(reason) open rewind=\(supportsRewind)")
+                    supportsRewind: capability.supportsRewind,
+                    canRestore: capability.canRestore) == row.open,
+                        "\(reason) open \(capability)")
             }
         }
+    }
+
+    /// The loss path 6a would otherwise open: with no rewind and no store, the
+    /// only mechanism left is reset-and-prefill-whole, and an abort takes the
+    /// live KV with it and leaves an entry no snapshot backs. Before 6a this
+    /// runner declined every rewrite; it still declines this one.
+    @Test func aSessionThatCanNeitherRewindNorSnapshotDeclinesTheSettle() {
+        for reason in Self.everyStopReason {
+            for closed in [true, false] {
+                #expect(KVRewrite.forCompletion(
+                    reason: reason,
+                    thoughtChannelClosed: closed,
+                    emittedToolCalls: false,
+                    stopStringFiltered: false,
+                    supportsRewind: false,
+                    canRestore: false) == KVRewrite.none,
+                        "\(reason) closed=\(closed)")
+            }
+        }
+        // A store alone is enough to bring the settle back, which is what
+        // separates this from a blanket capability gate.
+        #expect(KVRewrite.forCompletion(
+            reason: .endOfTurn,
+            thoughtChannelClosed: true,
+            emittedToolCalls: false,
+            stopStringFiltered: false,
+            supportsRewind: false,
+            canRestore: true) == .settleLiveRegion)
     }
 
     @Test func aTurnCarryingToolCallsStaysLiveWhateverStopEndedIt() {
         for reason in Self.everyStopReason {
             for closed in [true, false] {
-                for supportsRewind in [true, false] {
+                for capability in Self.everyCapability {
                     #expect(KVRewrite.forCompletion(
                         reason: reason,
                         thoughtChannelClosed: closed,
                         emittedToolCalls: true,
                         stopStringFiltered: false,
-                        supportsRewind: supportsRewind) == KVRewrite.none)
+                        supportsRewind: capability.supportsRewind,
+                        canRestore: capability.canRestore) == KVRewrite.none)
                 }
             }
         }
@@ -857,13 +905,14 @@ struct KVRewriteTests {
     @Test func aStopStringFilteredTurnIsNeverWorthARewrite() {
         for reason in Self.everyStopReason {
             for closed in [true, false] {
-                for supportsRewind in [true, false] {
+                for capability in Self.everyCapability {
                     #expect(KVRewrite.forCompletion(
                         reason: reason,
                         thoughtChannelClosed: closed,
                         emittedToolCalls: false,
                         stopStringFiltered: true,
-                        supportsRewind: supportsRewind) == KVRewrite.none)
+                        supportsRewind: capability.supportsRewind,
+                        canRestore: capability.canRestore) == KVRewrite.none)
                 }
             }
         }

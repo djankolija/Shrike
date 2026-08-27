@@ -66,17 +66,23 @@ enum KVRewrite: Sendable, Equatable {
     /// The spec's trigger table. Both signals are decoder state — the stop
     /// reason is a special token id, the thought channel the running parse.
     ///
-    /// The settle names a sequence rather than a cursor move, and
-    /// `KVReconstruction` picks a mechanism that reaches it on any runner, so
-    /// it is offered unconditionally. `dropEmission` is a truncation of the
-    /// live KV and nothing else expresses it: a degenerate turn on a runner
-    /// whose state cannot follow the cursor back declines instead, and the
-    /// settled entries below it still carry the conversation.
+    /// The settle names a sequence rather than a cursor move, so it is offered
+    /// wherever `KVReconstruction` has a mechanism that reaches one — a rewind,
+    /// or a restore onto a snapshot. With neither, the only way left is to
+    /// reset and re-prefill the conversation whole, and that pays for itself
+    /// only if it finishes: aborted, it takes the live KV with it and leaves an
+    /// entry no snapshot backs, which is strictly worse than never settling. A
+    /// session that can neither rewind nor snapshot therefore declines.
+    ///
+    /// `dropEmission` is a truncation of the live KV and nothing else expresses
+    /// it, so it stays rewind-gated whatever the store can do; the settled
+    /// entries below a skipped degenerate turn still carry the conversation.
     static func forCompletion(reason: StopReason,
                               thoughtChannelClosed: Bool,
                               emittedToolCalls: Bool,
                               stopStringFiltered: Bool,
-                              supportsRewind: Bool) -> KVRewrite {
+                              supportsRewind: Bool,
+                              canRestore: Bool) -> KVRewrite {
         // `publish` rejects a stop-string-filtered turn, and the settle path is
         // the most expensive operation here — a rewrite for an entry that will
         // never exist is minutes spent on nothing.
@@ -85,10 +91,12 @@ enum KVRewrite: Sendable, Equatable {
         // initializer hard-sets `toolCalls` empty: settling a tool hop would
         // re-prefill the KV to a render its calls had been deleted from.
         guard !emittedToolCalls else { return .none }
+        let settle: KVRewrite = supportsRewind || canRestore
+            ? .settleLiveRegion : .none
         let degenerate: KVRewrite = supportsRewind ? .dropEmission : .none
         switch reason {
         case .endOfTurn, .eos:
-            return thoughtChannelClosed ? .settleLiveRegion : degenerate
+            return thoughtChannelClosed ? settle : degenerate
         case .toolCalls:
             return .none
         case .maxTokens, .stopString, .external:
