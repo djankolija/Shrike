@@ -441,7 +441,7 @@ private enum KVNormalization: Sendable, Equatable {
     case unchanged
     /// The KV now holds exactly these tokens.
     case rewritten([Int32])
-    /// A failed rewrite reset the runner; the KV holds nothing.
+    /// A failed rewrite may have reset the runner; the KV counts as gone.
     case lost
 }
 
@@ -1125,7 +1125,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             result: result,
             promptTokenCount: effectivePromptIDs.count,
             thoughtChannelClosed: decoder?.thoughtChannelClosed ?? true,
-            emittedToolCalls: !calls.isEmpty)
+            emittedToolCalls: !calls.isEmpty,
+            stopStringFiltered: stopMatcher.isStopped)
         publishCacheEntry(
             cacheRequest: cacheRequest,
             content: content,
@@ -1177,12 +1178,14 @@ public actor ServerModelSession: ServerInferenceBackend {
         result: RawDecodeResult,
         promptTokenCount: Int,
         thoughtChannelClosed: Bool,
-        emittedToolCalls: Bool
+        emittedToolCalls: Bool,
+        stopStringFiltered: Bool
     ) async -> KVNormalization {
         guard promptCacheMode != .off,
               mtpDecoder == nil,
               prefillConfig.mode == .chunked,
               result.kvPosition == result.kvBackedTokenIDs.count,
+              result.uncommittedBoundaryTokenIDs.count == 1,
               runner.continuationPosition == result.kvPosition else {
             return .unchanged
         }
@@ -1190,6 +1193,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             reason: result.reason,
             thoughtChannelClosed: thoughtChannelClosed,
             emittedToolCalls: emittedToolCalls,
+            stopStringFiltered: stopStringFiltered,
             supportsRewind: runner.supportsPartialRewind) {
         case .none:
             return .unchanged
@@ -1248,6 +1252,9 @@ public actor ServerModelSession: ServerInferenceBackend {
               settled.count < maxContext else {
             return .unchanged
         }
+        // An entry whose bytes did not change keeps the bridges its structural
+        // description still describes.
+        guard settled != result.kvBackedTokenIDs else { return .unchanged }
         let comparable = min(result.kvPosition, settled.count)
         let common = (0..<comparable).first {
             result.kvBackedTokenIDs[$0] != settled[$0]
@@ -1268,8 +1275,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                                      startPosition: common,
                                      config: prefillConfig)
         } catch {
-            // A failed chunked prefill resets the runner, so there is no
-            // achieved cursor left for an entry to describe.
+            // A failure inside the chunk loop resets the runner; the guards
+            // that reject the call before it leave the KV alone. Nothing here
+            // can tell which happened, so the KV counts as gone.
             FileHandle.standardError.write(Data(
                 ("NVMAI prompt_cache normalize_failed error=\(error)\n").utf8))
             return .lost

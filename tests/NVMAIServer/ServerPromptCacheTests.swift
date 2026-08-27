@@ -807,11 +807,13 @@ struct KVRewriteTests {
                 reason: reason,
                 thoughtChannelClosed: true,
                 emittedToolCalls: false,
+                stopStringFiltered: false,
                 supportsRewind: true) == table.closed)
             #expect(KVRewrite.forCompletion(
                 reason: reason,
                 thoughtChannelClosed: false,
                 emittedToolCalls: false,
+                stopStringFiltered: false,
                 supportsRewind: true) == table.open)
         }
     }
@@ -823,6 +825,7 @@ struct KVRewriteTests {
                     reason: reason,
                     thoughtChannelClosed: closed,
                     emittedToolCalls: true,
+                    stopStringFiltered: false,
                     supportsRewind: true) == KVRewrite.none)
             }
         }
@@ -835,7 +838,23 @@ struct KVRewriteTests {
                     reason: reason,
                     thoughtChannelClosed: closed,
                     emittedToolCalls: false,
+                    stopStringFiltered: false,
                     supportsRewind: false) == KVRewrite.none)
+            }
+        }
+    }
+
+    /// `publish` rejects a stop-string-filtered turn, so the settle path's
+    /// forward pass would be spent producing bytes nothing ever stores.
+    @Test func aStopStringFilteredTurnIsNeverWorthARewrite() {
+        for reason in Self.everyStopReason {
+            for closed in [true, false] {
+                #expect(KVRewrite.forCompletion(
+                    reason: reason,
+                    thoughtChannelClosed: closed,
+                    emittedToolCalls: false,
+                    stopStringFiltered: true,
+                    supportsRewind: true) == KVRewrite.none)
             }
         }
     }
@@ -859,6 +878,13 @@ struct KVRewriteTests {
             kvBackedTokenIDs: [1, 2, 3],
             boundaryTokens: [],
             liveRegionTokens: [7, 8]) == nil)
+
+        // The no-op the caller declines on: a KV already holding the settled
+        // form yields a sequence equal to it, so nothing is rewritten.
+        #expect(KVRewrite.settledSequence(
+            kvBackedTokenIDs: [1, 2, 3],
+            boundaryTokens: [1, 2],
+            liveRegionTokens: [3]) == [1, 2, 3])
     }
 
     /// The date the Harmony template embeds moves at midnight, so a boundary

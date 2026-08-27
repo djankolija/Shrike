@@ -70,12 +70,16 @@ enum KVRewrite: Sendable, Equatable {
     static func forCompletion(reason: StopReason,
                               thoughtChannelClosed: Bool,
                               emittedToolCalls: Bool,
+                              stopStringFiltered: Bool,
                               supportsRewind: Bool) -> KVRewrite {
         guard supportsRewind else { return .none }
-        // A hop's emission is what the next render reproduces byte-for-byte,
-        // and it is what a later degenerate rewind keeps — so a turn carrying
-        // tool calls stays as it is whatever stop token ended it, ChatML's
-        // `<|im_end|>` included.
+        // `publish` rejects a stop-string-filtered turn, and the settle path is
+        // the most expensive operation here — a rewrite for an entry that will
+        // never exist is minutes spent on nothing.
+        guard !stopStringFiltered else { return .none }
+        // The settle path rebuilds the turn as a content-only message, whose
+        // initializer hard-sets `toolCalls` empty: settling a tool hop would
+        // re-prefill the KV to a render its calls had been deleted from.
         guard !emittedToolCalls else { return .none }
         switch reason {
         case .endOfTurn, .eos:
