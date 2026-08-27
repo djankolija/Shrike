@@ -1315,7 +1315,13 @@ public actor ServerModelSession: ServerInferenceBackend {
         guard common < settled.count else {
             // The settled form is a prefix of what the KV holds, so the rewind
             // alone is the whole rewrite and nothing has to run in the
-            // background.
+            // background — where the cursor can go back at all. Where it
+            // cannot, the truncation is reconstructed like any other target,
+            // with an empty remainder to prefill.
+            guard runner.supportsPartialRewind else {
+                print(line)
+                return .settle(target: settled, rewindTo: common)
+            }
             do {
                 try runner.rewind(to: common)
             } catch {
@@ -1329,10 +1335,11 @@ public actor ServerModelSession: ServerInferenceBackend {
     }
 
     /// Run a settle's forward pass between requests, so the response the
-    /// rewrite belongs to has already closed. Cancellation lands in
-    /// `prefillChunked`'s catch, which resets the runner: an aborted rewrite
-    /// leaves no live KV at all, and the entry published before it started is
-    /// what the aborting request falls back to.
+    /// rewrite belongs to has already closed. Cancellation lands in a
+    /// `checkCancellation` or in `prefillChunked`'s catch, which resets the
+    /// runner: an aborted rewrite leaves no live KV it claims to describe, and
+    /// the entry published before it started is what the aborting request falls
+    /// back to.
     private func startRewrite(target: [Int32], rewindTo: Int, entryID: UUID) {
         pendingRewrite = PendingRewrite(
             target: target,
@@ -1341,17 +1348,96 @@ public actor ServerModelSession: ServerInferenceBackend {
                                                entryID: entryID) })
     }
 
+    /// Every snapshot a settle could seat on. The entry under rewrite is not
+    /// among them: its snapshot describes the bytes this rewrite is replacing,
+    /// and its write is the one `pendingSnapshotSave` is still ordering.
+    private func reconstructionSnapshots(
+        target: [Int32],
+        excluding entryID: UUID
+    ) -> [KVReconstruction.Snapshot] {
+        guard let promptStateStore else { return [] }
+        return promptCache.entries.compactMap { entry in
+            guard entry.id != entryID,
+                  entry.kvPosition == entry.kvBackedTokenIDs.count,
+                  promptStateStore.contains(entry.id) else { return nil }
+            return KVReconstruction.Snapshot(
+                entryID: entry.id,
+                position: entry.kvPosition,
+                isPrefixOfTarget: entry.kvPosition <= target.count
+                    && target.prefix(entry.kvPosition)
+                        .elementsEqual(entry.kvBackedTokenIDs))
+        }
+    }
+
+    /// Put the KV at a prefix of `target` and return the position reached, so
+    /// the prefill that follows starts from the achieved cursor and never from
+    /// the one the mechanism intended. Every failure throws: a reconstruction
+    /// that does not land leaves the rewrite exactly where a failed prefill
+    /// leaves it.
+    private func seatForRewrite(_ plan: KVReconstruction,
+                                target: [Int32],
+                                entryID: UUID) async throws -> Int {
+        let settling = entryID.uuidString.lowercased()
+        switch plan {
+        case .rewind(let position):
+            if runner.continuationPosition != position {
+                try runner.rewind(to: position)
+            }
+            print("NVMAI prompt_cache normalize kind=settle_rewind "
+                    + "at=\(position) settled=\(target.count) entry=\(settling)")
+        case .restore(let source, let position):
+            guard let promptStateStore else {
+                throw ServerPromptStateStoreError.missing(source)
+            }
+            print("NVMAI prompt_cache normalize kind=settle_restore "
+                    + "from=\(source.uuidString.lowercased()) at=\(position) "
+                    + "settled=\(target.count) entry=\(settling)")
+            do {
+                _ = try await promptStateStore.restore(entryID: source, into: runner)
+            } catch {
+                // As in `resolveCacheStart`: a snapshot that will not seat is
+                // dropped with the entry that describes it, so the pair stays
+                // whole and neither is chosen again.
+                promptStateStore.remove(entryIDs: [source])
+                promptCache.remove(entryIDs: [source])
+                throw error
+            }
+        case .reset(let reason):
+            print("NVMAI prompt_cache normalize kind=settle_reset "
+                    + "reason=\(reason.rawValue) settled=\(target.count) "
+                    + "entry=\(settling)")
+            runner.reset()
+        }
+        let reached = runner.continuationPosition
+        guard reached == plan.seatedPosition else {
+            throw PrefillError.prefillCursorMismatch(
+                "settle seated the KV at \(reached), expected \(plan.seatedPosition)")
+        }
+        return reached
+    }
+
     private func runRewrite(target: [Int32], rewindTo: Int, entryID: UUID) async {
         defer { pendingRewrite = nil }
         var lost = false
         do {
-            if runner.continuationPosition != rewindTo {
-                try runner.rewind(to: rewindTo)
-            }
+            // Before anything is seated: a rewrite cancelled before it starts
+            // must not reset a runner it never needed to touch.
+            try Task.checkCancellation()
+            let start = try await seatForRewrite(
+                KVReconstruction.plan(
+                    supportsRewind: runner.supportsPartialRewind,
+                    livePosition: runner.continuationPosition,
+                    rewindTo: rewindTo,
+                    snapshots: reconstructionSnapshots(target: target,
+                                                       excluding: entryID),
+                    targetCount: target.count),
+                target: target,
+                entryID: entryID)
+            try Task.checkCancellation()
             try await prefillRewrite(runner: runner,
                                      scratch: scratch,
-                                     tokens: target[rewindTo...],
-                                     startPosition: rewindTo,
+                                     tokens: target[start...],
+                                     startPosition: start,
                                      config: prefillConfig)
         } catch {
             // A failure inside the chunk loop resets the runner; the guards
@@ -1411,9 +1497,11 @@ public actor ServerModelSession: ServerInferenceBackend {
         } catch {
             // S24: the entry now describes bytes the stored snapshot does not,
             // so both go rather than leave a restore that would seat the wrong
-            // context.
+            // context. Naming the entry is what lets a log reader tie the next
+            // settle's `settle_reset` back to the capture that broke the chain.
             FileHandle.standardError.write(Data(
-                ("NVMAI prompt_cache snapshot_failed error=\(error)\n").utf8))
+                ("NVMAI prompt_cache snapshot_failed "
+                    + "entry=\(entryID.uuidString.lowercased()) error=\(error)\n").utf8))
             promptStateStore.remove(entryIDs: [entryID])
             promptCache.remove(entryIDs: [entryID])
             activePromptCacheEntryID = nil
@@ -1531,7 +1619,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                     // never left published without backing; drop the entry so
                     // the next hit re-prefills instead of a doomed restore.
                     FileHandle.standardError.write(Data(
-                        ("NVMAI prompt_cache snapshot_failed error=\(error)\n").utf8))
+                        ("NVMAI prompt_cache snapshot_failed "
+                            + "entry=\(publication.entry.id.uuidString.lowercased()) "
+                            + "error=\(error)\n").utf8))
                     promptCache.remove(entryIDs: [publication.entry.id])
                     activePromptCacheEntryID = nil
                     backed = false

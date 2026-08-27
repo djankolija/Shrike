@@ -792,8 +792,13 @@ struct KVRewriteTests {
         .endOfTurn, .eos, .toolCalls, .maxTokens, .stopString, .external,
     ]
 
-    @Test func theTriggerIsTheSpecsTableOverEveryStopReason() throws {
-        let expected: [StopReason: (closed: KVRewrite, open: KVRewrite)] = [
+    /// The spec's trigger table, once per rewind capability. The settle column
+    /// is the same either way — it names a sequence, and reconstruction reaches
+    /// one on any runner — while the degenerate column is not: dropping this
+    /// generation's emission is a truncation of the live KV and nothing else
+    /// expresses it.
+    @Test func theTriggerIsTheSpecsTableOverEveryStopReasonAndCapability() throws {
+        let rewinding: [StopReason: (closed: KVRewrite, open: KVRewrite)] = [
             .endOfTurn: (.settleLiveRegion, .dropEmission),
             .eos: (.settleLiveRegion, .dropEmission),
             .toolCalls: (.none, .none),
@@ -801,46 +806,48 @@ struct KVRewriteTests {
             .stopString: (.dropEmission, .dropEmission),
             .external: (.dropEmission, .dropEmission),
         ]
-        #expect(expected.count == Self.everyStopReason.count)
+        let reconstructing: [StopReason: (closed: KVRewrite, open: KVRewrite)] = [
+            .endOfTurn: (.settleLiveRegion, .none),
+            .eos: (.settleLiveRegion, .none),
+            .toolCalls: (.none, .none),
+            .maxTokens: (.none, .none),
+            .stopString: (.none, .none),
+            .external: (.none, .none),
+        ]
+        #expect(rewinding.count == Self.everyStopReason.count)
+        #expect(reconstructing.count == Self.everyStopReason.count)
         for reason in Self.everyStopReason {
-            let table = try #require(expected[reason])
-            #expect(KVRewrite.forCompletion(
-                reason: reason,
-                thoughtChannelClosed: true,
-                emittedToolCalls: false,
-                stopStringFiltered: false,
-                supportsRewind: true) == table.closed)
-            #expect(KVRewrite.forCompletion(
-                reason: reason,
-                thoughtChannelClosed: false,
-                emittedToolCalls: false,
-                stopStringFiltered: false,
-                supportsRewind: true) == table.open)
+            for (supportsRewind, table) in [(true, rewinding), (false, reconstructing)] {
+                let row = try #require(table[reason])
+                #expect(KVRewrite.forCompletion(
+                    reason: reason,
+                    thoughtChannelClosed: true,
+                    emittedToolCalls: false,
+                    stopStringFiltered: false,
+                    supportsRewind: supportsRewind) == row.closed,
+                        "\(reason) closed rewind=\(supportsRewind)")
+                #expect(KVRewrite.forCompletion(
+                    reason: reason,
+                    thoughtChannelClosed: false,
+                    emittedToolCalls: false,
+                    stopStringFiltered: false,
+                    supportsRewind: supportsRewind) == row.open,
+                        "\(reason) open rewind=\(supportsRewind)")
+            }
         }
     }
 
     @Test func aTurnCarryingToolCallsStaysLiveWhateverStopEndedIt() {
         for reason in Self.everyStopReason {
             for closed in [true, false] {
-                #expect(KVRewrite.forCompletion(
-                    reason: reason,
-                    thoughtChannelClosed: closed,
-                    emittedToolCalls: true,
-                    stopStringFiltered: false,
-                    supportsRewind: true) == KVRewrite.none)
-            }
-        }
-    }
-
-    @Test func aRunnerThatCannotRewindDeclinesEveryRewrite() {
-        for reason in Self.everyStopReason {
-            for closed in [true, false] {
-                #expect(KVRewrite.forCompletion(
-                    reason: reason,
-                    thoughtChannelClosed: closed,
-                    emittedToolCalls: false,
-                    stopStringFiltered: false,
-                    supportsRewind: false) == KVRewrite.none)
+                for supportsRewind in [true, false] {
+                    #expect(KVRewrite.forCompletion(
+                        reason: reason,
+                        thoughtChannelClosed: closed,
+                        emittedToolCalls: true,
+                        stopStringFiltered: false,
+                        supportsRewind: supportsRewind) == KVRewrite.none)
+                }
             }
         }
     }
@@ -850,12 +857,14 @@ struct KVRewriteTests {
     @Test func aStopStringFilteredTurnIsNeverWorthARewrite() {
         for reason in Self.everyStopReason {
             for closed in [true, false] {
-                #expect(KVRewrite.forCompletion(
-                    reason: reason,
-                    thoughtChannelClosed: closed,
-                    emittedToolCalls: false,
-                    stopStringFiltered: true,
-                    supportsRewind: true) == KVRewrite.none)
+                for supportsRewind in [true, false] {
+                    #expect(KVRewrite.forCompletion(
+                        reason: reason,
+                        thoughtChannelClosed: closed,
+                        emittedToolCalls: false,
+                        stopStringFiltered: true,
+                        supportsRewind: supportsRewind) == KVRewrite.none)
+                }
             }
         }
     }
@@ -1056,6 +1065,274 @@ struct KVRewriteTests {
             kvPosition: kvBacked.count,
             kvBackedTokenIDs: kvBacked,
             uncommittedBoundaryTokenIDs: [0])
+    }
+}
+
+@Suite("Settle reconstruction mechanism")
+struct KVReconstructionTests {
+    private let shortPrefix = UUID()
+    private let longPrefix = UUID()
+    private let divergent = UUID()
+    private let partingPoint = 80
+    private let livePosition = 100
+    private let targetCount = 120
+
+    private enum Inventory: CaseIterable {
+        case empty
+        case nothingUsable
+        case onePrefix
+        case twoPrefixes
+    }
+
+    private func snapshots(_ inventory: Inventory) -> [KVReconstruction.Snapshot] {
+        switch inventory {
+        case .empty:
+            return []
+        case .nothingUsable:
+            return [.init(entryID: divergent, position: 95, isPrefixOfTarget: false)]
+        case .onePrefix:
+            return [.init(entryID: shortPrefix, position: 40, isPrefixOfTarget: true)]
+        case .twoPrefixes:
+            // The longest sits last and a longer non-prefix sits between, so a
+            // decision taking the first usable one — or the longest of all —
+            // fails here rather than passing by accident.
+            return [
+                .init(entryID: shortPrefix, position: 40, isPrefixOfTarget: true),
+                .init(entryID: divergent, position: 95, isPrefixOfTarget: false),
+                .init(entryID: longPrefix, position: 70, isPrefixOfTarget: true),
+            ]
+        }
+    }
+
+    @Test func everyCapabilityAndInventoryReachesTheTargetOneWay() {
+        // (the runner rewinds, the cursor already sits at the parting point,
+        // what is snapshotted) -> the mechanism, spelled out rather than
+        // recomputed from the rule under test.
+        let expected: [(Bool, Bool, Inventory, KVReconstruction)] = [
+            (true, true, .empty, .rewind(to: partingPoint)),
+            (true, true, .nothingUsable, .rewind(to: partingPoint)),
+            (true, true, .onePrefix, .rewind(to: partingPoint)),
+            (true, true, .twoPrefixes, .rewind(to: partingPoint)),
+            (true, false, .empty, .rewind(to: partingPoint)),
+            (true, false, .nothingUsable, .rewind(to: partingPoint)),
+            (true, false, .onePrefix, .rewind(to: partingPoint)),
+            (true, false, .twoPrefixes, .rewind(to: partingPoint)),
+            (false, true, .empty, .rewind(to: partingPoint)),
+            (false, true, .nothingUsable, .rewind(to: partingPoint)),
+            (false, true, .onePrefix, .rewind(to: partingPoint)),
+            (false, true, .twoPrefixes, .rewind(to: partingPoint)),
+            (false, false, .empty, .reset(reason: .noSnapshot)),
+            (false, false, .nothingUsable, .reset(reason: .noPrefixSnapshot)),
+            (false, false, .onePrefix, .restore(entryID: shortPrefix, position: 40)),
+            (false, false, .twoPrefixes, .restore(entryID: longPrefix, position: 70)),
+        ]
+        #expect(expected.count == 2 * 2 * Inventory.allCases.count)
+        for (supportsRewind, seated, inventory, mechanism) in expected {
+            let plan = KVReconstruction.plan(
+                supportsRewind: supportsRewind,
+                livePosition: seated ? partingPoint : livePosition,
+                rewindTo: partingPoint,
+                snapshots: snapshots(inventory),
+                targetCount: targetCount)
+            #expect(plan == mechanism,
+                    "rewind=\(supportsRewind) seated=\(seated) inventory=\(inventory)")
+        }
+    }
+
+    @Test func aSnapshotReachingPastTheTargetIsNotAPrefixOfIt() {
+        #expect(KVReconstruction.plan(
+            supportsRewind: false,
+            livePosition: livePosition,
+            rewindTo: partingPoint,
+            snapshots: [.init(entryID: longPrefix,
+                              position: targetCount + 1,
+                              isPrefixOfTarget: true)],
+            targetCount: targetCount) == .reset(reason: .noPrefixSnapshot))
+    }
+
+    @Test func anEmptySnapshotSeatsNothingAndIsSkipped() {
+        #expect(KVReconstruction.plan(
+            supportsRewind: false,
+            livePosition: livePosition,
+            rewindTo: partingPoint,
+            snapshots: [.init(entryID: longPrefix, position: 0, isPrefixOfTarget: true)],
+            targetCount: targetCount) == .reset(reason: .noPrefixSnapshot))
+    }
+
+    /// A snapshot holding the target whole leaves an empty remainder, which is
+    /// a rewrite that costs one restore and no forward pass.
+    @Test func aSnapshotHoldingTheWholeTargetStillSeats() {
+        #expect(KVReconstruction.plan(
+            supportsRewind: false,
+            livePosition: livePosition,
+            rewindTo: partingPoint,
+            snapshots: [.init(entryID: longPrefix,
+                              position: targetCount,
+                              isPrefixOfTarget: true)],
+            targetCount: targetCount)
+            == .restore(entryID: longPrefix, position: targetCount))
+    }
+
+    @Test func theSeatedPositionIsWhereTheRemaindersPrefillStarts() {
+        #expect(KVReconstruction.rewind(to: partingPoint).seatedPosition == partingPoint)
+        #expect(KVReconstruction.restore(entryID: longPrefix, position: 70)
+            .seatedPosition == 70)
+        #expect(KVReconstruction.reset(reason: .noSnapshot).seatedPosition == 0)
+        #expect(KVReconstruction.reset(reason: .noPrefixSnapshot).seatedPosition == 0)
+    }
+}
+
+/// The property the restore mechanism rests on: a conversation's settled bytes
+/// only ever grow at the end, so the snapshot `finishRewrite` captured at turn
+/// N-1's settled position is a byte prefix of turn N's settled target and can
+/// be seated on directly.
+@Suite("Settled renders are append-only")
+struct SettledAppendOnlyTests {
+    private typealias Message = GFTokenizer.Message
+
+    private static let weatherTool = GFTokenizer.FunctionDefinition(
+        name: "get_weather",
+        description: "Look up weather",
+        parameters: .object([
+            "type": .string("object"),
+            "properties": .object(["city": .object(["type": .string("string")])]),
+        ]))
+
+    /// The sequence a settle would leave in the KV for a completed request:
+    /// `KVRewrite.settledSequence`'s two halves, without the KV to validate the
+    /// first against.
+    private func settledTarget(_ tokenizer: GFTokenizer,
+                               _ messages: [Message],
+                               tools: [GFTokenizer.FunctionDefinition]) throws -> [Int32] {
+        try tokenizer.settledBoundaryTokens(messages: messages, tools: tools)
+            + tokenizer.settledLiveRegionTokens(messages: messages, tools: tools)
+    }
+
+    /// Every completed request in `conversation`, in order, settles into a
+    /// sequence the next one opens with.
+    private func expectAppendOnly(
+        _ tokenizer: GFTokenizer,
+        conversation: [Message],
+        completedAt: [Int],
+        tools: [GFTokenizer.FunctionDefinition]
+    ) throws {
+        var previous: [Int32]?
+        for end in completedAt {
+            let target = try settledTarget(tokenizer,
+                                           Array(conversation[...end]),
+                                           tools: tools)
+            if let previous {
+                #expect(previous.count < target.count,
+                        "settled target did not grow at turn ending \(end)")
+                #expect(target.prefix(previous.count).elementsEqual(previous),
+                        "settled target diverged from its predecessor, turn \(end)")
+            }
+            previous = target
+        }
+        #expect(previous != nil)
+    }
+
+    @Test("ChatML: a plain multi-turn conversation")
+    func chatMLPlainMultiTurn() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let conversation: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "Sunny.", thinking: "Paris is warm."),
+            Message(role: .user, content: "What about Berlin?"),
+            Message(role: .assistant, content: "Rain.", thinking: "Berlin is wet."),
+            Message(role: .user, content: "And Rome?"),
+            Message(role: .assistant, content: "Hot.", thinking: "Rome is hot."),
+        ]
+        try expectAppendOnly(tokenizer,
+                             conversation: conversation,
+                             completedAt: [2, 4, 6],
+                             tools: [])
+    }
+
+    @Test("ChatML: a tool loop between two plain turns")
+    func chatMLToolLoop() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let conversation: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "Sunny.", thinking: "Paris is warm."),
+            Message(role: .user, content: "What about Berlin?"),
+            Message(role: .assistant, content: "", toolCalls: [
+                .init(id: "call_1", name: "get_weather", arguments: "{\"city\":\"Berlin\"}"),
+            ], thinking: "Berlin needs a lookup."),
+            Message(role: .tool, content: "{\"temp\":12}", toolCallID: "call_1"),
+            Message(role: .assistant, content: "12C.", thinking: "Cooler than Paris."),
+            Message(role: .user, content: "And Rome?"),
+            Message(role: .assistant, content: "Hot.", thinking: "Rome is hot."),
+        ]
+        try expectAppendOnly(tokenizer,
+                             conversation: conversation,
+                             completedAt: [2, 6, 8],
+                             tools: [Self.weatherTool])
+    }
+
+    /// The hardest ChatML case: with no tools declared, the render routes on
+    /// the message list, so the first turn goes through the hand-written
+    /// template and the tool hop moves every later one onto the Jinja path. The
+    /// chain survives only if the two agree byte-for-byte on the shared prefix.
+    @Test("ChatML: a tool hop that moves the render onto the Jinja path")
+    func chatMLRoutingFlipsMidConversation() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let conversation: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "Sunny.", thinking: "Paris is warm."),
+            Message(role: .user, content: "What about Berlin?"),
+            Message(role: .assistant, content: "", toolCalls: [
+                .init(id: "call_1", name: "get_weather", arguments: "{\"city\":\"Berlin\"}"),
+            ], thinking: "Berlin needs a lookup."),
+            Message(role: .tool, content: "{\"temp\":12}", toolCallID: "call_1"),
+            Message(role: .assistant, content: "12C.", thinking: "Cooler than Paris."),
+        ]
+        #expect(!GFTokenizer.usesToolTemplate(messages: Array(conversation[...2]),
+                                              tools: []))
+        #expect(GFTokenizer.usesToolTemplate(messages: conversation, tools: []))
+        try expectAppendOnly(tokenizer,
+                             conversation: conversation,
+                             completedAt: [2, 6],
+                             tools: [])
+    }
+
+    @Test("Harmony: a plain multi-turn conversation")
+    func harmonyPlainMultiTurn() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.harmonyFolder())
+        let conversation: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "Sunny.", thinking: "Paris is warm."),
+            Message(role: .user, content: "What about Berlin?"),
+            Message(role: .assistant, content: "Rain.", thinking: "Berlin is wet."),
+            Message(role: .user, content: "And Rome?"),
+            Message(role: .assistant, content: "Hot.", thinking: "Rome is hot."),
+        ]
+        try expectAppendOnly(tokenizer,
+                             conversation: conversation,
+                             completedAt: [2, 4, 6],
+                             tools: [])
+    }
+
+    @Test("Kimi: a plain multi-turn conversation")
+    func kimiPlainMultiTurn() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.kimiFolder())
+        let conversation: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "Sunny.", thinking: "Paris is warm."),
+            Message(role: .user, content: "What about Berlin?"),
+            Message(role: .assistant, content: "Rain.", thinking: "Berlin is wet."),
+            Message(role: .user, content: "And Rome?"),
+            Message(role: .assistant, content: "Hot.", thinking: "Rome is hot."),
+        ]
+        try expectAppendOnly(tokenizer,
+                             conversation: conversation,
+                             completedAt: [2, 4, 6],
+                             tools: [])
     }
 }
 

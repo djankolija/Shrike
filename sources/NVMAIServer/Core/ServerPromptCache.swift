@@ -64,15 +64,19 @@ enum KVRewrite: Sendable, Equatable {
     case none
 
     /// The spec's trigger table. Both signals are decoder state — the stop
-    /// reason is a special token id, the thought channel the running parse —
-    /// and a runner whose state cannot follow the cursor back declines every
-    /// rewrite rather than attempting one it would have to abandon.
+    /// reason is a special token id, the thought channel the running parse.
+    ///
+    /// The settle names a sequence rather than a cursor move, and
+    /// `KVReconstruction` picks a mechanism that reaches it on any runner, so
+    /// it is offered unconditionally. `dropEmission` is a truncation of the
+    /// live KV and nothing else expresses it: a degenerate turn on a runner
+    /// whose state cannot follow the cursor back declines instead, and the
+    /// settled entries below it still carry the conversation.
     static func forCompletion(reason: StopReason,
                               thoughtChannelClosed: Bool,
                               emittedToolCalls: Bool,
                               stopStringFiltered: Bool,
                               supportsRewind: Bool) -> KVRewrite {
-        guard supportsRewind else { return .none }
         // `publish` rejects a stop-string-filtered turn, and the settle path is
         // the most expensive operation here — a rewrite for an entry that will
         // never exist is minutes spent on nothing.
@@ -81,13 +85,14 @@ enum KVRewrite: Sendable, Equatable {
         // initializer hard-sets `toolCalls` empty: settling a tool hop would
         // re-prefill the KV to a render its calls had been deleted from.
         guard !emittedToolCalls else { return .none }
+        let degenerate: KVRewrite = supportsRewind ? .dropEmission : .none
         switch reason {
         case .endOfTurn, .eos:
-            return thoughtChannelClosed ? .settleLiveRegion : .dropEmission
+            return thoughtChannelClosed ? .settleLiveRegion : degenerate
         case .toolCalls:
             return .none
         case .maxTokens, .stopString, .external:
-            return .dropEmission
+            return degenerate
         }
     }
 
@@ -109,6 +114,77 @@ enum KVRewrite: Sendable, Equatable {
             return nil
         }
         return boundaryTokens + liveRegionTokens
+    }
+}
+
+/// How a settle seats the KV on a prefix of its target before prefilling the
+/// remainder.
+///
+/// The rewrite's job is to make the KV hold a sequence, which is a statement
+/// about bytes and not about cursors. A rewind reaches a prefix only on a
+/// runner whose state can follow the cursor back; a snapshot restore reaches
+/// one on every architecture, which is what the prompt cache's own restore path
+/// already does; and with nothing to seat on, the target is prefilled whole —
+/// the same work the next request would pay for anyway.
+enum KVReconstruction: Sendable, Equatable {
+    /// Seat the live cursor at this position: a rewind, or nothing at all when
+    /// the cursor already sits there.
+    case rewind(to: Int)
+    /// Restore this entry's snapshot, whose bytes are the target's first
+    /// `position` tokens.
+    case restore(entryID: UUID, position: Int)
+    /// Reset and prefill the target whole.
+    case reset(reason: ResetReason)
+
+    /// Why no snapshot could be seated on. Both are worth telling apart in a
+    /// log: the first says the chain was never built (a store that is off, or
+    /// captures that failed or were refused), the second that it was broken.
+    enum ResetReason: String, Sendable, Equatable {
+        case noSnapshot = "no_snapshot"
+        case noPrefixSnapshot = "no_prefix_snapshot"
+    }
+
+    /// A restorable snapshot as the decision sees it: where it seats the cursor,
+    /// and whether the target opens with its bytes.
+    struct Snapshot: Sendable, Equatable {
+        let entryID: UUID
+        let position: Int
+        let isPrefixOfTarget: Bool
+    }
+
+    /// Where the chosen mechanism leaves the cursor — the position the target's
+    /// remainder is prefilled from.
+    var seatedPosition: Int {
+        switch self {
+        case .rewind(let position): return position
+        case .restore(_, let position): return position
+        case .reset: return 0
+        }
+    }
+
+    /// A cursor already at the target's parting point moves for free and is
+    /// taken whatever the runner supports; a rewind is the next cheapest, being
+    /// a cursor move that reads nothing; then the longest snapshot the target
+    /// opens with; then the target whole.
+    static func plan(supportsRewind: Bool,
+                     livePosition: Int,
+                     rewindTo: Int,
+                     snapshots: [Snapshot],
+                     targetCount: Int) -> KVReconstruction {
+        if livePosition == rewindTo || supportsRewind {
+            return .rewind(to: rewindTo)
+        }
+        var best: Snapshot?
+        for snapshot in snapshots
+        where snapshot.isPrefixOfTarget
+            && snapshot.position > 0
+            && snapshot.position <= targetCount {
+            if snapshot.position > (best?.position ?? 0) { best = snapshot }
+        }
+        if let best {
+            return .restore(entryID: best.entryID, position: best.position)
+        }
+        return .reset(reason: snapshots.isEmpty ? .noSnapshot : .noPrefixSnapshot)
     }
 }
 
