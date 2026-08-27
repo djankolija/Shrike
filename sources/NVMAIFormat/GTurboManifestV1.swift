@@ -119,6 +119,10 @@ package struct GTurboManifestV1: Codable, Equatable, Sendable {
     package let files: [String: GTurboManifestFileV1]
     package let expertsPerLayer: Int
     package let numLayers: Int
+    /// Bytes of one packed expert — derivable before a repack exists, as
+    /// `3 * hidden_size * moe_intermediate_size` weights at the group-64 4-bit
+    /// packing of 36 bytes per 64, so a candidate model's per-token expert read
+    /// is priceable from its `config.json` alone.
     package let expertStride: UInt64
     package let bitWidthOverridesHonored: Int?
 
