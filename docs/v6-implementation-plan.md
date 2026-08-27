@@ -42,9 +42,9 @@ this plan only sequences it. Baseline already landed: `d7acd76` (tools-path
 - Generation numerics unchanged at deploy time for any runtime-path change: pre-change
   vs post-change `NVMAICLI`, same machine, same model, the golden-baseline contract
   parameters (`--temperature 0 --seed 1234 --max-new 96`, the script's prompt),
-  byte-identical. The committed `tools/golden-baseline.sh` file was captured on retired
-  hardware (Mac15,3; no current machine matches), and the script's own scope note rules
-  out cross-GPU-family diffs — so the same-machine A/B replaces `--check 4`, and the
+  byte-identical. The committed `tools/golden-baseline.sh` file was captured on the
+  upstream author's test machine (Mac15,3; nothing in this deployment matches), and the
+  script's own scope note rules out cross-GPU-family diffs — so the same-machine A/B replaces `--check 4`, and the
   committed file needs recapturing on current hardware or deleting as dead (future
   work, not a sweep gate).
 - No hit-rate targets anywhere: retained thinking inflates numerator and denominator both.
