@@ -486,6 +486,26 @@ struct ChatMLTemplateTests {
         #expect(liveText.contains("<|im_start|>user\n<tool_response>\n{\"temp\":18}"))
     }
 
+    @Test("Settled form rejects a request still awaiting a tool result")
+    func settledLiveRegionRequiresACompletedRequest() {
+        let awaiting: [Message] = [
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "", toolCalls: [
+                .init(id: "call_1", name: "get_weather", arguments: "{\"city\":\"Paris\"}"),
+            ], thinking: "Paris first."),
+        ]
+        #expect(throws: GFTokenizerError.self) {
+            _ = try tok.settledLiveRegionTokens(messages: awaiting,
+                                                tools: [Self.weatherTool])
+        }
+        #expect(throws: GFTokenizerError.self) {
+            _ = try tok.settledLiveRegionTokens(
+                messages: awaiting + [Message(role: .tool, content: "{\"temp\":18}",
+                                              toolCallID: "call_1")],
+                tools: [Self.weatherTool])
+        }
+    }
+
     @Test("Settled boundary rejects a list whose only user turns are tool responses")
     func settledBoundaryWithoutAQuery() {
         #expect(throws: GFTokenizerError.self) {

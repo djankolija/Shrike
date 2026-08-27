@@ -1257,8 +1257,20 @@ public struct GFTokenizer: @unchecked Sendable {
     /// turns once its own query has settled them. Appended to a KV rewound to
     /// `settledBoundaryTokenCount(messages:tools:)` they reproduce that
     /// prompt's prefix exactly.
+    ///
+    /// `messages` must be a completed request — its last message an assistant
+    /// turn with no tool calls — because a list still awaiting a tool result is
+    /// continued by one, which does not move ChatML's `last_query_index`
+    /// (fixture lines 68-77), leaving the region live rather than settled.
     public func settledLiveRegionTokens(messages: [Message],
                                         tools: [FunctionDefinition]) throws -> [Int32] {
+        guard let final = messages.last,
+              final.role == .assistant,
+              final.toolCalls.isEmpty else {
+            throw GFTokenizerError.invalidChatTemplate(
+                "settled form requires a completed request: the last message "
+                    + "must be an assistant turn with no tool calls")
+        }
         let boundary = try settledBoundaryTokenCount(messages: messages, tools: tools)
         let settled = try settledFormRender(messages, tools: tools)
         guard boundary <= settled.count else {
