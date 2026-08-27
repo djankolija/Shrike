@@ -1122,7 +1122,11 @@ public actor ServerModelSession: ServerInferenceBackend {
         // re-render drops, so no entry can ever match; skip the publish and
         // its snapshot capture entirely. Kimi's append-only template has no
         // such drop — its re-renders extend the KV byte-for-byte and hit the
-        // S12 rendered-prefix path, so it publishes like ChatML.
+        // S12 rendered-prefix path, so it publishes like ChatML. A future
+        // Harmony cache would have to append new turns from the stop
+        // boundary instead of re-rendering (the ChatML text bridge's shape,
+        // keeping the analysis in KV); until then gpt-oss re-prefills every
+        // turn.
         guard tokenizer.dialect != .harmony else { return }
         if mtpDecoder != nil {
             // Native MTP keeps a second KV stream. Until both states are
