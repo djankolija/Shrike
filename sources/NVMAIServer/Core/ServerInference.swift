@@ -441,8 +441,6 @@ private enum KVNormalization: Sendable, Equatable {
     case unchanged
     /// The KV now holds exactly these tokens.
     case rewritten([Int32])
-    /// A failed rewrite may have reset the runner; the KV counts as gone.
-    case lost
 }
 
 /// What the response path leaves for the KV: either a rewrite already done —
@@ -1409,6 +1407,11 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// Every snapshot a settle could seat on. The entry under rewrite is not
     /// among them: its snapshot describes the bytes this rewrite is replacing,
     /// and its write is the one `pendingSnapshotSave` is still ordering.
+    ///
+    /// `entry.kvPosition` stands in for the snapshot's seated position because
+    /// salvage — the only truncation that skips recapturing it — is gated to
+    /// rewind-capable runners, on which `KVReconstruction.plan` never chooses
+    /// `.restore`.
     private func reconstructionSnapshots(
         target: [Int32],
         excluding entryID: UUID
@@ -1604,13 +1607,6 @@ public actor ServerModelSession: ServerInferenceBackend {
         stopStringFiltered: Bool,
         normalization: KVNormalization
     ) -> UUID? {
-        if case .lost = normalization {
-            // The runner reset under a failed rewrite, so nothing describes the
-            // live KV any more; entries already backed by a snapshot keep theirs.
-            if promptCacheMode == .singlePrefix { promptCache.invalidate() }
-            activePromptCacheEntryID = nil
-            return nil
-        }
         if mtpDecoder != nil {
             // Native MTP keeps a second KV stream. Until both states are
             // persisted atomically, do not publish target-only cache entries.
