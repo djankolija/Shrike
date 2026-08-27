@@ -1152,7 +1152,7 @@ public struct GFTokenizer: @unchecked Sendable {
                         "type": "function",
                         "function": [
                             "name": call.name,
-                            "arguments": try JSONValue.orderedJinjaObject(call.arguments),
+                            "arguments": try JSONValue.verbatimJinjaObject(call.arguments),
                         ] as [String: any Sendable],
                     ]
                 }

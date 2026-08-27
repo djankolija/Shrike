@@ -122,7 +122,25 @@ extension JSONValue {
     /// `JSONDecoder` cannot do this: it stores members in a dictionary before any
     /// `Codable` conformance runs, so `allKeys` comes back in hash order.
     public static func orderedJinjaObject(_ text: String) throws -> Jinja.Value {
-        var scanner = OrderedJSONScanner(text)
+        try jinjaObject(text, verbatimNonStringMembers: false)
+    }
+
+    /// `orderedJinjaObject` with each member that is not a JSON string carried
+    /// as the exact source slice its value spans, as a Jinja string.
+    ///
+    /// The template's other branch, `tojson`, is not the identity on the text
+    /// it parsed — it sorts nested object keys, drops the source's spacing and
+    /// escapes `/` — and a slice is. Strings are excluded because their slice
+    /// carries the quotes the string branch drops. Acceptance is unchanged:
+    /// every value is still parsed, only its rendered form differs.
+    static func verbatimJinjaObject(_ text: String) throws -> Jinja.Value {
+        try jinjaObject(text, verbatimNonStringMembers: true)
+    }
+
+    private static func jinjaObject(_ text: String,
+                                    verbatimNonStringMembers: Bool) throws -> Jinja.Value {
+        var scanner = OrderedJSONScanner(
+            text, verbatimNonStringMembers: verbatimNonStringMembers)
         let value = try scanner.parseValue()
         scanner.skipWhitespace()
         guard scanner.isAtEnd, case .object = value else {
@@ -136,8 +154,13 @@ extension JSONValue {
 struct OrderedJSONScanner {
     private let scalars: [Character]
     private var index: Int = 0
+    private let verbatimNonStringMembers: Bool
+    private var depth: Int = 0
 
-    init(_ text: String) { scalars = Array(text) }
+    init(_ text: String, verbatimNonStringMembers: Bool) {
+        scalars = Array(text)
+        self.verbatimNonStringMembers = verbatimNonStringMembers
+    }
 
     var isAtEnd: Bool { index >= scalars.count }
 
@@ -172,13 +195,17 @@ struct OrderedJSONScanner {
 
     private mutating func parseObject() throws -> Jinja.Value {
         try expect("{")
+        depth += 1
+        defer { depth -= 1 }
+        // Only the root object's members are what the template iterates.
+        let verbatim = verbatimNonStringMembers && depth == 1
         var members: OrderedDictionary<String, Jinja.Value> = [:]
         skipWhitespace()
         if try peek() == "}" { index += 1; return .object(members) }
         while true {
             let key = try parseString()
             try expect(":")
-            members[key] = try parseValue()
+            members[key] = verbatim ? try verbatimValue() : try parseValue()
             skipWhitespace()
             let next = try peek()
             index += 1
@@ -186,6 +213,19 @@ struct OrderedJSONScanner {
             guard next == "," else { throw ToolCallParserError.malformed }
         }
         return .object(members)
+    }
+
+    /// The value at the cursor, or — where it is not a JSON string — the source
+    /// it spans: from its first character to its last, leading whitespace
+    /// skipped and interior spacing kept as written.
+    private mutating func verbatimValue() throws -> Jinja.Value {
+        skipWhitespace()
+        let start = index
+        let value = try parseValue()
+        guard case .string = value else {
+            return .string(String(scalars[start..<index]))
+        }
+        return value
     }
 
     private mutating func parseArray() throws -> Jinja.Value {

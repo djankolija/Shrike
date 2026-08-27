@@ -1,4 +1,5 @@
 import Foundation
+import Jinja
 import Testing
 @testable import NVMAI
 
@@ -225,6 +226,44 @@ struct ChatMLTemplateTests {
         #expect(text.contains("<tool_call>\n<function=get_weather>"))
     }
 
+    /// The call measured breaking mid-loop byte-exactness (nested cached=0/743
+    /// against flat cached=486/506): a float array, a string array, and an
+    /// object whose members are not in the order `tojson` would sort them into.
+    private static let nestedArguments = "{\"depths\":[1.5,3.25],"
+        + "\"sites\":[\"harbour\",\"quarry\"],"
+        + "\"window\":{\"start\":\"2026-09-01\",\"end\":\"2026-09-07\"}}"
+
+    private static let nestedParameterBlock =
+        "<parameter=depths>\n[1.5,3.25]\n</parameter>\n"
+        + "<parameter=sites>\n[\"harbour\",\"quarry\"]\n</parameter>\n"
+        + "<parameter=window>\n{\"start\":\"2026-09-01\",\"end\":\"2026-09-07\"}\n</parameter>\n"
+
+    private static let surveyTool = GFTokenizer.FunctionDefinition(
+        name: "plan_survey",
+        description: "Plan a survey",
+        parameters: .object(["type": .string("object")]))
+
+    @Test("Nested tool arguments render as the bytes the call carried")
+    func toolChatRendersNestedArgumentsVerbatim() throws {
+        let ids = try tok.encodeToolChat(
+            messages: [
+                Message(role: .user, content: "Survey harbour and quarry."),
+                Message(role: .assistant, content: "", toolCalls: [
+                    .init(id: "call_1", name: "plan_survey",
+                          arguments: Self.nestedArguments),
+                ], thinking: "Both sites."),
+                Message(role: .tool, content: "{\"ok\":true}", toolCallID: "call_1"),
+            ],
+            tools: [Self.surveyTool])
+        let text = tok.decode(ids, skipSpecialTokens: false)
+        #expect(text.contains("<tool_call>\n<function=plan_survey>\n"
+            + Self.nestedParameterBlock + "</function>\n</tool_call>"))
+        #expect(text.contains("[1.5,3.25]"))
+        #expect(text.contains("[\"harbour\",\"quarry\"]"))
+        #expect(text.contains("{\"start\":\"2026-09-01\",\"end\":\"2026-09-07\"}"))
+        #expect(!text.contains("\"end\":\"2026-09-07\",\"start\""))
+    }
+
     @Test("Tool chat uses the same explicit thinking mode as text chat")
     func thinkingToolChatRendersJinja() async throws {
         let thinking = try await GFTokenizer.load(
@@ -438,6 +477,27 @@ struct ChatMLTemplateTests {
         #expect(liveForm.contains("<think>\nThat is warm.\n</think>"))
     }
 
+    @Test("Settled live region carries nested tool arguments verbatim")
+    func settledLiveRegionNestedToolArguments() throws {
+        let completed: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Survey harbour and quarry."),
+            Message(role: .assistant, content: "", toolCalls: [
+                .init(id: "call_1", name: "plan_survey",
+                      arguments: Self.nestedArguments),
+            ], thinking: "Both sites."),
+            Message(role: .tool, content: "{\"ok\":true}", toolCallID: "call_1"),
+            Message(role: .assistant, content: "Planned.", thinking: "Done."),
+        ]
+        let liveText = try expectSettledRegionInNextRender(
+            completed: completed,
+            nextQuery: Message(role: .user, content: "And the estuary?"),
+            tools: [Self.surveyTool])
+        #expect(!liveText.contains("<think>"))
+        #expect(liveText.contains(Self.nestedParameterBlock))
+        #expect(!liveText.contains("\"end\":\"2026-09-07\",\"start\""))
+    }
+
     @Test("Settled live region carries a settled tool round-trip's history")
     func settledLiveRegionAfterASettledToolLoop() throws {
         let completed: [Message] = [
@@ -516,6 +576,70 @@ struct ChatMLTemplateTests {
                             content: "<tool_response>\n{}\n</tool_response>"),
                 ],
                 tools: [])
+        }
+    }
+}
+
+/// The seam the ChatML tools render path reads its `arguments` mapping from.
+@Suite("Verbatim tool arguments")
+struct VerbatimJinjaArgumentsTests {
+    /// Each root member as the template's `args_value | string` branch would
+    /// write it, in source order. Every member must reach that branch, so a
+    /// value left un-stringified fails here rather than silently taking
+    /// `tojson`.
+    private func rendered(_ text: String) throws -> [(String, String)] {
+        guard case .object(let members) = try JSONValue.verbatimJinjaObject(text) else {
+            throw ToolCallParserError.malformed
+        }
+        return try members.map { key, value in
+            guard case .string(let written) = value else {
+                throw ToolCallParserError.malformed
+            }
+            return (key, written)
+        }
+    }
+
+    @Test("A non-string member is its exact lexeme span, interior spacing kept")
+    func sliceIsTheLexemeSpan() throws {
+        let members = try rendered(#"{ "a" : [1,  2] , "b" : { "x" : true } }"#)
+        #expect(members.map(\.0) == ["a", "b"])
+        #expect(members.map(\.1) == ["[1,  2]", #"{ "x" : true }"#])
+    }
+
+    @Test("A string member stays the parsed value, without its quotes")
+    func stringsAreUnchanged() throws {
+        let members = try rendered(#"{"s":"harbour","e":"a\nb\/c","u":"é"}"#)
+        #expect(members.map(\.1) == ["harbour", "a\nb/c", "é"])
+    }
+
+    @Test("Numbers, booleans and null carry their source lexeme")
+    func lexemesAreVerbatim() throws {
+        let members = try rendered(#"{"a":3.250,"b":1e2,"c":-0,"d":false,"e":null}"#)
+        #expect(members.map(\.1) == ["3.250", "1e2", "-0", "false", "null"])
+    }
+
+    @Test("The validating parse still yields typed values, not slices")
+    func orderedJinjaObjectIsUnchanged() throws {
+        guard case .object(let members) =
+                try JSONValue.orderedJinjaObject(#"{"a":[1,  2],"b":3,"c":"x"}"#) else {
+            throw ToolCallParserError.malformed
+        }
+        #expect(members["a"] == .array([.int(1), .int(2)]))
+        #expect(members["b"] == .int(3))
+        #expect(members["c"] == .string("x"))
+    }
+
+    @Test("Acceptance is unchanged from the validating parse")
+    func acceptanceMatchesOrderedJinjaObject() {
+        let accepted = [#"{}"#, #"{"a":1}"#, #"{"a":[1,{"b":null}]}"#, #"{ "a" : "x" }"#]
+        let rejected = [#"[1]"#, #""x""#, #"{"a":1"#, #"{"a":1}x"#, #"{"a":1e400}"#]
+        for text in accepted {
+            #expect((try? JSONValue.orderedJinjaObject(text)) != nil, "\(text)")
+            #expect((try? JSONValue.verbatimJinjaObject(text)) != nil, "\(text)")
+        }
+        for text in rejected {
+            #expect((try? JSONValue.orderedJinjaObject(text)) == nil, "\(text)")
+            #expect((try? JSONValue.verbatimJinjaObject(text)) == nil, "\(text)")
         }
     }
 }
