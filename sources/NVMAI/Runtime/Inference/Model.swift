@@ -773,7 +773,9 @@ extension Model {
         manifest: Manifest,
         layout: PackedExpertsLayout
     ) throws {
-        for layer in layout.layers {
+        // A zero-expert (dense-MLP) layer carries no layer file, matching
+        // GTurboV1StructuralValidator/crossValidate.
+        for layer in layout.layers where !layer.experts.isEmpty {
             let relativePath = "packed_experts/\(layer.file)"
             guard let manifestEntry = manifest.files[relativePath] else {
                 throw ModelError.trustedReceiptInvalid(
@@ -1112,6 +1114,12 @@ extension Model {
             ("down", config.hiddenSize, config.moeIntermediateSize),
         ]
         for layer in layout.layers {
+            // A leading dense-MLP layer has no routed tensors to check; its
+            // dense MLP is covered by the per-layer tensor schema. Any other
+            // layer without experts is still corrupt.
+            if layer.experts.isEmpty, layer.layer < config.numLeadingDenseLayers {
+                continue
+            }
             guard let reference = layer.experts.first else {
                 throw ModelError.indexCorrupt(
                     detail: "routed layer \(layer.layer) has no experts")

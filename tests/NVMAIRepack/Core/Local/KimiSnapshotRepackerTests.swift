@@ -64,6 +64,14 @@ import Testing
         #expect(manifest["bitWidthOverridesHonored"] as? Int == 4)
     }
 
+    @Test func verifyInstallAcceptsTheZeroExpertDenseLayer() async throws {
+        let (root, output, _) = try await importedKimi("kimi-verify")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let result = try VerifiedInstallTool.run(
+            options: VerifyInstallOptions(inputGTurbo: output))
+        #expect(result.unexpectedEntries.isEmpty)
+    }
+
     @Test func fusedAndSlicedBytesMatchTheSource() async throws {
         let (root, _, plan) = try await importedKimi("kimi-bytes")
         defer { try? FileManager.default.removeItem(atPath: root) }

@@ -178,12 +178,16 @@ public enum VerifiedInstallTool {
             guard layer.layer >= 0 && layer.layer < layout.numLayers else {
                 throw RepackError.configurationInvalid(detail: "packed expert layer index out of range")
             }
-            guard layer.experts.count == layout.expertsPerLayer else {
+            guard layer.experts.count == layout.expertsPerLayer
+                    || layer.experts.isEmpty else {
                 throw RepackError.configurationInvalid(
                     detail: "packed_experts/\(layer.file) expert count mismatch")
             }
             try GTurboPathValidator.validateBasename(
                 layer.file, field: "packed_experts/layout.json layers[\(layer.layer)].file")
+            // A zero-expert (dense-MLP) layer carries no layer file to verify,
+            // matching GTurboV1StructuralValidator/crossValidate.
+            if layer.experts.isEmpty { continue }
             let relativePath = "packed_experts/\(layer.file)"
             guard let manifestEntry = manifest.files[relativePath] else {
                 throw RepackError.configurationInvalid(detail: "manifest missing \(relativePath)")

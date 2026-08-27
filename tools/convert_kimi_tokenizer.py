@@ -209,7 +209,21 @@ def main():
     tokenizer.save(str(output))
     print(f"wrote {output} (base vocab {num_base}, "
           f"{NUM_SPECIAL_SLOTS} special slots)")
+    write_tokenizer_config(snapshot, output.parent / "tokenizer_config.json")
     return 0
+
+
+def write_tokenizer_config(snapshot, output):
+    """The upstream tokenizer_config names the custom `TikTokenTokenizer`
+    class, which neither swift-transformers nor a plain (no remote code)
+    Python load accepts. The converted sidecar keeps the upstream token
+    metadata but points at the standard fast-tokenizer path so both loaders
+    read the converted tokenizer.json instead."""
+    config = json.loads((snapshot / "tokenizer_config.json").read_text())
+    config["tokenizer_class"] = "PreTrainedTokenizerFast"
+    config.pop("auto_map", None)
+    output.write_text(json.dumps(config, indent=1, ensure_ascii=False))
+    print(f"wrote {output} (tokenizer_class PreTrainedTokenizerFast)")
 
 
 if __name__ == "__main__":
