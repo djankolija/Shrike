@@ -208,19 +208,20 @@ requires a mapping, and the round trip measured byte-exact through `orderedJinja
 
 ## Cost
 
-**Prefill ≈23.5 tok/s against decode ≈5.2 tok/s — a ratio of ≈4.5×.**
+**Prefill ≈23.5 tok/s against decode ≈6.05 tok/s — a ratio of ≈3.9×.**
 
 Measured 2026-08-27 on the mini, `kimi-linear-48b-a3b-4bit`, `--ram-budget 6G`,
-`--max-context 32768`. Two fully uncached prompts (587 and 2603 tokens, `cached=0` on
-both); the prefill rate is the slope between them, which cancels fixed request overhead
-and decode time. Fixed overhead solves to ≈0, and each point cross-checks independently
-at 24.7 and 23.8 tok/s.
+`--max-context 32768`. Prefill is the slope between two fully uncached prompts (587 and
+2603 tokens, `cached=0` on both), which cancels fixed request overhead and decode time;
+each point cross-checks independently at 24.7 and 23.8 tok/s. Decode is the server's
+own accounting (`NVMAI_RUNNER_STATS`, 256-token decode cells) at the same standing
+config, from the expert-cache slots sweep.
 
 ⚠ Absolute rates are per-box and per-model — the mini is the IO-bound one. The **ratio**
 is the transferable figure; it has not been re-measured on the MacBook or on a
 dense-attention model.
 
-At ≈4.5× prefill is not the cheap operation the usual batching argument assumes,
+At ≈3.9× prefill is not the cheap operation the usual batching argument assumes,
 presumably because expert streaming gates both paths.
 
 **This is the price of `preserve_thinking: false`, not a defect**, and there is no way
