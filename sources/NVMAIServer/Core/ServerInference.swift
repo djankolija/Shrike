@@ -449,17 +449,18 @@ private enum KVNormalization: Sendable, Equatable {
 /// both are cursor moves — or a forward pass still to run between requests.
 private enum KVNormalizationPlan: Sendable, Equatable {
     case done(KVNormalization)
-    /// The sequence the rewrite will leave in the KV, and the cursor it rewinds
-    /// to before prefilling the remainder. The target is what the next request
-    /// arbitrates against.
-    case settle(target: [Int32], rewindTo: Int)
+    /// Make the KV hold this sequence: the target, and the cursor a runner that
+    /// can rewind goes back to before prefilling the remainder. A settle's
+    /// target and a degenerate turn's truncation are both sequences, so both
+    /// arrive here. The target is what the next request arbitrates against.
+    case reconstruct(target: [Int32], rewindTo: Int)
 
-    /// What the KV holds at publish time. A pending settle has not moved it
-    /// yet, so its entry is published against the bytes the generation left.
+    /// What the KV holds at publish time. A pending reconstruction has not moved
+    /// it yet, so its entry is published against the bytes the generation left.
     var completedNormalization: KVNormalization {
         switch self {
         case .done(let normalization): return normalization
-        case .settle: return .unchanged
+        case .reconstruct: return .unchanged
         }
     }
 }
@@ -828,6 +829,14 @@ public actor ServerModelSession: ServerInferenceBackend {
         FileHandle.standardError.write(Data((line + "\n").utf8))
     }
 
+    /// Say which check left the KV unrewritten. Only chain breaks come here: a
+    /// conversation whose settles start failing has one of these lines at its
+    /// root, and without them the whole contagion is invisible.
+    private func declined(_ reason: KVNormalizationDecline) {
+        cacheDiag("NVMAI prompt_cache normalize kind=declined "
+                + "reason=\(reason.rawValue)")
+    }
+
     /// Decide where this request's prefill starts: from scratch, or resumed on
     /// a cache entry whose KV is live or restorable.
     ///
@@ -1178,7 +1187,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             normalization: plan.completedNormalization)
         // Nothing suspends between the publish and this, so no request can see
         // the entry before the rewrite that will replace it is arbitrable.
-        if case .settle(let target, let rewindTo) = plan, let publishedEntryID {
+        if case .reconstruct(let target, let rewindTo) = plan, let publishedEntryID {
             startRewrite(target: target, rewindTo: rewindTo, entryID: publishedEntryID)
         }
         completed = true
@@ -1246,10 +1255,19 @@ public actor ServerModelSession: ServerInferenceBackend {
             supportsRewind: runner.supportsPartialRewind,
             canRestore: canSnapshotForRestore) {
         case .none:
+            if KVRewrite.degenerateDeclinedForCapability(
+                reason: result.reason,
+                thoughtChannelClosed: thoughtChannelClosed,
+                emittedToolCalls: emittedToolCalls,
+                stopStringFiltered: stopStringFiltered,
+                supportsRewind: runner.supportsPartialRewind,
+                canRestore: canSnapshotForRestore) {
+                declined(.degenerateUnsupported)
+            }
             return .done(.unchanged)
         case .dropEmission:
-            return .done(dropEmission(result: result,
-                                      promptTokenCount: promptTokenCount))
+            return dropEmission(result: result,
+                                promptTokenCount: promptTokenCount)
         case .settleLiveRegion:
             let completed = messages
                 + [GFTokenizer.Message(role: .assistant, content: content)]
@@ -1259,28 +1277,39 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
     }
 
-    /// What the client sends back for a turn it never saw finish is its choice,
-    /// so the KV keeps only the request history the next render reproduces
-    /// regardless: everything below this generation's prompt suffix.
+    /// Drop this generation's suffix and emission, keeping the request history
+    /// the next render still reproduces.
+    ///
+    /// A cursor move where the runner can rewind. Where it cannot, the
+    /// truncation is a target like any other and the background rewrite reaches
+    /// it — a degenerate turn left standing keeps its blob under every later
+    /// boundary in the conversation, so every downstream settle would splice
+    /// onto bytes no render produces.
     private func dropEmission(result: RawDecodeResult,
-                              promptTokenCount: Int) -> KVNormalization {
-        let suffix = tokenizer.encode(tokenizer.generationSuffix, addBOS: false)
-        let target = promptTokenCount - suffix.count
-        guard target > 0,
-              target < result.kvPosition,
-              promptTokenCount <= result.kvBackedTokenIDs.count,
-              result.kvBackedTokenIDs[target..<promptTokenCount]
-                .elementsEqual(suffix) else {
-            return .unchanged
+                              promptTokenCount: Int) -> KVNormalizationPlan {
+        guard let target = KVRewrite.droppedPrefixLength(
+            kvBackedTokenIDs: result.kvBackedTokenIDs,
+            kvPosition: result.kvPosition,
+            promptTokenCount: promptTokenCount,
+            generationSuffix: tokenizer.encode(tokenizer.generationSuffix,
+                                               addBOS: false)) else {
+            declined(.suffixMismatch)
+            return .done(.unchanged)
+        }
+        let dropped = Array(result.kvBackedTokenIDs.prefix(target))
+        let line = "NVMAI prompt_cache normalize kind=drop_emission "
+            + "target=\(target) kv=\(result.kvPosition)"
+        guard runner.supportsPartialRewind else {
+            cacheDiag(line)
+            return .reconstruct(target: dropped, rewindTo: target)
         }
         do {
             try runner.rewind(to: target)
         } catch {
-            return .unchanged
+            return .done(.unchanged)
         }
-        cacheDiag("NVMAI prompt_cache normalize kind=drop_emission "
-                + "target=\(target) kv=\(result.kvPosition)")
-        return .rewritten(Array(result.kvBackedTokenIDs.prefix(target)))
+        cacheDiag(line)
+        return .done(.rewritten(dropped))
     }
 
     /// Rewind to where the KV and the settled render part company and prefill
@@ -1299,12 +1328,19 @@ public actor ServerModelSession: ServerInferenceBackend {
         guard let boundary = try? tokenizer.settledBoundaryTokens(messages: messages,
                                                                  tools: tools),
               let live = try? tokenizer.settledLiveRegionTokens(messages: messages,
-                                                                tools: tools),
-              let settled = KVRewrite.settledSequence(
-                kvBackedTokenIDs: result.kvBackedTokenIDs,
-                boundaryTokens: boundary,
-                liveRegionTokens: live),
-              settled.count < maxContext else {
+                                                                tools: tools) else {
+            declined(.renderFailed)
+            return .done(.unchanged)
+        }
+        guard let settled = KVRewrite.settledSequence(
+            kvBackedTokenIDs: result.kvBackedTokenIDs,
+            boundaryTokens: boundary,
+            liveRegionTokens: live) else {
+            declined(.spliceMismatch)
+            return .done(.unchanged)
+        }
+        guard settled.count < maxContext else {
+            declined(.overContext)
             return .done(.unchanged)
         }
         // An entry whose bytes did not change keeps the bridges its structural
@@ -1325,7 +1361,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             // with an empty remainder to prefill.
             guard runner.supportsPartialRewind else {
                 cacheDiag(line)
-                return .settle(target: settled, rewindTo: common)
+                return .reconstruct(target: settled, rewindTo: common)
             }
             do {
                 try runner.rewind(to: common)
@@ -1336,10 +1372,10 @@ public actor ServerModelSession: ServerInferenceBackend {
             return .done(.rewritten(settled))
         }
         cacheDiag(line)
-        return .settle(target: settled, rewindTo: common)
+        return .reconstruct(target: settled, rewindTo: common)
     }
 
-    /// Run a settle's forward pass between requests, so the response the
+    /// Run a reconstruction's forward pass between requests, so the response the
     /// rewrite belongs to has already closed. Cancelled before it seats
     /// anything, it skips and leaves the KV as the generation left it; cancelled
     /// after, it lands in a `checkCancellation` or in `prefillChunked`'s catch,

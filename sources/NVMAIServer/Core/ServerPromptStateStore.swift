@@ -376,31 +376,34 @@ final class ServerPromptStateStore: @unchecked Sendable {
     }
 
     private func evictMemoryIfNeeded() -> [UUID] {
-        state.withLock { state -> [UUID] in
-            var evicted: [UUID] = []
+        let evicted = state.withLock { state -> [(UUID, Int)] in
+            var evicted: [(UUID, Int)] = []
             while state.memoryBytes > configuration.memoryLimitBytes,
                   let id = state.memoryLRU.first {
                 state.memoryLRU.removeFirst()
                 if let snapshot = state.memory.removeValue(forKey: id) {
                     state.memoryBytes -= snapshot.payload.count
-                    evicted.append(id)
+                    evicted.append((id, snapshot.payload.count))
                 }
             }
             return evicted
         }
+        Self.logEvictions(evicted, reason: "memory_over_budget")
+        return evicted.map(\.0)
     }
 
     private func evictDiskIfNeeded() -> [UUID] {
         var directories: [URL] = []
-        let evicted = state.withLock { state -> [UUID] in
-            var evicted: [UUID] = []
+        let evicted = state.withLock { state -> [(UUID, Int)] in
+            var evicted: [(UUID, Int)] = []
             while state.diskBytes > configuration.diskLimitBytes,
                   let id = state.diskLRU.first {
                 state.diskLRU.removeFirst()
                 if let record = state.disk.removeValue(forKey: id) {
-                    state.diskBytes -= record.metadata.descriptor.payloadBytes
+                    let bytes = record.metadata.descriptor.payloadBytes
+                    state.diskBytes -= bytes
                     directories.append(record.directory)
-                    evicted.append(id)
+                    evicted.append((id, bytes))
                 }
             }
             return evicted
@@ -408,7 +411,21 @@ final class ServerPromptStateStore: @unchecked Sendable {
         for directory in directories {
             try? fileManager.removeItem(at: directory)
         }
-        return evicted
+        Self.logEvictions(evicted, reason: "disk_over_budget")
+        return evicted.map(\.0)
+    }
+
+    /// A capacity-driven drop, named where it happens: an explicit `remove` is
+    /// attributable to its caller, this is not, and a chain broken by eviction
+    /// was until now only inferable from a later `settle_reset`. The tiers are
+    /// separate reasons because a memory eviction leaves the entry restorable
+    /// from disk and a disk eviction does not.
+    private static func logEvictions(_ evicted: [(UUID, Int)], reason: String) {
+        for (id, bytes) in evicted {
+            FileHandle.standardError.write(Data(
+                ("NVMAI prompt_cache evict entry=\(id.uuidString.lowercased()) "
+                    + "bytes=\(bytes) reason=\(reason)\n").utf8))
+        }
     }
 
     private func writeDisk(entry: ServerPromptCacheEntry,

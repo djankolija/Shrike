@@ -793,11 +793,10 @@ struct KVRewriteTests {
     ]
 
     /// Every capability a session can have, since 6a made the trigger depend on
-    /// two of them. The settle asks only that *some* mechanism reaches its
-    /// target, so a rewind or a store will do; the degenerate turn asks for the
-    /// rewind specifically. A session with neither is offered nothing at all —
-    /// its only remaining mechanism is a reset whose abort would take the cache
-    /// with it.
+    /// two of them. Both rewrites ask only that *some* mechanism reaches their
+    /// target, so a rewind or a store will do for either. A session with neither
+    /// is offered nothing at all — its only remaining mechanism is a reset whose
+    /// abort would take the cache with it.
     private static let everyCapability: [(supportsRewind: Bool, canRestore: Bool)] = [
         (true, true), (true, false), (false, true), (false, false),
     ]
@@ -812,14 +811,6 @@ struct KVRewriteTests {
             .stopString: (.dropEmission, .dropEmission),
             .external: (.dropEmission, .dropEmission),
         ]
-        let restoringOnly: [StopReason: Row] = [
-            .endOfTurn: (.settleLiveRegion, .none),
-            .eos: (.settleLiveRegion, .none),
-            .toolCalls: (.none, .none),
-            .maxTokens: (.none, .none),
-            .stopString: (.none, .none),
-            .external: (.none, .none),
-        ]
         let neither: [StopReason: Row] = [
             .endOfTurn: (.none, .none),
             .eos: (.none, .none),
@@ -828,9 +819,11 @@ struct KVRewriteTests {
             .stopString: (.none, .none),
             .external: (.none, .none),
         ]
-        // A rewind reaches the target with or without a store, so the two
-        // rewinding rows are the same table.
-        let tables: [[StopReason: Row]] = [rewinding, rewinding, restoringOnly, neither]
+        // A rewind reaches the target with or without a store, and 6d made the
+        // drop's target a sequence a restore reaches too — so every capability
+        // holding some mechanism runs one table, and only the session holding
+        // none declines.
+        let tables: [[StopReason: Row]] = [rewinding, rewinding, rewinding, neither]
         #expect(tables.count == Self.everyCapability.count)
         for table in tables { #expect(table.count == Self.everyStopReason.count) }
         for reason in Self.everyStopReason {
@@ -873,7 +866,7 @@ struct KVRewriteTests {
                         "\(reason) closed=\(closed)")
             }
         }
-        // A store alone is enough to bring the settle back, which is what
+        // A store alone is enough to bring either rewrite back, which is what
         // separates this from a blanket capability gate.
         #expect(KVRewrite.forCompletion(
             reason: .endOfTurn,
@@ -882,6 +875,117 @@ struct KVRewriteTests {
             stopStringFiltered: false,
             supportsRewind: false,
             canRestore: true) == .settleLiveRegion)
+        #expect(KVRewrite.forCompletion(
+            reason: .maxTokens,
+            thoughtChannelClosed: true,
+            emittedToolCalls: false,
+            stopStringFiltered: false,
+            supportsRewind: false,
+            canRestore: true) == .dropEmission)
+    }
+
+    /// The line the matrix needed and did not have: a `finish=length` turn on a
+    /// runner that can neither rewind nor restore leaves its blob in the KV, and
+    /// every later settle in that conversation splices onto it. Only that case
+    /// is a decline — a tool hop and a filtered stop string leave the KV live by
+    /// design, and would say nothing however the capability fell.
+    @Test func onlyACapabilityDeclineOfADropIsWorthNaming() {
+        #expect(KVRewrite.degenerateDeclinedForCapability(
+            reason: .maxTokens,
+            thoughtChannelClosed: true,
+            emittedToolCalls: false,
+            stopStringFiltered: false,
+            supportsRewind: false,
+            canRestore: false))
+        // The settle declines on the same capability, but the drop is what the
+        // measured poison came from and what this line is for.
+        #expect(!KVRewrite.degenerateDeclinedForCapability(
+            reason: .endOfTurn,
+            thoughtChannelClosed: true,
+            emittedToolCalls: false,
+            stopStringFiltered: false,
+            supportsRewind: false,
+            canRestore: false))
+        for reason in Self.everyStopReason {
+            for closed in [true, false] {
+                for capability in Self.everyCapability {
+                    // A capability that reaches the target declines nothing.
+                    #expect(capability == (false, false)
+                        || !KVRewrite.degenerateDeclinedForCapability(
+                            reason: reason,
+                            thoughtChannelClosed: closed,
+                            emittedToolCalls: false,
+                            stopStringFiltered: false,
+                            supportsRewind: capability.supportsRewind,
+                            canRestore: capability.canRestore),
+                            "\(reason) closed=\(closed) \(capability)")
+                    // A by-design-live outcome is silent whatever the runner is.
+                    #expect(!KVRewrite.degenerateDeclinedForCapability(
+                        reason: reason,
+                        thoughtChannelClosed: closed,
+                        emittedToolCalls: true,
+                        stopStringFiltered: false,
+                        supportsRewind: capability.supportsRewind,
+                        canRestore: capability.canRestore))
+                    #expect(!KVRewrite.degenerateDeclinedForCapability(
+                        reason: reason,
+                        thoughtChannelClosed: closed,
+                        emittedToolCalls: false,
+                        stopStringFiltered: true,
+                        supportsRewind: capability.supportsRewind,
+                        canRestore: capability.canRestore))
+                }
+            }
+        }
+    }
+
+    /// The reasons are read out of a log by a person or a probe, so the strings
+    /// are the interface and a rename is a break.
+    @Test func everyDeclineNamesItselfInTheLogsVocabulary() {
+        #expect(Set(
+            [KVNormalizationDecline.spliceMismatch,
+             .renderFailed,
+             .overContext,
+             .degenerateUnsupported,
+             .suffixMismatch].map(\.rawValue))
+            == ["splice_mismatch",
+                "render_failed",
+                "over_context",
+                "degenerate_unsupported",
+                "suffix_mismatch"])
+    }
+
+    /// The drop keeps the request's own render below its generation suffix, and
+    /// verifies the suffix is there rather than trusting the subtraction — the
+    /// check that caught a Jinja template rendering it differently.
+    @Test func theDropKeepsTheRenderBelowAVerifiedGenerationSuffix() {
+        let prompt: [Int32] = [1, 2, 3, 4, 90, 91]
+        let kv = prompt + [50, 51, 52]
+        #expect(KVRewrite.droppedPrefixLength(
+            kvBackedTokenIDs: kv,
+            kvPosition: kv.count,
+            promptTokenCount: prompt.count,
+            generationSuffix: [90, 91]) == 4)
+        // The suffix is not what the template rendered: nothing is dropped
+        // rather than cutting at a position no render names.
+        #expect(KVRewrite.droppedPrefixLength(
+            kvBackedTokenIDs: kv,
+            kvPosition: kv.count,
+            promptTokenCount: prompt.count,
+            generationSuffix: [90, 99]) == nil)
+        // A prompt that is nothing but its suffix leaves no history to keep.
+        #expect(KVRewrite.droppedPrefixLength(
+            kvBackedTokenIDs: [90, 91, 50],
+            kvPosition: 3,
+            promptTokenCount: 2,
+            generationSuffix: [90, 91]) == nil)
+        // A prompt the KV does not hold whole: the suffix cannot be verified
+        // where it would have to be read past the end to look.
+        #expect(KVRewrite.droppedPrefixLength(
+            kvBackedTokenIDs: kv,
+            kvPosition: kv.count,
+            promptTokenCount: kv.count + 1,
+            generationSuffix: [90, 91]) == nil)
     }
 
     @Test func aTurnCarryingToolCallsStaysLiveWhateverStopEndedIt() {
@@ -1220,6 +1324,48 @@ struct KVReconstructionTests {
                               isPrefixOfTarget: true)],
             targetCount: targetCount)
             == .restore(entryID: longPrefix, position: targetCount))
+    }
+
+    /// 6d, end to end over the pure halves: a `finish=length` turn on a runner
+    /// that cannot rewind names a target — its own render below the generation
+    /// suffix — and the same reconstruction that serves a settle reaches it. The
+    /// previous turn's snapshot is a prefix of that target because the target is
+    /// this request's render, which opens with the bytes that turn settled into.
+    @Test func aDegenerateTurnOnANonRewindableRunnerNamesAReachableTarget() throws {
+        let previousTurn: [Int32] = [1, 2, 3, 4, 5, 6]
+        let render = previousTurn + [7, 8, 90, 91]
+        let kv = render + [50, 51, 52, 53]
+        let dropped = try #require(KVRewrite.droppedPrefixLength(
+            kvBackedTokenIDs: kv,
+            kvPosition: kv.count,
+            promptTokenCount: render.count,
+            generationSuffix: [90, 91]))
+        let target = Array(kv.prefix(dropped))
+        #expect(target == [1, 2, 3, 4, 5, 6, 7, 8])
+
+        let previous = UUID()
+        let plan = KVReconstruction.plan(
+            supportsRewind: false,
+            livePosition: kv.count,
+            rewindTo: dropped,
+            snapshots: [.init(
+                entryID: previous,
+                position: previousTurn.count,
+                isPrefixOfTarget: target.prefix(previousTurn.count)
+                    .elementsEqual(previousTurn))],
+            targetCount: target.count)
+        #expect(plan == .restore(entryID: previous, position: previousTurn.count))
+        // The remainder is what the rewrite prefills after seating.
+        #expect(Array(target[plan.seatedPosition...]) == [7, 8])
+
+        // With nothing to seat on the drop still lands, by prefilling the target
+        // whole — the work the next request would have paid for anyway.
+        #expect(KVReconstruction.plan(
+            supportsRewind: false,
+            livePosition: kv.count,
+            rewindTo: dropped,
+            snapshots: [],
+            targetCount: target.count) == .reset(reason: .noSnapshot))
     }
 
     @Test func theSeatedPositionIsWhereTheRemaindersPrefillStarts() {

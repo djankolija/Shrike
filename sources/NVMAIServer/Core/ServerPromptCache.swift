@@ -74,9 +74,11 @@ enum KVRewrite: Sendable, Equatable {
     /// entry no snapshot backs, which is strictly worse than never settling. A
     /// session that can neither rewind nor snapshot therefore declines.
     ///
-    /// `dropEmission` is a truncation of the live KV and nothing else expresses
-    /// it, so it stays rewind-gated whatever the store can do; the settled
-    /// entries below a skipped degenerate turn still carry the conversation.
+    /// `dropEmission` names a sequence too — the request's own render below its
+    /// generation suffix — so it is offered on the same mechanisms. A degenerate
+    /// turn that declines does not merely lose its own rewrite: its blob stays
+    /// below every later boundary in that conversation, and every downstream
+    /// settle then fails its splice check.
     static func forCompletion(reason: StopReason,
                               thoughtChannelClosed: Bool,
                               emittedToolCalls: Bool,
@@ -91,9 +93,9 @@ enum KVRewrite: Sendable, Equatable {
         // initializer hard-sets `toolCalls` empty: settling a tool hop would
         // re-prefill the KV to a render its calls had been deleted from.
         guard !emittedToolCalls else { return .none }
-        let settle: KVRewrite = supportsRewind || canRestore
-            ? .settleLiveRegion : .none
-        let degenerate: KVRewrite = supportsRewind ? .dropEmission : .none
+        let reachable = supportsRewind || canRestore
+        let settle: KVRewrite = reachable ? .settleLiveRegion : .none
+        let degenerate: KVRewrite = reachable ? .dropEmission : .none
         switch reason {
         case .endOfTurn, .eos:
             return thoughtChannelClosed ? settle : degenerate
@@ -102,6 +104,51 @@ enum KVRewrite: Sendable, Equatable {
         case .maxTokens, .stopString, .external:
             return degenerate
         }
+    }
+
+    /// Whether the table declined only for want of a mechanism — the one
+    /// decline worth a line, since the turn's blob then stays in the KV under
+    /// everything that follows it. Asked of the table rather than restated from
+    /// it: the same inputs with the capability granted.
+    static func degenerateDeclinedForCapability(
+        reason: StopReason,
+        thoughtChannelClosed: Bool,
+        emittedToolCalls: Bool,
+        stopStringFiltered: Bool,
+        supportsRewind: Bool,
+        canRestore: Bool
+    ) -> Bool {
+        guard !supportsRewind, !canRestore else { return false }
+        return forCompletion(reason: reason,
+                             thoughtChannelClosed: thoughtChannelClosed,
+                             emittedToolCalls: emittedToolCalls,
+                             stopStringFiltered: stopStringFiltered,
+                             supportsRewind: true,
+                             canRestore: true) == .dropEmission
+    }
+
+    /// How much of a degenerate turn's KV the drop keeps: the request's own
+    /// render below its generation suffix. What the client sends back for a turn
+    /// it never saw finish is its choice, so the KV keeps only the history the
+    /// next render reproduces regardless.
+    ///
+    /// Nil unless the suffix stands byte-for-byte where the subtraction puts it.
+    /// A template that renders the suffix differently from
+    /// `encode(generationSuffix)` makes that arithmetic a guess, and a
+    /// truncation on a guess cuts the KV at a position no render names.
+    static func droppedPrefixLength(kvBackedTokenIDs: [Int32],
+                                    kvPosition: Int,
+                                    promptTokenCount: Int,
+                                    generationSuffix: [Int32]) -> Int? {
+        let target = promptTokenCount - generationSuffix.count
+        guard target > 0,
+              target < kvPosition,
+              promptTokenCount <= kvBackedTokenIDs.count,
+              kvBackedTokenIDs[target..<promptTokenCount]
+                .elementsEqual(generationSuffix) else {
+            return nil
+        }
+        return target
     }
 
     /// The token sequence a settled rewrite leaves in the KV: the bytes below
@@ -123,6 +170,30 @@ enum KVRewrite: Sendable, Equatable {
         }
         return boundaryTokens + liveRegionTokens
     }
+}
+
+/// Why a completed turn's KV was left holding bytes the next render will not
+/// reproduce.
+///
+/// Each of these breaks the chain for the whole conversation rather than for
+/// the one turn — the unrewritten bytes sit below every later boundary, so the
+/// splice check fails from here on — which is why each says so on stderr.
+/// Outcomes that leave the KV live by design (a tool hop, a filtered stop
+/// string, a settle whose target the KV already holds) are not declines and are
+/// not here.
+enum KVNormalizationDecline: String, Sendable, Equatable {
+    /// `settledSequence` refused: the KV's bytes below the boundary are not the
+    /// ones the settled render produces. The tell for an already-poisoned chain.
+    case spliceMismatch = "splice_mismatch"
+    /// The boundary or the live region would not render.
+    case renderFailed = "render_failed"
+    /// The settled form does not fit the context the session was built with.
+    case overContext = "over_context"
+    /// The runner can neither rewind nor restore, so nothing reaches the
+    /// degenerate turn's target.
+    case degenerateUnsupported = "degenerate_unsupported"
+    /// The generation suffix is not where the drop's arithmetic puts it.
+    case suffixMismatch = "suffix_mismatch"
 }
 
 /// How a settle seats the KV on a prefix of its target before prefilling the
