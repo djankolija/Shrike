@@ -31,6 +31,18 @@ struct ServerPromptCacheEntry: Codable, Sendable, Equatable {
     let kvBackedTokenIDs: [Int32]
     let uncommittedBoundaryTokenIDs: [Int32]
     let kvPosition: Int
+
+    func truncated(to position: Int) -> ServerPromptCacheEntry {
+        ServerPromptCacheEntry(
+            id: id,
+            domain: domain,
+            inputMessages: inputMessages,
+            tools: tools,
+            assistantTurn: assistantTurn,
+            kvBackedTokenIDs: Array(kvBackedTokenIDs.prefix(position)),
+            uncommittedBoundaryTokenIDs: uncommittedBoundaryTokenIDs,
+            kvPosition: position)
+    }
 }
 
 enum ServerPromptCacheMatch: Sendable, Equatable {
@@ -124,7 +136,7 @@ struct ServerPromptCache: Sendable {
         renderedPromptIDs: [Int32],
         tokenizer: GFTokenizer
     ) -> ServerPromptCacheMatch {
-        var best: (index: Int, effective: [Int32], cached: Int)?
+        var best: (index: Int, candidate: EntryMatch)?
         for (index, entry) in entries.enumerated() {
             guard entry.domain == domain,
                   entry.tools == request.tools,
@@ -136,17 +148,37 @@ struct ServerPromptCache: Sendable {
                     request: request,
                     renderedPromptIDs: renderedPromptIDs,
                     tokenizer: tokenizer) else { continue }
-            if candidate.cached > (best?.cached ?? -1) {
-                best = (index, candidate.effective, candidate.cached)
+            if candidate.cachedTokens > (best?.candidate.cachedTokens ?? -1) {
+                best = (index, candidate)
             }
         }
         guard let best else { return .miss }
+        let effective: [Int32]
+        switch best.candidate {
+        case .resume(let resumed, _):
+            effective = resumed
+        case .salvage(let commonPrefix):
+            entries[best.index] = entries[best.index].truncated(to: commonPrefix)
+            effective = renderedPromptIDs
+        }
         let matched = entries.remove(at: best.index)
         entries.append(matched)
         return .hit(
             entryID: matched.id,
-            effectivePromptIDs: best.effective,
-            cachedPromptTokens: best.cached)
+            effectivePromptIDs: effective,
+            cachedPromptTokens: best.candidate.cachedTokens)
+    }
+
+    private enum EntryMatch {
+        case resume(effective: [Int32], cachedTokens: Int)
+        case salvage(commonPrefix: Int)
+
+        var cachedTokens: Int {
+            switch self {
+            case .resume(_, let cachedTokens): return cachedTokens
+            case .salvage(let commonPrefix): return commonPrefix
+            }
+        }
     }
 
     private func match(
@@ -154,36 +186,59 @@ struct ServerPromptCache: Sendable {
         request: ValidatedChatRequest,
         renderedPromptIDs: [Int32],
         tokenizer: GFTokenizer
-    ) -> (effective: [Int32], cached: Int)? {
+    ) -> EntryMatch? {
         guard entry.kvPosition == entry.kvBackedTokenIDs.count,
               entry.kvPosition > 0,
               entry.uncommittedBoundaryTokenIDs.count == 1 else {
             return nil
         }
 
-        // S12: direct prefix hit. `>=` (not `>`) so an identical-prompt
-        // replay whose render is exactly the entry's KV-backed prefix also
-        // hits; the caller restores the entry state without extending it.
-        if renderedPromptIDs.count >= entry.kvPosition,
-           renderedPromptIDs.prefix(entry.kvPosition)
-            .elementsEqual(entry.kvBackedTokenIDs) {
-            return (renderedPromptIDs, entry.kvPosition)
+        let comparableLength = min(renderedPromptIDs.count, entry.kvPosition)
+        let commonPrefix = (0..<comparableLength).first {
+            renderedPromptIDs[$0] != entry.kvBackedTokenIDs[$0]
+        } ?? comparableLength
+        NVMAICacheDiag.log(
+            "lcp k=\(commonPrefix) kv=\(entry.kvPosition) "
+                + "fraction=\(Double(commonPrefix) / Double(entry.kvPosition))")
+
+        // S12: direct prefix hit. An identical-prompt replay, whose render
+        // extends the entry by nothing, hits here too rather than falling
+        // through to the structural paths.
+        if commonPrefix == entry.kvPosition {
+            return .resume(effective: renderedPromptIDs, cachedTokens: entry.kvPosition)
         }
         if renderedPromptIDs.count < entry.kvPosition {
             NVMAICacheDiag.log(
                 "s12_short rendered=\(renderedPromptIDs.count) kv=\(entry.kvPosition)")
-        } else if let firstDiff = (0..<entry.kvPosition).first(where: {
-            renderedPromptIDs[$0] != entry.kvBackedTokenIDs[$0]
-        }) {
-            let lo = max(0, firstDiff - 6)
-            let hi = min(entry.kvPosition, firstDiff + 6)
+        } else {
+            let lo = max(0, commonPrefix - 6)
+            let hi = min(entry.kvPosition, commonPrefix + 6)
             NVMAICacheDiag.log(
-                "s12_diverge at=\(firstDiff) of kv=\(entry.kvPosition) "
+                "s12_diverge at=\(commonPrefix) of kv=\(entry.kvPosition) "
                     + "window=\(lo)..<\(hi) "
                     + "rendered=\(Array(renderedPromptIDs[lo..<hi])) "
                     + "cached=\(Array(entry.kvBackedTokenIDs[lo..<hi]))")
         }
 
+        if let structural = structuralMatch(
+            entry: entry,
+            request: request,
+            tokenizer: tokenizer) {
+            return .resume(
+                effective: structural.effective,
+                cachedTokens: structural.cached)
+        }
+        // Partial salvage runs last so it cannot truncate KV the structural
+        // path would have restored whole.
+        guard commonPrefix > 0 else { return nil }
+        return .salvage(commonPrefix: commonPrefix)
+    }
+
+    private func structuralMatch(
+        entry: ServerPromptCacheEntry,
+        request: ValidatedChatRequest,
+        tokenizer: GFTokenizer
+    ) -> (effective: [Int32], cached: Int)? {
         let inputCount = entry.inputMessages.count
         guard request.messages.count > inputCount + 1,
               request.messages.prefix(inputCount)

@@ -97,7 +97,19 @@ struct ServerPromptCacheTests {
             request: continuation,
             renderedPromptIDs: rendered,
             tokenizer: tokenizer)
-        #expect(match == .miss)
+
+        // The ChatML text bridge is dialect-gated, so a Harmony entry has no
+        // structural path: it salvages the shared prefix, never splices a bridge.
+        guard case .hit(_, let effective, let cached) = match else {
+            Issue.record("expected a common-prefix salvage")
+            return
+        }
+        #expect(effective == rendered)
+        #expect(cached > 0)
+        #expect(cached < kvBacked.count)
+        let entry = try #require(cache.entries.last)
+        #expect(entry.kvBackedTokenIDs == Array(kvBacked.prefix(cached)))
+        #expect(entry.kvPosition == cached)
     }
 
     @Test func kimiContinuationsHitTheRenderedPrefixWithoutABridge() async throws {
@@ -150,7 +162,7 @@ struct ServerPromptCacheTests {
         #expect(effective[cached] == tokenizer.endOfTurnID)
     }
 
-    @Test func mismatchedLineageDomainAndUnsafeStopsMiss() async throws {
+    @Test func unsafeStopsDoNotPublishAndAChangedLineageOnlySalvagesItsPrefix() async throws {
         let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         let initial = request(messages: [
             GFTokenizer.Message(role: .user, content: "first"),
@@ -176,6 +188,7 @@ struct ServerPromptCacheTests {
             #expect(publication == nil)
         }
 
+        let kvBacked = prompt + tokenizer.encode("answer", addBOS: false)
         cache.publish(
             domain: domain,
             request: initial,
@@ -183,7 +196,7 @@ struct ServerPromptCacheTests {
             calls: [],
             result: rawResult(
                 prompt: prompt,
-                kvBacked: prompt + tokenizer.encode("answer", addBOS: false),
+                kvBacked: kvBacked,
                 boundary: tokenizer.endOfTurnID,
                 reason: .endOfTurn))
         let changed = request(messages: [
@@ -194,11 +207,24 @@ struct ServerPromptCacheTests {
         let rendered = tokenizer.encode(
             try tokenizer.applyChatTemplate(changed.messages),
             addBOS: false)
-        #expect(cache.match(
+        let match = cache.match(
             domain: domain,
             request: changed,
             renderedPromptIDs: rendered,
-            tokenizer: tokenizer) == .miss)
+            tokenizer: tokenizer)
+
+        // A changed first turn has no structural continuation, so all the entry
+        // can keep is the template preamble both renders share.
+        guard case .hit(_, let effective, let cached) = match else {
+            Issue.record("expected a common-prefix salvage")
+            return
+        }
+        #expect(effective == rendered)
+        #expect(cached > 0)
+        #expect(cached < prompt.count)
+        let entry = try #require(cache.entries.last)
+        #expect(entry.kvBackedTokenIDs == Array(kvBacked.prefix(cached)))
+        #expect(entry.kvPosition == cached)
     }
 
     @Test func tailCompletedStopStringDoesNotPublishPrefix() async throws {
@@ -421,6 +447,154 @@ struct ServerPromptCacheTests {
         #expect(rawEffective == kvBacked
             + tokenizer.encodeTextContinuation(userContent: rawSecond.content ?? ""))
         #expect(rawEffective != effective)
+    }
+
+    @Test func fullPrefixHitLeavesTheEntryWhole() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let initial = request(messages: [
+            GFTokenizer.Message(role: .user, content: "first"),
+        ])
+        var cache = ServerPromptCache()
+        let published = cache.publish(
+            domain: domain,
+            request: initial,
+            content: "answer",
+            calls: [],
+            result: rawResult(
+                prompt: [1, 2, 3],
+                kvBacked: [1, 2, 3],
+                boundary: tokenizer.endOfTurnID,
+                reason: .endOfTurn))
+        let publication = try #require(published)
+
+        let match = cache.match(
+            domain: domain,
+            request: initial,
+            renderedPromptIDs: [1, 2, 3, 4, 5],
+            tokenizer: tokenizer)
+
+        #expect(match == .hit(
+            entryID: publication.entry.id,
+            effectivePromptIDs: [1, 2, 3, 4, 5],
+            cachedPromptTokens: 3))
+        let entry = try #require(cache.entries.last)
+        #expect(entry.kvBackedTokenIDs == [1, 2, 3])
+        #expect(entry.kvPosition == 3)
+    }
+
+    @Test func thinkingRetainedContinuationTakesTheStructuralPathUntruncated() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let initial = request(messages: [
+            GFTokenizer.Message(role: .user, content: "first"),
+        ])
+        let initialPrompt = tokenizer.encode(
+            try tokenizer.applyChatTemplate(initial.messages),
+            addBOS: false)
+        // The blob carries the turn's reasoning and the re-render drops it, so
+        // the render comes back shorter than the entry.
+        let generated = tokenizer.encode(
+            String(repeating: "reasoning ", count: 40) + "answer",
+            addBOS: false)
+        let kvBacked = initialPrompt + generated
+        var cache = ServerPromptCache()
+        cache.publish(
+            domain: domain,
+            request: initial,
+            content: "answer",
+            calls: [],
+            result: rawResult(
+                prompt: initialPrompt,
+                kvBacked: kvBacked,
+                boundary: tokenizer.endOfTurnID,
+                reason: .endOfTurn))
+
+        let continuation = request(messages: initial.messages + [
+            GFTokenizer.Message(role: .assistant, content: "answer"),
+            GFTokenizer.Message(role: .user, content: "second"),
+        ])
+        let rendered = tokenizer.encode(
+            try tokenizer.applyChatTemplate(continuation.messages),
+            addBOS: false)
+        #expect(rendered.count < kvBacked.count)
+
+        let match = cache.match(
+            domain: domain,
+            request: continuation,
+            renderedPromptIDs: rendered,
+            tokenizer: tokenizer)
+
+        guard case .hit(_, let effective, let cached) = match else {
+            Issue.record("expected the structural text-continuation hit")
+            return
+        }
+        #expect(cached == kvBacked.count)
+        #expect(effective == kvBacked
+            + tokenizer.encodeTextContinuation(userContent: "second"))
+        let entry = try #require(cache.entries.last)
+        #expect(entry.kvBackedTokenIDs == kvBacked)
+        #expect(entry.kvPosition == kvBacked.count)
+    }
+
+    @Test func divergentTailTruncatesTheEntryToTheCommonPrefix() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let initial = request(messages: [
+            GFTokenizer.Message(role: .user, content: "first"),
+        ])
+        var cache = ServerPromptCache()
+        let published = cache.publish(
+            domain: domain,
+            request: initial,
+            content: "answer",
+            calls: [],
+            result: rawResult(
+                prompt: [1, 2, 3],
+                kvBacked: [1, 2, 3, 4, 5],
+                boundary: tokenizer.endOfTurnID,
+                reason: .endOfTurn))
+        let publication = try #require(published)
+
+        let match = cache.match(
+            domain: domain,
+            request: initial,
+            renderedPromptIDs: [1, 2, 9, 9],
+            tokenizer: tokenizer)
+
+        #expect(match == .hit(
+            entryID: publication.entry.id,
+            effectivePromptIDs: [1, 2, 9, 9],
+            cachedPromptTokens: 2))
+        let entry = try #require(cache.entries.last)
+        #expect(entry.kvBackedTokenIDs == [1, 2])
+        #expect(entry.kvPosition == entry.kvBackedTokenIDs.count)
+    }
+
+    @Test func aRenderWithNoCommonPrefixMissesAndLeavesTheEntryWhole() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let initial = request(messages: [
+            GFTokenizer.Message(role: .user, content: "first"),
+        ])
+        var cache = ServerPromptCache()
+        cache.publish(
+            domain: domain,
+            request: initial,
+            content: "answer",
+            calls: [],
+            result: rawResult(
+                prompt: [1, 2, 3],
+                kvBacked: [1, 2, 3, 4, 5],
+                boundary: tokenizer.endOfTurnID,
+                reason: .endOfTurn))
+
+        let match = cache.match(
+            domain: domain,
+            request: initial,
+            renderedPromptIDs: [7, 8],
+            tokenizer: tokenizer)
+
+        #expect(match == .miss)
+        let entry = try #require(cache.entries.last)
+        #expect(entry.kvBackedTokenIDs == [1, 2, 3, 4, 5])
+        #expect(entry.kvPosition == 5)
     }
 
     /// The post-strip view swaps only the messages and tools; every other
