@@ -29,6 +29,23 @@ struct QwenToolCallParserTests {
         #expect(call.id == "call_test")
     }
 
+    @Test("argumentsJSON keeps the model's parameter order, not sorted")
+    func argumentsJSONPreservesEmissionOrder() throws {
+        let call = try parse("""
+
+        <function=get_weather>
+        <parameter=unit>
+        c
+        </parameter>
+        <parameter=city>
+        Paris
+        </parameter>
+        </function>
+
+        """)
+        #expect(call.argumentsJSON == #"{"unit":"c","city":"Paris"}"#)
+    }
+
     @Test("JSON values become typed, non-JSON stays string")
     func jsonAndStringValues() throws {
         let call = try parse("""

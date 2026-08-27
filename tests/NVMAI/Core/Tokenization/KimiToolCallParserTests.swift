@@ -16,7 +16,7 @@ struct KimiToolCallParserTests {
         #expect(call.name == "get_weather")
         #expect(call.arguments == .object(["city": .string("Paris"),
                                            "days": .integer(2)]))
-        #expect(call.argumentsJSON == #"{"city":"Paris","days":2}"#)
+        #expect(call.argumentsJSON == #"{"city": "Paris", "days": 2}"#)
     }
 
     @Test("Whitespace around the id and body is trimmed")

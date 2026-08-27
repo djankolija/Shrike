@@ -18,6 +18,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
+        .package(url: "https://github.com/huggingface/swift-jinja.git", from: "2.3.6"),
+        .package(url: "https://github.com/apple/swift-collections.git", from: "1.5.1"),
         .package(url: "https://github.com/apple/swift-nio.git", exact: "2.99.0"),
     ],
     targets: [
@@ -40,6 +42,8 @@ let package = Package(
                 "NVMAIFormat",
                 "NVMAIKernelsC",
                 .product(name: "Tokenizers", package: "swift-transformers"),
+                .product(name: "Jinja", package: "swift-jinja"),
+                .product(name: "OrderedCollections", package: "swift-collections"),
             ],
             path: "sources/NVMAI",
             resources: [

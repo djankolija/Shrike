@@ -46,9 +46,11 @@ public struct HarmonyToolCallParser: Sendable {
               case .object = arguments else {
             throw ToolCallParserError.malformed
         }
+        // The model's own JSON text, verbatim: replayed history re-renders
+        // exactly the bytes the KV was built from.
         return ParsedToolCall(id: id,
                               name: name,
                               arguments: arguments,
-                              argumentsJSON: try arguments.encoded())
+                              argumentsJSON: trimmed)
     }
 }

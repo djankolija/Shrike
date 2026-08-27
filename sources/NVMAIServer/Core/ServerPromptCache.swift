@@ -86,7 +86,7 @@ struct ServerPromptCache: Sendable {
             GFTokenizer.HistoricalToolCall(
                 id: $0.id,
                 name: $0.name,
-                arguments: $0.arguments)
+                arguments: $0.argumentsJSON)
         }
         let assistant = GFTokenizer.Message(
             role: .assistant,

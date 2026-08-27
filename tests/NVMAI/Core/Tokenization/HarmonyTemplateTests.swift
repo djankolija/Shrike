@@ -180,7 +180,7 @@ struct HarmonyTemplateTests {
             Message(role: .user, content: "Weather in Paris?"),
             Message(role: .assistant, content: nil,
                     toolCalls: [.init(id: "call_1", name: "get_weather",
-                                      arguments: .object(["city": .string("Paris")]))],
+                                      arguments: #"{"city":"Paris"}"#)],
                     thinking: "Need the live number."),
             Message(role: .tool, content: "22C, clear"),
         ], tools: [Self.weatherTool])
@@ -301,7 +301,7 @@ struct HarmonyTemplateTests {
                 Message(role: .user, content: "Hi"),
                 Message(role: .assistant, content: "a",
                         toolCalls: [.init(id: "call_1", name: "ping",
-                                          arguments: .object([:]))],
+                                          arguments: "{}")],
                         thinking: "b"),
             ])
         }
@@ -321,7 +321,7 @@ struct HarmonyTemplateTests {
     @Test("More than one tool call per assistant message is rejected")
     func multipleToolCalls() {
         let call = GFTokenizer.HistoricalToolCall(
-            id: "call_1", name: "ping", arguments: .object([:]))
+            id: "call_1", name: "ping", arguments: "{}")
         #expect(throws: GFTokenizerError.self) {
             _ = try render([
                 Message(role: .user, content: "Hi"),
@@ -336,7 +336,7 @@ struct HarmonyTemplateTests {
             _ = try tok.encodeToolResultContinuation(
                 cachedMessages: [Message(role: .user, content: "Hi")],
                 assistant: Message(role: .assistant, content: nil, toolCalls: [
-                    .init(id: "call_1", name: "lookup", arguments: .object([:])),
+                    .init(id: "call_1", name: "lookup", arguments: "{}"),
                 ]),
                 incomingMessages: [Message(role: .user, content: "Hi")],
                 tools: [])

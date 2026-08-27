@@ -1,4 +1,6 @@
 import Foundation
+import Jinja
+import OrderedCollections
 
 public indirect enum JSONValue: Codable, Equatable, Sendable {
     case object([String: JSONValue])
@@ -94,5 +96,204 @@ public indirect enum JSONValue: Codable, Equatable, Sendable {
         let encoder = JSONEncoder()
         if sortedKeys { encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes] }
         return String(decoding: try encoder.encode(self), as: UTF8.self)
+    }
+}
+
+extension JSONValue {
+    /// Serialise key/value pairs in the given order, which `[String: JSONValue]`
+    /// cannot express.
+    public static func encodedObject(_ pairs: [(String, JSONValue)]) throws -> String {
+        let encoder = JSONEncoder()
+        var parts: [String] = []
+        for (key, value) in pairs {
+            let keyData = try encoder.encode(key)
+            let valueData = try encoder.encode(value)
+            guard let keyText = String(data: keyData, encoding: .utf8),
+                  let valueText = String(data: valueData, encoding: .utf8) else {
+                throw ToolCallParserError.malformed
+            }
+            parts.append("\(keyText):\(valueText)")
+        }
+        return "{" + parts.joined(separator: ",") + "}"
+    }
+
+    /// Parse a JSON object into a Jinja value that keeps the text's key order.
+    ///
+    /// `JSONDecoder` cannot do this: it stores members in a dictionary before any
+    /// `Codable` conformance runs, so `allKeys` comes back in hash order.
+    public static func orderedJinjaObject(_ text: String) throws -> Jinja.Value {
+        var scanner = OrderedJSONScanner(text)
+        let value = try scanner.parseValue()
+        scanner.skipWhitespace()
+        guard scanner.isAtEnd, case .object = value else {
+            throw ToolCallParserError.malformed
+        }
+        return value
+    }
+}
+
+/// Minimal recursive-descent JSON reader that preserves object key order.
+struct OrderedJSONScanner {
+    private let scalars: [Character]
+    private var index: Int = 0
+
+    init(_ text: String) { scalars = Array(text) }
+
+    var isAtEnd: Bool { index >= scalars.count }
+
+    mutating func skipWhitespace() {
+        while index < scalars.count, scalars[index].isWhitespace { index += 1 }
+    }
+
+    private mutating func expect(_ character: Character) throws {
+        skipWhitespace()
+        guard index < scalars.count, scalars[index] == character else {
+            throw ToolCallParserError.malformed
+        }
+        index += 1
+    }
+
+    private mutating func peek() throws -> Character {
+        skipWhitespace()
+        guard index < scalars.count else { throw ToolCallParserError.malformed }
+        return scalars[index]
+    }
+
+    mutating func parseValue() throws -> Jinja.Value {
+        switch try peek() {
+        case "{": return try parseObject()
+        case "[": return try parseArray()
+        case "\"": return .string(try parseString())
+        case "t", "f": return .boolean(try parseLiteralBool())
+        case "n": try parseNull(); return .null
+        default: return try parseNumber()
+        }
+    }
+
+    private mutating func parseObject() throws -> Jinja.Value {
+        try expect("{")
+        var members: OrderedDictionary<String, Jinja.Value> = [:]
+        skipWhitespace()
+        if try peek() == "}" { index += 1; return .object(members) }
+        while true {
+            let key = try parseString()
+            try expect(":")
+            members[key] = try parseValue()
+            skipWhitespace()
+            let next = try peek()
+            index += 1
+            if next == "}" { break }
+            guard next == "," else { throw ToolCallParserError.malformed }
+        }
+        return .object(members)
+    }
+
+    private mutating func parseArray() throws -> Jinja.Value {
+        try expect("[")
+        var items: [Jinja.Value] = []
+        skipWhitespace()
+        if try peek() == "]" { index += 1; return .array(items) }
+        while true {
+            items.append(try parseValue())
+            skipWhitespace()
+            let next = try peek()
+            index += 1
+            if next == "]" { break }
+            guard next == "," else { throw ToolCallParserError.malformed }
+        }
+        return .array(items)
+    }
+
+    private mutating func parseString() throws -> String {
+        try expect("\"")
+        var out = ""
+        while index < scalars.count {
+            let character = scalars[index]
+            index += 1
+            if character == "\"" { return out }
+            if character != "\\" { out.append(character); continue }
+            guard index < scalars.count else { throw ToolCallParserError.malformed }
+            let escape = scalars[index]
+            index += 1
+            switch escape {
+            case "\"", "\\", "/": out.append(escape)
+            case "b": out.append("\u{08}")
+            case "f": out.append("\u{0C}")
+            case "n": out.append("\n")
+            case "r": out.append("\r")
+            case "t": out.append("\t")
+            case "u":
+                guard index + 4 <= scalars.count else { throw ToolCallParserError.malformed }
+                let hex = String(scalars[index..<(index + 4)])
+                index += 4
+                guard let code = UInt32(hex, radix: 16) else {
+                    throw ToolCallParserError.malformed
+                }
+                if code >= 0xD800, code <= 0xDBFF,
+                   index + 6 <= scalars.count,
+                   scalars[index] == "\\", scalars[index + 1] == "u",
+                   let low = UInt32(String(scalars[(index + 2)..<(index + 6)]), radix: 16),
+                   low >= 0xDC00, low <= 0xDFFF {
+                    index += 6
+                    let combined = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
+                    guard let scalar = Unicode.Scalar(combined) else {
+                        throw ToolCallParserError.malformed
+                    }
+                    out.append(Character(scalar))
+                } else {
+                    guard let scalar = Unicode.Scalar(code) else {
+                        throw ToolCallParserError.malformed
+                    }
+                    out.append(Character(scalar))
+                }
+            default: throw ToolCallParserError.malformed
+            }
+        }
+        throw ToolCallParserError.malformed
+    }
+
+    private mutating func parseLiteralBool() throws -> Bool {
+        if matches("true") { return true }
+        if matches("false") { return false }
+        throw ToolCallParserError.malformed
+    }
+
+    private mutating func parseNull() throws {
+        guard matches("null") else { throw ToolCallParserError.malformed }
+    }
+
+    private mutating func matches(_ literal: String) -> Bool {
+        let characters = Array(literal)
+        guard index + characters.count <= scalars.count,
+              Array(scalars[index..<(index + characters.count)]) == characters else {
+            return false
+        }
+        index += characters.count
+        return true
+    }
+
+    private mutating func parseNumber() throws -> Jinja.Value {
+        skipWhitespace()
+        let start = index
+        while index < scalars.count,
+              "0123456789+-.eE".contains(scalars[index]) {
+            index += 1
+        }
+        let text = String(scalars[start..<index])
+        guard !text.isEmpty else { throw ToolCallParserError.malformed }
+        if let integer = Int(text) { return .int(integer) }
+        // Value-exactness gate matching `jinjaSendableValue`: a number the
+        // renderer cannot reproduce exactly (e.g. UInt64.max) is rejected,
+        // never rounded.
+        guard let double = Double(text), double.isFinite,
+              let literal = Decimal(
+                string: text, locale: Locale(identifier: "en_US_POSIX")),
+              let roundTrip = Decimal(
+                string: String(double),
+                locale: Locale(identifier: "en_US_POSIX")),
+              roundTrip == literal else {
+            throw ToolCallParserError.malformed
+        }
+        return .double(double)
     }
 }

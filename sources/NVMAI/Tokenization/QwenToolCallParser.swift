@@ -59,9 +59,11 @@ public struct QwenToolCallParser: Sendable {
             throw ToolCallParserError.unknownTool(name)
         }
 
+        var ordered: [(String, JSONValue)] = []
         var arguments: [String: JSONValue] = [:]
         while !body.hasPrefix("</function>") {
             let (key, value) = try parameter(&body)
+            ordered.append((key, value))
             arguments[key] = value
         }
         body.removeFirst("</function>".count)
@@ -72,7 +74,9 @@ public struct QwenToolCallParser: Sendable {
         return ParsedToolCall(id: id,
                               name: name,
                               arguments: argumentsValue,
-                              argumentsJSON: try argumentsValue.encoded())
+                              // Emission order, not sorted: the re-rendered
+                              // history must reproduce the KV's bytes.
+                              argumentsJSON: try JSONValue.encodedObject(ordered))
     }
 
     private func trimOuterWhitespace(_ body: inout Substring) {

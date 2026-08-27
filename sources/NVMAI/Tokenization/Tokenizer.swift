@@ -547,9 +547,12 @@ public struct GFTokenizer: @unchecked Sendable {
     public struct HistoricalToolCall: Codable, Sendable, Equatable {
         public let id: String
         public let name: String
-        public let arguments: JSONValue
+        /// The JSON text the model emitted, verbatim. Not a parsed object:
+        /// the KV was built from these bytes, so anything that re-serialises
+        /// them can reorder the parameters and break the prefix match.
+        public let arguments: String
 
-        public init(id: String, name: String, arguments: JSONValue) {
+        public init(id: String, name: String, arguments: String) {
             self.id = id
             self.name = name
             self.arguments = arguments
@@ -862,7 +865,7 @@ public struct GFTokenizer: @unchecked Sendable {
         let call = message.toolCalls[0]
         s += "<|start|>assistant to=functions.\(call.name)"
         s += "<|channel|>commentary json<|message|>"
-        s += try call.arguments.encoded()
+        s += call.arguments
         s += "<|call|>"
         lastToolCallName = call.name
         return s
@@ -1068,7 +1071,7 @@ public struct GFTokenizer: @unchecked Sendable {
             for call in message.toolCalls {
                 s += kimiToolCallBeginMark + call.id
                     + kimiToolArgumentBeginMark
-                    + (try kimiArgumentsText(call.arguments))
+                    + call.arguments
                     + kimiToolCallEndMark
             }
             return s + kimiToolSectionEndMark
@@ -1100,12 +1103,6 @@ public struct GFTokenizer: @unchecked Sendable {
         }).encoded()
     }
 
-    /// Jinja renders string arguments bare and everything else via `tojson`.
-    private static func kimiArgumentsText(_ arguments: JSONValue) throws -> String {
-        if case .string(let text) = arguments { return text }
-        return try arguments.encoded()
-    }
-
     public func encodeToolChat(messages: [Message],
                                tools: [FunctionDefinition]) throws -> [Int32] {
         if dialect == .harmony {
@@ -1131,7 +1128,7 @@ public struct GFTokenizer: @unchecked Sendable {
                         "type": "function",
                         "function": [
                             "name": call.name,
-                            "arguments": try call.arguments.jinjaSendableValue(),
+                            "arguments": try JSONValue.orderedJinjaObject(call.arguments),
                         ] as [String: any Sendable],
                     ]
                 }

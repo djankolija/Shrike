@@ -545,12 +545,13 @@ public enum OpenAIRequestValidator {
                                   "messages", "invalid_tool_call")
                 }
                 let data = Data(call.function.arguments.utf8)
-                let arguments = try JSONDecoder().decode(JSONValue.self, from: data)
-                guard arguments.objectValue != nil else {
+                let decoded = try JSONDecoder().decode(JSONValue.self, from: data)
+                let arguments = call.function.arguments
+                guard decoded.objectValue != nil else {
                     throw invalid("historical tool arguments must be a JSON object",
                                   "messages", "invalid_tool_arguments")
                 }
-                guard (try? arguments.jinjaSendableValue()) != nil else {
+                guard (try? JSONValue.orderedJinjaObject(arguments)) != nil else {
                     throw invalid(
                         "historical tool arguments cannot be represented exactly",
                         "messages",

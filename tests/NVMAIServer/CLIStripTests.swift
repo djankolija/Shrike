@@ -89,7 +89,7 @@ struct CLIStripTests {
                 GFTokenizer.HistoricalToolCall(
                     id: "call_1",
                     name: "read_file",
-                    arguments: JSONValue.object(["path": .string("a.txt")])),
+                    arguments: #"{"path":"a.txt"}"#),
             ])
         let toolResult = GFTokenizer.Message(
             role: .tool,

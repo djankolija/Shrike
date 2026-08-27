@@ -37,7 +37,7 @@ struct HarmonyToolCallParserTests {
         }
     }
 
-    @Test("Arguments parse as a JSON object with canonical re-encoding")
+    @Test("Arguments parse as a JSON object and keep the model's text verbatim")
     func parseArguments() throws {
         let call = try HarmonyToolCallParser().parse(
             name: "get_weather",
@@ -48,7 +48,7 @@ struct HarmonyToolCallParserTests {
             id: "call_fixed",
             name: "get_weather",
             arguments: .object(["city": .string("Paris"), "unit": .string("c")]),
-            argumentsJSON: #"{"city":"Paris","unit":"c"}"#))
+            argumentsJSON: #"{"unit":"c","city":"Paris"}"#))
     }
 
     @Test("Tools outside the allowed set are rejected")

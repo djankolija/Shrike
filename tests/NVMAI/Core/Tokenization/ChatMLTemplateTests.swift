@@ -167,7 +167,7 @@ struct ChatMLTemplateTests {
             _ = try tok.encodeToolResultContinuation(
                 cachedMessages: [Message(role: .user, content: "Hi")],
                 assistant: Message(role: .assistant, content: nil, toolCalls: [
-                    .init(id: "call_1", name: "lookup", arguments: .object([:])),
+                    .init(id: "call_1", name: "lookup", arguments: "{}"),
                 ]),
                 incomingMessages: [Message(role: .user, content: "Hi")],
                 tools: [])

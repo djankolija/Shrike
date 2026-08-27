@@ -157,7 +157,7 @@ struct OpenAIValidationTests {
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
         let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
         let call = try #require(validated.messages[1].toolCalls.first)
-        #expect(try call.arguments.encoded().contains(#""id":\#(expected)"#))
+        #expect(call.arguments.contains(#""id":\#(expected)"#))
         let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         let rendered = tokenizer.decode(
             try tokenizer.encodeToolChat(

@@ -172,7 +172,7 @@ struct KimiTemplateTests {
             Message(role: .assistant, content: "",
                     toolCalls: [.init(id: "functions.get_weather:0",
                                       name: "get_weather",
-                                      arguments: .object(["city": .string("Paris")]))]),
+                                      arguments: #"{"city":"Paris"}"#)]),
             Message(role: .tool, content: "22C, clear",
                     toolCallID: "functions.get_weather:0"),
         ], tools: [Self.weatherTool])
@@ -196,10 +196,9 @@ struct KimiTemplateTests {
             Message(role: .assistant, content: "Checking now.",
                     toolCalls: [
                         .init(id: "functions.get_weather:0", name: "get_weather",
-                              arguments: .object(["city": .string("Paris"),
-                                                  "days": .integer(2)])),
+                              arguments: #"{"city":"Paris","days":2}"#),
                         .init(id: "functions.ping:1", name: "ping",
-                              arguments: .object([:])),
+                              arguments: "{}"),
                     ]),
         ], tools: [Self.weatherTool, Self.pingTool])
         var expected = "<|im_assistant|>assistant<|im_middle|>Checking now."
@@ -219,7 +218,7 @@ struct KimiTemplateTests {
             Message(role: .user, content: "Go"),
             Message(role: .assistant, content: "",
                     toolCalls: [.init(id: "functions.ping:0", name: "ping",
-                                      arguments: .string("{\"raw\": 1}"))]),
+                                      arguments: "{\"raw\": 1}")]),
         ], tools: [Self.pingTool])
         #expect(p.contains(
             "<|tool_call_begin|>functions.ping:0"
@@ -243,7 +242,7 @@ struct KimiTemplateTests {
             Message(role: .user, content: "Go"),
             Message(role: .assistant, content: "",
                     toolCalls: [.init(id: "functions.ping:0", name: "ping",
-                                      arguments: .object([:]))]),
+                                      arguments: "{}")]),
         ], tools: [Self.pingTool])
         let ids = tok.encode(p, addBOS: false)
         for id in [tok.kimiToolSectionBeginID, tok.kimiToolSectionEndID,
@@ -291,7 +290,7 @@ struct KimiTemplateTests {
                 cachedMessages: [Message(role: .user, content: "Hi")],
                 assistant: Message(role: .assistant, content: nil, toolCalls: [
                     .init(id: "functions.lookup:0", name: "lookup",
-                          arguments: .object([:])),
+                          arguments: "{}"),
                 ]),
                 incomingMessages: [Message(role: .user, content: "Hi")],
                 tools: [])
