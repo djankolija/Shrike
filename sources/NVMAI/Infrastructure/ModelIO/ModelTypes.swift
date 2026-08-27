@@ -448,11 +448,10 @@ public struct ArchConfig: Sendable, Equatable {
     public var linearAttentionSigmoidGateNormEps: Float? {
         family == .kimiLinear48b ? 1e-5 : nil
     }
-    /// Layer-norm (and MLA kv_a latent norm) eps. Kimi's checkpoint pins
-    /// 1e-5; the shipped qwen36 and gpt-oss runtimes keep the 1e-6 their
-    /// bring-up gates were validated at (gpt-oss's config also says 1e-5 —
-    /// an open follow-up, not silently changed here).
-    public var rmsNormEps: Float { family == .kimiLinear48b ? 1e-5 : 1e-6 }
+    /// Layer-norm (and MLA kv_a latent norm) eps. Kimi and gpt-oss pin their
+    /// checkpoints' 1e-5 (gpt-oss re-validated against the greedy gate at C7);
+    /// qwen36 stays at its config's 1e-6.
+    public var rmsNormEps: Float { family == .qwen36 ? 1e-6 : 1e-5 }
     /// Kimi router: scores are sigmoid(logits); top-k selects by score plus
     /// `e_score_correction_bias`, weights are the original scores of the
     /// selected renormalized (÷ sum + 1e-20) and scaled by 2.446. Other
