@@ -824,6 +824,10 @@ public actor ServerModelSession: ServerInferenceBackend {
         return (promptIDs, cacheRequest, effectiveMessages, needsToolTemplate)
     }
 
+    private func cacheDiag(_ line: String) {
+        FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
+
     /// Decide where this request's prefill starts: from scratch, or resumed on
     /// a cache entry whose KV is live or restorable.
     ///
@@ -877,7 +881,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                     // position). Anything else falls through to a snapshot
                     // restore or a full prefill instead of resuming from a
                     // stale or mismatched KV.
-                    print(
+                    cacheDiag(
                         "NVMAI prompt_cache hit tier=live "
                             + "cached_tokens=\(cached) entry=\(entryID.uuidString.lowercased())")
                 } else {
@@ -894,7 +898,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                         if runner.continuationPosition != cached {
                             try runner.rewind(to: cached)
                         }
-                        print(
+                        cacheDiag(
                             "NVMAI prompt_cache hit tier=\(tier) "
                                 + "cached_tokens=\(cached) entry=\(entryID.uuidString.lowercased())")
                     } catch {
@@ -1274,7 +1278,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         } catch {
             return .unchanged
         }
-        print("NVMAI prompt_cache normalize kind=drop_emission "
+        cacheDiag("NVMAI prompt_cache normalize kind=drop_emission "
                 + "target=\(target) kv=\(result.kvPosition)")
         return .rewritten(Array(result.kvBackedTokenIDs.prefix(target)))
     }
@@ -1320,7 +1324,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             // cannot, the truncation is reconstructed like any other target,
             // with an empty remainder to prefill.
             guard runner.supportsPartialRewind else {
-                print(line)
+                cacheDiag(line)
                 return .settle(target: settled, rewindTo: common)
             }
             do {
@@ -1328,10 +1332,10 @@ public actor ServerModelSession: ServerInferenceBackend {
             } catch {
                 return .done(.unchanged)
             }
-            print(line)
+            cacheDiag(line)
             return .done(.rewritten(settled))
         }
-        print(line)
+        cacheDiag(line)
         return .settle(target: settled, rewindTo: common)
     }
 
@@ -1393,13 +1397,13 @@ public actor ServerModelSession: ServerInferenceBackend {
             if runner.continuationPosition != position {
                 try runner.rewind(to: position)
             }
-            print("NVMAI prompt_cache normalize kind=settle_rewind "
+            cacheDiag("NVMAI prompt_cache normalize kind=settle_rewind "
                     + "at=\(position) settled=\(target.count) entry=\(settling)")
         case .restore(let source, let position):
             guard let promptStateStore else {
                 throw ServerPromptStateStoreError.missing(source)
             }
-            print("NVMAI prompt_cache normalize kind=settle_restore "
+            cacheDiag("NVMAI prompt_cache normalize kind=settle_restore "
                     + "from=\(source.uuidString.lowercased()) at=\(position) "
                     + "settled=\(target.count) entry=\(settling)")
             do {
@@ -1413,7 +1417,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 throw error
             }
         case .reset(let reason):
-            print("NVMAI prompt_cache normalize kind=settle_reset "
+            cacheDiag("NVMAI prompt_cache normalize kind=settle_reset "
                     + "reason=\(reason.rawValue) settled=\(target.count) "
                     + "entry=\(settling)")
             runner.reset()
@@ -1433,7 +1437,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         // Disowning that would cost the aborting request its live tier — and in
         // single-prefix the whole cache — for work that never began.
         guard !Task.isCancelled else {
-            print("NVMAI prompt_cache normalize kind=settle_skipped "
+            cacheDiag("NVMAI prompt_cache normalize kind=settle_skipped "
                     + "reason=cancelled settled=\(target.count) "
                     + "entry=\(entryID.uuidString.lowercased())")
             return
@@ -1475,7 +1479,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             // matches it is withdrawn.
             if promptCacheMode == .singlePrefix { promptCache.invalidate() }
             activePromptCacheEntryID = nil
-            print("NVMAI prompt_cache normalize kind=settle_lost "
+            cacheDiag("NVMAI prompt_cache normalize kind=settle_lost "
                     + "settled=\(target.count) entry=\(entryID.uuidString.lowercased())")
             return
         }
@@ -1490,7 +1494,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                                               kvBackedTokenIDs: target) else {
             return
         }
-        print("NVMAI prompt_cache normalize kind=settle_done "
+        cacheDiag("NVMAI prompt_cache normalize kind=settle_done "
                 + "settled=\(target.count) entry=\(entryID.uuidString.lowercased())")
         guard promptCacheMode == .multiPrefix, let promptStateStore else { return }
         do {
@@ -1505,7 +1509,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 FileHandle.standardError.write(Data(
                     ("NVMAI prompt_cache disk_write_failed error=\(diskError)\n").utf8))
             }
-            print("NVMAI prompt_cache stored "
+            cacheDiag("NVMAI prompt_cache stored "
                     + "tokens=\(entry.kvPosition) "
                     + "state_bytes=\(snapshot.payload.count) "
                     + "ram_bytes=\(saved.memoryBytes) "
@@ -1536,7 +1540,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             render: renderedPromptIDs,
             cancel: { pending.task.cancel() },
             wait: { await pending.task.value })
-        print("NVMAI prompt_cache arbitrate decision=\(decision.rawValue) "
+        cacheDiag("NVMAI prompt_cache arbitrate decision=\(decision.rawValue) "
                 + "target=\(pending.target.count) render=\(renderedPromptIDs.count)")
     }
 
@@ -1623,13 +1627,13 @@ public actor ServerModelSession: ServerInferenceBackend {
                             FileHandle.standardError.write(Data(
                                 ("NVMAI prompt_cache disk_write_failed error=\(diskError)\n").utf8))
                         }
-                        print(
-                            "NVMAI prompt_cache stored "
+                        FileHandle.standardError.write(Data(
+                            ("NVMAI prompt_cache stored "
                                 + "tokens=\(entry.kvPosition) "
                                 + "state_bytes=\(snapshot.payload.count) "
                                 + "ram_bytes=\(saved.memoryBytes) "
                                 + "disk_bytes=\(saved.diskBytes) "
-                                + "entry=\(entry.id.uuidString.lowercased())")
+                                + "entry=\(entry.id.uuidString.lowercased())\n").utf8))
                     }
                 } catch {
                     // S24: a snapshot that cannot be captured or verified is
