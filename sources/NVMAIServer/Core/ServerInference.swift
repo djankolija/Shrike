@@ -635,10 +635,13 @@ public actor ServerModelSession: ServerInferenceBackend {
             promptStateStore = store
             promptCache = ServerPromptCache(
                 maximumEntries: promptCacheMaximumEntries,
-                entries: persisted)
+                entries: persisted,
+                allowsPartialSalvage: runner.supportsPartialRewind)
         } else {
             promptStateStore = nil
-            promptCache = ServerPromptCache(maximumEntries: 1)
+            promptCache = ServerPromptCache(
+                maximumEntries: 1,
+                allowsPartialSalvage: runner.supportsPartialRewind)
         }
         return ServerModelSession(context: context,
                                   model: model,

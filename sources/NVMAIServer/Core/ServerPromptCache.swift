@@ -59,12 +59,18 @@ struct ServerPromptCachePublication: Sendable, Equatable {
 
 struct ServerPromptCache: Sendable {
     private let maximumEntries: Int
+    /// Serving a partial salvage costs a state restore the runner must then seat
+    /// on a shorter prefix. Where it cannot, a divergent render stays a plain
+    /// miss: the entry keeps its bytes and nothing is read back to be discarded.
+    private let allowsPartialSalvage: Bool
     private(set) var entries: [ServerPromptCacheEntry]
 
     init(maximumEntries: Int = 1,
-         entries: [ServerPromptCacheEntry] = []) {
+         entries: [ServerPromptCacheEntry] = [],
+         allowsPartialSalvage: Bool = true) {
         precondition(maximumEntries > 0, "maximumEntries must be positive")
         self.maximumEntries = maximumEntries
+        self.allowsPartialSalvage = allowsPartialSalvage
         self.entries = Array(entries.suffix(maximumEntries))
     }
 
@@ -201,7 +207,8 @@ struct ServerPromptCache: Sendable {
         } ?? comparableLength
         NVMAICacheDiag.log(
             "lcp k=\(commonPrefix) kv=\(entry.kvPosition) "
-                + "fraction=\(Double(commonPrefix) / Double(entry.kvPosition))")
+                + "fraction=\(Double(commonPrefix) / Double(entry.kvPosition)) "
+                + "entry=\(entry.id.uuidString.lowercased())")
 
         // S12: direct prefix hit. An identical-prompt replay, whose render
         // extends the entry by nothing, hits here too rather than falling
@@ -230,9 +237,13 @@ struct ServerPromptCache: Sendable {
                 effective: structural.effective,
                 cachedTokens: structural.cached)
         }
-        // Partial salvage runs last so it cannot truncate KV the structural
-        // path would have restored whole.
-        guard commonPrefix > 0 else { return nil }
+        // Partial salvage runs last so it cannot truncate KV the structural path
+        // would have restored whole, and only where it can win: a render the
+        // entry already contains whole leaves nothing to prefill, so serving it
+        // costs a restore and a truncation to save no forward pass at all.
+        guard allowsPartialSalvage,
+              commonPrefix > 0,
+              commonPrefix < renderedPromptIDs.count else { return nil }
         return .salvage(commonPrefix: commonPrefix)
     }
 

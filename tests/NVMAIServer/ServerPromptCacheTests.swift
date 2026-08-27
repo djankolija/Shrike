@@ -568,6 +568,77 @@ struct ServerPromptCacheTests {
         #expect(entry.kvPosition == entry.kvBackedTokenIDs.count)
     }
 
+    @Test func aRenderTheEntryAlreadyContainsWholeMissesRatherThanSalvaging() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let initial = request(messages: [
+            GFTokenizer.Message(role: .user, content: "first"),
+        ])
+        var cache = ServerPromptCache()
+        cache.publish(
+            domain: domain,
+            request: initial,
+            content: "answer",
+            calls: [],
+            result: rawResult(
+                prompt: [1, 2, 3],
+                kvBacked: [1, 2, 3, 4, 5],
+                boundary: tokenizer.endOfTurnID,
+                reason: .endOfTurn))
+
+        // Every token of the render is cached already, so a salvage would save no
+        // forward pass — and would truncate the entry to buy that nothing.
+        let match = cache.match(
+            domain: domain,
+            request: initial,
+            renderedPromptIDs: [1, 2, 3],
+            tokenizer: tokenizer)
+
+        #expect(match == .miss)
+        let entry = try #require(cache.entries.last)
+        #expect(entry.kvBackedTokenIDs == [1, 2, 3, 4, 5])
+        #expect(entry.assistantTurn != nil)
+    }
+
+    @Test func aRunnerThatCannotRewindMissesAndKeepsTheEntry() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let initial = request(messages: [
+            GFTokenizer.Message(role: .user, content: "first"),
+        ])
+        var cache = ServerPromptCache(allowsPartialSalvage: false)
+        cache.publish(
+            domain: domain,
+            request: initial,
+            content: "answer",
+            calls: [],
+            result: rawResult(
+                prompt: [1, 2, 3],
+                kvBacked: [1, 2, 3, 4, 5],
+                boundary: tokenizer.endOfTurnID,
+                reason: .endOfTurn))
+
+        // The render that salvages in divergentTailTruncatesTheEntryToTheCommon-
+        // Prefix, against a cache whose runner cannot seat a shorter cursor.
+        #expect(cache.match(
+            domain: domain,
+            request: initial,
+            renderedPromptIDs: [1, 2, 9, 9],
+            tokenizer: tokenizer) == .miss)
+        let kept = try #require(cache.entries.last)
+        #expect(kept.kvBackedTokenIDs == [1, 2, 3, 4, 5])
+        #expect(kept.kvPosition == 5)
+        #expect(kept.assistantTurn != nil)
+
+        // Only the salvage is gated: a full-prefix hit needs no rewind.
+        #expect(cache.match(
+            domain: domain,
+            request: initial,
+            renderedPromptIDs: [1, 2, 3, 4, 5, 6],
+            tokenizer: tokenizer) == .hit(
+                entryID: kept.id,
+                effectivePromptIDs: [1, 2, 3, 4, 5, 6],
+                cachedPromptTokens: 5))
+    }
+
     @Test func aTruncatedEntryCanNoLongerServeAStructuralBridge() async throws {
         let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         let initial = request(messages: [
