@@ -185,9 +185,63 @@ On-box, deploy per the constraints above. qwen36, thinking on, temperature 0, di
 
 Any structural hit in these runs is a finding, not noise — stop and diagnose before Task 7.
 
+## Task 6a (unblocking — from Task 6 red): settle by reconstruction
+
+- [ ] implemented, tests green, committed
+
+Task 6 measured that no model on this box can run the settle: qwen36/ornith are
+30-of-40 GDN layers, kimi is GDN, gpt-oss and gemma are ring-backed —
+`supportsPartialRewind` is false everywhere that matters, normalization never ran, and
+the structural fallback served ~97%. The capability check is right about *seeking*: a
+recurrent state cannot go backwards and a wrapped ring's rows are gone. The mechanism
+generalizes instead — the settle does not need to seek to a position, it needs the
+state AT a prefix of its target, and `captureInferenceState`/`restoreInferenceState`
+reconstruct state at any snapshotted position on every architecture; the prompt-cache
+restore path already proves it on GDN.
+
+**Contract:** the rewrite ("make the KV hold sequence X") gains a reconstruction path.
+Rewind-capable runner: today's path (rewind to LCP(X, kv), prefill the remainder).
+Otherwise: restore the best available snapshot whose bytes are a byte prefix of X, then
+prefill `X[snapshot.position...]`; with no prefixing snapshot, reset and prefill X
+whole — the eager-can't-lose argument prices that as the next request's work done
+early. Settled renders are append-only across turns (Task 2's prefix property applied
+to nested settled lists — pin it per dialect in a test, do not assume it), so
+`finishRewrite`'s existing capture at the settled position IS the next turn's restore
+source: steady-state settle cost = one restore + the new turn's delta. Normalization's
+capability gate becomes "always", mechanism chosen per runner. `allowsPartialSalvage`
+stays rewind-gated — mid-entry state cannot be reconstructed from a later snapshot —
+and `dropEmission` stays rewind-gated (a degenerate turn on a non-rewindable runner
+skips; the prior settled entries still carry the conversation). Arbitration, targets,
+`.lost`, and every entry/snapshot pairing invariant are unchanged: reconstruction
+failure lands exactly where prefill failure lands today.
+
+**Tests:** the mechanism decision (rewind vs restore vs reset, given capability and
+snapshot inventory) as a pure exhaustive function; the append-only property per
+dialect; the actor wiring rides to the Task 6 re-run.
+
+## Task 6b (from Task 6 red): verbatim non-scalar tool arguments
+
+- [ ] implemented, tests green, committed
+
+Measured: a nested tool call (objects, float arrays) breaks mid-loop byte-exactness —
+flat mid-loop cached=486/506, nested cached=0/743 — because `args_value | tojson`
+re-serializes what the model emitted. Fix: on the ChatML tools render path, carry
+argument values as their raw source slices (strings), so the template's
+`args_value | string` branch emits the model's original bytes for scalars and
+non-scalars alike — the per-value cousin of gemma's whole-arguments string lever.
+Verify against the shipped fixture's branch semantics and the existing goldens (scalar
+bytes must not change), and confirm the settled render inherits the fix through the
+shared render path. If the raw-slice representation cannot pass Jinja's `is string`
+test, or a golden breaks in a way that reveals a real constraint, stop and report.
+
 ## Task 7: deletions + final verification
 
 - [ ] deleted, probes re-pass, committed
+
+**Gate hardened by Task 6 red:** do not delete until the Task 6 re-run shows
+normalization *running* on qwen36 (`settle_done` lines) with structural hits at zero.
+Task 6 measured structural carrying ~97% on qwen36; deletion before reconstruction
+lands would replace it with ~3%.
 
 **Files:** `sources/NVMAIServer/Core/ServerPromptCache.swift`,
 `sources/NVMAI/Tokenization/Tokenizer.swift`, their tests.
