@@ -309,9 +309,17 @@ struct ServerPromptCacheTests {
         #expect(entry.kvPosition == 3)
     }
 
-    /// The shape the interim match order existed to protect: a render the
-    /// entry outruns because the blob holds reasoning the re-render drops.
-    /// Salvage now serves it, and truncates the entry to what it served.
+    /// The shape the interim match order existed to protect — a render the
+    /// entry outruns because the blob holds reasoning the re-render drops —
+    /// and what it falls through to now: a salvage, which truncates the entry
+    /// to what it served.
+    ///
+    /// This pins that outcome, not the order. The render diverges inside the
+    /// entry, so the full-hit branch is unreachable here and a salvage-first
+    /// cache would answer identically. The order is carried by
+    /// `identicalReplayReportsEntirePromptAsCached` and by the closing
+    /// full-prefix half of `aRunnerThatCannotRewindMissesAndKeepsTheEntry`,
+    /// both of which become misses if salvage is consulted first.
     @Test func aThinkingRetainedContinuationSalvagesAndTruncatesTheEntry() async throws {
         let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         let initial = request(messages: [

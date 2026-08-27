@@ -153,15 +153,6 @@ struct ChatMLTemplateTests {
         #expect(tok.decode(ids, skipSpecialTokens: false) == p)
     }
 
-    @Test("Text continuation bridges from im_end into the next user turn")
-    func textContinuation() throws {
-        let ids = tok.encodeTextContinuation(userContent: " Next \n")
-        #expect(ids.first == tok.endOfTurnID)
-        let text = tok.decode(ids, skipSpecialTokens: false)
-        #expect(text == "<|im_end|>\n<|im_start|>user\nNext<|im_end|>\n"
-            + "<|im_start|>assistant\n<think>\n\n</think>\n\n")
-    }
-
     @Test("Tool chat renders the bundled Jinja template with thinking disabled")
     func toolChatRendersJinja() throws {
         let ids = try tok.encodeToolChat(

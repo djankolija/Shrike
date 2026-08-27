@@ -1340,16 +1340,6 @@ public struct GFTokenizer: @unchecked Sendable {
         }
         return Array(rendered.dropLast(tail.count))
     }
-
-    public func encodeTextContinuation(userContent: String) -> [Int32] {
-        // The template trims user content (`render_content(...)|trim`), so the
-        // continuation bridge mirrors it; see `chatMLChatTemplate`.
-        let content = userContent.trimmingCharacters(in: .whitespacesAndNewlines)
-        return [endOfTurnID] + encode(
-            "\n\(Self.imStartMark)user\n\(content)\(Self.imEndMark)\n"
-                + generationSuffix,
-            addBOS: false)
-    }
 }
 
 private enum GFTokenizerLoadSource: Hashable {
