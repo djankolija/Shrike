@@ -742,7 +742,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         let cacheRequest = request.replacingMessages(
             filteredMessages,
             tools: filteredTools)
-        let needsToolTemplate = usesToolTemplate(
+        let needsToolTemplate = GFTokenizer.usesToolTemplate(
             messages: filteredMessages,
             tools: filteredTools)
         let effectiveMessages = concisePrompt.map {
@@ -1215,15 +1215,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             } else {
                 activePromptCacheEntryID = nil
             }
-        }
-    }
-
-    private func usesToolTemplate(
-        messages: [GFTokenizer.Message],
-        tools: [GFTokenizer.FunctionDefinition]
-    ) -> Bool {
-        !tools.isEmpty || messages.contains {
-            $0.role == .developer || $0.role == .tool || !$0.toolCalls.isEmpty
         }
     }
 

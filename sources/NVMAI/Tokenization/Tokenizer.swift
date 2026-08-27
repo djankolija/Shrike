@@ -1182,6 +1182,17 @@ public struct GFTokenizer: @unchecked Sendable {
         ).map(Int32.init)
     }
 
+    /// Whether a request renders through `encodeToolChat` rather than
+    /// `applyChatTemplate`. Tool-shaped history routes there with no tools
+    /// declared, and for ChatML those are two different renderers, so anything
+    /// that has to reproduce a prompt must route on the same predicate.
+    public static func usesToolTemplate(messages: [Message],
+                                        tools: [FunctionDefinition]) -> Bool {
+        !tools.isEmpty || messages.contains {
+            $0.role == .developer || $0.role == .tool || !$0.toolCalls.isEmpty
+        }
+    }
+
     // MARK: - Settled boundary
 
     /// Token count of the render truncated at the last user query — the
@@ -1196,7 +1207,10 @@ public struct GFTokenizer: @unchecked Sendable {
         let settled = Array(messages[...queryIndex])
         switch dialect {
         case .chatml:
-            guard tools.isEmpty else {
+            // Routed on the whole list, not on the slice being rendered: the
+            // count has to prefix the render the request actually produced,
+            // and a round-trip living only in the live region still routes it.
+            guard !Self.usesToolTemplate(messages: messages, tools: tools) else {
                 return try upstreamJinjaRender(settled, tools: tools,
                                                addGenerationPrompt: false).count
             }

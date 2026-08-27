@@ -249,16 +249,20 @@ struct ChatMLTemplateTests {
             "properties": .object(["city": .object(["type": .string("string")])]),
         ]))
 
+    /// `ServerInference.encodePrompt`, which routes on the whole request's
+    /// list rather than on the messages it is handed.
     private func promptIDs(_ messages: [Message],
+                           routedWith full: [Message],
                            tools: [GFTokenizer.FunctionDefinition]) throws -> [Int32] {
-        try tools.isEmpty
-            ? tok.encode(tok.applyChatTemplate(messages), addBOS: false)
-            : tok.encodeToolChat(messages: messages, tools: tools)
+        try GFTokenizer.usesToolTemplate(messages: full, tools: tools)
+            ? tok.encodeToolChat(messages: messages, tools: tools)
+            : tok.encode(tok.applyChatTemplate(messages), addBOS: false)
     }
 
     private func settledText(_ messages: [Message],
+                             routedWith full: [Message],
                              tools: [GFTokenizer.FunctionDefinition]) throws -> String {
-        let text = tok.decode(try promptIDs(messages, tools: tools),
+        let text = tok.decode(try promptIDs(messages, routedWith: full, tools: tools),
                               skipSpecialTokens: false)
         return String(text.dropLast(tok.generationSuffix.count))
     }
@@ -271,8 +275,8 @@ struct ChatMLTemplateTests {
             Message(role: .assistant, content: "Sunny."),
             Message(role: .user, content: "What about Berlin?"),
         ]
-        let fullIDs = try promptIDs(messages, tools: [])
-        let settled = try settledText(messages, tools: [])
+        let fullIDs = try promptIDs(messages, routedWith: messages, tools: [])
+        let settled = try settledText(messages, routedWith: messages, tools: [])
         #expect(tok.decode(fullIDs, skipSpecialTokens: false).hasPrefix(settled))
         #expect(settled.hasSuffix("<|im_start|>user\nWhat about Berlin?<|im_end|>\n"))
         let boundary = try tok.settledBoundaryTokenCount(messages: messages, tools: [])
@@ -300,13 +304,64 @@ struct ChatMLTemplateTests {
         ]
         let messages = settledMessages + liveMessages
         let tools = [Self.weatherTool]
-        let fullIDs = try promptIDs(messages, tools: tools)
-        let settled = try settledText(settledMessages, tools: tools)
+        let fullIDs = try promptIDs(messages, routedWith: messages, tools: tools)
+        let settled = try settledText(settledMessages, routedWith: messages, tools: tools)
         #expect(tok.decode(fullIDs, skipSpecialTokens: false).hasPrefix(settled))
         #expect(settled.hasSuffix("<|im_start|>user\nWhat about Berlin?<|im_end|>\n"))
         #expect(!settled.contains("Berlin now."))
         #expect(!settled.contains("{\"temp\":12}"))
         let boundary = try tok.settledBoundaryTokenCount(messages: messages, tools: tools)
+        #expect(tok.decode(Array(fullIDs.prefix(boundary)), skipSpecialTokens: false)
+            == settled)
+    }
+
+    @Test("Settled boundary follows a settled tool round-trip onto the Jinja path")
+    func settledBoundaryFollowsHistoryOntoTheToolPath() throws {
+        let settledMessages: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "", toolCalls: [
+                .init(id: "call_1", name: "get_weather", arguments: "{\"city\":\"Paris\"}"),
+            ]),
+            Message(role: .tool, content: "{\"temp\":18}", toolCallID: "call_1"),
+            Message(role: .assistant, content: "18C."),
+            Message(role: .user, content: "What about Berlin?"),
+        ]
+        let messages = settledMessages + [Message(role: .assistant, content: "Rainy.")]
+        #expect(GFTokenizer.usesToolTemplate(messages: messages, tools: []))
+        let fullIDs = try promptIDs(messages, routedWith: messages, tools: [])
+        let settled = try settledText(settledMessages, routedWith: messages, tools: [])
+        #expect(settled.contains("<|im_start|>user\n<tool_response>\n{\"temp\":18}"))
+        #expect(tok.decode(fullIDs, skipSpecialTokens: false).hasPrefix(settled))
+        #expect(settled.hasSuffix("<|im_start|>user\nWhat about Berlin?<|im_end|>\n"))
+        let boundary = try tok.settledBoundaryTokenCount(messages: messages, tools: [])
+        #expect(tok.decode(Array(fullIDs.prefix(boundary)), skipSpecialTokens: false)
+            == settled)
+    }
+
+    @Test("Settled boundary follows a live-only tool round-trip onto the Jinja path")
+    func settledBoundaryFollowsLiveOnlyHistoryOntoTheToolPath() throws {
+        let settledMessages: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant,
+                    content: "<think>\nParis first.\n</think>\n\nSunny."),
+            Message(role: .user, content: "What about Berlin?"),
+        ]
+        let messages = settledMessages + [
+            Message(role: .assistant, content: "", toolCalls: [
+                .init(id: "call_1", name: "get_weather", arguments: "{\"city\":\"Berlin\"}"),
+            ]),
+            Message(role: .tool, content: "{\"temp\":12}", toolCallID: "call_1"),
+        ]
+        #expect(!GFTokenizer.usesToolTemplate(messages: settledMessages, tools: []))
+        #expect(GFTokenizer.usesToolTemplate(messages: messages, tools: []))
+        let fullIDs = try promptIDs(messages, routedWith: messages, tools: [])
+        let settled = try settledText(settledMessages, routedWith: messages, tools: [])
+        #expect(!settled.contains("Paris first."))
+        #expect(tok.decode(fullIDs, skipSpecialTokens: false).hasPrefix(settled))
+        #expect(settled.hasSuffix("<|im_start|>user\nWhat about Berlin?<|im_end|>\n"))
+        let boundary = try tok.settledBoundaryTokenCount(messages: messages, tools: [])
         #expect(tok.decode(Array(fullIDs.prefix(boundary)), skipSpecialTokens: false)
             == settled)
     }
