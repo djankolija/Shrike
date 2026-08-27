@@ -697,7 +697,8 @@ public struct GFTokenizer: @unchecked Sendable {
         }
     }
 
-    private func chatMLChatTemplate(_ messages: [Message]) throws -> String {
+    private func chatMLChatTemplate(_ messages: [Message],
+                                    addGenerationPrompt: Bool = true) throws -> String {
         var s = ""
         for (index, message) in messages.enumerated() {
             guard let rawContent = message.content else {
@@ -712,7 +713,7 @@ public struct GFTokenizer: @unchecked Sendable {
             }
             s += Self.imStartMark + message.role.rawValue + "\n" + content + Self.imEndMark + "\n"
         }
-        s += generationSuffix
+        if addGenerationPrompt { s += generationSuffix }
         return s
     }
 
@@ -732,7 +733,8 @@ public struct GFTokenizer: @unchecked Sendable {
 
     func harmonyChatTemplate(_ messages: [Message],
                              tools: [FunctionDefinition],
-                             currentDate: String? = nil) throws -> String {
+                             currentDate: String? = nil,
+                             addGenerationPrompt: Bool = true) throws -> String {
         var s = Self.harmonySystemBlock(
             hasTools: !tools.isEmpty,
             currentDate: currentDate ?? Self.harmonyCurrentDate())
@@ -753,7 +755,7 @@ public struct GFTokenizer: @unchecked Sendable {
             s += try Self.harmonyMessageBlock(
                 message, lastToolCallName: &lastToolCallName)
         }
-        s += Self.harmonyGenerationSuffix
+        if addGenerationPrompt { s += Self.harmonyGenerationSuffix }
         return s
     }
 
@@ -1037,7 +1039,8 @@ public struct GFTokenizer: @unchecked Sendable {
     /// is compact with sorted keys (JSON order does not survive decoding),
     /// the same normalization the Harmony renderer pins.
     func kimiChatTemplate(_ messages: [Message],
-                          tools: [FunctionDefinition]) throws -> String {
+                          tools: [FunctionDefinition],
+                          addGenerationPrompt: Bool = true) throws -> String {
         var s = ""
         if !tools.isEmpty {
             s += Self.kimiSystemMark + "tool_declare" + Self.kimiMiddleMark
@@ -1046,7 +1049,7 @@ public struct GFTokenizer: @unchecked Sendable {
         for message in messages {
             s += try Self.kimiMessageBlock(message)
         }
-        s += Self.kimiGenerationSuffix
+        if addGenerationPrompt { s += Self.kimiGenerationSuffix }
         return s
     }
 
@@ -1113,6 +1116,26 @@ public struct GFTokenizer: @unchecked Sendable {
             return encode(try kimiChatTemplate(messages, tools: tools),
                           addBOS: false)
         }
+        let rendered = try upstreamJinjaRender(
+            messages,
+            tools: tools,
+            // Adaptive appends the bare role header itself: the template's
+            // `enable_thinking` boolean can only pick an injected form, and
+            // the generation prompt is appended after the message loop, so
+            // the split render is a token-exact substitute (same property the
+            // suffix derivation probe relies on).
+            addGenerationPrompt: thinkingMode != .adaptive)
+        guard thinkingMode == .adaptive else { return rendered }
+        return rendered + encode(generationSuffix, addBOS: false)
+    }
+
+    /// The ChatML tools path: the tokenizer's bundled `chat_template.jinja`,
+    /// which the hand-written `chatMLChatTemplate` does not reproduce.
+    private func upstreamJinjaRender(
+        _ messages: [Message],
+        tools: [FunctionDefinition],
+        addGenerationPrompt: Bool
+    ) throws -> [Int32] {
         guard tokenizer.hasChatTemplate else {
             throw GFTokenizerError.missingToolTemplate
         }
@@ -1148,22 +1171,65 @@ public struct GFTokenizer: @unchecked Sendable {
                 ] as [String: any Sendable],
             ]
         }
-        let rendered = try tokenizer.applyChatTemplate(
+        return try tokenizer.applyChatTemplate(
             messages: upstreamMessages,
             chatTemplate: nil,
-            // Adaptive appends the bare role header itself: the template's
-            // `enable_thinking` boolean can only pick an injected form, and
-            // the generation prompt is appended after the message loop, so
-            // the split render is a token-exact substitute (same property the
-            // suffix derivation probe relies on).
-            addGenerationPrompt: thinkingMode != .adaptive,
+            addGenerationPrompt: addGenerationPrompt,
             truncation: false,
             maxLength: nil,
             tools: upstreamTools,
             additionalContext: ["enable_thinking": thinkingMode.isEnabled]
         ).map(Int32.init)
-        guard thinkingMode == .adaptive else { return rendered }
-        return rendered + encode(generationSuffix, addBOS: false)
+    }
+
+    // MARK: - Settled boundary
+
+    /// Token count of the render truncated at the last user query — the
+    /// boundary between the settled region, whose bytes no later turn can
+    /// move, and the live region the in-flight request rewrites. The result is
+    /// a token prefix of the full render of the same `messages` and `tools`.
+    public func settledBoundaryTokenCount(messages: [Message],
+                                          tools: [FunctionDefinition]) throws -> Int {
+        guard let queryIndex = lastQueryIndex(messages) else {
+            throw GFTokenizerError.invalidChatTemplate("no user query found in messages")
+        }
+        let settled = Array(messages[...queryIndex])
+        switch dialect {
+        case .chatml:
+            guard tools.isEmpty else {
+                return try upstreamJinjaRender(settled, tools: tools,
+                                               addGenerationPrompt: false).count
+            }
+            return encode(try chatMLChatTemplate(settled, addGenerationPrompt: false),
+                          addBOS: false).count
+        case .harmony:
+            return encode(try harmonyChatTemplate(settled, tools: tools,
+                                                  addGenerationPrompt: false),
+                          addBOS: false).count
+        case .kimi:
+            return encode(try kimiChatTemplate(settled, tools: tools,
+                                               addGenerationPrompt: false),
+                          addBOS: false).count
+        }
+    }
+
+    /// The ChatML branch is the shipped template's `last_query_index` scan;
+    /// Harmony and Kimi have no equivalent and take the last user message.
+    private func lastQueryIndex(_ messages: [Message]) -> Int? {
+        switch dialect {
+        case .chatml:
+            return messages.lastIndex {
+                $0.role == .user && !Self.isToolResponseWrapper($0)
+            }
+        case .harmony, .kimi:
+            return messages.lastIndex { $0.role == .user }
+        }
+    }
+
+    private static func isToolResponseWrapper(_ message: Message) -> Bool {
+        let content = (message.content ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return content.hasPrefix("<tool_response>") && content.hasSuffix("</tool_response>")
     }
 
     public func encodeTextContinuation(userContent: String) -> [Int32] {

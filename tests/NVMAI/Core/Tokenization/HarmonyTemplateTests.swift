@@ -342,4 +342,64 @@ struct HarmonyTemplateTests {
                 tools: [])
         }
     }
+
+    // MARK: - Settled boundary
+
+    private func promptIDs(_ messages: [Message],
+                           tools: [GFTokenizer.FunctionDefinition]) throws -> [Int32] {
+        tok.encode(try tok.harmonyChatTemplate(messages, tools: tools), addBOS: false)
+    }
+
+    private func settledText(_ messages: [Message],
+                             tools: [GFTokenizer.FunctionDefinition]) throws -> String {
+        let text = try tok.harmonyChatTemplate(messages, tools: tools)
+        return String(text.dropLast(GFTokenizer.harmonyGenerationSuffix.count))
+    }
+
+    @Test("Settled boundary ends the plain multi-turn render at the last query")
+    func settledBoundaryPlainMultiTurn() throws {
+        let messages: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "Sunny."),
+            Message(role: .user, content: "What about Berlin?"),
+        ]
+        let fullIDs = try promptIDs(messages, tools: [])
+        let settled = try settledText(messages, tools: [])
+        #expect(tok.decode(fullIDs, skipSpecialTokens: false).hasPrefix(settled))
+        #expect(settled.hasSuffix("<|start|>user<|message|>What about Berlin?<|end|>"))
+        let boundary = try tok.settledBoundaryTokenCount(messages: messages, tools: [])
+        #expect(tok.decode(Array(fullIDs.prefix(boundary)), skipSpecialTokens: false)
+            == settled)
+    }
+
+    @Test("Settled boundary ends a tool loop at the last user turn")
+    func settledBoundaryToolLoop() throws {
+        let settledMessages: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: nil, toolCalls: [
+                .init(id: "call_1", name: "get_weather", arguments: "{\"city\":\"Paris\"}"),
+            ], thinking: "Paris first."),
+            Message(role: .tool, content: "{\"temp\":18}", toolCallID: "call_1"),
+            Message(role: .assistant, content: "18C."),
+            Message(role: .user, content: "What about Berlin?"),
+        ]
+        let liveMessages: [Message] = [
+            Message(role: .assistant, content: nil, toolCalls: [
+                .init(id: "call_2", name: "get_weather", arguments: "{\"city\":\"Berlin\"}"),
+            ], thinking: "Berlin now."),
+            Message(role: .tool, content: "{\"temp\":12}", toolCallID: "call_2"),
+        ]
+        let messages = settledMessages + liveMessages
+        let tools = [Self.weatherTool]
+        let fullIDs = try promptIDs(messages, tools: tools)
+        let settled = try settledText(settledMessages, tools: tools)
+        #expect(tok.decode(fullIDs, skipSpecialTokens: false).hasPrefix(settled))
+        #expect(settled.hasSuffix("<|start|>user<|message|>What about Berlin?<|end|>"))
+        #expect(!settled.contains("Berlin now."))
+        let boundary = try tok.settledBoundaryTokenCount(messages: messages, tools: tools)
+        #expect(tok.decode(Array(fullIDs.prefix(boundary)), skipSpecialTokens: false)
+            == settled)
+    }
 }
