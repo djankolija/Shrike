@@ -1246,6 +1246,79 @@ public struct GFTokenizer: @unchecked Sendable {
         return content.hasPrefix("<tool_response>") && content.hasSuffix("</tool_response>")
     }
 
+    // MARK: - Settled form
+
+    /// A query rendered only so the ChatML template's `last_query_index` moves
+    /// past the live region, then stripped again.
+    private static let settledFormSentinelQuery = "next"
+
+    /// The live region of `messages` — every turn after the last user query —
+    /// in settled form: the tokens a later request's prompt carries for those
+    /// turns once its own query has settled them. Appended to a KV rewound to
+    /// `settledBoundaryTokenCount(messages:tools:)` they reproduce that
+    /// prompt's prefix exactly.
+    public func settledLiveRegionTokens(messages: [Message],
+                                        tools: [FunctionDefinition]) throws -> [Int32] {
+        let boundary = try settledBoundaryTokenCount(messages: messages, tools: tools)
+        let settled = try settledFormRender(messages, tools: tools)
+        guard boundary <= settled.count else {
+            throw GFTokenizerError.invalidChatTemplate(
+                "settled boundary falls past the settled render")
+        }
+        return Array(settled.dropFirst(boundary))
+    }
+
+    /// Every turn of `messages` in settled form, no generation prompt, through
+    /// the render path the request itself was routed to.
+    private func settledFormRender(_ messages: [Message],
+                                   tools: [FunctionDefinition]) throws -> [Int32] {
+        switch dialect {
+        case .chatml:
+            // Routed on the whole list, for the reason
+            // `settledBoundaryTokenCount` is.
+            guard Self.usesToolTemplate(messages: messages, tools: tools) else {
+                // The hand renderer takes reasoning from `thinking`, which it
+                // never renders, so its output is already the settled form.
+                return encode(try chatMLChatTemplate(messages, addGenerationPrompt: false),
+                              addBOS: false)
+            }
+            return try chatMLSettledJinjaRender(messages, tools: tools)
+        case .harmony:
+            // Harmony retains per message, not by position: a tool-call turn
+            // renders its analysis wherever it sits and a text turn never does
+            // at inference (fixture lines 355-382), so the plain render is
+            // already the settled one.
+            return encode(try harmonyChatTemplate(messages, tools: tools,
+                                                  addGenerationPrompt: false),
+                          addBOS: false)
+        case .kimi:
+            return encode(try kimiChatTemplate(messages, tools: tools,
+                                               addGenerationPrompt: false),
+                          addBOS: false)
+        }
+    }
+
+    /// The ChatML template selects its reasoning-dropping branch by position
+    /// alone (`loop.index0 > ns.last_query_index`, fixture line 100), and
+    /// exposes no flag that forces it. Appending one query and dropping its
+    /// block again takes the settled bytes from the shipped template rather
+    /// than from a second implementation of its tool-call serialisation.
+    private func chatMLSettledJinjaRender(_ messages: [Message],
+                                          tools: [FunctionDefinition]) throws -> [Int32] {
+        let sentinel = Message(role: .user, content: Self.settledFormSentinelQuery)
+        let rendered = try upstreamJinjaRender(messages + [sentinel], tools: tools,
+                                               addGenerationPrompt: false)
+        let tail = encode(Self.imStartMark + "user\n" + Self.settledFormSentinelQuery
+                            + Self.imEndMark + "\n",
+                          addBOS: false)
+        guard rendered.count >= tail.count,
+              Array(rendered.suffix(tail.count)) == tail else {
+            throw GFTokenizerError.invalidChatTemplate(
+                "settled render does not end in the appended query")
+        }
+        return Array(rendered.dropLast(tail.count))
+    }
+
     public func encodeTextContinuation(userContent: String) -> [Int32] {
         // The template trims user content (`render_content(...)|trim`), so the
         // continuation bridge mirrors it; see `chatMLChatTemplate`.

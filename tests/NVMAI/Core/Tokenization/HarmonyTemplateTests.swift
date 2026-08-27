@@ -402,4 +402,67 @@ struct HarmonyTemplateTests {
         #expect(tok.decode(Array(fullIDs.prefix(boundary)), skipSpecialTokens: false)
             == settled)
     }
+
+    // MARK: - Settled form
+
+    /// The byte-exactness property: the next request's own render must carry
+    /// the settled live region verbatim, starting at the settled boundary.
+    private func expectSettledRegionInNextRender(
+        completed: [Message],
+        nextQuery: Message,
+        tools: [GFTokenizer.FunctionDefinition]
+    ) throws -> String {
+        let boundary = try tok.settledBoundaryTokenCount(messages: completed, tools: tools)
+        let liveIDs = try tok.settledLiveRegionTokens(messages: completed, tools: tools)
+        let nextIDs = try promptIDs(completed + [nextQuery], tools: tools)
+        try #require(nextIDs.count >= boundary + liveIDs.count)
+        #expect(Array(nextIDs[boundary ..< boundary + liveIDs.count]) == liveIDs)
+
+        let liveText = tok.decode(liveIDs, skipSpecialTokens: false)
+        let settledText = tok.decode(Array(nextIDs.prefix(boundary)), skipSpecialTokens: false)
+        #expect(tok.decode(nextIDs, skipSpecialTokens: false)
+            .hasPrefix(settledText + liveText))
+        return liveText
+    }
+
+    @Test("Settled live region drops a text turn's analysis")
+    func settledLiveRegionPlainMultiTurn() throws {
+        let completed: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "Sunny.", thinking: "Paris is warm."),
+        ]
+        let liveText = try expectSettledRegionInNextRender(
+            completed: completed,
+            nextQuery: Message(role: .user, content: "What about Berlin?"),
+            tools: [])
+        #expect(liveText == "<|start|>assistant<|channel|>final<|message|>Sunny.<|end|>")
+    }
+
+    @Test("Settled live region keeps a tool call's analysis and drops the answer's")
+    func settledLiveRegionToolLoop() throws {
+        let completed: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: nil, toolCalls: [
+                .init(id: "call_1", name: "get_weather",
+                      arguments: "{\"city\":\"Paris\"}"),
+            ], thinking: "Paris first."),
+            Message(role: .tool, content: "{\"temp\":18}", toolCallID: "call_1"),
+            Message(role: .assistant, content: "18C.", thinking: "That is warm."),
+        ]
+        let liveText = try expectSettledRegionInNextRender(
+            completed: completed,
+            nextQuery: Message(role: .user, content: "What about Berlin?"),
+            tools: [Self.weatherTool])
+
+        // Retention is per message, not by position: the tool-call turn's
+        // analysis survives into the settled region, the answer's does not.
+        #expect(liveText.contains(
+            "<|start|>assistant<|channel|>analysis<|message|>Paris first.<|end|>"))
+        #expect(!liveText.contains("That is warm."))
+        #expect(liveText.contains("<|channel|>commentary json<|message|>{\"city\":\"Paris\"}"))
+        #expect(liveText.hasSuffix(
+            "<|start|>assistant<|channel|>final<|message|>18C.<|end|>"))
+    }
 }

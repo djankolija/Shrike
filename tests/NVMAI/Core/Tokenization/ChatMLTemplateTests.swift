@@ -366,6 +366,126 @@ struct ChatMLTemplateTests {
             == settled)
     }
 
+    // MARK: - Settled form
+
+    /// The byte-exactness property: the next request's own render must carry
+    /// the settled live region verbatim, starting at the settled boundary.
+    private func expectSettledRegionInNextRender(
+        completed: [Message],
+        nextQuery: Message,
+        tools: [GFTokenizer.FunctionDefinition]
+    ) throws -> String {
+        let next = completed + [nextQuery]
+        let boundary = try tok.settledBoundaryTokenCount(messages: completed, tools: tools)
+        let liveIDs = try tok.settledLiveRegionTokens(messages: completed, tools: tools)
+        let nextIDs = try promptIDs(next, routedWith: next, tools: tools)
+        try #require(nextIDs.count >= boundary + liveIDs.count)
+        #expect(Array(nextIDs[boundary ..< boundary + liveIDs.count]) == liveIDs)
+
+        let liveText = tok.decode(liveIDs, skipSpecialTokens: false)
+        let settledText = tok.decode(Array(nextIDs.prefix(boundary)), skipSpecialTokens: false)
+        #expect(tok.decode(nextIDs, skipSpecialTokens: false)
+            .hasPrefix(settledText + liveText))
+        return liveText
+    }
+
+    @Test("Settled live region drops a plain turn's reasoning")
+    func settledLiveRegionPlainMultiTurn() throws {
+        let completed: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "Sunny.", thinking: "Paris is warm."),
+        ]
+        let liveText = try expectSettledRegionInNextRender(
+            completed: completed,
+            nextQuery: Message(role: .user, content: "What about Berlin?"),
+            tools: [])
+        #expect(liveText == "<|im_start|>assistant\nSunny.<|im_end|>\n")
+    }
+
+    @Test("Settled live region drops a whole tool loop's reasoning")
+    func settledLiveRegionToolLoop() throws {
+        let completed: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "", toolCalls: [
+                .init(id: "call_1", name: "get_weather",
+                      arguments: "{\"units\":\"c\",\"city\":\"Paris\",\"days\":3}"),
+            ], thinking: "Paris first."),
+            Message(role: .tool, content: "{\"temp\":18}", toolCallID: "call_1"),
+            Message(role: .assistant, content: "18C.", thinking: "That is warm."),
+        ]
+        let tools = [Self.weatherTool]
+        let liveText = try expectSettledRegionInNextRender(
+            completed: completed,
+            nextQuery: Message(role: .user, content: "What about Berlin?"),
+            tools: tools)
+
+        #expect(!liveText.contains("<think>"))
+        #expect(!liveText.contains("Paris first."))
+        #expect(!liveText.contains("That is warm."))
+        #expect(liveText.hasPrefix("<|im_start|>assistant\n<tool_call>\n<function=get_weather>\n"))
+        #expect(liveText.contains("<parameter=units>\nc\n</parameter>\n"
+            + "<parameter=city>\nParis\n</parameter>\n"
+            + "<parameter=days>\n3\n</parameter>\n"))
+        #expect(liveText.contains("<|im_start|>user\n<tool_response>\n{\"temp\":18}"))
+        #expect(liveText.hasSuffix("<|im_start|>assistant\n18C.<|im_end|>\n"))
+
+        // The same turns render with their reasoning while the request is live.
+        let liveForm = tok.decode(try promptIDs(completed, routedWith: completed, tools: tools),
+                                  skipSpecialTokens: false)
+        #expect(liveForm.contains("<think>\nParis first.\n</think>"))
+        #expect(liveForm.contains("<think>\nThat is warm.\n</think>"))
+    }
+
+    @Test("Settled live region carries a settled tool round-trip's history")
+    func settledLiveRegionAfterASettledToolLoop() throws {
+        let completed: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "", toolCalls: [
+                .init(id: "call_1", name: "get_weather", arguments: "{\"city\":\"Paris\"}"),
+            ], thinking: "Paris first."),
+            Message(role: .tool, content: "{\"temp\":18}", toolCallID: "call_1"),
+            Message(role: .assistant, content: "18C."),
+            Message(role: .user, content: "What about Berlin?"),
+            Message(role: .assistant, content: "", toolCalls: [
+                .init(id: "call_2", name: "get_weather", arguments: "{\"city\":\"Berlin\"}"),
+            ], thinking: "Berlin now."),
+            Message(role: .tool, content: "{\"temp\":12}", toolCallID: "call_2"),
+            Message(role: .assistant, content: "12C.", thinking: "Cooler."),
+        ]
+        let liveText = try expectSettledRegionInNextRender(
+            completed: completed,
+            nextQuery: Message(role: .user, content: "And Rome?"),
+            tools: [Self.weatherTool])
+        #expect(!liveText.contains("Berlin now."))
+        #expect(!liveText.contains("Cooler."))
+        #expect(!liveText.contains("Paris"))
+        #expect(!liveText.contains("{\"temp\":18}"))
+        #expect(liveText.contains("{\"temp\":12}"))
+    }
+
+    @Test("Settled live region follows tool-shaped history with no tools declared")
+    func settledLiveRegionFollowsHistoryOntoTheToolPath() throws {
+        let completed: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "", toolCalls: [
+                .init(id: "call_1", name: "get_weather", arguments: "{\"city\":\"Paris\"}"),
+            ]),
+            Message(role: .tool, content: "{\"temp\":18}", toolCallID: "call_1"),
+            Message(role: .assistant, content: "18C.", thinking: "Warm."),
+        ]
+        #expect(GFTokenizer.usesToolTemplate(messages: completed, tools: []))
+        let liveText = try expectSettledRegionInNextRender(
+            completed: completed,
+            nextQuery: Message(role: .user, content: "What about Berlin?"),
+            tools: [])
+        #expect(!liveText.contains("Warm."))
+        #expect(liveText.contains("<|im_start|>user\n<tool_response>\n{\"temp\":18}"))
+    }
+
     @Test("Settled boundary rejects a list whose only user turns are tool responses")
     func settledBoundaryWithoutAQuery() {
         #expect(throws: GFTokenizerError.self) {

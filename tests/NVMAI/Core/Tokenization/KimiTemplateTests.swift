@@ -362,4 +362,78 @@ struct KimiTemplateTests {
         #expect(tok.decode(Array(fullIDs.prefix(boundary)), skipSpecialTokens: false)
             == settled)
     }
+
+    // MARK: - Settled form
+
+    /// The byte-exactness property: the next request's own render must carry
+    /// the settled live region verbatim, starting at the settled boundary.
+    private func expectSettledRegionInNextRender(
+        completed: [Message],
+        nextQuery: Message,
+        tools: [GFTokenizer.FunctionDefinition]
+    ) throws -> String {
+        let boundary = try tok.settledBoundaryTokenCount(messages: completed, tools: tools)
+        let liveIDs = try tok.settledLiveRegionTokens(messages: completed, tools: tools)
+        let nextIDs = try promptIDs(completed + [nextQuery], tools: tools)
+        try #require(nextIDs.count >= boundary + liveIDs.count)
+        #expect(Array(nextIDs[boundary ..< boundary + liveIDs.count]) == liveIDs)
+
+        let liveText = tok.decode(liveIDs, skipSpecialTokens: false)
+        let settledText = tok.decode(Array(nextIDs.prefix(boundary)), skipSpecialTokens: false)
+        #expect(tok.decode(nextIDs, skipSpecialTokens: false)
+            .hasPrefix(settledText + liveText))
+        return liveText
+    }
+
+    /// Kimi has no thinking channel, so settling is a no-op: the live region of
+    /// the completed request's own render is already the settled form.
+    private func expectSettledRegionIsLiveRegion(
+        completed: [Message],
+        tools: [GFTokenizer.FunctionDefinition]
+    ) throws {
+        let boundary = try tok.settledBoundaryTokenCount(messages: completed, tools: tools)
+        let liveIDs = try tok.settledLiveRegionTokens(messages: completed, tools: tools)
+        let suffix = tok.encode(GFTokenizer.kimiGenerationSuffix, addBOS: false)
+        let ownIDs = try promptIDs(completed, tools: tools)
+        #expect(liveIDs == Array(ownIDs.dropLast(suffix.count).dropFirst(boundary)))
+    }
+
+    @Test("Settled live region is the live region unchanged for a plain turn")
+    func settledLiveRegionPlainMultiTurn() throws {
+        let completed: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "Sunny.", thinking: "Paris is warm."),
+        ]
+        let liveText = try expectSettledRegionInNextRender(
+            completed: completed,
+            nextQuery: Message(role: .user, content: "What about Berlin?"),
+            tools: [])
+        #expect(liveText == "<|im_assistant|>assistant<|im_middle|>Sunny.<|im_end|>")
+        try expectSettledRegionIsLiveRegion(completed: completed, tools: [])
+    }
+
+    @Test("Settled live region is the live region unchanged for a tool loop")
+    func settledLiveRegionToolLoop() throws {
+        let completed: [Message] = [
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Weather in Paris?"),
+            Message(role: .assistant, content: "", toolCalls: [
+                .init(id: "functions.get_weather:0", name: "get_weather",
+                      arguments: "{\"city\":\"Paris\"}"),
+            ], thinking: "Paris first."),
+            Message(role: .tool, content: "{\"temp\":18}",
+                    toolCallID: "functions.get_weather:0"),
+            Message(role: .assistant, content: "18C.", thinking: "That is warm."),
+        ]
+        let tools = [Self.weatherTool]
+        let liveText = try expectSettledRegionInNextRender(
+            completed: completed,
+            nextQuery: Message(role: .user, content: "What about Berlin?"),
+            tools: tools)
+        #expect(liveText.contains("<|tool_call_begin|>functions.get_weather:0"))
+        #expect(liveText.contains("## Return of functions.get_weather:0\n{\"temp\":18}"))
+        #expect(liveText.hasSuffix("<|im_assistant|>assistant<|im_middle|>18C.<|im_end|>"))
+        try expectSettledRegionIsLiveRegion(completed: completed, tools: tools)
+    }
 }
