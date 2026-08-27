@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 
 @testable import NVMAI
@@ -1055,5 +1056,184 @@ struct KVRewriteTests {
             kvPosition: kvBacked.count,
             kvBackedTokenIDs: kvBacked,
             uncommittedBoundaryTokenIDs: [0])
+    }
+}
+
+@Suite("Mid-rewrite arbitration")
+struct RewriteArbitrationTests {
+    private let domain = ServerPromptCacheDomain(
+        modelID: "model",
+        sourceSnapshotHash: "snapshot",
+        runtimeProfileHash: "profile",
+        maximumContext: 16_384,
+        kvStorage: "fp16",
+        fp16RingEnabled: true,
+        templateSHA256: "template")
+
+    /// Records what a stubbed rewrite was asked to do, and in which order.
+    private final class RewriteStub: Sendable {
+        private let events = Mutex<[String]>([])
+
+        var order: [String] { events.withLock { $0 } }
+
+        func cancel() { events.withLock { $0.append("cancel") } }
+
+        func wait() async {
+            events.withLock { $0.append("wait") }
+            // A rewrite outlasts the request that arbitrates it; the sleep is
+            // what makes "decided before the wait" an ordering claim rather
+            // than a coincidence of scheduling.
+            try? await Task.sleep(for: .milliseconds(20))
+            events.withLock { $0.append("finished") }
+        }
+    }
+
+    @Test func aTargetTheRenderOpensWithJoinsAndEverythingElseAborts() {
+        #expect(RewriteArbitration.decide(target: [1, 2, 3],
+                                          render: [1, 2, 3, 4, 5]) == .join)
+        #expect(RewriteArbitration.decide(target: [1, 2, 3],
+                                          render: [1, 2, 3]) == .join)
+        // The rewrite is writing past where this render ends, so its bytes are
+        // not this request's prefill however far they agree.
+        #expect(RewriteArbitration.decide(target: [1, 2, 3],
+                                          render: [1, 2]) == .abort)
+        #expect(RewriteArbitration.decide(target: [1, 2, 3],
+                                          render: [1, 9, 3, 4]) == .abort)
+        #expect(RewriteArbitration.decide(target: [1, 2, 3],
+                                          render: [9, 2, 3, 4]) == .abort)
+        #expect(RewriteArbitration.decide(target: [1, 2, 3],
+                                          render: []) == .abort)
+        #expect(RewriteArbitration.decide(target: [],
+                                          render: [1, 2, 3]) == .abort)
+        #expect(RewriteArbitration.decide(target: [], render: []) == .abort)
+    }
+
+    @Test func aFollowUpRenderWaitsForTheRewriteItIsAlreadyBeingPrefilled() async {
+        let stub = RewriteStub()
+        let decision = await RewriteArbitration.arbitrate(
+            target: [1, 2, 3],
+            render: [1, 2, 3, 4],
+            cancel: { stub.cancel() },
+            wait: { await stub.wait() })
+        #expect(decision == .join)
+        #expect(stub.order == ["wait", "finished"])
+    }
+
+    /// The whole point of rendering before waiting: a request the rewrite is
+    /// not prefilling for stops it *first*, so it never queues behind work its
+    /// own arrival invalidated.
+    @Test func aDivergentRenderCancelsBeforeItEverWaits() async {
+        let stub = RewriteStub()
+        let decision = await RewriteArbitration.arbitrate(
+            target: [1, 2, 3],
+            render: [1, 9, 9],
+            cancel: { stub.cancel() },
+            wait: { await stub.wait() })
+        #expect(decision == .abort)
+        #expect(stub.order == ["cancel", "wait", "finished"])
+    }
+
+    /// Against the real template rather than made-up ids: the sequence a
+    /// completed turn is rewritten into is what its next turn renders, and what
+    /// a regeneration of that turn does not.
+    @Test func theRealSettledTargetJoinsTheNextTurnAndAbortsARegeneration() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let messages = [GFTokenizer.Message(role: .user, content: "first")]
+        let prompt = tokenizer.encode(
+            try tokenizer.applyChatTemplate(messages), addBOS: false)
+        let kvBacked = prompt + tokenizer.encode("answer", addBOS: false)
+        let completed = messages
+            + [GFTokenizer.Message(role: .assistant, content: "answer")]
+        let target = try #require(KVRewrite.settledSequence(
+            kvBackedTokenIDs: kvBacked,
+            boundaryTokens: try tokenizer.settledBoundaryTokens(
+                messages: completed, tools: []),
+            liveRegionTokens: try tokenizer.settledLiveRegionTokens(
+                messages: completed, tools: [])))
+
+        let followUp = tokenizer.encode(
+            try tokenizer.applyChatTemplate(
+                completed + [GFTokenizer.Message(role: .user, content: "second")]),
+            addBOS: false)
+        #expect(RewriteArbitration.decide(target: target, render: followUp) == .join)
+
+        // Asking the same turn again: the render stops where the assistant turn
+        // began, so the rewrite is producing bytes past its end.
+        let regenerated = tokenizer.encode(
+            try tokenizer.applyChatTemplate(messages), addBOS: false)
+        #expect(RewriteArbitration.decide(target: target,
+                                          render: regenerated) == .abort)
+    }
+
+    /// An edit aborts, and then salvages: the entry it aborted onto is the one
+    /// published before the rewrite started, so the normal match path still
+    /// finds the prefix the two renders share.
+    @Test func anEditAbortsTheRewriteAndStillSalvagesItsSharedPrefix() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let messages = [GFTokenizer.Message(role: .user, content: "first question")]
+        let prompt = tokenizer.encode(
+            try tokenizer.applyChatTemplate(messages), addBOS: false)
+        let kvBacked = prompt + tokenizer.encode("answer", addBOS: false)
+        let completed = messages
+            + [GFTokenizer.Message(role: .assistant, content: "answer")]
+        let target = try #require(KVRewrite.settledSequence(
+            kvBackedTokenIDs: kvBacked,
+            boundaryTokens: try tokenizer.settledBoundaryTokens(
+                messages: completed, tools: []),
+            liveRegionTokens: try tokenizer.settledLiveRegionTokens(
+                messages: completed, tools: [])))
+
+        let edited = request(messages: [
+            GFTokenizer.Message(role: .user, content: "first question, restated"),
+        ])
+        let rendered = tokenizer.encode(
+            try tokenizer.applyChatTemplate(edited.messages), addBOS: false)
+        #expect(RewriteArbitration.decide(target: target, render: rendered) == .abort)
+
+        var cache = ServerPromptCache()
+        cache.publish(
+            domain: domain,
+            request: request(messages: messages),
+            content: "answer",
+            calls: [],
+            result: RawDecodeResult(
+                prefillTokens: kvBacked.count,
+                cachedPromptTokens: 0,
+                computedPrefillTokens: kvBacked.count,
+                prefillSeconds: 0,
+                newTokens: 1,
+                decodeSeconds: 0,
+                reason: .endOfTurn,
+                kvPosition: kvBacked.count,
+                kvBackedTokenIDs: kvBacked,
+                uncommittedBoundaryTokenIDs: [0]))
+        let match = cache.match(
+            domain: domain,
+            request: edited,
+            renderedPromptIDs: rendered,
+            tokenizer: tokenizer)
+        guard case .hit(_, let effective, let cached) = match else {
+            Issue.record("expected the pre-rewrite entry to salvage its prefix")
+            return
+        }
+        #expect(cached > 0)
+        #expect(cached < kvBacked.count)
+        #expect(effective == rendered)
+        let salvaged = try #require(cache.entries.first)
+        #expect(salvaged.kvPosition == cached)
+        #expect(salvaged.kvPosition == salvaged.kvBackedTokenIDs.count)
+    }
+
+    private func request(
+        messages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition] = []
+    ) -> ValidatedChatRequest {
+        ValidatedChatRequest(
+            messages: messages,
+            tools: tools,
+            stream: false,
+            includeUsage: false,
+            generationConfig: GenerationConfig(maxNewTokens: 16, temperature: 0),
+            maximumCompletionTokens: 16)
     }
 }

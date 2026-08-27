@@ -445,6 +445,25 @@ private enum KVNormalization: Sendable, Equatable {
     case lost
 }
 
+/// What the response path leaves for the KV: either a rewrite already done —
+/// both are cursor moves — or a forward pass still to run between requests.
+private enum KVNormalizationPlan: Sendable, Equatable {
+    case done(KVNormalization)
+    /// The sequence the rewrite will leave in the KV, and the cursor it rewinds
+    /// to before prefilling the remainder. The target is what the next request
+    /// arbitrates against.
+    case settle(target: [Int32], rewindTo: Int)
+
+    /// What the KV holds at publish time. A pending settle has not moved it
+    /// yet, so its entry is published against the bytes the generation left.
+    var completedNormalization: KVNormalization {
+        switch self {
+        case .done(let normalization): return normalization
+        case .settle: return .unchanged
+        }
+    }
+}
+
 public actor ServerModelSession: ServerInferenceBackend {
     /// Manifest-derived API model identifier used when --model-id is absent.
     public nonisolated let defaultModelID: String
@@ -472,6 +491,19 @@ public actor ServerModelSession: ServerInferenceBackend {
     private var promptCache: ServerPromptCache
     private let promptStateStore: ServerPromptStateStore?
     private var activePromptCacheEntryID: UUID?
+    /// A settle prefilling between requests, and the sequence it is prefilling
+    /// toward. Nothing else may touch the runner or the scratch while this is
+    /// set, so every request arbitrates it — join or abort — before it starts.
+    private var pendingRewrite: PendingRewrite?
+    /// The snapshot write for the entry a pending rewrite will replace. Both
+    /// writes carry the same entry id and only the store's disk queue orders
+    /// them, so the rewrite waits for this one before saving its own.
+    private var pendingSnapshotSave: Task<Void, Never>?
+
+    private struct PendingRewrite {
+        let target: [Int32]
+        let task: Task<Void, Never>
+    }
     /// Concise-mode system prompt injected into every completion, or nil when
     /// concise mode is off. Selected per quantization (see ConcisePrompt).
     private nonisolated let concisePrompt: String?
@@ -916,6 +948,13 @@ public actor ServerModelSession: ServerInferenceBackend {
         _ request: ValidatedChatRequest,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
+        // Rendered before anything is awaited, because a rewrite still running
+        // between requests is arbitrated on this render: one that it is not
+        // prefilling for must cancel it rather than queue behind it. The reset
+        // guard below stays under this, so a request rejected here cannot reset
+        // a runner the rewrite is still driving.
+        let prepared = try preparePrompt(request)
+        await arbitratePendingRewrite(renderedPromptIDs: prepared.promptIDs)
         // Stage-split measurement (NVMAI_RUNNER_STATS): snapshot the runner's
         // lifetime counters so the footer can report this request's delta.
         let runnerSnapshot = RunnerCounterSnapshot(
@@ -954,7 +993,6 @@ public actor ServerModelSession: ServerInferenceBackend {
                 mtpDecoder?.reset()
             }
         }
-        let prepared = try preparePrompt(request)
         let promptIDs = prepared.promptIDs
         let cacheRequest = prepared.cacheRequest
         let needsToolTemplate = prepared.needsToolTemplate
@@ -1118,7 +1156,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         } else {
             reason = "stop"
         }
-        let normalization = await normalizeCompletedKV(
+        let plan = normalizeCompletedKV(
             messages: prepared.effectiveMessages,
             tools: cacheRequest.tools,
             content: content,
@@ -1127,13 +1165,18 @@ public actor ServerModelSession: ServerInferenceBackend {
             thoughtChannelClosed: decoder?.thoughtChannelClosed ?? true,
             emittedToolCalls: !calls.isEmpty,
             stopStringFiltered: stopMatcher.isStopped)
-        publishCacheEntry(
+        let publishedEntryID = publishCacheEntry(
             cacheRequest: cacheRequest,
             content: content,
             calls: calls,
             result: result,
             stopStringFiltered: stopMatcher.isStopped,
-            normalization: normalization)
+            normalization: plan.completedNormalization)
+        // Nothing suspends between the publish and this, so no request can see
+        // the entry before the rewrite that will replace it is arbitrable.
+        if case .settle(let target, let rewindTo) = plan, let publishedEntryID {
+            startRewrite(target: target, rewindTo: rewindTo, entryID: publishedEntryID)
+        }
         completed = true
         return ServerCompletion(
             content: content,
@@ -1168,9 +1211,11 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// Rewrite the completed generation's KV into the bytes the next request
     /// will render, so the prompt cache stays a byte comparison.
     ///
-    /// Runs after the response has streamed and before the entry is published,
-    /// so the snapshot is captured against the rewritten cursor rather than a
-    /// position the KV has already left.
+    /// Decides and renders on the response path — the target has to be recorded
+    /// before this returns, since the next request arbitrates on it — but the
+    /// forward pass a settle needs is left to `startRewrite` to run between
+    /// requests, so the stream closes on the response rather than on the
+    /// rewrite.
     private func normalizeCompletedKV(
         messages: [GFTokenizer.Message],
         tools: [GFTokenizer.FunctionDefinition],
@@ -1180,14 +1225,14 @@ public actor ServerModelSession: ServerInferenceBackend {
         thoughtChannelClosed: Bool,
         emittedToolCalls: Bool,
         stopStringFiltered: Bool
-    ) async -> KVNormalization {
+    ) -> KVNormalizationPlan {
         guard promptCacheMode != .off,
               mtpDecoder == nil,
               prefillConfig.mode == .chunked,
               result.kvPosition == result.kvBackedTokenIDs.count,
               result.uncommittedBoundaryTokenIDs.count == 1,
               runner.continuationPosition == result.kvPosition else {
-            return .unchanged
+            return .done(.unchanged)
         }
         switch KVRewrite.forCompletion(
             reason: result.reason,
@@ -1196,15 +1241,16 @@ public actor ServerModelSession: ServerInferenceBackend {
             stopStringFiltered: stopStringFiltered,
             supportsRewind: runner.supportsPartialRewind) {
         case .none:
-            return .unchanged
+            return .done(.unchanged)
         case .dropEmission:
-            return dropEmission(result: result, promptTokenCount: promptTokenCount)
+            return .done(dropEmission(result: result,
+                                      promptTokenCount: promptTokenCount))
         case .settleLiveRegion:
             let completed = messages
                 + [GFTokenizer.Message(role: .assistant, content: content)]
-            return await settleLiveRegion(messages: completed,
-                                          tools: tools,
-                                          result: result)
+            return settleLiveRegion(messages: completed,
+                                    tools: tools,
+                                    result: result)
         }
     }
 
@@ -1236,11 +1282,15 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// the rest. The parting point is at or after the settled boundary, so this
     /// is the spec's rewind with the work the two forms already agree on left
     /// standing — a dialect that retains reasoning then costs nothing.
+    ///
+    /// The rewind itself is deferred with the prefill: it moves the cursor off
+    /// the position the entry is about to be published at, which is the
+    /// position that entry's snapshot has to be captured from.
     private func settleLiveRegion(
         messages: [GFTokenizer.Message],
         tools: [GFTokenizer.FunctionDefinition],
         result: RawDecodeResult
-    ) async -> KVNormalization {
+    ) -> KVNormalizationPlan {
         guard let boundary = try? tokenizer.settledBoundaryTokens(messages: messages,
                                                                  tools: tools),
               let live = try? tokenizer.settledLiveRegionTokens(messages: messages,
@@ -1250,29 +1300,58 @@ public actor ServerModelSession: ServerInferenceBackend {
                 boundaryTokens: boundary,
                 liveRegionTokens: live),
               settled.count < maxContext else {
-            return .unchanged
+            return .done(.unchanged)
         }
         // An entry whose bytes did not change keeps the bridges its structural
         // description still describes.
-        guard settled != result.kvBackedTokenIDs else { return .unchanged }
+        guard settled != result.kvBackedTokenIDs else { return .done(.unchanged) }
         let comparable = min(result.kvPosition, settled.count)
         let common = (0..<comparable).first {
             result.kvBackedTokenIDs[$0] != settled[$0]
         } ?? comparable
-        do {
-            if common < result.kvPosition { try runner.rewind(to: common) }
-        } catch {
-            return .unchanged
+        let line = "NVMAI prompt_cache normalize kind=settle "
+            + "boundary=\(boundary.count) rewind=\(common) "
+            + "kv=\(result.kvPosition) settled=\(settled.count)"
+        guard common < settled.count else {
+            // The settled form is a prefix of what the KV holds, so the rewind
+            // alone is the whole rewrite and nothing has to run in the
+            // background.
+            do {
+                try runner.rewind(to: common)
+            } catch {
+                return .done(.unchanged)
+            }
+            print(line)
+            return .done(.rewritten(settled))
         }
-        print("NVMAI prompt_cache normalize kind=settle "
-                + "boundary=\(boundary.count) rewind=\(common) "
-                + "kv=\(result.kvPosition) settled=\(settled.count)")
-        guard common < settled.count else { return .rewritten(settled) }
+        print(line)
+        return .settle(target: settled, rewindTo: common)
+    }
+
+    /// Run a settle's forward pass between requests, so the response the
+    /// rewrite belongs to has already closed. Cancellation lands in
+    /// `prefillChunked`'s catch, which resets the runner: an aborted rewrite
+    /// leaves no live KV at all, and the entry published before it started is
+    /// what the aborting request falls back to.
+    private func startRewrite(target: [Int32], rewindTo: Int, entryID: UUID) {
+        pendingRewrite = PendingRewrite(
+            target: target,
+            task: Task { await self.runRewrite(target: target,
+                                               rewindTo: rewindTo,
+                                               entryID: entryID) })
+    }
+
+    private func runRewrite(target: [Int32], rewindTo: Int, entryID: UUID) async {
+        defer { pendingRewrite = nil }
+        var lost = false
         do {
+            if runner.continuationPosition != rewindTo {
+                try runner.rewind(to: rewindTo)
+            }
             try await prefillRewrite(runner: runner,
                                      scratch: scratch,
-                                     tokens: settled[common...],
-                                     startPosition: common,
+                                     tokens: target[rewindTo...],
+                                     startPosition: rewindTo,
                                      config: prefillConfig)
         } catch {
             // A failure inside the chunk loop resets the runner; the guards
@@ -1280,9 +1359,80 @@ public actor ServerModelSession: ServerInferenceBackend {
             // can tell which happened, so the KV counts as gone.
             FileHandle.standardError.write(Data(
                 ("NVMAI prompt_cache normalize_failed error=\(error)\n").utf8))
-            return .lost
+            lost = true
         }
-        return .rewritten(settled)
+        // The pre-rewrite pair has to be on disk before its replacement is
+        // written: both carry this entry's id, and only the store's disk queue
+        // orders the two writes.
+        await pendingSnapshotSave?.value
+        pendingSnapshotSave = nil
+        guard !lost else {
+            // The entry stands as published, still described by the snapshot
+            // captured before the rewind; only the claim that the live KV
+            // matches it is withdrawn.
+            if promptCacheMode == .singlePrefix { promptCache.invalidate() }
+            activePromptCacheEntryID = nil
+            print("NVMAI prompt_cache normalize kind=settle_lost "
+                    + "settled=\(target.count) entry=\(entryID.uuidString.lowercased())")
+            return
+        }
+        await finishRewrite(target: target, entryID: entryID)
+    }
+
+    /// Move the entry and its snapshot onto the rewritten bytes together. Both
+    /// happen before the arbitrating request is let go, so no match ever pairs
+    /// a rewritten entry with the snapshot of what it used to hold.
+    private func finishRewrite(target: [Int32], entryID: UUID) async {
+        guard let entry = promptCache.rewrite(entryID: entryID,
+                                              kvBackedTokenIDs: target) else {
+            return
+        }
+        print("NVMAI prompt_cache normalize kind=settle_done "
+                + "settled=\(target.count) entry=\(entryID.uuidString.lowercased())")
+        guard promptCacheMode == .multiPrefix, let promptStateStore else { return }
+        do {
+            let snapshot = try runner.captureInferenceState(
+                maximumBytes: promptStateStore.maximumSnapshotBytes)
+            guard snapshot.descriptor.position == entry.kvPosition else {
+                throw InferenceStateSnapshotError.invalidPosition(
+                    snapshot.descriptor.position)
+            }
+            let saved = await promptStateStore.save(entry: entry, snapshot: snapshot)
+            if let diskError = saved.diskError {
+                FileHandle.standardError.write(Data(
+                    ("NVMAI prompt_cache disk_write_failed error=\(diskError)\n").utf8))
+            }
+            print("NVMAI prompt_cache stored "
+                    + "tokens=\(entry.kvPosition) "
+                    + "state_bytes=\(snapshot.payload.count) "
+                    + "ram_bytes=\(saved.memoryBytes) "
+                    + "disk_bytes=\(saved.diskBytes) "
+                    + "entry=\(entry.id.uuidString.lowercased())")
+        } catch {
+            // S24: the entry now describes bytes the stored snapshot does not,
+            // so both go rather than leave a restore that would seat the wrong
+            // context.
+            FileHandle.standardError.write(Data(
+                ("NVMAI prompt_cache snapshot_failed error=\(error)\n").utf8))
+            promptStateStore.remove(entryIDs: [entryID])
+            promptCache.remove(entryIDs: [entryID])
+            activePromptCacheEntryID = nil
+        }
+    }
+
+    /// Settle with a rewrite still running: decide on this request's render
+    /// first, then wait. `RewriteArbitration.arbitrate` holds that order, which
+    /// is what keeps an aborting request from queueing behind the work its own
+    /// arrival invalidated.
+    private func arbitratePendingRewrite(renderedPromptIDs: [Int32]) async {
+        guard let pending = pendingRewrite else { return }
+        let decision = await RewriteArbitration.arbitrate(
+            target: pending.target,
+            render: renderedPromptIDs,
+            cancel: { pending.task.cancel() },
+            wait: { await pending.task.value })
+        print("NVMAI prompt_cache arbitrate decision=\(decision.rawValue) "
+                + "target=\(pending.target.count) render=\(renderedPromptIDs.count)")
     }
 
     /// Publish this turn's KV range to the prompt cache, and persist a snapshot
@@ -1292,6 +1442,9 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// broken one: an entry whose snapshot cannot be captured or verified is
     /// removed again, so the next hit re-prefills instead of attempting a
     /// doomed restore.
+    ///
+    /// Returns the published entry's id, or nil when nothing survived — which
+    /// is what tells a deferred settle whether it has an entry to rewrite.
     private func publishCacheEntry(
         cacheRequest: ValidatedChatRequest,
         content: String,
@@ -1299,13 +1452,13 @@ public actor ServerModelSession: ServerInferenceBackend {
         result: RawDecodeResult,
         stopStringFiltered: Bool,
         normalization: KVNormalization
-    ) {
+    ) -> UUID? {
         if case .lost = normalization {
             // The runner reset under a failed rewrite, so nothing describes the
             // live KV any more; entries already backed by a snapshot keep theirs.
             if promptCacheMode == .singlePrefix { promptCache.invalidate() }
             activePromptCacheEntryID = nil
-            return
+            return nil
         }
         if mtpDecoder != nil {
             // Native MTP keeps a second KV stream. Until both states are
@@ -1321,9 +1474,10 @@ public actor ServerModelSession: ServerInferenceBackend {
                 result: result,
                 stopStringFiltered: stopStringFiltered) else {
                 promptCache.invalidate()
-                return
+                return nil
             }
             applying(normalization, to: publication.entry)
+            return publication.entry.id
         } else if promptCacheMode == .multiPrefix {
             let previousActive = activePromptCacheEntryID
             if let publication = promptCache.publish(
@@ -1335,6 +1489,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 stopStringFiltered: stopStringFiltered) {
                 promptStateStore?.remove(entryIDs: publication.evictedEntryIDs)
                 let published = applying(normalization, to: publication.entry)
+                var backed = true
                 do {
                     guard let promptStateStore else {
                         throw ServerPromptStateStoreError.missing(published.id)
@@ -1354,7 +1509,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                             snapshot.descriptor.position)
                     }
                     let entry = published
-                    Task.detached(priority: .utility) { [promptStateStore] in
+                    pendingSnapshotSave = Task.detached(priority: .utility) {
+                        [promptStateStore] in
                         let saved = await promptStateStore.save(
                             entry: entry,
                             snapshot: snapshot)
@@ -1378,6 +1534,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                         ("NVMAI prompt_cache snapshot_failed error=\(error)\n").utf8))
                     promptCache.remove(entryIDs: [publication.entry.id])
                     activePromptCacheEntryID = nil
+                    backed = false
                 }
                 if let previousActive,
                    previousActive != publication.entry.id,
@@ -1385,10 +1542,12 @@ public actor ServerModelSession: ServerInferenceBackend {
                     promptCache.remove(entryIDs: [previousActive])
                 }
                 activePromptCacheEntryID = publication.entry.id
+                return backed ? publication.entry.id : nil
             } else {
                 activePromptCacheEntryID = nil
             }
         }
+        return nil
     }
 
     private func encodePrompt(

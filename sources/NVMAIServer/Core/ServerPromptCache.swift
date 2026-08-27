@@ -112,6 +112,44 @@ enum KVRewrite: Sendable, Equatable {
     }
 }
 
+/// What a request arriving while a rewrite is still prefilling does with it.
+enum RewriteArbitration: String, Sendable, Equatable {
+    /// The rewrite is this request's prefill already running: wait for it and
+    /// match against the entry it leaves behind.
+    case join
+    /// The rewrite is producing bytes this request cannot use: stop it and
+    /// take the normal match path.
+    case abort
+
+    /// Bytes only — no session identity is tested and none is needed. A
+    /// follow-up turn joins by construction, because the settled sequence a
+    /// completed turn is rewritten into is what that turn's next render opens
+    /// with; regeneration and edits abort.
+    ///
+    /// A rewrite naming no target is evidence of nothing, so it aborts rather
+    /// than making every request wait on the vacuous prefix.
+    static func decide(target: [Int32], render: [Int32]) -> RewriteArbitration {
+        guard !target.isEmpty,
+              render.prefix(target.count).elementsEqual(target) else {
+            return .abort
+        }
+        return .join
+    }
+
+    /// Decide, then wait — never wait, then decide. A request the rewrite is
+    /// not prefilling for has to cancel it before it queues, or it blocks on
+    /// work its own arrival invalidated.
+    static func arbitrate(target: [Int32],
+                          render: [Int32],
+                          cancel: @Sendable () -> Void,
+                          wait: @Sendable () async -> Void) async -> RewriteArbitration {
+        let decision = decide(target: target, render: render)
+        if decision == .abort { cancel() }
+        await wait()
+        return decision
+    }
+}
+
 enum ServerPromptCacheMatch: Sendable, Equatable {
     case miss
     case hit(entryID: UUID, effectivePromptIDs: [Int32], cachedPromptTokens: Int)
