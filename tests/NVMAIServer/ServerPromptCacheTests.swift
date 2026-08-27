@@ -16,7 +16,7 @@ struct ServerPromptCacheTests {
         fp16RingEnabled: true,
         templateSHA256: "template")
 
-    @Test func textContinuationUsesActualGeneratedHistoryAndOnlyPrefillsSuffix() async throws {
+    @Test func aTextContinuationSalvagesTheSharedPrefixOfItsRender() async throws {
         let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         let initial = request(messages: [
             GFTokenizer.Message(role: .user, content: "first"),
@@ -30,8 +30,6 @@ struct ServerPromptCacheTests {
         cache.publish(
             domain: domain,
             request: initial,
-            content: "answer",
-            calls: [],
             result: rawResult(
                 prompt: initialPrompt,
                 kvBacked: kvBacked,
@@ -48,61 +46,15 @@ struct ServerPromptCacheTests {
         let match = cache.match(
             domain: domain,
             request: continuation,
-            renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
+            renderedPromptIDs: rendered)
 
-        guard case .hit(_, let effective, let cached) = match else {
-            Issue.record("expected text continuation hit")
-            return
-        }
-        let bridge = tokenizer.encodeTextContinuation(userContent: "second")
-        #expect(cached == kvBacked.count)
-        #expect(effective == kvBacked + bridge)
-        #expect(!rendered.prefix(kvBacked.count).elementsEqual(kvBacked))
-        #expect(effective[cached] == tokenizer.endOfTurnID)
-    }
-
-    @Test func harmonyEntriesNeverBridgeTextContinuations() async throws {
-        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.harmonyFolder())
-        let initial = request(messages: [
-            GFTokenizer.Message(role: .user, content: "first"),
-        ])
-        let initialPrompt = tokenizer.encode(
-            try tokenizer.applyChatTemplate(initial.messages),
-            addBOS: false)
-        let generated = tokenizer.encode("answer", addBOS: false)
-        let kvBacked = initialPrompt + generated
-        var cache = ServerPromptCache()
-        cache.publish(
-            domain: domain,
-            request: initial,
-            content: "answer",
-            calls: [],
-            result: rawResult(
-                prompt: initialPrompt,
-                kvBacked: kvBacked,
-                boundary: generated.last ?? 0,
-                reason: .maxTokens))
-
-        let continuation = request(messages: initial.messages + [
-            GFTokenizer.Message(role: .assistant, content: "answer"),
-            GFTokenizer.Message(role: .user, content: "second"),
-        ])
-        let rendered = tokenizer.encode(
-            try tokenizer.applyChatTemplate(continuation.messages),
-            addBOS: false)
-        let match = cache.match(
-            domain: domain,
-            request: continuation,
-            renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
-
-        // The ChatML text bridge is dialect-gated, so a Harmony entry has no
-        // structural path: it salvages the shared prefix, never splices a bridge.
+        // The re-render drops the turn's reasoning, so it is not a prefix of
+        // the KV and the entry keeps only what both renders share.
         guard case .hit(_, let effective, let cached) = match else {
             Issue.record("expected a common-prefix salvage")
             return
         }
+        #expect(!rendered.prefix(kvBacked.count).elementsEqual(kvBacked))
         #expect(effective == rendered)
         #expect(cached > 0)
         #expect(cached < kvBacked.count)
@@ -111,7 +63,7 @@ struct ServerPromptCacheTests {
         #expect(entry.kvPosition == cached)
     }
 
-    @Test func kimiContinuationsHitTheRenderedPrefixWithoutABridge() async throws {
+    @Test func kimiContinuationsHitTheRenderedPrefixWhole() async throws {
         let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.kimiFolder())
         let initial = request(messages: [
             GFTokenizer.Message(role: .user, content: "first"),
@@ -125,8 +77,6 @@ struct ServerPromptCacheTests {
         cache.publish(
             domain: domain,
             request: initial,
-            content: "answer",
-            calls: [],
             result: rawResult(
                 prompt: initialPrompt,
                 kvBacked: kvBacked,
@@ -143,13 +93,11 @@ struct ServerPromptCacheTests {
         let match = cache.match(
             domain: domain,
             request: continuation,
-            renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
+            renderedPromptIDs: rendered)
 
         // Kimi's template is append-only (no <think> stripping, no dropped
         // analysis), so the re-render extends the cached KV byte-for-byte and
-        // the dialect-agnostic S12 prefix path hits — the ChatML-shaped text
-        // bridge stays unused.
+        // the whole entry is served.
         guard case .hit(_, let effective, let cached) = match else {
             Issue.record("expected a rendered-prefix hit")
             return
@@ -174,8 +122,6 @@ struct ServerPromptCacheTests {
             let publication = cache.publish(
                 domain: domain,
                 request: initial,
-                content: "answer",
-                calls: [],
                 result: rawResult(
                     prompt: prompt,
                     kvBacked: prompt,
@@ -190,8 +136,6 @@ struct ServerPromptCacheTests {
         cache.publish(
             domain: domain,
             request: initial,
-            content: "answer",
-            calls: [],
             result: rawResult(
                 prompt: prompt,
                 kvBacked: kvBacked,
@@ -208,11 +152,10 @@ struct ServerPromptCacheTests {
         let match = cache.match(
             domain: domain,
             request: changed,
-            renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
+            renderedPromptIDs: rendered)
 
-        // A changed first turn has no structural continuation, so all the entry
-        // can keep is the template preamble both renders share.
+        // A changed first turn diverges inside the prompt, so all the entry can
+        // keep is the template preamble both renders share.
         guard case .hit(_, let effective, let cached) = match else {
             Issue.record("expected a common-prefix salvage")
             return
@@ -242,8 +185,6 @@ struct ServerPromptCacheTests {
         let publication = cache.publish(
             domain: domain,
             request: initial,
-            content: "answer ",
-            calls: [],
             result: rawResult(
                 prompt: prompt,
                 kvBacked: prompt,
@@ -264,8 +205,6 @@ struct ServerPromptCacheTests {
         let shortPublication = cache.publish(
             domain: domain,
             request: initial,
-            content: "short",
-            calls: [],
             result: rawResult(
                 prompt: [1, 2],
                 kvBacked: [1, 2],
@@ -275,8 +214,6 @@ struct ServerPromptCacheTests {
         let longPublication = cache.publish(
             domain: domain,
             request: initial,
-            content: "long",
-            calls: [],
             result: rawResult(
                 prompt: [1, 2, 3],
                 kvBacked: [1, 2, 3],
@@ -287,8 +224,7 @@ struct ServerPromptCacheTests {
         let match = cache.match(
             domain: domain,
             request: initial,
-            renderedPromptIDs: [1, 2, 3, 4],
-            tokenizer: tokenizer)
+            renderedPromptIDs: [1, 2, 3, 4])
         #expect(match == .hit(
             entryID: long.entry.id,
             effectivePromptIDs: [1, 2, 3, 4],
@@ -297,8 +233,6 @@ struct ServerPromptCacheTests {
         let newestPublication = cache.publish(
             domain: domain,
             request: initial,
-            content: "newest",
-            calls: [],
             result: rawResult(
                 prompt: [9],
                 kvBacked: [9],
@@ -328,8 +262,6 @@ struct ServerPromptCacheTests {
         let publication = cache.publish(
             domain: domain,
             request: initial,
-            content: "answer",
-            calls: [],
             result: rawResult(
                 prompt: prompt,
                 kvBacked: prompt,
@@ -340,111 +272,11 @@ struct ServerPromptCacheTests {
         let match = cache.match(
             domain: domain,
             request: initial,
-            renderedPromptIDs: prompt,
-            tokenizer: tokenizer)
+            renderedPromptIDs: prompt)
         #expect(match == .hit(
             entryID: entry.entry.id,
             effectivePromptIDs: prompt,
             cachedPromptTokens: prompt.count))
-    }
-
-    /// Regression: the cache keys on the post-strip view of a request, so a
-    /// "<model>-fast" continuation re-renders its tail through CLIStrip too.
-    /// Keying on the raw request instead produced a bridge that still carried
-    /// the CLI's <system-reminder> scaffolding — an unstripped tail spliced
-    /// onto a stripped prefix, so the cached turn silently lost the alias's
-    /// strip and stopped reproducing a fresh prefill of the same request.
-    @Test func strippedContinuationBridgeDropsReminderScaffolding() async throws {
-        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
-        let bloat = GFTokenizer.Message(role: .system, content: "you are an agent")
-        let rawFirst = GFTokenizer.Message(
-            role: .user,
-            content: "first<system-reminder>\ncwd is /tmp\n</system-reminder>")
-        let rawSecond = GFTokenizer.Message(
-            role: .user,
-            content: "second<system-reminder>\nfile changed\n</system-reminder>")
-
-        // Turn 1, exactly as ServerInference composes it: strip, then key the
-        // cache on the filtered view that was actually encoded.
-        let firstStrip = CLIStrip.filter(messages: [bloat, rawFirst], tools: [])
-        let initial = request(messages: [bloat, rawFirst])
-            .replacingMessages(firstStrip.messages, tools: firstStrip.tools)
-        #expect(initial.messages.map(\.content) == ["first"])
-
-        let initialPrompt = tokenizer.encode(
-            try tokenizer.applyChatTemplate(initial.messages),
-            addBOS: false)
-        let kvBacked = initialPrompt + tokenizer.encode("answer", addBOS: false)
-        var cache = ServerPromptCache()
-        cache.publish(
-            domain: domain,
-            request: initial,
-            content: "answer",
-            calls: [],
-            result: rawResult(
-                prompt: initialPrompt,
-                kvBacked: kvBacked,
-                boundary: tokenizer.endOfTurnID,
-                reason: .endOfTurn))
-
-        // Turn 2 arrives with the bloat and both reminder blocks intact.
-        let rawContinuation = [
-            bloat,
-            rawFirst,
-            GFTokenizer.Message(role: .assistant, content: "answer"),
-            rawSecond,
-        ]
-        let secondStrip = CLIStrip.filter(messages: rawContinuation, tools: [])
-        let continuation = request(messages: rawContinuation)
-            .replacingMessages(secondStrip.messages, tools: secondStrip.tools)
-        let rendered = tokenizer.encode(
-            try tokenizer.applyChatTemplate(continuation.messages),
-            addBOS: false)
-        let match = cache.match(
-            domain: domain,
-            request: continuation,
-            renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
-
-        guard case .hit(_, let effective, let cached) = match else {
-            Issue.record("expected text continuation hit on the stripped view")
-            return
-        }
-        // The bridge is the *stripped* user turn; the reminder block never
-        // reaches the model, and the raw turn would have produced a longer one.
-        #expect(cached == kvBacked.count)
-        #expect(effective == kvBacked
-            + tokenizer.encodeTextContinuation(userContent: "second"))
-        #expect(effective != kvBacked
-            + tokenizer.encodeTextContinuation(userContent: rawSecond.content ?? ""))
-
-        // And the shape of the defect this guards: an entry keyed on the raw
-        // messages still describes a KV range prefilled from the *stripped*
-        // ones, so its continuation bridge carries the reminder block — an
-        // unstripped tail on a stripped prefix.
-        var rawKeyed = ServerPromptCache()
-        rawKeyed.publish(
-            domain: domain,
-            request: request(messages: [bloat, rawFirst]),
-            content: "answer",
-            calls: [],
-            result: rawResult(
-                prompt: initialPrompt,
-                kvBacked: kvBacked,
-                boundary: tokenizer.endOfTurnID,
-                reason: .endOfTurn))
-        let rawMatch = rawKeyed.match(
-            domain: domain,
-            request: request(messages: rawContinuation),
-            renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
-        guard case .hit(_, let rawEffective, _) = rawMatch else {
-            Issue.record("expected the raw-keyed cache to still hit")
-            return
-        }
-        #expect(rawEffective == kvBacked
-            + tokenizer.encodeTextContinuation(userContent: rawSecond.content ?? ""))
-        #expect(rawEffective != effective)
     }
 
     @Test func fullPrefixHitLeavesTheEntryWhole() async throws {
@@ -456,8 +288,6 @@ struct ServerPromptCacheTests {
         let published = cache.publish(
             domain: domain,
             request: initial,
-            content: "answer",
-            calls: [],
             result: rawResult(
                 prompt: [1, 2, 3],
                 kvBacked: [1, 2, 3],
@@ -468,8 +298,7 @@ struct ServerPromptCacheTests {
         let match = cache.match(
             domain: domain,
             request: initial,
-            renderedPromptIDs: [1, 2, 3, 4, 5],
-            tokenizer: tokenizer)
+            renderedPromptIDs: [1, 2, 3, 4, 5])
 
         #expect(match == .hit(
             entryID: publication.entry.id,
@@ -480,7 +309,10 @@ struct ServerPromptCacheTests {
         #expect(entry.kvPosition == 3)
     }
 
-    @Test func thinkingRetainedContinuationTakesTheStructuralPathUntruncated() async throws {
+    /// The shape the interim match order existed to protect: a render the
+    /// entry outruns because the blob holds reasoning the re-render drops.
+    /// Salvage now serves it, and truncates the entry to what it served.
+    @Test func aThinkingRetainedContinuationSalvagesAndTruncatesTheEntry() async throws {
         let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         let initial = request(messages: [
             GFTokenizer.Message(role: .user, content: "first"),
@@ -498,8 +330,6 @@ struct ServerPromptCacheTests {
         cache.publish(
             domain: domain,
             request: initial,
-            content: "answer",
-            calls: [],
             result: rawResult(
                 prompt: initialPrompt,
                 kvBacked: kvBacked,
@@ -518,19 +348,18 @@ struct ServerPromptCacheTests {
         let match = cache.match(
             domain: domain,
             request: continuation,
-            renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
+            renderedPromptIDs: rendered)
 
         guard case .hit(_, let effective, let cached) = match else {
-            Issue.record("expected the structural text-continuation hit")
+            Issue.record("expected a common-prefix salvage")
             return
         }
-        #expect(cached == kvBacked.count)
-        #expect(effective == kvBacked
-            + tokenizer.encodeTextContinuation(userContent: "second"))
+        #expect(effective == rendered)
+        #expect(cached > 0)
+        #expect(cached < rendered.count)
         let entry = try #require(cache.entries.last)
-        #expect(entry.kvBackedTokenIDs == kvBacked)
-        #expect(entry.kvPosition == kvBacked.count)
+        #expect(entry.kvBackedTokenIDs == Array(kvBacked.prefix(cached)))
+        #expect(entry.kvPosition == cached)
     }
 
     @Test func divergentTailTruncatesTheEntryToTheCommonPrefix() async throws {
@@ -542,8 +371,6 @@ struct ServerPromptCacheTests {
         let published = cache.publish(
             domain: domain,
             request: initial,
-            content: "answer",
-            calls: [],
             result: rawResult(
                 prompt: [1, 2, 3],
                 kvBacked: [1, 2, 3, 4, 5],
@@ -554,8 +381,7 @@ struct ServerPromptCacheTests {
         let match = cache.match(
             domain: domain,
             request: initial,
-            renderedPromptIDs: [1, 2, 9, 9],
-            tokenizer: tokenizer)
+            renderedPromptIDs: [1, 2, 9, 9])
 
         #expect(match == .hit(
             entryID: publication.entry.id,
@@ -575,8 +401,6 @@ struct ServerPromptCacheTests {
         cache.publish(
             domain: domain,
             request: initial,
-            content: "answer",
-            calls: [],
             result: rawResult(
                 prompt: [1, 2, 3],
                 kvBacked: [1, 2, 3, 4, 5],
@@ -588,13 +412,11 @@ struct ServerPromptCacheTests {
         let match = cache.match(
             domain: domain,
             request: initial,
-            renderedPromptIDs: [1, 2, 3],
-            tokenizer: tokenizer)
+            renderedPromptIDs: [1, 2, 3])
 
         #expect(match == .miss)
         let entry = try #require(cache.entries.last)
         #expect(entry.kvBackedTokenIDs == [1, 2, 3, 4, 5])
-        #expect(entry.assistantTurn != nil)
     }
 
     @Test func aRunnerThatCannotRewindMissesAndKeepsTheEntry() async throws {
@@ -606,8 +428,6 @@ struct ServerPromptCacheTests {
         cache.publish(
             domain: domain,
             request: initial,
-            content: "answer",
-            calls: [],
             result: rawResult(
                 prompt: [1, 2, 3],
                 kvBacked: [1, 2, 3, 4, 5],
@@ -619,80 +439,19 @@ struct ServerPromptCacheTests {
         #expect(cache.match(
             domain: domain,
             request: initial,
-            renderedPromptIDs: [1, 2, 9, 9],
-            tokenizer: tokenizer) == .miss)
+            renderedPromptIDs: [1, 2, 9, 9]) == .miss)
         let kept = try #require(cache.entries.last)
         #expect(kept.kvBackedTokenIDs == [1, 2, 3, 4, 5])
         #expect(kept.kvPosition == 5)
-        #expect(kept.assistantTurn != nil)
 
         // Only the salvage is gated: a full-prefix hit needs no rewind.
         #expect(cache.match(
             domain: domain,
             request: initial,
-            renderedPromptIDs: [1, 2, 3, 4, 5, 6],
-            tokenizer: tokenizer) == .hit(
+            renderedPromptIDs: [1, 2, 3, 4, 5, 6]) == .hit(
                 entryID: kept.id,
                 effectivePromptIDs: [1, 2, 3, 4, 5, 6],
                 cachedPromptTokens: 5))
-    }
-
-    @Test func aTruncatedEntryCanNoLongerServeAStructuralBridge() async throws {
-        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
-        let initial = request(messages: [
-            GFTokenizer.Message(role: .user, content: "first"),
-        ])
-        let initialPrompt = tokenizer.encode(
-            try tokenizer.applyChatTemplate(initial.messages),
-            addBOS: false)
-        let kvBacked = initialPrompt + tokenizer.encode("answer", addBOS: false)
-        var cache = ServerPromptCache()
-        cache.publish(
-            domain: domain,
-            request: initial,
-            content: "answer",
-            calls: [],
-            result: rawResult(
-                prompt: initialPrompt,
-                kvBacked: kvBacked,
-                boundary: tokenizer.endOfTurnID,
-                reason: .endOfTurn))
-
-        // A one-message request cannot continue structurally, so this salvages
-        // everything but the last token and truncates the entry there.
-        _ = cache.match(
-            domain: domain,
-            request: initial,
-            renderedPromptIDs: Array(kvBacked.dropLast()) + [Int32.max],
-            tokenizer: tokenizer)
-        let truncated = try #require(cache.entries.last)
-        #expect(truncated.kvBackedTokenIDs == Array(kvBacked.dropLast()))
-        #expect(truncated.inputMessages.isEmpty)
-        #expect(truncated.assistantTurn == nil)
-
-        let continuation = request(messages: initial.messages + [
-            GFTokenizer.Message(role: .assistant, content: "answer"),
-            GFTokenizer.Message(role: .user, content: "second"),
-        ])
-        let rendered = tokenizer.encode(
-            try tokenizer.applyChatTemplate(continuation.messages),
-            addBOS: false)
-        let match = cache.match(
-            domain: domain,
-            request: continuation,
-            renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
-
-        guard case .hit(_, let effective, let cached) = match else {
-            Issue.record("expected a common-prefix salvage")
-            return
-        }
-        // Short of the truncated length, so the structural path was reached and
-        // refused rather than splicing a bridge onto bytes that are gone.
-        #expect(cached < truncated.kvPosition)
-        #expect(effective == rendered)
-        #expect(effective != truncated.kvBackedTokenIDs
-            + tokenizer.encodeTextContinuation(userContent: "second"))
     }
 
     @Test func aRenderWithNoCommonPrefixMissesAndLeavesTheEntryWhole() async throws {
@@ -704,8 +463,6 @@ struct ServerPromptCacheTests {
         cache.publish(
             domain: domain,
             request: initial,
-            content: "answer",
-            calls: [],
             result: rawResult(
                 prompt: [1, 2, 3],
                 kvBacked: [1, 2, 3, 4, 5],
@@ -715,8 +472,7 @@ struct ServerPromptCacheTests {
         let match = cache.match(
             domain: domain,
             request: initial,
-            renderedPromptIDs: [7, 8],
-            tokenizer: tokenizer)
+            renderedPromptIDs: [7, 8])
 
         #expect(match == .miss)
         let entry = try #require(cache.entries.last)
@@ -1062,8 +818,6 @@ struct KVRewriteTests {
         let published = cache.publish(
             domain: domain,
             request: request(messages: messages),
-            content: "answer",
-            calls: [],
             result: rawResult(kvBacked: kvBacked, reason: .eos))
         let publication = try #require(published)
 
@@ -1082,7 +836,6 @@ struct KVRewriteTests {
         let entry = try #require(cache.entries.last)
         #expect(entry == publication.entry)
         #expect(entry.kvBackedTokenIDs == kvBacked)
-        #expect(entry.assistantTurn != nil)
     }
 
     /// Harmony stops at `<|return|>`, which the decode loop reports as `.eos`;
@@ -1098,8 +851,6 @@ struct KVRewriteTests {
         let publication = cache.publish(
             domain: domain,
             request: request(messages: messages),
-            content: "answer",
-            calls: [],
             result: rawResult(kvBacked: kvBacked, reason: .eos))
 
         let entry = try #require(publication?.entry)
@@ -1119,8 +870,6 @@ struct KVRewriteTests {
         let published = cache.publish(
             domain: domain,
             request: request(messages: messages),
-            content: "answer",
-            calls: [],
             result: rawResult(kvBacked: kvBacked, reason: .endOfTurn))
         let publication = try #require(published)
 
@@ -1138,8 +887,6 @@ struct KVRewriteTests {
             kvBackedTokenIDs: settled)
         let rewritten = try #require(settledEntry)
         #expect(rewritten.kvPosition == rewritten.kvBackedTokenIDs.count)
-        #expect(rewritten.inputMessages.isEmpty)
-        #expect(rewritten.assistantTurn == nil)
 
         let next = request(messages: completed
             + [GFTokenizer.Message(role: .user, content: "second")])
@@ -1148,8 +895,7 @@ struct KVRewriteTests {
         let match = cache.match(
             domain: domain,
             request: next,
-            renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
+            renderedPromptIDs: rendered)
 
         guard case .hit(_, let effective, let cached) = match else {
             Issue.record("expected the settled entry to prefix the next render")
@@ -1172,8 +918,6 @@ struct KVRewriteTests {
         let published = cache.publish(
             domain: domain,
             request: request(messages: messages),
-            content: "answer",
-            calls: [],
             result: rawResult(kvBacked: kvBacked, reason: .maxTokens))
         let publication = try #require(published)
 
@@ -1187,8 +931,6 @@ struct KVRewriteTests {
 
         #expect(rewritten.kvPosition == preSuffix)
         #expect(rewritten.kvBackedTokenIDs == Array(kvBacked.prefix(preSuffix)))
-        #expect(rewritten.inputMessages.isEmpty)
-        #expect(rewritten.assistantTurn == nil)
         let unknown = cache.rewrite(entryID: UUID(), kvBackedTokenIDs: [1])
         #expect(unknown == nil)
     }
@@ -1666,8 +1408,6 @@ struct RewriteArbitrationTests {
         cache.publish(
             domain: domain,
             request: request(messages: messages),
-            content: "answer",
-            calls: [],
             result: RawDecodeResult(
                 prefillTokens: kvBacked.count,
                 cachedPromptTokens: 0,
@@ -1682,8 +1422,7 @@ struct RewriteArbitrationTests {
         let match = cache.match(
             domain: domain,
             request: edited,
-            renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
+            renderedPromptIDs: rendered)
         guard case .hit(_, let effective, let cached) = match else {
             Issue.record("expected the pre-rewrite entry to salvage its prefix")
             return

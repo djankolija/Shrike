@@ -46,6 +46,40 @@ struct ServerPromptStateStoreTests {
         #expect(restored.snapshot == snapshot)
     }
 
+    /// Keys the entry no longer declares are ignored rather than version-gated,
+    /// so a metadata file an older build wrote loads instead of stranding its
+    /// snapshot directory untracked on disk.
+    @Test func metadataCarryingUnknownKeysStillLoads() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entry = makeEntry(tokens: [1, 2])
+        let configuration = ServerPromptCacheStorageConfiguration(
+            memoryLimitBytes: 0,
+            diskDirectory: root,
+            diskLimitBytes: 1_024)
+        let writer = try ServerPromptStateStore(configuration: configuration)
+        _ = await writer.save(
+            entry: entry,
+            snapshot: makeSnapshot(position: 2, payload: Data([1, 2, 3, 4, 5, 6, 7])))
+
+        let metadataURL = root
+            .appendingPathComponent(entry.id.uuidString.lowercased())
+            .appendingPathComponent("metadata.json")
+        var metadata = try #require(try JSONSerialization.jsonObject(
+            with: Data(contentsOf: metadataURL)) as? [String: Any])
+        var stored = try #require(metadata["entry"] as? [String: Any])
+        stored["inputMessages"] = [["role": "user", "content": "prompt"]]
+        stored["assistantTurn"] = [
+            "message": ["role": "assistant", "content": "answer"],
+            "rawStopReason": "endOfTurn",
+        ]
+        metadata["entry"] = stored
+        try JSONSerialization.data(withJSONObject: metadata).write(to: metadataURL)
+
+        let reader = try ServerPromptStateStore(configuration: configuration)
+        #expect(reader.loadEntries(domain: domain) == [entry])
+    }
+
     @Test func memoryLRUEvictsOldestUnbackedSnapshot() async throws {
         let store = try ServerPromptStateStore(
             configuration: ServerPromptCacheStorageConfiguration(
@@ -123,11 +157,7 @@ struct ServerPromptStateStoreTests {
         ServerPromptCacheEntry(
             id: UUID(),
             domain: domain,
-            inputMessages: [GFTokenizer.Message(role: .user, content: "prompt")],
             tools: [],
-            assistantTurn: CachedAssistantTurn(
-                message: GFTokenizer.Message(role: .assistant, content: "answer"),
-                rawStopReason: .endOfTurn),
             kvBackedTokenIDs: tokens,
             uncommittedBoundaryTokenIDs: [99],
             kvPosition: tokens.count)

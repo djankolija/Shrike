@@ -1350,20 +1350,6 @@ public struct GFTokenizer: @unchecked Sendable {
                 + generationSuffix,
             addBOS: false)
     }
-
-    public func encodeToolResultContinuation(
-        cachedMessages: [Message],
-        assistant: Message,
-        incomingMessages: [Message],
-        tools: [FunctionDefinition]
-    ) throws -> [Int32] {
-        // The ChatML template's `<think>` stripping depends on each assistant
-        // turn's position relative to the last user query, so a re-rendered
-        // prefix is not guaranteed to be a token prefix of the full render.
-        // Callers (ServerPromptCache) fall back to prefix matching; the
-        // tool-result KV continuation is unsupported for ChatML.
-        throw GFTokenizerError.unsupportedForDialect("tool-result KV continuation")
-    }
 }
 
 private enum GFTokenizerLoadSource: Hashable {

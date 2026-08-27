@@ -859,8 +859,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             switch promptCache.match(
                 domain: promptCacheDomain,
                 request: cacheRequest,
-                renderedPromptIDs: promptIDs,
-                tokenizer: tokenizer) {
+                renderedPromptIDs: promptIDs) {
             case .miss:
                 promptCache.invalidate()
                 effectivePromptIDs = promptIDs
@@ -882,8 +881,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             switch promptCache.match(
                 domain: promptCacheDomain,
                 request: cacheRequest,
-                renderedPromptIDs: promptIDs,
-                tokenizer: tokenizer) {
+                renderedPromptIDs: promptIDs) {
             case .miss:
                 activePromptCacheEntryID = nil
                 effectivePromptIDs = promptIDs
@@ -1187,8 +1185,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             stopStringFiltered: stopMatcher.isStopped)
         let publishedEntryID = publishCacheEntry(
             cacheRequest: cacheRequest,
-            content: content,
-            calls: calls,
             result: result,
             stopStringFiltered: stopMatcher.isStopped,
             normalization: plan.completedNormalization)
@@ -1355,8 +1351,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             declined(.overContext)
             return .done(.unchanged)
         }
-        // An entry whose bytes did not change keeps the bridges its structural
-        // description still describes.
         guard settled != result.kvBackedTokenIDs else { return .done(.unchanged) }
         let comparable = min(result.kvPosition, settled.count)
         let common = (0..<comparable).first {
@@ -1606,8 +1600,6 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// is what tells a deferred settle whether it has an entry to rewrite.
     private func publishCacheEntry(
         cacheRequest: ValidatedChatRequest,
-        content: String,
-        calls: [ParsedToolCall],
         result: RawDecodeResult,
         stopStringFiltered: Bool,
         normalization: KVNormalization
@@ -1628,8 +1620,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             guard let publication = promptCache.publish(
                 domain: promptCacheDomain,
                 request: cacheRequest,
-                content: content,
-                calls: calls,
                 result: result,
                 stopStringFiltered: stopStringFiltered) else {
                 promptCache.invalidate()
@@ -1642,8 +1632,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             if let publication = promptCache.publish(
                 domain: promptCacheDomain,
                 request: cacheRequest,
-                content: content,
-                calls: calls,
                 result: result,
                 stopStringFiltered: stopStringFiltered) {
                 promptStateStore?.remove(entryIDs: publication.evictedEntryIDs)

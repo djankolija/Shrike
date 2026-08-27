@@ -330,19 +330,6 @@ struct HarmonyTemplateTests {
         }
     }
 
-    @Test("Tool-result KV continuation stays unsupported for harmony")
-    func toolResultContinuationUnsupported() {
-        #expect(throws: GFTokenizerError.self) {
-            _ = try tok.encodeToolResultContinuation(
-                cachedMessages: [Message(role: .user, content: "Hi")],
-                assistant: Message(role: .assistant, content: nil, toolCalls: [
-                    .init(id: "call_1", name: "lookup", arguments: "{}"),
-                ]),
-                incomingMessages: [Message(role: .user, content: "Hi")],
-                tools: [])
-        }
-    }
-
     // MARK: - Settled boundary
 
     private func promptIDs(_ messages: [Message],

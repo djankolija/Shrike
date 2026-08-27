@@ -283,20 +283,6 @@ struct KimiTemplateTests {
         }
     }
 
-    @Test("Tool-result KV continuation stays unsupported for kimi")
-    func toolResultContinuationUnsupported() {
-        #expect(throws: GFTokenizerError.self) {
-            _ = try tok.encodeToolResultContinuation(
-                cachedMessages: [Message(role: .user, content: "Hi")],
-                assistant: Message(role: .assistant, content: nil, toolCalls: [
-                    .init(id: "functions.lookup:0", name: "lookup",
-                          arguments: "{}"),
-                ]),
-                incomingMessages: [Message(role: .user, content: "Hi")],
-                tools: [])
-        }
-    }
-
     // MARK: - Settled boundary
 
     private func promptIDs(_ messages: [Message],

@@ -162,19 +162,6 @@ struct ChatMLTemplateTests {
             + "<|im_start|>assistant\n<think>\n\n</think>\n\n")
     }
 
-    @Test("Tool-result KV continuation is unsupported for chatml")
-    func toolResultContinuationUnsupported() {
-        #expect(throws: GFTokenizerError.self) {
-            _ = try tok.encodeToolResultContinuation(
-                cachedMessages: [Message(role: .user, content: "Hi")],
-                assistant: Message(role: .assistant, content: nil, toolCalls: [
-                    .init(id: "call_1", name: "lookup", arguments: "{}"),
-                ]),
-                incomingMessages: [Message(role: .user, content: "Hi")],
-                tools: [])
-        }
-    }
-
     @Test("Tool chat renders the bundled Jinja template with thinking disabled")
     func toolChatRendersJinja() throws {
         let ids = try tok.encodeToolChat(
