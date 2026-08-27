@@ -201,6 +201,30 @@ struct ChatMLTemplateTests {
                 "expected enable_thinking=false generation prompt, got suffix: \(suffix)")
     }
 
+    @Test("Tool chat renders assistant reasoning alongside tool calls")
+    func toolChatRendersReasoningWithToolCalls() throws {
+        let ids = try tok.encodeToolChat(
+            messages: [
+                Message(role: .user, content: "Weather in Paris?"),
+                Message(role: .assistant, content: "", toolCalls: [
+                    .init(id: "call_1", name: "get_weather", arguments: "{\"city\":\"Paris\"}"),
+                ], thinking: "Need to look up the weather in Paris."),
+            ],
+            tools: [
+                .init(name: "get_weather",
+                      description: "Look up weather",
+                      parameters: .object([
+                        "type": .string("object"),
+                        "properties": .object([
+                            "city": .object(["type": .string("string")]),
+                        ]),
+                      ])),
+            ])
+        let text = tok.decode(ids, skipSpecialTokens: false)
+        #expect(text.contains("<think>\nNeed to look up the weather in Paris.\n</think>"))
+        #expect(text.contains("<tool_call>\n<function=get_weather>"))
+    }
+
     @Test("Tool chat uses the same explicit thinking mode as text chat")
     func thinkingToolChatRendersJinja() async throws {
         let thinking = try await GFTokenizer.load(

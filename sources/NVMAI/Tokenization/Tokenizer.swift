@@ -1135,6 +1135,7 @@ public struct GFTokenizer: @unchecked Sendable {
             }
             if let toolCallID = message.toolCallID { value["tool_call_id"] = toolCallID }
             if let name = message.name { value["name"] = name }
+            if let thinking = message.thinking { value["reasoning_content"] = thinking }
             return value
         }
         let upstreamTools: [ToolSpec] = try tools.map { tool in
