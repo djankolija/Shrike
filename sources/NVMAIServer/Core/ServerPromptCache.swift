@@ -33,17 +33,78 @@ struct ServerPromptCacheEntry: Codable, Sendable, Equatable {
     let kvPosition: Int
 
     /// The structural description goes with the bytes it described: a bridge
-    /// spliced onto a truncated blob would be a render nothing produced.
-    func truncated(to position: Int) -> ServerPromptCacheEntry {
+    /// spliced onto rewritten bytes would be a render nothing produced.
+    func rewritten(kvBackedTokenIDs rewritten: [Int32]) -> ServerPromptCacheEntry {
         ServerPromptCacheEntry(
             id: id,
             domain: domain,
             inputMessages: [],
             tools: tools,
             assistantTurn: nil,
-            kvBackedTokenIDs: Array(kvBackedTokenIDs.prefix(position)),
+            kvBackedTokenIDs: rewritten,
             uncommittedBoundaryTokenIDs: uncommittedBoundaryTokenIDs,
-            kvPosition: position)
+            kvPosition: rewritten.count)
+    }
+
+    func truncated(to position: Int) -> ServerPromptCacheEntry {
+        rewritten(kvBackedTokenIDs: Array(kvBackedTokenIDs.prefix(position)))
+    }
+}
+
+/// The rewrite a completed generation's KV takes before its entry is published,
+/// so that the cached bytes are the ones the next request will render.
+enum KVRewrite: Sendable, Equatable {
+    /// Settle the live region: the turns the template will stop rendering
+    /// reasoning for are re-prefilled in the form it renders them.
+    case settleLiveRegion
+    /// Drop this generation's suffix and emission, keeping the request history
+    /// the next render still reproduces.
+    case dropEmission
+    /// Leave the KV as it stands.
+    case none
+
+    /// The spec's trigger table. Both signals are decoder state — the stop
+    /// reason is a special token id, the thought channel the running parse —
+    /// and a runner whose state cannot follow the cursor back declines every
+    /// rewrite rather than attempting one it would have to abandon.
+    static func forCompletion(reason: StopReason,
+                              thoughtChannelClosed: Bool,
+                              emittedToolCalls: Bool,
+                              supportsRewind: Bool) -> KVRewrite {
+        guard supportsRewind else { return .none }
+        // A hop's emission is what the next render reproduces byte-for-byte,
+        // and it is what a later degenerate rewind keeps — so a turn carrying
+        // tool calls stays as it is whatever stop token ended it, ChatML's
+        // `<|im_end|>` included.
+        guard !emittedToolCalls else { return .none }
+        switch reason {
+        case .endOfTurn, .eos:
+            return thoughtChannelClosed ? .settleLiveRegion : .dropEmission
+        case .toolCalls:
+            return .none
+        case .maxTokens, .stopString, .external:
+            return .dropEmission
+        }
+    }
+
+    /// The token sequence a settled rewrite leaves in the KV: the bytes below
+    /// the boundary as they stand, the whole live region in settled form after
+    /// them.
+    ///
+    /// Nil when the KV's own bytes below the boundary are not the ones the
+    /// settled render produces — the Harmony template embeds today's date, so a
+    /// conversation spanning midnight drifts — because splicing settled bytes
+    /// onto drifted ones builds a prefix no render reproduces.
+    static func settledSequence(kvBackedTokenIDs: [Int32],
+                                boundaryTokens: [Int32],
+                                liveRegionTokens: [Int32]) -> [Int32]? {
+        guard !boundaryTokens.isEmpty,
+              boundaryTokens.count <= kvBackedTokenIDs.count,
+              kvBackedTokenIDs.prefix(boundaryTokens.count)
+                .elementsEqual(boundaryTokens) else {
+            return nil
+        }
+        return boundaryTokens + liveRegionTokens
     }
 }
 
@@ -98,6 +159,7 @@ struct ServerPromptCache: Sendable {
               result.uncommittedBoundaryTokenIDs.count == 1,
               !stopStringFiltered,
               result.reason == .endOfTurn
+                || result.reason == .eos
                 || result.reason == .toolCalls
                 || result.reason == .maxTokens else {
             return nil
@@ -136,6 +198,19 @@ struct ServerPromptCache: Sendable {
         return ServerPromptCachePublication(
             entry: entry,
             evictedEntryIDs: evicted)
+    }
+
+    /// Follow a KV rewrite with the entry that describes it. The rewrite moved
+    /// the live cursor, so the entry has to move with it or the
+    /// `kvPosition == kvBackedTokenIDs.count` invariant breaks at the next match.
+    @discardableResult
+    mutating func rewrite(entryID: UUID,
+                          kvBackedTokenIDs: [Int32]) -> ServerPromptCacheEntry? {
+        guard let index = entries.firstIndex(where: { $0.id == entryID }) else {
+            return nil
+        }
+        entries[index] = entries[index].rewritten(kvBackedTokenIDs: kvBackedTokenIDs)
+        return entries[index]
     }
 
     mutating func match(

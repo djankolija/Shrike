@@ -419,6 +419,32 @@ private struct RunnerCounterSnapshot {
     let expertStreaming: ExpertStreamingStatistics
 }
 
+/// Prefill a KV rewrite's tokens, discarding the head output. A free function
+/// for the same reason `runRawCompletion` is one: `MTLBuffer` is not Sendable,
+/// so the logits scratch must stay inside a single non-isolated region.
+private func prefillRewrite(runner: RealForwardRunner,
+                            scratch: RawCompletionScratch,
+                            tokens: ArraySlice<Int32>,
+                            startPosition: Int,
+                            config: PrefillRuntimeConfig) async throws {
+    _ = try await runner.prefillChunked(
+        tokens: tokens,
+        startPosition: startPosition,
+        outputMode: .greedyIfAvailable,
+        config: config,
+        into: scratch.logits) { _ in }
+}
+
+/// What a completed generation's KV rewrite left behind.
+private enum KVNormalization: Sendable, Equatable {
+    /// No rewrite ran; the KV holds what the generation left in it.
+    case unchanged
+    /// The KV now holds exactly these tokens.
+    case rewritten([Int32])
+    /// A failed rewrite reset the runner; the KV holds nothing.
+    case lost
+}
+
 public actor ServerModelSession: ServerInferenceBackend {
     /// Manifest-derived API model identifier used when --model-id is absent.
     public nonisolated let defaultModelID: String
@@ -724,6 +750,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         _ request: ValidatedChatRequest
     ) throws -> (promptIDs: [Int32],
                  cacheRequest: ValidatedChatRequest,
+                 effectiveMessages: [GFTokenizer.Message],
                  needsToolTemplate: Bool) {
         let filteredMessages: [GFTokenizer.Message]
         let filteredTools: [GFTokenizer.FunctionDefinition]
@@ -762,7 +789,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 param: "messages",
                 code: "context_length_exceeded")
         }
-        return (promptIDs, cacheRequest, needsToolTemplate)
+        return (promptIDs, cacheRequest, effectiveMessages, needsToolTemplate)
     }
 
     /// Decide where this request's prefill starts: from scratch, or resumed on
@@ -1091,12 +1118,21 @@ public actor ServerModelSession: ServerInferenceBackend {
         } else {
             reason = "stop"
         }
+        let normalization = await normalizeCompletedKV(
+            messages: prepared.effectiveMessages,
+            tools: cacheRequest.tools,
+            content: content,
+            result: result,
+            promptTokenCount: effectivePromptIDs.count,
+            thoughtChannelClosed: decoder?.thoughtChannelClosed ?? true,
+            emittedToolCalls: !calls.isEmpty)
         publishCacheEntry(
             cacheRequest: cacheRequest,
             content: content,
             calls: calls,
             result: result,
-            stopStringFiltered: stopMatcher.isStopped)
+            stopStringFiltered: stopMatcher.isStopped,
+            normalization: normalization)
         completed = true
         return ServerCompletion(
             content: content,
@@ -1113,6 +1149,134 @@ public actor ServerModelSession: ServerInferenceBackend {
                                cachedTokens: result.cachedPromptTokens))
     }
 
+    /// The entry as the KV rewrite left it, or as published when the rewrite
+    /// declined. Its bytes are the cursor actually reached, never the target
+    /// the rewrite was computing toward.
+    @discardableResult
+    private func applying(_ normalization: KVNormalization,
+                          to entry: ServerPromptCacheEntry) -> ServerPromptCacheEntry {
+        guard case .rewritten(let kvBackedTokenIDs) = normalization,
+              let rewritten = promptCache.rewrite(
+                entryID: entry.id,
+                kvBackedTokenIDs: kvBackedTokenIDs) else {
+            return entry
+        }
+        return rewritten
+    }
+
+    /// Rewrite the completed generation's KV into the bytes the next request
+    /// will render, so the prompt cache stays a byte comparison.
+    ///
+    /// Runs after the response has streamed and before the entry is published,
+    /// so the snapshot is captured against the rewritten cursor rather than a
+    /// position the KV has already left.
+    private func normalizeCompletedKV(
+        messages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition],
+        content: String,
+        result: RawDecodeResult,
+        promptTokenCount: Int,
+        thoughtChannelClosed: Bool,
+        emittedToolCalls: Bool
+    ) async -> KVNormalization {
+        guard promptCacheMode != .off,
+              mtpDecoder == nil,
+              prefillConfig.mode == .chunked,
+              result.kvPosition == result.kvBackedTokenIDs.count,
+              runner.continuationPosition == result.kvPosition else {
+            return .unchanged
+        }
+        switch KVRewrite.forCompletion(
+            reason: result.reason,
+            thoughtChannelClosed: thoughtChannelClosed,
+            emittedToolCalls: emittedToolCalls,
+            supportsRewind: runner.supportsPartialRewind) {
+        case .none:
+            return .unchanged
+        case .dropEmission:
+            return dropEmission(result: result, promptTokenCount: promptTokenCount)
+        case .settleLiveRegion:
+            let completed = messages
+                + [GFTokenizer.Message(role: .assistant, content: content)]
+            return await settleLiveRegion(messages: completed,
+                                          tools: tools,
+                                          result: result)
+        }
+    }
+
+    /// What the client sends back for a turn it never saw finish is its choice,
+    /// so the KV keeps only the request history the next render reproduces
+    /// regardless: everything below this generation's prompt suffix.
+    private func dropEmission(result: RawDecodeResult,
+                              promptTokenCount: Int) -> KVNormalization {
+        let suffix = tokenizer.encode(tokenizer.generationSuffix, addBOS: false)
+        let target = promptTokenCount - suffix.count
+        guard target > 0,
+              target < result.kvPosition,
+              promptTokenCount <= result.kvBackedTokenIDs.count,
+              result.kvBackedTokenIDs[target..<promptTokenCount]
+                .elementsEqual(suffix) else {
+            return .unchanged
+        }
+        do {
+            try runner.rewind(to: target)
+        } catch {
+            return .unchanged
+        }
+        print("NVMAI prompt_cache normalize kind=drop_emission "
+                + "target=\(target) kv=\(result.kvPosition)")
+        return .rewritten(Array(result.kvBackedTokenIDs.prefix(target)))
+    }
+
+    /// Rewind to where the KV and the settled render part company and prefill
+    /// the rest. The parting point is at or after the settled boundary, so this
+    /// is the spec's rewind with the work the two forms already agree on left
+    /// standing — a dialect that retains reasoning then costs nothing.
+    private func settleLiveRegion(
+        messages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition],
+        result: RawDecodeResult
+    ) async -> KVNormalization {
+        guard let boundary = try? tokenizer.settledBoundaryTokens(messages: messages,
+                                                                 tools: tools),
+              let live = try? tokenizer.settledLiveRegionTokens(messages: messages,
+                                                                tools: tools),
+              let settled = KVRewrite.settledSequence(
+                kvBackedTokenIDs: result.kvBackedTokenIDs,
+                boundaryTokens: boundary,
+                liveRegionTokens: live),
+              settled.count < maxContext else {
+            return .unchanged
+        }
+        let comparable = min(result.kvPosition, settled.count)
+        let common = (0..<comparable).first {
+            result.kvBackedTokenIDs[$0] != settled[$0]
+        } ?? comparable
+        do {
+            if common < result.kvPosition { try runner.rewind(to: common) }
+        } catch {
+            return .unchanged
+        }
+        print("NVMAI prompt_cache normalize kind=settle "
+                + "boundary=\(boundary.count) rewind=\(common) "
+                + "kv=\(result.kvPosition) settled=\(settled.count)")
+        guard common < settled.count else { return .rewritten(settled) }
+        do {
+            try await prefillRewrite(runner: runner,
+                                     scratch: scratch,
+                                     tokens: settled[common...],
+                                     startPosition: common,
+                                     config: prefillConfig)
+        } catch {
+            // A failed chunked prefill resets the runner, so there is no
+            // achieved cursor left for an entry to describe.
+            FileHandle.standardError.write(Data(
+                ("NVMAI prompt_cache normalize_failed error=\(error)\n").utf8))
+            return .lost
+        }
+        return .rewritten(settled)
+    }
+
     /// Publish this turn's KV range to the prompt cache, and persist a snapshot
     /// so a later request can resume from it without re-prefilling.
     ///
@@ -1125,32 +1289,33 @@ public actor ServerModelSession: ServerInferenceBackend {
         content: String,
         calls: [ParsedToolCall],
         result: RawDecodeResult,
-        stopStringFiltered: Bool
+        stopStringFiltered: Bool,
+        normalization: KVNormalization
     ) {
-        // Harmony KV always carries the generated analysis block that a
-        // re-render drops, so no entry can ever match; skip the publish and
-        // its snapshot capture entirely. Kimi's append-only template has no
-        // such drop — its re-renders extend the KV byte-for-byte and hit the
-        // S12 rendered-prefix path, so it publishes like ChatML. A future
-        // Harmony cache would have to append new turns from the stop
-        // boundary instead of re-rendering (the ChatML text bridge's shape,
-        // keeping the analysis in KV); until then gpt-oss re-prefills every
-        // turn.
-        guard tokenizer.dialect != .harmony else { return }
+        if case .lost = normalization {
+            // The runner reset under a failed rewrite, so nothing describes the
+            // live KV any more; entries already backed by a snapshot keep theirs.
+            if promptCacheMode == .singlePrefix { promptCache.invalidate() }
+            activePromptCacheEntryID = nil
+            return
+        }
         if mtpDecoder != nil {
             // Native MTP keeps a second KV stream. Until both states are
             // persisted atomically, do not publish target-only cache entries.
             promptCache.invalidate()
             activePromptCacheEntryID = nil
         } else if promptCacheMode == .singlePrefix {
-            let publication = promptCache.publish(
+            guard let publication = promptCache.publish(
                 domain: promptCacheDomain,
                 request: cacheRequest,
                 content: content,
                 calls: calls,
                 result: result,
-                stopStringFiltered: stopStringFiltered)
-            if publication == nil { promptCache.invalidate() }
+                stopStringFiltered: stopStringFiltered) else {
+                promptCache.invalidate()
+                return
+            }
+            applying(normalization, to: publication.entry)
         } else if promptCacheMode == .multiPrefix {
             let previousActive = activePromptCacheEntryID
             if let publication = promptCache.publish(
@@ -1161,10 +1326,10 @@ public actor ServerModelSession: ServerInferenceBackend {
                 result: result,
                 stopStringFiltered: stopStringFiltered) {
                 promptStateStore?.remove(entryIDs: publication.evictedEntryIDs)
+                let published = applying(normalization, to: publication.entry)
                 do {
                     guard let promptStateStore else {
-                        throw ServerPromptStateStoreError.missing(
-                            publication.entry.id)
+                        throw ServerPromptStateStoreError.missing(published.id)
                     }
                     // S2: capture is bounded by the store's hard snapshot cap;
                     // the payload is a plain Data copy, so the disk write can
@@ -1176,11 +1341,11 @@ public actor ServerModelSession: ServerInferenceBackend {
                     // misses and re-prefills (restore failure self-heals).
                     let snapshot = try runner.captureInferenceState(
                         maximumBytes: promptStateStore.maximumSnapshotBytes)
-                    guard snapshot.descriptor.position == publication.entry.kvPosition else {
+                    guard snapshot.descriptor.position == published.kvPosition else {
                         throw InferenceStateSnapshotError.invalidPosition(
                             snapshot.descriptor.position)
                     }
-                    let entry = publication.entry
+                    let entry = published
                     Task.detached(priority: .utility) { [promptStateStore] in
                         let saved = await promptStateStore.save(
                             entry: entry,

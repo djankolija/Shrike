@@ -72,8 +72,6 @@ struct ServerPromptCacheTests {
         let generated = tokenizer.encode("answer", addBOS: false)
         let kvBacked = initialPrompt + generated
         var cache = ServerPromptCache()
-        // .maxTokens is the only stop a Harmony turn could publish under
-        // (its stop tokens map to .eos, which publish already rejects).
         cache.publish(
             domain: domain,
             request: initial,
@@ -150,8 +148,7 @@ struct ServerPromptCacheTests {
         // Kimi's template is append-only (no <think> stripping, no dropped
         // analysis), so the re-render extends the cached KV byte-for-byte and
         // the dialect-agnostic S12 prefix path hits — the ChatML-shaped text
-        // bridge stays unused. ServerInference still gates publish to chatml;
-        // this pins why that gate's Harmony rationale does not extend here.
+        // bridge stays unused.
         guard case .hit(_, let effective, let cached) = match else {
             Issue.record("expected a rendered-prefix hit")
             return
@@ -172,7 +169,7 @@ struct ServerPromptCacheTests {
             addBOS: false)
         var cache = ServerPromptCache()
 
-        for reason in [StopReason.stopString, .eos] {
+        for reason in [StopReason.stopString, .external] {
             let publication = cache.publish(
                 domain: domain,
                 request: initial,
@@ -776,5 +773,261 @@ struct ServerPromptCacheTests {
             kvPosition: kvBacked.count,
             kvBackedTokenIDs: kvBacked,
             uncommittedBoundaryTokenIDs: [boundary])
+    }
+}
+
+@Suite("Completed generation KV rewrite")
+struct KVRewriteTests {
+    private let domain = ServerPromptCacheDomain(
+        modelID: "model",
+        sourceSnapshotHash: "snapshot",
+        runtimeProfileHash: "profile",
+        maximumContext: 16_384,
+        kvStorage: "fp16",
+        fp16RingEnabled: true,
+        templateSHA256: "template")
+
+    private static let everyStopReason: [StopReason] = [
+        .endOfTurn, .eos, .toolCalls, .maxTokens, .stopString, .external,
+    ]
+
+    @Test func theTriggerIsTheSpecsTableOverEveryStopReason() throws {
+        let expected: [StopReason: (closed: KVRewrite, open: KVRewrite)] = [
+            .endOfTurn: (.settleLiveRegion, .dropEmission),
+            .eos: (.settleLiveRegion, .dropEmission),
+            .toolCalls: (.none, .none),
+            .maxTokens: (.dropEmission, .dropEmission),
+            .stopString: (.dropEmission, .dropEmission),
+            .external: (.dropEmission, .dropEmission),
+        ]
+        #expect(expected.count == Self.everyStopReason.count)
+        for reason in Self.everyStopReason {
+            let table = try #require(expected[reason])
+            #expect(KVRewrite.forCompletion(
+                reason: reason,
+                thoughtChannelClosed: true,
+                emittedToolCalls: false,
+                supportsRewind: true) == table.closed)
+            #expect(KVRewrite.forCompletion(
+                reason: reason,
+                thoughtChannelClosed: false,
+                emittedToolCalls: false,
+                supportsRewind: true) == table.open)
+        }
+    }
+
+    @Test func aTurnCarryingToolCallsStaysLiveWhateverStopEndedIt() {
+        for reason in Self.everyStopReason {
+            for closed in [true, false] {
+                #expect(KVRewrite.forCompletion(
+                    reason: reason,
+                    thoughtChannelClosed: closed,
+                    emittedToolCalls: true,
+                    supportsRewind: true) == KVRewrite.none)
+            }
+        }
+    }
+
+    @Test func aRunnerThatCannotRewindDeclinesEveryRewrite() {
+        for reason in Self.everyStopReason {
+            for closed in [true, false] {
+                #expect(KVRewrite.forCompletion(
+                    reason: reason,
+                    thoughtChannelClosed: closed,
+                    emittedToolCalls: false,
+                    supportsRewind: false) == KVRewrite.none)
+            }
+        }
+    }
+
+    @Test func aSettledRewriteSplicesOnlyOntoTheBytesItsBoundaryDescribes() {
+        let settled = KVRewrite.settledSequence(
+            kvBackedTokenIDs: [1, 2, 3, 40, 50],
+            boundaryTokens: [1, 2, 3],
+            liveRegionTokens: [7, 8])
+        #expect(settled == [1, 2, 3, 7, 8])
+
+        #expect(KVRewrite.settledSequence(
+            kvBackedTokenIDs: [1, 2, 9, 40, 50],
+            boundaryTokens: [1, 2, 3],
+            liveRegionTokens: [7, 8]) == nil)
+        #expect(KVRewrite.settledSequence(
+            kvBackedTokenIDs: [1, 2],
+            boundaryTokens: [1, 2, 3],
+            liveRegionTokens: [7, 8]) == nil)
+        #expect(KVRewrite.settledSequence(
+            kvBackedTokenIDs: [1, 2, 3],
+            boundaryTokens: [],
+            liveRegionTokens: [7, 8]) == nil)
+    }
+
+    /// The date the Harmony template embeds moves at midnight, so a boundary
+    /// rendered now can describe a different prefix than the one the KV holds.
+    @Test func aDriftedBoundaryRenderLeavesTheEntryExactlyAsPublished() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.harmonyFolder())
+        let messages = [GFTokenizer.Message(role: .user, content: "first")]
+        let prompt = tokenizer.encode(
+            try tokenizer.applyChatTemplate(messages), addBOS: false)
+        let kvBacked = prompt + tokenizer.encode("answer", addBOS: false)
+        var cache = ServerPromptCache()
+        let published = cache.publish(
+            domain: domain,
+            request: request(messages: messages),
+            content: "answer",
+            calls: [],
+            result: rawResult(kvBacked: kvBacked, reason: .eos))
+        let publication = try #require(published)
+
+        let completed = messages
+            + [GFTokenizer.Message(role: .assistant, content: "answer")]
+        let boundary = try tokenizer.settledBoundaryTokens(
+            messages: completed, tools: [])
+        var drifted = kvBacked
+        drifted[boundary.count - 1] = drifted[boundary.count - 1] &+ 1
+        #expect(KVRewrite.settledSequence(
+            kvBackedTokenIDs: drifted,
+            boundaryTokens: boundary,
+            liveRegionTokens: try tokenizer.settledLiveRegionTokens(
+                messages: completed, tools: [])) == nil)
+
+        let entry = try #require(cache.entries.last)
+        #expect(entry == publication.entry)
+        #expect(entry.kvBackedTokenIDs == kvBacked)
+        #expect(entry.assistantTurn != nil)
+    }
+
+    /// Harmony stops at `<|return|>`, which the decode loop reports as `.eos`;
+    /// nothing about the dialect keeps its turns out of the cache any more.
+    @Test func aHarmonyTurnPublishesLikeEveryOtherDialect() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.harmonyFolder())
+        let messages = [GFTokenizer.Message(role: .user, content: "first")]
+        let prompt = tokenizer.encode(
+            try tokenizer.applyChatTemplate(messages), addBOS: false)
+        let kvBacked = prompt + tokenizer.encode("answer", addBOS: false)
+        var cache = ServerPromptCache()
+
+        let publication = cache.publish(
+            domain: domain,
+            request: request(messages: messages),
+            content: "answer",
+            calls: [],
+            result: rawResult(kvBacked: kvBacked, reason: .eos))
+
+        let entry = try #require(publication?.entry)
+        #expect(entry.kvBackedTokenIDs == kvBacked)
+        #expect(entry.kvPosition == kvBacked.count)
+    }
+
+    /// The whole rewrite short of the forward pass: the settled bytes a clean
+    /// turn leaves in the KV are the ones the next request's render carries.
+    @Test func aSettledEntryIsAPrefixOfTheNextRequestsRender() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let messages = [GFTokenizer.Message(role: .user, content: "first")]
+        let prompt = tokenizer.encode(
+            try tokenizer.applyChatTemplate(messages), addBOS: false)
+        let kvBacked = prompt + tokenizer.encode("answer", addBOS: false)
+        var cache = ServerPromptCache()
+        let published = cache.publish(
+            domain: domain,
+            request: request(messages: messages),
+            content: "answer",
+            calls: [],
+            result: rawResult(kvBacked: kvBacked, reason: .endOfTurn))
+        let publication = try #require(published)
+
+        let completed = messages
+            + [GFTokenizer.Message(role: .assistant, content: "answer")]
+        let settled = try #require(KVRewrite.settledSequence(
+            kvBackedTokenIDs: kvBacked,
+            boundaryTokens: try tokenizer.settledBoundaryTokens(
+                messages: completed, tools: []),
+            liveRegionTokens: try tokenizer.settledLiveRegionTokens(
+                messages: completed, tools: [])))
+        #expect(settled != kvBacked)
+        let settledEntry = cache.rewrite(
+            entryID: publication.entry.id,
+            kvBackedTokenIDs: settled)
+        let rewritten = try #require(settledEntry)
+        #expect(rewritten.kvPosition == rewritten.kvBackedTokenIDs.count)
+        #expect(rewritten.inputMessages.isEmpty)
+        #expect(rewritten.assistantTurn == nil)
+
+        let next = request(messages: completed
+            + [GFTokenizer.Message(role: .user, content: "second")])
+        let rendered = tokenizer.encode(
+            try tokenizer.applyChatTemplate(next.messages), addBOS: false)
+        let match = cache.match(
+            domain: domain,
+            request: next,
+            renderedPromptIDs: rendered,
+            tokenizer: tokenizer)
+
+        guard case .hit(_, let effective, let cached) = match else {
+            Issue.record("expected the settled entry to prefix the next render")
+            return
+        }
+        #expect(cached == settled.count)
+        #expect(effective == rendered)
+        #expect(rendered.prefix(settled.count).elementsEqual(settled))
+    }
+
+    /// A rewrite publishes the cursor it reached, never the target it was
+    /// computing toward.
+    @Test func aRewrittenEntryAlwaysDescribesTheCursorItHolds() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let messages = [GFTokenizer.Message(role: .user, content: "first")]
+        let prompt = tokenizer.encode(
+            try tokenizer.applyChatTemplate(messages), addBOS: false)
+        let kvBacked = prompt + tokenizer.encode("answer", addBOS: false)
+        var cache = ServerPromptCache()
+        let published = cache.publish(
+            domain: domain,
+            request: request(messages: messages),
+            content: "answer",
+            calls: [],
+            result: rawResult(kvBacked: kvBacked, reason: .maxTokens))
+        let publication = try #require(published)
+
+        let suffix = tokenizer.encode(tokenizer.generationSuffix, addBOS: false)
+        let preSuffix = prompt.count - suffix.count
+        #expect(kvBacked[preSuffix..<prompt.count].elementsEqual(suffix))
+        let truncatedEntry = cache.rewrite(
+            entryID: publication.entry.id,
+            kvBackedTokenIDs: Array(kvBacked.prefix(preSuffix)))
+        let rewritten = try #require(truncatedEntry)
+
+        #expect(rewritten.kvPosition == preSuffix)
+        #expect(rewritten.kvBackedTokenIDs == Array(kvBacked.prefix(preSuffix)))
+        #expect(rewritten.inputMessages.isEmpty)
+        #expect(rewritten.assistantTurn == nil)
+        let unknown = cache.rewrite(entryID: UUID(), kvBackedTokenIDs: [1])
+        #expect(unknown == nil)
+    }
+
+    private func request(
+        messages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition] = []
+    ) -> ValidatedChatRequest {
+        ValidatedChatRequest(
+            messages: messages,
+            tools: tools,
+            stream: false,
+            includeUsage: false,
+            generationConfig: GenerationConfig(maxNewTokens: 16, temperature: 0),
+            maximumCompletionTokens: 16)
+    }
+
+    private func rawResult(kvBacked: [Int32], reason: StopReason) -> RawDecodeResult {
+        RawDecodeResult(
+            prefillTokens: kvBacked.count,
+            cachedPromptTokens: 0,
+            computedPrefillTokens: kvBacked.count,
+            prefillSeconds: 0,
+            newTokens: 1,
+            decodeSeconds: 0,
+            reason: reason,
+            kvPosition: kvBacked.count,
+            kvBackedTokenIDs: kvBacked,
+            uncommittedBoundaryTokenIDs: [0])
     }
 }
