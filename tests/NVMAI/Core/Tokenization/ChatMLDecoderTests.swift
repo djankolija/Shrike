@@ -51,6 +51,16 @@ struct ChatMLDecoderTests {
         #expect(!d.hasToolCalls)
     }
 
+    @Test("The thought channel is open exactly between the think delimiters")
+    func thoughtChannelTracksTheThinkDelimiters() throws {
+        let d = decoder()
+        #expect(d.thoughtChannelClosed)
+        _ = try feed("<think>\nbudget burned in here", into: d)
+        #expect(!d.thoughtChannelClosed)
+        _ = try feed("\n</think>\n\nanswer", into: d)
+        #expect(d.thoughtChannelClosed)
+    }
+
     @Test("Think spans route to thinking events, text after them is visible")
     func thinkSuppression() throws {
         let d = decoder()

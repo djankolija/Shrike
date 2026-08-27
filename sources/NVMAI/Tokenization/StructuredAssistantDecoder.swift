@@ -448,4 +448,21 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     }
 
     public var hasToolCalls: Bool { emittedCalls > 0 }
+
+    /// Whether the running parse sits outside a thought block: a stop token can
+    /// land inside an unclosed `<think>`, and the template splits on
+    /// `'</think>' in content`, so without the delimiter the partial reasoning
+    /// re-renders as visible text.
+    public var thoughtChannelClosed: Bool {
+        guard !failed else { return false }
+        switch tokenizer.dialect {
+        case .chatml:
+            return channel != .thought
+        case .harmony:
+            if case .thought = harmonyState { return false }
+            return true
+        case .kimi:
+            return true
+        }
+    }
 }

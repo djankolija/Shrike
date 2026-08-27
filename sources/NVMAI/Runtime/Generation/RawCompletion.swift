@@ -37,7 +37,9 @@ public struct RawDecodeResult: Sendable {
 /// unchecked-invariant: the buffers and sampler are exclusively owned by one
 /// generation at a time — the single-in-flight guard upstream is the contract.
 public struct RawCompletionScratch: @unchecked Sendable {
-    let logits: MTLBuffer
+    /// Public so a caller inside the same single-in-flight window can prefill
+    /// through it without allocating a second vocab-sized buffer.
+    public let logits: MTLBuffer
     let probs: MTLBuffer
     let outToken: MTLBuffer
     let sampler: Sampler

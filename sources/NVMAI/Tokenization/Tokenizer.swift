@@ -111,9 +111,10 @@ public struct GFTokenizer: @unchecked Sendable {
     /// Generation-prompt suffix appended after the last message: derived from
     /// the tokenizer's bundled `chat_template.jinja`
     /// (`add_generation_prompt` per the thinking mode) when available,
-    /// falling back to the pinned constant otherwise (R6). Internal so the
-    /// structured decoder can prime itself with the injected prefix.
-    let generationSuffix: String
+    /// falling back to the pinned constant otherwise (R6). Public so the
+    /// structured decoder can prime itself with the injected prefix and the
+    /// server can locate a prompt's pre-suffix boundary.
+    public let generationSuffix: String
 
     @usableFromInline
     let tokenizer: any Tokenizer
@@ -1201,6 +1202,15 @@ public struct GFTokenizer: @unchecked Sendable {
     /// a token prefix of the full render of the same `messages` and `tools`.
     public func settledBoundaryTokenCount(messages: [Message],
                                           tools: [FunctionDefinition]) throws -> Int {
+        try settledBoundaryTokens(messages: messages, tools: tools).count
+    }
+
+    /// The tokens `settledBoundaryTokenCount(messages:tools:)` counts, for a
+    /// caller that has to compare them against bytes it already holds rather
+    /// than trust a length: a template that embeds the date renders the same
+    /// count and different bytes either side of midnight.
+    public func settledBoundaryTokens(messages: [Message],
+                                      tools: [FunctionDefinition]) throws -> [Int32] {
         guard let queryIndex = lastQueryIndex(messages) else {
             throw GFTokenizerError.invalidChatTemplate("no user query found in messages")
         }
@@ -1212,18 +1222,18 @@ public struct GFTokenizer: @unchecked Sendable {
             // and a round-trip living only in the live region still routes it.
             guard !Self.usesToolTemplate(messages: messages, tools: tools) else {
                 return try upstreamJinjaRender(settled, tools: tools,
-                                               addGenerationPrompt: false).count
+                                               addGenerationPrompt: false)
             }
             return encode(try chatMLChatTemplate(settled, addGenerationPrompt: false),
-                          addBOS: false).count
+                          addBOS: false)
         case .harmony:
             return encode(try harmonyChatTemplate(settled, tools: tools,
                                                   addGenerationPrompt: false),
-                          addBOS: false).count
+                          addBOS: false)
         case .kimi:
             return encode(try kimiChatTemplate(settled, tools: tools,
                                                addGenerationPrompt: false),
-                          addBOS: false).count
+                          addBOS: false)
         }
     }
 

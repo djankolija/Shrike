@@ -53,6 +53,16 @@ struct HarmonyDecoderTests {
         #expect(!d.hasToolCalls)
     }
 
+    @Test("The thought channel is open only inside an analysis message")
+    func thoughtChannelTracksTheAnalysisBlock() throws {
+        let d = decoder()
+        #expect(d.thoughtChannelClosed)
+        _ = try feed("<|channel|>analysis<|message|>still thinking", into: d)
+        #expect(!d.thoughtChannelClosed)
+        _ = try feed("<|end|><|start|>assistant<|channel|>final<|message|>Answer", into: d)
+        #expect(d.thoughtChannelClosed)
+    }
+
     @Test("Analysis streams as thinking, then a new block carries the answer")
     func analysisThenFinal() throws {
         let d = decoder()
