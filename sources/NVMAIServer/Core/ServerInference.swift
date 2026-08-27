@@ -1120,8 +1120,10 @@ public actor ServerModelSession: ServerInferenceBackend {
     ) {
         // Harmony KV always carries the generated analysis block that a
         // re-render drops, so no entry can ever match; skip the publish and
-        // its snapshot capture entirely.
-        guard tokenizer.dialect == .chatml else { return }
+        // its snapshot capture entirely. Kimi's append-only template has no
+        // such drop — its re-renders extend the KV byte-for-byte and hit the
+        // S12 rendered-prefix path, so it publishes like ChatML.
+        guard tokenizer.dialect != .harmony else { return }
         if mtpDecoder != nil {
             // Native MTP keeps a second KV stream. Until both states are
             // persisted atomically, do not publish target-only cache entries.

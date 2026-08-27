@@ -169,6 +169,20 @@ struct ServerPromptCache: Sendable {
             .elementsEqual(entry.kvBackedTokenIDs) {
             return (renderedPromptIDs, entry.kvPosition)
         }
+        if renderedPromptIDs.count < entry.kvPosition {
+            NVMAICacheDiag.log(
+                "s12_short rendered=\(renderedPromptIDs.count) kv=\(entry.kvPosition)")
+        } else if let firstDiff = (0..<entry.kvPosition).first(where: {
+            renderedPromptIDs[$0] != entry.kvBackedTokenIDs[$0]
+        }) {
+            let lo = max(0, firstDiff - 6)
+            let hi = min(entry.kvPosition, firstDiff + 6)
+            NVMAICacheDiag.log(
+                "s12_diverge at=\(firstDiff) of kv=\(entry.kvPosition) "
+                    + "window=\(lo)..<\(hi) "
+                    + "rendered=\(Array(renderedPromptIDs[lo..<hi])) "
+                    + "cached=\(Array(entry.kvBackedTokenIDs[lo..<hi]))")
+        }
 
         let inputCount = entry.inputMessages.count
         guard request.messages.count > inputCount + 1,
@@ -177,9 +191,17 @@ struct ServerPromptCache: Sendable {
               assistantMatches(
                 request.messages[inputCount],
                 entry.assistantTurn.message) else {
+            NVMAICacheDiag.log(
+                "structural_reject inputCount=\(inputCount) "
+                    + "reqMsgs=\(request.messages.count)")
             return nil
         }
         let continuation = Array(request.messages.dropFirst(inputCount + 1))
+        NVMAICacheDiag.log(
+            "structural inputCount=\(inputCount) reqMsgs=\(request.messages.count) "
+                + "continuation=\(continuation.count) "
+                + "entryCalls=\(entry.assistantTurn.message.toolCalls.count) "
+                + "stopReason=\(entry.assistantTurn.rawStopReason)")
 
         if entry.assistantTurn.message.toolCalls.isEmpty {
             return matchTextContinuation(
@@ -284,5 +306,17 @@ struct ServerPromptCache: Sendable {
             return nil
         }
         return (entry.kvBackedTokenIDs + bridge, entry.kvPosition)
+    }
+}
+
+/// Opt-in cache diagnostics: set NVMAI_CACHE_DIAG=1 to have every match
+/// failure say which check rejected the entry. Off by default so the hot
+/// path stays quiet.
+enum NVMAICacheDiag {
+    static let enabled = ProcessInfo.processInfo.environment["NVMAI_CACHE_DIAG"] != nil
+
+    static func log(_ message: String) {
+        guard enabled else { return }
+        FileHandle.standardError.write(Data("NVMAI prompt_cache_diag \(message)\n".utf8))
     }
 }
