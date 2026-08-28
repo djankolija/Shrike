@@ -151,7 +151,9 @@ public struct OpenAIStreamOptions: Codable, Equatable, Sendable {
 }
 
 public struct OpenAIChatRequest: Codable, Equatable, Sendable {
-    public let model: String
+    /// Optional so an omitted field can resolve to the roster default; the
+    /// server errors before validation when there is no default to fall to.
+    public let model: String?
     public let messages: [OpenAIChatMessage]
     public let stream: Bool?
     public let streamOptions: OpenAIStreamOptions?
@@ -250,15 +252,18 @@ public struct OpenAIModelList: Codable, Equatable, Sendable {
 
 public enum ServerRequestError: Error, Equatable, Sendable {
     case invalid(message: String, param: String?, code: String)
-    case unknownModel
+    case unknownModel(valid: [String])
     case queueFull
 
     public var envelope: OpenAIErrorEnvelope {
         switch self {
         case .invalid(let message, let param, let code):
             OpenAIErrorEnvelope(message: message, param: param, code: code)
-        case .unknownModel:
-            OpenAIErrorEnvelope(message: "requested model is not available",
+        case .unknownModel(let valid):
+            OpenAIErrorEnvelope(message: valid.isEmpty
+                                    ? "requested model is not available"
+                                    : "requested model is not available; valid: "
+                                        + valid.joined(separator: ", "),
                                 param: "model", code: "model_not_found")
         case .queueFull:
             OpenAIErrorEnvelope(message: "generation queue is full",
@@ -323,15 +328,10 @@ public enum OpenAIRequestValidator {
     /// rejects one malformed field with its own error. Grouping them into
     /// sub-validators would add indirection without removing a single check.
     public static func validate(_ request: OpenAIChatRequest,
-                                modelID: String,
                                 maxContext: Int = RuntimeConfiguration
                                     .supportedContextTokens.max() ?? 262_144) throws -> ValidatedChatRequest {
-        // The "<model>-fast" alias selects the same weights as the base model
-        // but enables the CLI-strip heuristic per request (chat-only speed),
-        // so tool-using clients keep the base model and chat users opt in.
-        let fastModelID = modelID + "-fast"
-        let stripCLIPrompt = request.model == fastModelID
-        guard request.model == modelID || stripCLIPrompt else { throw ServerRequestError.unknownModel }
+        // The model id was already resolved against the roster by the caller;
+        // validation checks everything else against that model's bounds.
         guard request.n == nil || request.n == 1 else {
             throw invalid("only n=1 is supported", "n", "unsupported_value")
         }
@@ -455,8 +455,7 @@ public enum OpenAIRequestValidator {
                                     stream: request.stream ?? false,
                                     includeUsage: request.streamOptions?.includeUsage ?? false,
                                     generationConfig: config,
-                                    maximumCompletionTokens: maximum,
-                                    stripCLIPrompt: stripCLIPrompt)
+                                    maximumCompletionTokens: maximum)
     }
 
     private static func validateTool(_ tool: OpenAITool) throws -> GFTokenizer.FunctionDefinition {

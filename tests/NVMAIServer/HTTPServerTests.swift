@@ -184,13 +184,41 @@ private final class LoadCounter: @unchecked Sendable {
     }
 }
 
+private func makeRegistry(backend: any ServerInferenceBackend,
+                          id: String = "m") throws -> ModelRegistry {
+    let roster = try ModelRoster.resolve(
+        candidates: [RosterCandidate(bundleName: id,
+                                     directory: URL(fileURLWithPath: "/nonexistent/\(id).gturbo"),
+                                     manifestModelID: "vendor/\(id)",
+                                     family: .qwen36)],
+        overrides: [])
+    let plan = ModelSessionPlan(
+        modelDirectory: URL(fileURLWithPath: "/nonexistent/\(id).gturbo"),
+        maxContext: 262_144,
+        promptCacheMode: .multiPrefix,
+        promptCacheMaximumEntries: 1,
+        promptCacheMemoryLimitBytes: 1_048_576,
+        promptCacheDiskDirectory: nil,
+        promptCacheDiskLimitBytes: 1_048_576,
+        prefillChunkTokens: nil,
+        expertCacheSlots: nil,
+        mtpModelDirectory: nil,
+        mtpMemoryMiB: 0)
+    let model = ModelRegistry.Model(
+        id: id, plan: plan,
+        facts: ModelSessionFacts(modelID: id,
+                                 prefillChunkTokens: 4_096,
+                                 promptCacheMode: .multiPrefix))
+    return ModelRegistry(models: [model], roster: roster, idleTimeout: nil,
+                         loader: { _, _ in backend })
+}
+
 @Suite("OpenAI HTTP server", .serialized)
 struct HTTPServerTests {
     @Test func healthModelsAndNonStreamingCompletion() async throws {
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
-            queueLimit: 1,
-            backend: ScriptedServerBackend())
+            registry: try makeRegistry(backend: ScriptedServerBackend(), id: "test-model"),
+            queueLimit: 1)
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
 
@@ -225,9 +253,8 @@ struct HTTPServerTests {
 
     @Test func streamingUsesStableShapeAndDoneMarker() async throws {
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
-            queueLimit: 1,
-            backend: ScriptedServerBackend())
+            registry: try makeRegistry(backend: ScriptedServerBackend(), id: "test-model"),
+            queueLimit: 1)
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
         var request = URLRequest(
@@ -253,9 +280,8 @@ struct HTTPServerTests {
 
     @Test func nonStreamingCompletionCarriesReasoningContent() async throws {
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
-            queueLimit: 1,
-            backend: ReasoningServerBackend())
+            registry: try makeRegistry(backend: ReasoningServerBackend(), id: "test-model"),
+            queueLimit: 1)
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
         var request = URLRequest(
@@ -279,9 +305,8 @@ struct HTTPServerTests {
 
     @Test func streamingCarriesReasoningContentDeltas() async throws {
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
-            queueLimit: 1,
-            backend: ReasoningServerBackend())
+            registry: try makeRegistry(backend: ReasoningServerBackend(), id: "test-model"),
+            queueLimit: 1)
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
         var request = URLRequest(
@@ -303,9 +328,8 @@ struct HTTPServerTests {
 
     @Test func wrongModelUsesOpenAIErrorEnvelope() async throws {
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
-            queueLimit: 1,
-            backend: ScriptedServerBackend())
+            registry: try makeRegistry(backend: ScriptedServerBackend(), id: "test-model"),
+            queueLimit: 1)
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
         var request = URLRequest(
@@ -324,9 +348,9 @@ struct HTTPServerTests {
 
     @Test func streamingHeartbeatKeepsSlowFirstEventAlive() async throws {
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
+            registry: try makeRegistry(
+                backend: ScriptedServerBackend(delayNanoseconds: 50_000_000), id: "test-model"),
             queueLimit: 1,
-            backend: ScriptedServerBackend(delayNanoseconds: 50_000_000),
             heartbeatInterval: .milliseconds(10))
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
@@ -345,9 +369,8 @@ struct HTTPServerTests {
 
     @Test func streamingMultipleToolsUseDistinctIndexes() async throws {
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
-            queueLimit: 1,
-            backend: MultipleToolBackend())
+            registry: try makeRegistry(backend: MultipleToolBackend(), id: "test-model"),
+            queueLimit: 1)
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
         var request = URLRequest(
@@ -380,9 +403,8 @@ struct HTTPServerTests {
 
     @Test func nonStreamingToolCallRetainsVisibleContent() async throws {
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
-            queueLimit: 1,
-            backend: ContentAndToolBackend())
+            registry: try makeRegistry(backend: ContentAndToolBackend(), id: "test-model"),
+            queueLimit: 1)
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
         var request = URLRequest(
@@ -418,9 +440,8 @@ struct HTTPServerTests {
     @Test func pipelinedStreamingThenHealthResponsesRemainOrdered() async throws {
         let backend = PipelinedRequestBackend()
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
+            registry: try makeRegistry(backend: backend, id: "test-model"),
             queueLimit: 1,
-            backend: backend,
             heartbeatInterval: .seconds(10))
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
@@ -469,9 +490,8 @@ struct HTTPServerTests {
 
     @Test func shutdownAfterListenerClosesIsIdempotent() async throws {
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
-            queueLimit: 1,
-            backend: ScriptedServerBackend())
+            registry: try makeRegistry(backend: ScriptedServerBackend(), id: "test-model"),
+            queueLimit: 1)
         let channel = try await server.start(port: 0)
 
         try await channel.close().get()
@@ -482,9 +502,8 @@ struct HTTPServerTests {
     @Test func shutdownCancelsActiveAndQueuedRequestsBeforeReturning() async throws {
         let backend = CancellableServerBackend()
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
-            queueLimit: 1,
-            backend: backend)
+            registry: try makeRegistry(backend: backend, id: "test-model"),
+            queueLimit: 1)
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
         let firstSocket = try connectedSocket(port: port)
@@ -533,31 +552,37 @@ struct HTTPServerTests {
 
     @Test func unloadEndpointReleasesTheModel() async throws {
         let counter = LoadCounter()
-        let managed = ManagedModelBackend(
-            plan: ModelSessionPlan(
-                modelDirectory: URL(fileURLWithPath: "/nonexistent/model"),
-                maxContext: 4_096,
-                promptCacheMode: .multiPrefix,
-                promptCacheMaximumEntries: 1,
-                promptCacheMemoryLimitBytes: 1_048_576,
-                promptCacheDiskDirectory: nil,
-                promptCacheDiskLimitBytes: 1_048_576,
-                prefillChunkTokens: nil,
-                expertCacheSlots: nil,
-                mtpModelDirectory: nil,
-                mtpMemoryMiB: 0),
-            facts: ModelSessionFacts(modelID: "test-model",
+        let roster = try ModelRoster.resolve(
+            candidates: [RosterCandidate(bundleName: "m",
+                                         directory: URL(fileURLWithPath: "/nonexistent/m.gturbo"),
+                                         manifestModelID: "vendor/m",
+                                         family: .qwen36)],
+            overrides: [])
+        let plan = ModelSessionPlan(
+            modelDirectory: URL(fileURLWithPath: "/nonexistent/m.gturbo"),
+            maxContext: 262_144,
+            promptCacheMode: .multiPrefix,
+            promptCacheMaximumEntries: 1,
+            promptCacheMemoryLimitBytes: 1_048_576,
+            promptCacheDiskDirectory: nil,
+            promptCacheDiskLimitBytes: 1_048_576,
+            prefillChunkTokens: nil,
+            expertCacheSlots: nil,
+            mtpModelDirectory: nil,
+            mtpMemoryMiB: 0)
+        let model = ModelRegistry.Model(
+            id: "m", plan: plan,
+            facts: ModelSessionFacts(modelID: "m",
                                      prefillChunkTokens: 4_096,
-                                     promptCacheMode: .multiPrefix),
-            idleTimeout: nil,
-            loader: { _, _ in
-                counter.increment()
-                return ScriptedServerBackend()
-            })
+                                     promptCacheMode: .multiPrefix))
+        let registry = ModelRegistry(models: [model], roster: roster, idleTimeout: nil,
+                                     loader: { _, _ in
+                                         counter.increment()
+                                         return ScriptedServerBackend()
+                                     })
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
-            queueLimit: 1,
-            backend: managed)
+            registry: registry,
+            queueLimit: 1)
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
 
@@ -567,7 +592,7 @@ struct HTTPServerTests {
         completion.httpMethod = "POST"
         completion.setValue("application/json", forHTTPHeaderField: "content-type")
         completion.httpBody = Data(#"""
-        {"model":"test-model","messages":[{"role":"user","content":"hi"}]}
+        {"model":"m","messages":[{"role":"user","content":"hi"}]}
         """#.utf8)
         let (_, response) = try await URLSession.shared.data(for: completion)
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
@@ -581,7 +606,14 @@ struct HTTPServerTests {
         #expect((unloadResponse as? HTTPURLResponse)?.statusCode == 200)
         let object = try #require(
             JSONSerialization.jsonObject(with: data) as? [String: Any])
-        #expect(object["unloaded"] as? Bool == true)
+        #expect(object["unloaded"] as? String == "m")
+
+        // A repeated unload with nothing resident reports JSON null.
+        let (repeatedData, repeatedResponse) = try await URLSession.shared.data(for: unload)
+        #expect((repeatedResponse as? HTTPURLResponse)?.statusCode == 200)
+        let repeatedObject = try #require(
+            JSONSerialization.jsonObject(with: repeatedData) as? [String: Any])
+        #expect(repeatedObject["unloaded"] is NSNull)
 
         // A second completion reloads on demand.
         let (_, secondResponse) = try await URLSession.shared.data(for: completion)
@@ -593,9 +625,8 @@ struct HTTPServerTests {
 
     @Test func unloadEndpointIsANoOpWithoutResidency() async throws {
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
-            queueLimit: 1,
-            backend: ScriptedServerBackend())
+            registry: try makeRegistry(backend: ScriptedServerBackend(), id: "test-model"),
+            queueLimit: 1)
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
 
@@ -606,16 +637,15 @@ struct HTTPServerTests {
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
         let object = try #require(
             JSONSerialization.jsonObject(with: data) as? [String: Any])
-        #expect(object["unloaded"] as? Bool == false)
+        #expect(object["unloaded"] is NSNull)
 
         try await server.shutdown()
     }
 
     @Test func unloadEndpointRejectsNonPostMethods() async throws {
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
-            queueLimit: 1,
-            backend: ScriptedServerBackend())
+            registry: try makeRegistry(backend: ScriptedServerBackend(), id: "test-model"),
+            queueLimit: 1)
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
 
@@ -633,9 +663,8 @@ struct HTTPServerTests {
     /// the error path (S5/S20).
     @Test func errorDuringStreamEmitsErrorFrameAndTerminalDone() async throws {
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
-            queueLimit: 1,
-            backend: ThrowingMidStreamBackend())
+            registry: try makeRegistry(backend: ThrowingMidStreamBackend(), id: "test-model"),
+            queueLimit: 1)
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
         var request = URLRequest(
@@ -670,9 +699,8 @@ struct HTTPServerTests {
         // A short heartbeat makes the server notice the dead peer quickly via
         // a failed ping write.
         let server = NVMAIHTTPServer(
-            modelID: "test-model",
+            registry: try makeRegistry(backend: backend, id: "test-model"),
             queueLimit: 1,
-            backend: backend,
             heartbeatInterval: .milliseconds(50))
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)

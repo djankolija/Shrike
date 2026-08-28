@@ -42,7 +42,7 @@ public struct ResponsesAPIRequest: Decodable, Sendable {
         public let parameters: JSONValue?
     }
 
-    public let model: String
+    public let model: String?
     public let instructions: String?
     public let input: [Item]?
     public let tools: [Tool]?

@@ -9,7 +9,7 @@ struct OpenAIValidationTests {
         let data = Data(#"{"model":"m","messages":[{"role":"user","content":"x"}]}"#.utf8)
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
 
-        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+        let validated = try OpenAIRequestValidator.validate(request)
 
         #expect(validated.generationConfig.temperature == 0.6)
         #expect(validated.generationConfig.topK == 20)
@@ -23,7 +23,7 @@ struct OpenAIValidationTests {
         """#.utf8)
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
         #expect(throws: ServerRequestError.self) {
-            try OpenAIRequestValidator.validate(request, modelID: "m")
+            try OpenAIRequestValidator.validate(request)
         }
     }
 
@@ -36,7 +36,7 @@ struct OpenAIValidationTests {
         ]}
         """#.utf8)
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
-        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+        let validated = try OpenAIRequestValidator.validate(request)
         #expect(validated.messages.map(\.role) == [.system, .developer, .user])
     }
 
@@ -49,7 +49,7 @@ struct OpenAIValidationTests {
         ]}
         """#.utf8)
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
-        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+        let validated = try OpenAIRequestValidator.validate(request)
         #expect(validated.messages[1].thinking == "because")
         #expect(validated.messages[0].thinking == nil)
     }
@@ -62,7 +62,7 @@ struct OpenAIValidationTests {
         """#.utf8)
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
         #expect(throws: ServerRequestError.self) {
-            try OpenAIRequestValidator.validate(request, modelID: "m")
+            try OpenAIRequestValidator.validate(request)
         }
     }
 
@@ -75,31 +75,7 @@ struct OpenAIValidationTests {
         """#.utf8)
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
         #expect(throws: ServerRequestError.self) {
-            try OpenAIRequestValidator.validate(request, modelID: "m")
-        }
-    }
-
-    @Test func fastAliasSelectsStripButBaseModelDoesNot() throws {
-        let base = try JSONDecoder().decode(
-            OpenAIChatRequest.self,
-            from: Data(#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#.utf8))
-        let baseValidated = try OpenAIRequestValidator.validate(base, modelID: "m")
-        #expect(baseValidated.stripCLIPrompt == false)
-
-        let fast = try JSONDecoder().decode(
-            OpenAIChatRequest.self,
-            from: Data(#"{"model":"m-fast","messages":[{"role":"user","content":"hi"}]}"#.utf8))
-        let fastValidated = try OpenAIRequestValidator.validate(fast, modelID: "m")
-        #expect(fastValidated.stripCLIPrompt == true)
-    }
-
-    @Test func fastAliasOfUnservedModelIsRejected() throws {
-        let data = Data(#"""
-        {"model":"nope-fast","messages":[{"role":"user","content":"hi"}]}
-        """#.utf8)
-        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
-        #expect(throws: ServerRequestError.self) {
-            try OpenAIRequestValidator.validate(request, modelID: "m")
+            try OpenAIRequestValidator.validate(request)
         }
     }
 
@@ -155,7 +131,7 @@ struct OpenAIValidationTests {
         }
         """#.utf8)
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
-        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+        let validated = try OpenAIRequestValidator.validate(request)
         let call = try #require(validated.messages[1].toolCalls.first)
         #expect(call.arguments.contains(#""id":\#(expected)"#))
         let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
@@ -196,7 +172,7 @@ struct OpenAIValidationTests {
             OpenAIChatRequest.self,
             from: unrepresentableHistory)
         #expect(throws: ServerRequestError.self) {
-            try OpenAIRequestValidator.validate(rejected, modelID: "m")
+            try OpenAIRequestValidator.validate(rejected)
         }
     }
 
@@ -222,7 +198,7 @@ struct OpenAIValidationTests {
         }
         """#.utf8)
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
-        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+        let validated = try OpenAIRequestValidator.validate(request)
         let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         _ = try tokenizer.encodeToolChat(
             messages: validated.messages,
@@ -272,7 +248,7 @@ struct OpenAIValidationTests {
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
         // S-audit: tool parameter names are deliberately free-form (only the
         // schema structure is validated), even inside allOf compositions.
-        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+        let validated = try OpenAIRequestValidator.validate(request)
         #expect(validated.tools.count == 1)
     }
 }

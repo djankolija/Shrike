@@ -13,7 +13,7 @@ import Testing
         """)
 
         let chat = try ResponsesAPIMapper.chatRequest(request)
-        let validated = try OpenAIRequestValidator.validate(chat, modelID: "m")
+        let validated = try OpenAIRequestValidator.validate(chat)
 
         #expect(validated.generationConfig.temperature == 0.6)
         #expect(validated.generationConfig.topK == 20)
@@ -28,7 +28,7 @@ import Testing
         """)
 
         let chat = try ResponsesAPIMapper.chatRequest(request)
-        let validated = try OpenAIRequestValidator.validate(chat, modelID: "m")
+        let validated = try OpenAIRequestValidator.validate(chat)
 
         #expect(validated.generationConfig.temperature == 0.7)
         #expect(validated.generationConfig.topK == 12)

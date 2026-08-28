@@ -294,14 +294,19 @@ public actor ModelRegistry {
         return nil
     }
 
+    /// Loads `model` and returns once it is resident, without generating.
+    public func preload(_ model: Model) async throws {
+        _ = try await acquire(model)
+        release()
+    }
+
     /// Loads `model` without generating. Fire-and-forget: the load runs
     /// through the same slot serialization as any request, and a failure
     /// surfaces on the next generate exactly as a lazy-load failure does.
     public func startLoad(_ model: Model) {
         Task {
             do {
-                _ = try await self.acquire(model)
-                self.release()
+                try await self.preload(model)
             } catch {
                 ServerLog.residency("load \(model.id) failed: \(error)")
             }

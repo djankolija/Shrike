@@ -180,6 +180,23 @@ extension ModelRoster {
         }
     }
 
+    /// Roster for `--model`: exactly this bundle, ignoring any config, with
+    /// `--model-id` as its canonical id.
+    public static func single(directory: URL, overrideID: String?) throws -> ModelRoster {
+        let identity = try ManifestReader.peekIdentity(directoryURL: directory)
+        let name = directory.lastPathComponent
+        let bundleName = name.hasSuffix(".gturbo")
+            ? String(name.dropLast(".gturbo".count)) : name
+        let candidate = RosterCandidate(bundleName: bundleName,
+                                        directory: directory,
+                                        manifestModelID: identity.modelID,
+                                        family: identity.family)
+        let overrides = overrideID.map {
+            [ServerConfig.ModelOverride(dir: bundleName, id: $0, isDefault: true)]
+        } ?? []
+        return try resolve(candidates: [candidate], overrides: overrides)
+    }
+
     public static func scanBundles(in directory: URL) throws -> BundleScan {
         let contents: [URL]
         do {

@@ -37,35 +37,27 @@ do {
         },
         mtpMemoryMiB: arguments.mtpMemoryMiB)
 
-    let backend: any ServerInferenceBackend
-    let facts: ModelSessionFacts
-    var managed: ManagedModelBackend?
-
-    if arguments.managesResidency {
-        // Reads manifest.json only; a bad --model still fails here at launch
-        // rather than on the first request.
-        facts = try plan.previewFacts(modelIDOverride: arguments.modelIDOverride)
-        let residency = ManagedModelBackend(
-            plan: plan,
-            facts: facts,
-            idleTimeout: arguments.idleUnloadSeconds > 0
-                ? .seconds(arguments.idleUnloadSeconds) : nil)
-        managed = residency
-        backend = residency
-    } else {
-        let session = try await plan.makeSession()
-        backend = session
-        facts = ModelSessionFacts(
-            modelID: arguments.modelIDOverride ?? session.defaultModelID,
-            prefillChunkTokens: session.prefillChunkTokens,
-            promptCacheMode: session.promptCacheMode,
-            expertCacheSlots: session.expertCacheSlots)
+    // Reads manifest.json only; a bad --model still fails here at launch
+    // rather than on the first request.
+    let roster = try ModelRoster.single(
+        directory: modelURL, overrideID: arguments.modelIDOverride)
+    let entry = roster.entries[0]
+    let facts = try plan.previewFacts(modelIDOverride: entry.id)
+    let model = ModelRegistry.Model(id: entry.id, plan: plan, facts: facts)
+    let registry = ModelRegistry(
+        models: [model],
+        roster: roster,
+        idleTimeout: arguments.idleUnloadSeconds > 0
+            ? .seconds(arguments.idleUnloadSeconds) : nil)
+    if !arguments.managesResidency {
+        // Eager startup keeps its meaning: resident before serving, so a
+        // broken model still fails the launch, not the first request.
+        try await registry.preload(model)
     }
 
     let server = NVMAIHTTPServer(
-        modelID: facts.modelID,
-        queueLimit: arguments.queueLimit,
-        backend: backend)
+        registry: registry,
+        queueLimit: arguments.queueLimit)
     _ = try await server.start(port: arguments.port)
     let diskCache = facts.promptCacheMode == .off
         ? "off" : arguments.promptCacheDiskDirectory ?? "off"
@@ -87,7 +79,7 @@ do {
     _ = await signals.wait()
     try await server.shutdown()
     // After the server, so the reaper cannot outlive it.
-    await managed?.shutdown()
+    await registry.shutdown()
     await signals.cancel()
 } catch {
     FileHandle.standardError.write(Data("error: \(error)\n".utf8))

@@ -17,8 +17,7 @@ public actor NVMAIHTTPServer {
     public static let maximumConcurrentConnections = 64
 
     private let group: MultiThreadedEventLoopGroup
-    private let modelID: String
-    private let backend: any ServerInferenceBackend
+    private let registry: ModelRegistry
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
     private let childChannels = ChildChannelRegistry(
@@ -26,21 +25,18 @@ public actor NVMAIHTTPServer {
     private var channel: Channel?
     private var shutdownTask: Task<Void, any Error>?
 
-    public init(modelID: String,
+    public init(registry: ModelRegistry,
                 queueLimit: Int,
-                backend: any ServerInferenceBackend,
                 heartbeatInterval: TimeAmount = .seconds(5),
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
         self.group = group
-        self.modelID = modelID
-        self.backend = backend
+        self.registry = registry
         self.coordinator = ServerCoordinator(queueLimit: queueLimit)
         self.heartbeatInterval = heartbeatInterval
     }
 
     public func start(port: Int) async throws -> Channel {
-        let modelID = self.modelID
-        let backend = self.backend
+        let registry = self.registry
         let coordinator = self.coordinator
         let heartbeatInterval = self.heartbeatInterval
         let childChannels = self.childChannels
@@ -54,8 +50,7 @@ public actor NVMAIHTTPServer {
                     withErrorHandling: true
                 ).flatMap {
                     channel.pipeline.addHandler(ServerHTTPHandler(
-                        modelID: modelID,
-                        backend: backend,
+                        registry: registry,
                         coordinator: coordinator,
                         heartbeatInterval: heartbeatInterval,
                         childChannels: childChannels))
@@ -141,8 +136,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     {"error":{"message":"internal server error","type":"server_error","code":"internal_error"}}
     """#.utf8)
 
-    private let modelID: String
-    private let backend: any ServerInferenceBackend
+    private let registry: ModelRegistry
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
     private let childChannels: ChildChannelRegistry
@@ -166,13 +160,11 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private var inFlightRequests = 0
     private var idleCloseTask: Scheduled<Void>?
 
-    init(modelID: String,
-         backend: any ServerInferenceBackend,
+    init(registry: ModelRegistry,
          coordinator: ServerCoordinator,
          heartbeatInterval: TimeAmount,
          childChannels: ChildChannelRegistry) {
-        self.modelID = modelID
-        self.backend = backend
+        self.registry = registry
         self.coordinator = coordinator
         self.heartbeatInterval = heartbeatInterval
         self.childChannels = childChannels
@@ -259,22 +251,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                   omittingEmptySubsequences: false).first.map(String.init) ?? head.uri
         switch (head.method, path) {
         case (.GET, "/health"):
-            writeJSON(context, status: .ok, object: ["status": "ok"])
+            handleHealth(context: context)
         case (.GET, "/v1/models"):
-            // Advertise the base model plus the "<model>-fast" alias, which
-            // serves the same weights with the CLI-strip heuristic enabled.
             let response = OpenAIModelList(
                 object: "list",
-                data: [
-                    .init(id: modelID,
-                          object: "model",
-                          created: nil,
-                          ownedBy: "nvmai"),
-                    .init(id: modelID + "-fast",
-                          object: "model",
-                          created: nil,
-                          ownedBy: "nvmai"),
-                ])
+                data: registry.models.map {
+                    .init(id: $0.id, object: "model", created: nil, ownedBy: "nvmai")
+                })
             writeCodable(context, status: .ok, response)
         case (.HEAD, "/health"), (.HEAD, "/v1/models"):
             // S28: HEAD is answered with headers only.
@@ -303,7 +286,16 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 context: context)
         case (.POST, "/v1/models/unload"):
             handleUnload(context: context)
-        case (_, "/health"), (_, "/v1/models"), (_, "/v1/chat/completions"), (_, "/v1/responses"), (_, "/v1/models/unload"):
+        case (.POST, "/v1/models/load"):
+            guard head.headers.first(name: "content-type")?
+                .lowercased().hasPrefix("application/json") == true else {
+                writeError(context, status: .unsupportedMediaType,
+                           OpenAIErrorEnvelope(message: "content-type must be application/json",
+                                               code: "unsupported_media_type"))
+                return
+            }
+            handleLoad(body: body, context: context)
+        case (_, "/health"), (_, "/v1/models"), (_, "/v1/chat/completions"), (_, "/v1/responses"), (_, "/v1/models/unload"), (_, "/v1/models/load"):
             writeError(context, status: .methodNotAllowed,
                        OpenAIErrorEnvelope(message: "method not allowed",
                                            code: "method_not_allowed"))
@@ -314,23 +306,52 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         }
     }
 
-    /// Control endpoint: release the model's memory on demand. With residency
-    /// managed (--lazy-load / --idle-unload-seconds) this waits for in-flight
-    /// requests to drain, then unloads; with a plain session it is a no-op.
+    private func handleHealth(context: ChannelHandlerContext) {
+        let contextBox = SendableContext(context)
+        activeTask = childChannels.startTask {
+            let health = await self.registry.health()
+            self.writeJSON(contextBox.value, status: .ok, object: [
+                "status": "ok",
+                "resident": health.residentID.map { $0 as Any } ?? NSNull(),
+                "loading": health.isLoading,
+                "models": health.modelCount,
+            ])
+        }
+    }
+
+    /// Control endpoint: release the resident model's memory on demand,
+    /// draining in-flight requests first. Reports which model was released,
+    /// or null when nothing was resident.
     private func handleUnload(context: ChannelHandlerContext) {
         let contextBox = SendableContext(context)
         activeTask = childChannels.startTask {
-            // Only a residency-managing backend has anything to release; a
-            // plain session reports false without the inference protocol
-            // needing to know residency exists.
-            let released: Bool
-            if let managing = self.backend as? any ResidencyManaging {
-                released = await managing.unload()
-            } else {
-                released = false
-            }
+            let released = await self.registry.unload()
             self.writeJSON(contextBox.value, status: .ok,
-                           object: ["status": "ok", "unloaded": released])
+                           object: ["status": "ok",
+                                    "unloaded": released.map { $0 as Any } ?? NSNull()])
+        }
+    }
+
+    private struct LoadRequest: Decodable {
+        let model: String?
+    }
+
+    /// Control endpoint: load a model without generating. Answers after the
+    /// id resolves — acceptance, not completion; a failed load surfaces on
+    /// the first generate.
+    private func handleLoad(body: ByteBuffer, context: ChannelHandlerContext) {
+        let requested = (try? JSONDecoder().decode(
+            LoadRequest.self, from: Data(body.readableBytesView)))?.model
+        guard let model = registry.model(for: requested) else {
+            writeError(context, status: .notFound,
+                       ServerRequestError.unknownModel(valid: registry.ids).envelope)
+            return
+        }
+        let contextBox = SendableContext(context)
+        activeTask = childChannels.startTask {
+            await self.registry.startLoad(model)
+            self.writeJSON(contextBox.value, status: .ok,
+                           object: ["status": "accepted", "model": model.id])
         }
     }
 
@@ -341,8 +362,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             // duplicate a body of up to `maximumBodyBytes` before decoding.
             let decoded = try JSONDecoder().decode(
                 OpenAIChatRequest.self, from: Data(body.readableBytesView))
+            guard let model = registry.model(for: decoded.model) else {
+                throw ServerRequestError.unknownModel(valid: registry.ids)
+            }
             let request = try OpenAIRequestValidator.validate(
-                decoded, modelID: modelID, maxContext: backend.maximumContext)
+                decoded, maxContext: model.maximumContext)
+            let modelID = model.id
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
@@ -357,7 +382,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                       }) else { return }
                 let future = self.beginStream(
                     contextBox.value,
-                    self.chunk(id: responseID, created: created,
+                    self.chunk(id: responseID, created: created, model: modelID,
                                delta: ["role": "assistant"],
                                finishReason: nil))
                 streamState.setStartFuture(future)
@@ -380,26 +405,27 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     }
                 }
                 do {
-                    let completion = try await self.coordinator.run(onQueued: onQueued) {
+                    let completion = try await self.coordinator.run(modelID: modelID,
+                                                                    onQueued: onQueued) {
                         try Task.checkCancellation()
                         startStream()
                         try await streamState.waitUntilStarted()
                         try Task.checkCancellation()
                         phaseState.set("generating")
                         ServerLog.generating(id: responseID)
-                        return try await self.backend.generate(request) { event in
+                        return try await self.registry.generate(model, request) { event in
                             guard request.stream, let outbox else { return }
                             switch event {
                             case .content(let text):
                                 self.enqueueStreamChunk(
-                                    self.chunk(id: responseID, created: created,
+                                    self.chunk(id: responseID, created: created, model: modelID,
                                                delta: ["content": text],
                                                finishReason: nil),
                                     outbox: outbox,
                                     context: contextBox.value)
                             case .thinking(let text):
                                 self.enqueueStreamChunk(
-                                    self.chunk(id: responseID, created: created,
+                                    self.chunk(id: responseID, created: created, model: modelID,
                                                delta: ["reasoning_content": text],
                                                finishReason: nil),
                                     outbox: outbox,
@@ -408,6 +434,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                 self.enqueueToolCallChunks(
                                     id: responseID,
                                     created: created,
+                                    model: modelID,
                                     toolIndex: streamState.nextToolIndex(),
                                     call: call,
                                     outbox: outbox,
@@ -423,6 +450,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         self.finishStream(contextBox.value,
                                           id: responseID,
                                           created: created,
+                                          model: modelID,
                                           completion: completion,
                                           includeUsage: request.includeUsage,
                                           outbox: outbox)
@@ -430,6 +458,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         self.writeCompletion(contextBox.value,
                                              id: responseID,
                                              created: created,
+                                             model: modelID,
                                              completion: completion)
                     }
                 } catch {
@@ -446,9 +475,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 }
             }
         } catch let error as ServerRequestError {
-            writeError(context,
-                       status: error == .unknownModel ? .notFound : .badRequest,
-                       error.envelope)
+            let status: HTTPResponseStatus
+            if case .unknownModel = error { status = .notFound } else { status = .badRequest }
+            writeError(context, status: status, error.envelope)
         } catch {
             writeError(context, status: .badRequest,
                        OpenAIErrorEnvelope(message: "malformed JSON request",
@@ -490,8 +519,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     param: "store", code: "unsupported_value")
             }
             let chatRequest = try ResponsesAPIMapper.chatRequest(decoded)
+            guard let model = registry.model(for: chatRequest.model) else {
+                throw ServerRequestError.unknownModel(valid: registry.ids)
+            }
             let request = try OpenAIRequestValidator.validate(
-                chatRequest, modelID: modelID, maxContext: backend.maximumContext)
+                chatRequest, maxContext: model.maximumContext)
+            let modelID = model.id
             let responseID = ResponsesAPIBuilder.responseID()
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
@@ -509,6 +542,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     contextBox.value,
                     id: responseID,
                     created: created,
+                    model: modelID,
                     request: request,
                     store: decoded.store)
                 streamState.setStartFuture(future)
@@ -531,14 +565,15 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     }
                 }
                 do {
-                    let completion = try await self.coordinator.run(onQueued: onQueued) {
+                    let completion = try await self.coordinator.run(modelID: modelID,
+                                                                    onQueued: onQueued) {
                         try Task.checkCancellation()
                         startStream()
                         try await streamState.waitUntilStarted()
                         try Task.checkCancellation()
                         phaseState.set("generating")
                         ServerLog.generating(id: responseID)
-                        return try await self.backend.generate(request) { event in
+                        return try await self.registry.generate(model, request) { event in
                             guard request.stream, let outbox else { return }
                             switch event {
                             case .content(let text):
@@ -567,12 +602,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         streamState.stop()
                         self.finishResponsesStream(
                             contextBox.value, id: responseID, created: created,
-                            request: request, completion: completion,
+                            model: modelID, request: request, completion: completion,
                             itemState: itemState, outbox: outbox)
                     } else {
                         self.writeResponses(
                             contextBox.value, id: responseID, created: created,
-                            request: request, completion: completion)
+                            model: modelID, request: request, completion: completion)
                     }
                 } catch {
                     streamState.stop()
@@ -588,9 +623,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 }
             }
         } catch let error as ServerRequestError {
-            writeError(context,
-                       status: error == .unknownModel ? .notFound : .badRequest,
-                       error.envelope)
+            let status: HTTPResponseStatus
+            if case .unknownModel = error { status = .notFound } else { status = .badRequest }
+            writeError(context, status: status, error.envelope)
         } catch {
             writeError(context, status: .badRequest,
                        OpenAIErrorEnvelope(message: "malformed JSON request",
@@ -601,13 +636,14 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func beginResponsesStream(_ context: ChannelHandlerContext,
                                       id: String,
                                       created: Int,
+                                      model: String,
                                       request: ValidatedChatRequest,
                                       store: Bool?) -> EventLoopFuture<Void> {
         let response = ResponsesAPIBuilder.responseObject(
-            id: id, created: created, model: modelID, status: "in_progress",
+            id: id, created: created, model: model, status: "in_progress",
             output: [], usage: nil, store: store ?? false)
         let createdEvent = ResponsesAPIBuilder.responseObject(
-            id: id, created: created, model: modelID, status: "in_progress",
+            id: id, created: created, model: model, status: "in_progress",
             output: [], usage: nil, store: store ?? false)
         var frames = Data()
         if let frame = Self.eventFrame(name: "response.created",
@@ -723,6 +759,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func finishResponsesStream(_ context: ChannelHandlerContext,
                                        id: String,
                                        created: Int,
+                                       model: String,
                                        request: ValidatedChatRequest,
                                        completion: ServerCompletion,
                                        itemState: ResponsesItemState,
@@ -770,7 +807,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             name: "response.completed",
             object: ["type": "response.completed",
                      "response": ResponsesAPIBuilder.responseObject(
-                        id: id, created: created, model: modelID, status: "completed",
+                        id: id, created: created, model: model, status: "completed",
                         output: output, usage: completion.usage)]) {
             _ = outbox.enqueue(frame)
         }
@@ -780,18 +817,20 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func writeResponses(_ context: ChannelHandlerContext,
                                 id: String,
                                 created: Int,
+                                model: String,
                                 request: ValidatedChatRequest,
                                 completion: ServerCompletion) {
         let output = ResponsesAPIBuilder.outputItems(completion: completion, idPrefix: id)
         writeJSON(context, status: .ok, object:
                   ResponsesAPIBuilder.responseObject(
-                    id: id, created: created, model: modelID, status: "completed",
+                    id: id, created: created, model: model, status: "completed",
                     output: output, usage: completion.usage))
     }
 
     private func writeCompletion(_ context: ChannelHandlerContext,
                                  id: String,
                                  created: Int,
+                                 model: String,
                                  completion: ServerCompletion) {
         let encodedContent: Any =
             completion.content.isEmpty && !completion.toolCalls.isEmpty
@@ -811,7 +850,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             "id": id,
             "object": "chat.completion",
             "created": created,
-            "model": modelID,
+            "model": model,
             "choices": [[
                 "index": 0,
                 "message": message,
@@ -856,6 +895,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
 
     private func enqueueToolCallChunks(id: String,
                                        created: Int,
+                                       model: String,
                                        toolIndex: Int,
                                        call: ParsedToolCall,
                                        outbox: SSEOutbox,
@@ -871,7 +911,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 tool["function"] = function
             }
             enqueueStreamChunk(
-                chunk(id: id, created: created,
+                chunk(id: id, created: created, model: model,
                       delta: ["tool_calls": [tool]],
                       finishReason: nil),
                 outbox: outbox,
@@ -882,11 +922,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func finishStream(_ context: ChannelHandlerContext,
                               id: String,
                               created: Int,
+                              model: String,
                               completion: ServerCompletion,
                               includeUsage: Bool,
                               outbox: SSEOutbox) {
         if let frame = streamFrame(
-            chunk(id: id, created: created,
+            chunk(id: id, created: created, model: model,
                   delta: [:],
                   finishReason: completion.finishReason)) {
             _ = outbox.enqueue(frame)
@@ -896,7 +937,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                "id": id,
                "object": "chat.completion.chunk",
                "created": created,
-               "model": modelID,
+               "model": model,
                "choices": [],
                "usage": usageObject(completion.usage),
            ]) {
@@ -907,6 +948,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
 
     private func chunk(id: String,
                        created: Int,
+                       model: String,
                        delta: [String: Any],
                        finishReason: String?) -> [String: Any] {
         let encodedReason: Any = finishReason.map { $0 as Any } ?? NSNull()
@@ -914,7 +956,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             "id": id,
             "object": "chat.completion.chunk",
             "created": created,
-            "model": modelID,
+            "model": model,
             "choices": [[
                 "index": 0,
                 "delta": delta,

@@ -66,7 +66,7 @@ straddle a task boundary with one accepting what the other no longer advertises.
   `ServerCoordinatorTests` — affinity batching, FIFO fallback when no waiter matches,
   shedding unchanged.
 
-- [ ] **Task 4 — HTTP rewire.** `NVMAIHTTPServer` holds the registry (no `modelID`, no
+- [x] **Task 4 — HTTP rewire.** `NVMAIHTTPServer` holds the registry (no `modelID`, no
   `backend`); handlers resolve `request.model` against the roster before validation
   (unknown id errors naming the valid ids; omitted `model` resolves to the default entry
   or produces the same error), validate against that entry's bounds, and echo the
