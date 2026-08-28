@@ -48,7 +48,7 @@ straddle a task boundary with one accepting what the other no longer advertises.
   (`ManifestReader.peekIdentity` per `*.gturbo`) stays separate from resolution so
   resolution tests need no disk. Tests: `ServerConfigTests`, `ModelRosterTests`.
 
-- [ ] **Task 2 — ModelRegistry.** New actor over the roster: immutable entries map
+- [x] **Task 2 — ModelRegistry.** New actor over the roster: immutable entries map
   (plan + facts + max context per id, `nonisolated` lookup), `acquire`/`release` with
   per-model load coalescing and a state loop safe under actor reentrancy, swap =
   drain → unload returns → load, `unload()` reporting the released id, `startLoad(_:)`
