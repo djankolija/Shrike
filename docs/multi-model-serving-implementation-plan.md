@@ -60,7 +60,7 @@ straddle a task boundary with one accepting what the other no longer advertises.
   cross-model coalescing, unknown id, unload-reports-id, startLoad failure deferred to
   next acquire.
 
-- [ ] **Task 3 — coordinator model affinity.** `ServerCoordinator.run` takes the resolved
+- [x] **Task 3 — coordinator model affinity.** `ServerCoordinator.run` takes the resolved
   model id; on release the next admit prefers the first waiter matching the
   last-admitted model, else the FIFO head. Queue-limit shedding unchanged. Tests:
   `ServerCoordinatorTests` — affinity batching, FIFO fallback when no waiter matches,

@@ -295,6 +295,7 @@ public protocol ResidencyManaging: Sendable {
 public actor ServerCoordinator {
     private struct Waiter {
         let id: UUID
+        let modelID: String?
         let continuation: CheckedContinuation<Void, Error>
     }
 
@@ -303,22 +304,28 @@ public actor ServerCoordinator {
     private var active = false
     private var waiters: [Waiter] = []
     private var shuttingDown = false
+    /// The model of the most recently admitted request, so `release` can
+    /// prefer a waiter that will not force a model swap.
+    private var lastAdmittedModelID: String?
 
     public init(queueLimit: Int) {
         self.queueLimit = queueLimit
     }
 
     public func run<T: Sendable>(
+        modelID: String? = nil,
         onQueued: @escaping @Sendable () -> Void = {},
         _ operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
         try await runPreparing(
+            modelID: modelID,
             onQueued: onQueued,
             prepare: { () },
             operation: { _ in try await operation() })
     }
 
     func runPreparing<Prepared: Sendable, T: Sendable>(
+        modelID: String? = nil,
         onQueued: @escaping @Sendable () -> Void = {},
         prepare: @escaping @Sendable () async throws -> Prepared,
         operation: @escaping @Sendable (Prepared) async throws -> T
@@ -336,16 +343,18 @@ public actor ServerCoordinator {
 
         let prepared = try await prepare()
         try Task.checkCancellation()
-        try await acquire(onQueued: onQueued)
+        try await acquire(modelID: modelID, onQueued: onQueued)
         defer { release() }
         return try await operation(prepared)
     }
 
-    private func acquire(onQueued: @escaping @Sendable () -> Void) async throws {
+    private func acquire(modelID: String?,
+                         onQueued: @escaping @Sendable () -> Void) async throws {
         try Task.checkCancellation()
         guard !shuttingDown else { throw CancellationError() }
         if !active {
             active = true
+            lastAdmittedModelID = modelID
             return
         }
         guard waiters.count < queueLimit else { throw ServerRequestError.queueFull }
@@ -353,7 +362,7 @@ public actor ServerCoordinator {
         let id = UUID()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                waiters.append(Waiter(id: id, continuation: continuation))
+                waiters.append(Waiter(id: id, modelID: modelID, continuation: continuation))
             }
         } onCancel: {
             Task { await self.cancelWaiter(id) }
@@ -373,9 +382,18 @@ public actor ServerCoordinator {
     private func release() {
         if waiters.isEmpty {
             active = false
-        } else {
-            waiters.removeFirst().continuation.resume()
+            return
         }
+        // Model affinity: admit every queued request for the model that just
+        // ran before one that would force a swap, FIFO otherwise. A continuous
+        // same-model stream can starve a waiter for another model; accepted,
+        // and bounded only by the queue limit (design: multi-model-serving).
+        let index = waiters.firstIndex { $0.modelID != nil && $0.modelID == lastAdmittedModelID } ?? 0
+        let waiter = waiters.remove(at: index)
+        if let modelID = waiter.modelID {
+            lastAdmittedModelID = modelID
+        }
+        waiter.continuation.resume()
     }
 
     public func shutdown() {
