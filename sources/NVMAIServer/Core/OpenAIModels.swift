@@ -280,24 +280,19 @@ public struct ValidatedChatRequest: Sendable {
     public let includeUsage: Bool
     public let generationConfig: GenerationConfig
     public let maximumCompletionTokens: Int
-    /// Set when the request named the "<model>-fast" alias: the CLI-strip
-    /// heuristic runs for this request regardless of NVMAI_STRIP_CLI_PROMPT.
-    public let stripCLIPrompt: Bool
 
     public init(messages: [GFTokenizer.Message],
                 tools: [GFTokenizer.FunctionDefinition],
                 stream: Bool,
                 includeUsage: Bool,
                 generationConfig: GenerationConfig,
-                maximumCompletionTokens: Int,
-                stripCLIPrompt: Bool = false) {
+                maximumCompletionTokens: Int) {
         self.messages = messages
         self.tools = tools
         self.stream = stream
         self.includeUsage = includeUsage
         self.generationConfig = generationConfig
         self.maximumCompletionTokens = maximumCompletionTokens
-        self.stripCLIPrompt = stripCLIPrompt
     }
 
     /// The post-strip view of this request: the same request carrying the
@@ -318,8 +313,7 @@ public struct ValidatedChatRequest: Sendable {
             stream: stream,
             includeUsage: includeUsage,
             generationConfig: generationConfig,
-            maximumCompletionTokens: maximumCompletionTokens,
-            stripCLIPrompt: stripCLIPrompt)
+            maximumCompletionTokens: maximumCompletionTokens)
     }
 }
 

@@ -27,10 +27,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_DIR="${SCRIPT_DIR}/.."
 BINARY="$BASE_DIR/.build/arm64-apple-macosx/release/NVMAIServer"
 MODEL="ornith-1.5-35b-a3b"
-# The "<model>-fast" alias is served alongside the base model name by the
-# same server; the fast alias applies the CLI-strip heuristic per request
-# (chat-only speed) instead of the base model's agentic tool loop.
-FAST_MODEL="${MODEL}-fast"
+# "fast" mode turns on the server-side CLI-strip heuristic for every request
+# (chat-only speed) via the NVMAI_STRIP_CLI_PROMPT operator lever; the API
+# model id is the same either way. The "<model>-fast" alias no longer exists.
 
 # --- 1) coding CLI: codex (default) / qwen / opencode ---
 cli="${1:-}"
@@ -196,6 +195,9 @@ if lsof -i :"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
 fi
 
 echo "Starting NVMAIServer ($quant, $mode_word, $think_word)..."
+if [[ "$model_word" == fast ]]; then
+  export NVMAI_STRIP_CLI_PROMPT=1
+fi
 "$BINARY" \
   --model "$MODEL_DIR" \
   --port "$PORT" \
@@ -218,13 +220,10 @@ if ! curl -s --max-time 2 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; 
   exit 1
 fi
 
-# The API setup advertises the model chosen in the question flow — the fast
-# alias for chat-only speed, or the base model for the agentic tool loop.
+api_model="$MODEL"
 if [[ "$model_word" == fast ]]; then
-  api_model="$FAST_MODEL"
-  api_model_note="(fast alias, seconds-per-answer chat)"
+  api_model_note="(CLI-strip on, seconds-per-answer chat)"
 else
-  api_model="$MODEL"
   api_model_note="(full agent loop)"
 fi
 

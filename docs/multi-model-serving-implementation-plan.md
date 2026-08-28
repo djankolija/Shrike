@@ -77,7 +77,7 @@ straddle a task boundary with one accepting what the other no longer advertises.
   pattern). Tests: `HTTPServerTests` + load endpoint, health fields, unknown-id message,
   omitted-model behaviour, a two-model swap over HTTP with stub loaders.
 
-- [ ] **Task 5 — `-fast` removal.** `fastModelID` and `stripCLIPrompt` leave
+- [x] **Task 5 — `-fast` removal.** `fastModelID` and `stripCLIPrompt` leave
   `OpenAIRequestValidator.validate` and `ValidatedChatRequest`; the `ServerInference`
   strip branch keys on `CLIStrip.isEnabled()` alone; `tools/server_launcher.sh` stops
   advertising the `-fast` id. Tests: `OpenAIValidationTests` (`-fast` now rejected as

@@ -792,16 +792,16 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// tool definitions, tool-call history, and in-message <system-reminder>
     /// scaffolding, keeping only the real user/assistant conversation (see
     /// CLIStrip). Guards ensure the real prompt can never be stripped into an
-    /// empty turn or an empty request. Runs when the request names the
-    /// "<model>-fast" alias or NVMAI_STRIP_CLI_PROMPT is set.
+    /// empty turn or an empty request. Runs when NVMAI_STRIP_CLI_PROMPT is
+    /// set — an operator lever, not something a client can reach.
     ///
     /// Returns the encoded prompt alongside the `cacheRequest` — the post-strip
     /// view the prompt cache must key on. Cache entries describe a KV range
     /// prefilled from the filtered messages, and the cache's text-continuation
     /// path re-renders the tail with the same template, so matching or
     /// publishing against the raw request would splice an unstripped tail onto
-    /// a stripped prefix, silently losing the "-fast" alias's strip on every
-    /// cached continuation turn.
+    /// a stripped prefix, silently losing the strip on every cached
+    /// continuation turn.
     private func preparePrompt(
         _ request: ValidatedChatRequest
     ) throws -> (promptIDs: [Int32],
@@ -811,7 +811,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         let filteredMessages: [GFTokenizer.Message]
         let filteredTools: [GFTokenizer.FunctionDefinition]
         var stripStats: CLIStrip.Stats?
-        if request.stripCLIPrompt || CLIStrip.isEnabled() {
+        if CLIStrip.isEnabled() {
             let filtered = CLIStrip.filter(
                 messages: request.messages,
                 tools: request.tools)

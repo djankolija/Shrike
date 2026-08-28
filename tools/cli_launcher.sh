@@ -4,9 +4,9 @@
 # model, quantization, mode, thinking — and uses all of them: it stops any
 # stale NVMAIServer, starts a fresh one via tools/server_launcher.sh for the
 # chosen quantization/mode/thinking, wires the CLI's provider config to the
-# chosen model (the "<model>-fast" alias strips CLI boilerplate before
-# prefill for seconds-per-answer chat speed; the base model keeps the CLI's
-# agentic tool loop), then hands the terminal over to the CLI.
+# model (fast mode turns on the server-side CLI-strip heuristic for
+# seconds-per-answer chat speed; full keeps the CLI's agentic tool loop —
+# the API model id is the same either way), then hands over to the CLI.
 #
 #   tools/cli_launcher.sh [codex|qwen|opencode] [fast|full] [4|8] [default|concise] [off|on]
 #
@@ -27,10 +27,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_DIR="${SCRIPT_DIR}/.."
 MODEL="ornith-1.5-35b-a3b"
-# The "<model>-fast" alias serves the same weights with the CLI-strip
-# heuristic enabled per request (chat-only speed): system prompts, tool
-# definitions, and <system-reminder> scaffolding are dropped before prefill.
-FAST_MODEL="${MODEL}-fast"
+# Fast mode drops system prompts, tool definitions, and <system-reminder>
+# scaffolding before prefill via the server's NVMAI_STRIP_CLI_PROMPT lever
+# (set by server_launcher.sh); the "<model>-fast" alias no longer exists.
 
 # --- 1) coding CLI: codex (default) / qwen / opencode ---
 cli="${1:-}"
@@ -56,7 +55,7 @@ esac
 # --- 2) model: full (default, agentic tool loop) or fast (strip boilerplate) ---
 if [[ -n "${2:-}" ]]; then
   case "$2" in
-    fast|1) launch_model="$FAST_MODEL" ; model_word=fast ;;
+    fast|1) launch_model="$MODEL" ; model_word=fast ;;
     full|0) launch_model="$MODEL" ; model_word=full ;;
     *) echo "unknown model: $2 (fast|full)" >&2; exit 2 ;;
   esac
@@ -69,7 +68,7 @@ else
   read -r model_choice || exit 1
   case "${model_choice:-1}" in
     1) launch_model="$MODEL" ; model_word=full ;;
-    2) launch_model="$FAST_MODEL" ; model_word=fast ;;
+    2) launch_model="$MODEL" ; model_word=fast ;;
     *) echo "invalid choice: $model_choice" >&2; exit 2 ;;
   esac
 fi
@@ -245,10 +244,9 @@ EOF
     ;;
   opencode)
     # OpenCode reads the built-in openai provider override in its global
-    # config (baseURL -> NVMAI), so no per-run config is written here. The
-    # global config lists both the base model and the "-fast" alias; pick
-    # the matching one in the TUI ("Ornith 1.5 35B-A3B (fast)" for the
-    # chat-only speed mode, "Ornith 1.5 35B-A3B" for the full agent loop).
+    # config (baseURL -> NVMAI), so no per-run config is written here. Pick
+    # the base model in the TUI; fast vs full is decided server-side now,
+    # and a leftover "-fast" entry in the global config would 404.
     if ! grep -q "$BASE_URL" "$HOME/.config/opencode/opencode.jsonc" 2>/dev/null; then
       echo "WARNING: opencode global config does not point the openai provider at $BASE_URL" >&2
     fi

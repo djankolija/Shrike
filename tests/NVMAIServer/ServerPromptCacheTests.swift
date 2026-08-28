@@ -503,7 +503,6 @@ struct ServerPromptCacheTests {
         #expect(replaced.stream == original.stream)
         #expect(replaced.includeUsage == original.includeUsage)
         #expect(replaced.maximumCompletionTokens == original.maximumCompletionTokens)
-        #expect(replaced.stripCLIPrompt == original.stripCLIPrompt)
         #expect(replaced.generationConfig.maxNewTokens
             == original.generationConfig.maxNewTokens)
     }
