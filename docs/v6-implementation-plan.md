@@ -67,7 +67,7 @@ measurement campaigns after v6 lands, not implementation.
 
 ## Task 1: LCP match + fraction logging
 
-- [ ] implemented, tests green, committed
+- [x] implemented, tests green, committed
 
 **Files:** `sources/NVMAIServer/Core/ServerPromptCache.swift:152-217` (the `match` path);
 `tests/NVMAIServer/ServerPromptCacheTests.swift` (extend).
@@ -94,7 +94,7 @@ path *before* any salvage — assert the entry is not truncated; (c) a genuinely
 
 ## Task 2: settled boundary per dialect
 
-- [ ] implemented, tests green, committed
+- [x] implemented, tests green, committed
 
 **Files:** `sources/NVMAI/Tokenization/Tokenizer.swift` (new API next to the render paths);
 `tests/NVMAI/Core/Tokenization/` (per-dialect template test files, extend).
@@ -113,7 +113,7 @@ user message to pin the skip rule.
 
 ## Task 3: settled-form renderer per dialect
 
-- [ ] implemented, tests green, committed
+- [x] implemented, tests green, committed
 
 **Files:** `sources/NVMAI/Tokenization/Tokenizer.swift`; per-dialect template tests.
 
@@ -130,7 +130,7 @@ The Kimi test asserts identity (settled == live), so normalization will no-op th
 
 ## Task 4: normalization + Harmony publish
 
-- [ ] implemented, tests green, committed
+- [x] implemented, tests green, committed
 
 **Files:** `sources/NVMAIServer/Core/ServerPromptCache.swift` (publish + a new normalize
 entry point); the generation-completion path that owns stop reasons
@@ -156,7 +156,7 @@ Harmony publish path no longer skips. The prefill half is verified live in Task 
 
 ## Task 5: mid-rewrite arbitration
 
-- [ ] implemented, tests green, committed
+- [x] implemented, tests green, committed
 
 **Files:** `sources/NVMAIServer/Core/ServerPromptCache.swift` / server core;
 `tests/NVMAIServer/ServerPromptCacheTests.swift`.
@@ -174,7 +174,7 @@ salvage from there), and the ordering (prefix check happens before lock wait).
 
 ## Task 6: live verification, structural still present
 
-- [ ] all probes pass, results recorded
+- [x] all probes pass, results recorded
 
 On-box, deploy per the constraints above. qwen36, thinking on, temperature 0, diag on:
 
@@ -185,7 +185,10 @@ On-box, deploy per the constraints above. qwen36, thinking on, temperature 0, di
   `d7acd76`); the post-loop turn — the measured `s12_short rendered=395 kv=494` flip — is now
   a full hit against the normalized entry.
 - **Degenerate:** a `max_tokens` cut mid-thinking → entry truncated to the settled boundary;
-  next turn cold-prefills from there; no structural, no fuzz.
+  next turn cold-prefills from there; no structural, no fuzz. Only THIS arm structurally
+  tests truncation — its forced low `max_tokens` guarantees the cut. A plain run's
+  truncation is incidental to model verbosity (measured: the same arm truncated on one
+  box and not the other), so never treat `plain` as truncation coverage.
 - **Kimi canary:** profile unchanged from 2026-08-27.
 - **Harmony (gpt-oss):** caches for the first time — record its numbers as the new baseline.
 - Generation numerics unchanged: pre-v6 vs v6 `NVMAICLI`, same machine as the sweep,
@@ -198,7 +201,7 @@ Any structural hit in these runs is a finding, not noise — stop and diagnose b
 
 ## Task 6a (unblocking — from Task 6 red): settle by reconstruction
 
-- [ ] implemented, tests green, committed
+- [x] implemented, tests green, committed
 
 Task 6 measured that no model on this box can run the settle: qwen36/ornith are
 30-of-40 GDN layers, kimi is GDN, gpt-oss and gemma are ring-backed —
@@ -232,7 +235,7 @@ dialect; the actor wiring rides to the Task 6 re-run.
 
 ## Task 6b (from Task 6 red): verbatim non-scalar tool arguments
 
-- [ ] implemented, tests green, committed
+- [x] implemented, tests green, committed
 
 Measured: a nested tool call (objects, float arrays) breaks mid-loop byte-exactness —
 flat mid-loop cached=486/506, nested cached=0/743 — because `args_value | tojson`
@@ -247,7 +250,7 @@ test, or a golden breaks in a way that reveals a real constraint, stop and repor
 
 ## Task 6d (from the qwen36 matrix): degenerate turns reconstruct, and no branch declines silently
 
-- [ ] implemented, tests green, committed
+- [x] implemented, tests green, committed
 
 The matrix passed 6a and 6b but found the contagion the 6a ruling missed: a `finish=length`
 turn on a non-rewindable runner declines `dropEmission` silently, its blob (partial
@@ -278,7 +281,7 @@ structural fires zero times — must hold on the run-B shape (a mid-conversation
 
 ## Task 7: deletions + final verification
 
-- [ ] deleted, probes re-pass, committed
+- [x] deleted, probes re-pass, committed
 
 **Gate hardened by Task 6 red:** do not delete until the Task 6 re-run shows
 normalization *running* on qwen36 (`settle_done` lines) with structural hits at zero.
@@ -296,23 +299,19 @@ fall back on. `rg` confirms none of the five symbols remain under `sources/`.
 
 ## Task 8 (gated — not scheduled): gemma
 
-Only if gemma-4-26b-a4b is adopted — and the gate is **"does gemma have a cache path at
-all"**, not adoption alone. Gemma is 25-of-30 sliding-window layers (turbo's ArchConfig;
-verify on the real checkpoint), so the ring-backed storage that makes
-`supportsPartialRewind` refuse gpt-oss refuses gemma harder — normalization cannot run —
-while its template both drops reasoning (normalization mandatory) and exposes no
-`preserve_thinking`-style replay flag (`enable_thinking` gates generation, not history).
-With thinking on, that leaves no working cache path. Three options to cost at bring-up:
-disable the fp16 ring so SWA storage stays linear and rewindable
-(`KVCacheManager.swift:263`) — SWA layers then allocate against `maxContext` instead of
-their window, a real memory price on a 16 GB box, and no launch flag currently exposes
-the toggle; run gemma with thinking off — text turns then carry unmodified (the template
-injects a closed empty thought block, so the blob holds no reasoning to drop) but tool
-loops still need the string-arguments lever below, since `dictsort` reorders arguments
-independently of thinking mode and NVMAI hands the template a mapping, so the string
-branch never fires without it (whether the reorder bites depends on the model's emission
-order — unknown, and the lever removes the need to find out); or accept cold prefills.
-Then, as
+Only if gemma-4-26b-a4b is adopted. **The gate softened after 6a:** gemma is 25-of-30
+sliding-window layers (turbo's ArchConfig; verify on the real checkpoint), so
+`supportsPartialRewind` refuses it — but the settle now reaches its target by
+reconstruction on exactly such runners, proven live on gpt-oss including genuine
+ring-layer restore round trips. Gemma therefore HAS a cache path with thinking on; what
+the ring refusal still costs is partial salvage only. The old ring-off toggle
+(`KVCacheManager.swift:263`; SWA layers then allocate against `maxContext`, a real
+memory price, no launch flag exists) would buy back only salvage and is likely not worth
+it. What bring-up still owes: verify the template against the gemma-4-12B-it read (spec:
+*Not established*); tool loops need the string-arguments lever below regardless of
+thinking mode, since `dictsort` reorders arguments independently of reasoning and the
+string branch never fires on a mapping (whether the reorder bites depends on emission
+order — unknown, and the lever removes the need to find out). Then, as
 before: verify the shipped template against the gemma-4-12B-it read (spec: *Not
 established*), wire the conjunction boundary predicate into Task 2's scan, and pass
 tool-call arguments as a string to defeat `dictsort` (spec: *What this needs*).

@@ -460,7 +460,8 @@ Nothing has been dropped by the v4.0 work so far, which is additive.
 
 `--prompt-cache-mode off|single-prefix|multi-prefix`, plus `--prompt-cache-entries`,
 `--prompt-cache-memory-mib`, `--prompt-cache-disk`. The S12 direct-prefix path,
-S13/S14 text continuation and S15 live-KV checks.
+S13/S14 text continuation and S15 live-KV checks. *(Superseded in v6: S13/S14 were
+deleted; matching is LCP-only. See `v6-dialect-normalized-cache.md`.)*
 
 **Interaction:** a follow-up turn that hits S12 skips prefill entirely, so the
 expert access pattern jumps straight into decode with a cold slot cache and no
