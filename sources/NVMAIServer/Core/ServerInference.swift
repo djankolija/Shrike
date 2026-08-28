@@ -1190,7 +1190,10 @@ public actor ServerModelSession: ServerInferenceBackend {
         // the entry before the rewrite that will replace it is arbitrable.
         if case .reconstruct(let target, let rewindTo, let announcement) = plan,
            let publishedEntryID {
-            if let announcement { cacheDiag(announcement) }
+            if let announcement {
+                cacheDiag(announcement
+                    + " entry=\(publishedEntryID.uuidString.lowercased())")
+            }
             startRewrite(target: target, rewindTo: rewindTo, entryID: publishedEntryID)
         }
         completed = true
@@ -1471,6 +1474,13 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
         let reached = runner.continuationPosition
         guard reached == plan.seatedPosition else {
+            if case .restore(let source, _) = plan {
+                // Mirrors the restore-failure arm above: a source seated at
+                // the wrong position is no more trustworthy than one that
+                // failed to restore outright.
+                promptStateStore?.remove(entryIDs: [source])
+                promptCache.remove(entryIDs: [source])
+            }
             throw PrefillError.prefillCursorMismatch(
                 "settle seated the KV at \(reached), expected \(plan.seatedPosition)")
         }
@@ -1512,7 +1522,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             // that reject the call before it leave the KV alone. Nothing here
             // can tell which happened, so the KV counts as gone.
             FileHandle.standardError.write(Data(
-                ("NVMAI prompt_cache normalize_failed error=\(error)\n").utf8))
+                ("NVMAI prompt_cache normalize_failed error=\(error) "
+                    + "entry=\(entryID.uuidString.lowercased())\n").utf8))
             lost = true
         }
         // The pre-rewrite pair has to be on disk before its replacement is
@@ -1539,6 +1550,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     private func finishRewrite(target: [Int32], entryID: UUID) async {
         guard let entry = promptCache.rewrite(entryID: entryID,
                                               kvBackedTokenIDs: target) else {
+            activePromptCacheEntryID = nil
             return
         }
         cacheDiag("NVMAI prompt_cache normalize kind=settle_done "
@@ -1554,7 +1566,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             let saved = await promptStateStore.save(entry: entry, snapshot: snapshot)
             if let diskError = saved.diskError {
                 FileHandle.standardError.write(Data(
-                    ("NVMAI prompt_cache disk_write_failed error=\(diskError)\n").utf8))
+                    ("NVMAI prompt_cache disk_write_failed error=\(diskError) "
+                        + "entry=\(entry.id.uuidString.lowercased())\n").utf8))
             }
             cacheDiag("NVMAI prompt_cache stored "
                     + "tokens=\(entry.kvPosition) "
@@ -1659,7 +1672,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                             snapshot: snapshot)
                         if let diskError = saved.diskError {
                             FileHandle.standardError.write(Data(
-                                ("NVMAI prompt_cache disk_write_failed error=\(diskError)\n").utf8))
+                                ("NVMAI prompt_cache disk_write_failed error=\(diskError) "
+                                    + "entry=\(entry.id.uuidString.lowercased())\n").utf8))
                         }
                         FileHandle.standardError.write(Data(
                             ("NVMAI prompt_cache stored "
@@ -1719,7 +1733,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             let stats = activeMTP.statistics
             let decodeRate = result.decodeSeconds > 0
                 ? Double(result.newTokens) / result.decodeSeconds : 0
-            print(String(format:
+            cacheDiag(String(format:
                 "NVMAI mtp drafted=%d accepted=%d acceptance=%.1f%% "
                     + "target_passes=%d emitted_per_pass=%.3f "
                     + "prefill_s=%.3f decode_s=%.3f decode_tok_s=%.3f "
@@ -1741,7 +1755,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 // averaged over the request's target passes.
                 let passes = Double(stats.targetBackbonePasses)
                 let ms: (UInt64) -> Double = { Double($0) / passes / 1_000_000 }
-                print(String(format:
+                cacheDiag(String(format:
                     "NVMAI mtp-phases per_pass_ms proposal=%.3f checkpoint=%.3f "
                         + "verify=%.3f verify_backbone=%.3f verify_head=%.3f "
                         + "verify_argmax=%.3f commit=%.3f rollback=%.3f passes=%d",
@@ -1758,7 +1772,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         } else {
             let decodeRate = result.decodeSeconds > 0
                 ? Double(result.newTokens) / result.decodeSeconds : 0
-            print(String(format:
+            cacheDiag(String(format:
                 "NVMAI generation prefill_s=%.3f decode_s=%.3f decode_tok_s=%.3f",
                 result.prefillSeconds,
                 result.decodeSeconds,
@@ -1789,7 +1803,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         let gpuHits = runner.totalGPUClassifiedHits - snapshot.gpuClassifiedHits
         let gpuMisses = runner.totalGPUClassifiedMisses - snapshot.gpuClassifiedMisses
         let gpuAllHit = runner.totalGPUResidencyAllHitLayers - snapshot.gpuAllHitLayers
-        print(String(
+        cacheDiag(String(
             format: "NVMAI runner cb1_ms=%.3f io_ms=%.3f cb2_ms=%.3f "
                 + "head_ms=%.3f head_fused_ms=%.3f rdadvise_ms=%.3f "
                 + "wait_ms=%.3f body_ms=%.3f rdadvise_calls=%llu rdadvise_mib=%.1f "
@@ -1831,23 +1845,23 @@ public actor ServerModelSession: ServerInferenceBackend {
         let summary = runner.kernelGPUTimingSummary()
         let totalGPU = summary.reduce(0) { $0 + $1.millis }
         for entry in summary {
-            print(String(
+            cacheDiag(String(
                 format: "NVMAI kernel role=%@ gpu_ms=%.3f per_token_ms=%.3f count=%d",
                 entry.role, entry.millis, entry.millis / Double(tokens), entry.count))
         }
         // Role sums overlap by design. Merged busy/span is the actual queue
         // occupancy and distinguishes useful concurrency from idle gaps.
         let occupancy = runner.kernelGPUOccupancy()
-        print(String(format: "NVMAI kernel total_gpu_ms=%.3f gpu_share_of_decode=%.1f%%",
+        cacheDiag(String(format: "NVMAI kernel total_gpu_ms=%.3f gpu_share_of_decode=%.1f%%",
             totalGPU,
             result.decodeSeconds > 0
                 ? totalGPU / (result.decodeSeconds * 1000) * 100 : 0))
         for gap in runner.kernelGPUGaps().prefix(8) {
-            print(String(
+            cacheDiag(String(
                 format: "NVMAI gap %@ total_ms=%.1f per_token_ms=%.3f count=%d",
                 gap.transition, gap.millis, gap.millis / Double(tokens), gap.count))
         }
-        print(String(format: "NVMAI kernel busy_ms=%.3f span_ms=%.3f "
+        cacheDiag(String(format: "NVMAI kernel busy_ms=%.3f span_ms=%.3f "
             + "occupancy=%.1f%% busy_share_of_decode=%.1f%% busy_per_token_ms=%.3f",
             occupancy.busyMillis, occupancy.spanMillis,
             occupancy.spanMillis > 0

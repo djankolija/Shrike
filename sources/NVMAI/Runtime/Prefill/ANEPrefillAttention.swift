@@ -111,6 +111,10 @@ final class ANEPrefillAttention: @unchecked Sendable {
     private(set) var shadowTokens = 0
     private var loggedFallback = false
 
+    private static func aneDiag(_ line: String) {
+        FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
+
     /// - Parameter weightsSha256: the model's own recorded `model_weights.bin`
     ///   digest, taken from its install receipt. A sidecar exported from
     ///   different weights computes plausible-looking but wrong attention, and
@@ -144,7 +148,7 @@ final class ANEPrefillAttention: @unchecked Sendable {
                     + "\(weightsSha256.prefix(12))...); re-export it for this model")
             }
         } else {
-            print("NVMAI ane-prefill: sidecar/weights binding unverified "
+            Self.aneDiag("NVMAI ane-prefill: sidecar/weights binding unverified "
                   + "(no receipt digest available); a stale sidecar would not "
                   + "be detected")
         }
@@ -200,7 +204,7 @@ final class ANEPrefillAttention: @unchecked Sendable {
               histories.contains(startPosition) else {
             if !loggedFallback {
                 loggedFallback = true
-                print("NVMAI ane-prefill fallback: chunk at \(startPosition) "
+                Self.aneDiag("NVMAI ane-prefill fallback: chunk at \(startPosition) "
                       + "(+\(tokenCount)) outside sidecar coverage "
                       + "(chunk \(chunkTokens), max prompt \(maxPromptTokens)); "
                       + "using the GPU path")
