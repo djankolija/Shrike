@@ -38,7 +38,7 @@ straddle a task boundary with one accepting what the other no longer advertises.
 
 ## Tasks
 
-- [ ] **Task 1 — config + roster resolution.** New `ServerConfig` (Codable: `models_dir`,
+- [x] **Task 1 — config + roster resolution.** New `ServerConfig` (Codable: `models_dir`,
   `defaults{max_context, ram_budget, idle_unload_seconds}`, `models[{dir, id, default}]`;
   loaded from a `--config` path, `~` expanded) and `ModelRoster` (pure resolution over
   scan candidates `(bundleName, manifestModelID, family)`: canonical id = config `id`
