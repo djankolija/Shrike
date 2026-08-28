@@ -415,31 +415,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         ServerLog.generating(id: responseID)
                         return try await self.registry.generate(model, request) { event in
                             guard request.stream, let outbox else { return }
-                            switch event {
-                            case .content(let text):
-                                self.enqueueStreamChunk(
-                                    self.chunk(id: responseID, created: created, model: modelID,
-                                               delta: ["content": text],
-                                               finishReason: nil),
-                                    outbox: outbox,
-                                    context: contextBox.value)
-                            case .thinking(let text):
-                                self.enqueueStreamChunk(
-                                    self.chunk(id: responseID, created: created, model: modelID,
-                                               delta: ["reasoning_content": text],
-                                               finishReason: nil),
-                                    outbox: outbox,
-                                    context: contextBox.value)
-                            case .toolCall(let call):
-                                self.enqueueToolCallChunks(
-                                    id: responseID,
-                                    created: created,
-                                    model: modelID,
-                                    toolIndex: streamState.nextToolIndex(),
-                                    call: call,
-                                    outbox: outbox,
-                                    context: contextBox.value)
-                            }
+                            self.streamChatEvent(event, id: responseID, created: created,
+                                                 model: modelID, streamState: streamState,
+                                                 outbox: outbox, context: contextBox.value)
                         }
                     }
                     ServerLog.completed(id: responseID,
@@ -482,6 +460,31 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             writeError(context, status: .badRequest,
                        OpenAIErrorEnvelope(message: "malformed JSON request",
                                            code: "invalid_json"))
+        }
+    }
+
+    private func streamChatEvent(_ event: ServerInferenceEvent,
+                                 id: String,
+                                 created: Int,
+                                 model: String,
+                                 streamState: StreamState,
+                                 outbox: SSEOutbox,
+                                 context: ChannelHandlerContext) {
+        switch event {
+        case .content(let text):
+            enqueueStreamChunk(
+                chunk(id: id, created: created, model: model,
+                      delta: ["content": text], finishReason: nil),
+                outbox: outbox, context: context)
+        case .thinking(let text):
+            enqueueStreamChunk(
+                chunk(id: id, created: created, model: model,
+                      delta: ["reasoning_content": text], finishReason: nil),
+                outbox: outbox, context: context)
+        case .toolCall(let call):
+            enqueueToolCallChunks(id: id, created: created, model: model,
+                                  toolIndex: streamState.nextToolIndex(), call: call,
+                                  outbox: outbox, context: context)
         }
     }
 
@@ -575,24 +578,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         ServerLog.generating(id: responseID)
                         return try await self.registry.generate(model, request) { event in
                             guard request.stream, let outbox else { return }
-                            switch event {
-                            case .content(let text):
-                                self.enqueueResponsesContentDelta(
-                                    id: responseID, created: created,
-                                    request: request, text: text,
-                                    itemState: itemState,
-                                    outbox: outbox, context: contextBox.value)
-                            case .thinking:
-                                // The Responses API frames reasoning as its
-                                // own item stream; not mapped yet.
-                                break
-                            case .toolCall(let call):
-                                self.enqueueResponsesToolDelta(
-                                    id: responseID, created: created,
-                                    request: request, call: call,
-                                    itemState: itemState,
-                                    outbox: outbox, context: contextBox.value)
-                            }
+                            self.streamResponsesEvent(event, id: responseID, created: created,
+                                                      request: request, itemState: itemState,
+                                                      outbox: outbox, context: contextBox.value)
                         }
                     }
                     ServerLog.completed(id: responseID,
@@ -630,6 +618,29 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             writeError(context, status: .badRequest,
                        OpenAIErrorEnvelope(message: "malformed JSON request",
                                            code: "invalid_json"))
+        }
+    }
+
+    private func streamResponsesEvent(_ event: ServerInferenceEvent,
+                                      id: String,
+                                      created: Int,
+                                      request: ValidatedChatRequest,
+                                      itemState: ResponsesItemState,
+                                      outbox: SSEOutbox,
+                                      context: ChannelHandlerContext) {
+        switch event {
+        case .content(let text):
+            enqueueResponsesContentDelta(id: id, created: created, request: request,
+                                         text: text, itemState: itemState,
+                                         outbox: outbox, context: context)
+        case .thinking:
+            // The Responses API frames reasoning as its own item stream; not
+            // mapped yet.
+            break
+        case .toolCall(let call):
+            enqueueResponsesToolDelta(id: id, created: created, request: request,
+                                      call: call, itemState: itemState,
+                                      outbox: outbox, context: context)
         }
     }
 

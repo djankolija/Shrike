@@ -543,3 +543,47 @@ private extension ModelRegistry {
         bumpInFlightForTesting(-1)
     }
 }
+
+private let fixtureManifest = """
+{
+  "magic": "GTURBO", "versionMajor": 1, "versionMinor": 1, "flags": {},
+  "modelID": "vendor/good-4bit",
+  "arch": {
+    "hiddenSize": 8, "ffnIntermediate": 8, "moeIntermediateSize": 8,
+    "numHeads": 2, "numKVHeads": 1, "numFullKVHeads": 1,
+    "headDim": 4, "fullHeadDim": 4, "vocabSize": 16,
+    "slidingWindow": 0, "finalLogitSoftcap": 0,
+    "ropeTheta": 10000, "fullRopeTheta": 10000, "partialRotaryFactor": 1,
+    "numLayers": 1, "numExperts": 2, "topKExperts": 1,
+    "tieWordEmbeddings": false, "attentionKEqV": false,
+    "hiddenActivation": "silu", "fullAttentionLayerMask": [0],
+    "family": "qwen36"
+  },
+  "files": {},
+  "expertsPerLayer": 2, "numLayers": 1, "expertStride": 16384
+}
+"""
+
+@Suite struct ModelRegistryConstructionTests {
+    @Test func modelsFromARosterCarryMergedArgumentsAndRosterIDs() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("registry-build-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bundle = root.appendingPathComponent("good.gturbo")
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+        try Data(fixtureManifest.utf8).write(to: bundle.appendingPathComponent("manifest.json"))
+
+        let scan = try ModelRoster.scanBundles(in: root)
+        let roster = try ModelRoster.resolve(
+            candidates: scan.candidates,
+            overrides: [.init(dir: "good.gturbo", id: "nice-name")])
+        let arguments = try ServerArguments.parse(["--max-context", "32768"], environment: [:])
+        let models = try ModelRegistry.models(for: roster, arguments: arguments)
+
+        #expect(models.map(\.id) == ["nice-name"])
+        #expect(models[0].facts.modelID == "nice-name")
+        #expect(models[0].plan.maxContext == 32_768)
+        #expect(models[0].plan.modelDirectory.resolvingSymlinksInPath().path
+            == bundle.resolvingSymlinksInPath().path)
+    }
+}

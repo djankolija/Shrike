@@ -2,7 +2,9 @@ import Foundation
 import NVMAI
 
 public struct ServerArguments: Equatable, Sendable {
-    public let model: String
+    /// Serve exactly this model, ignoring any config or roster. nil selects
+    /// config mode: scan a models directory and serve everything found.
+    public let model: String?
     public let mtpModel: String?
     public let mtpMemoryMiB: Int
     public let port: Int
@@ -25,15 +27,21 @@ public struct ServerArguments: Equatable, Sendable {
     /// model's own expert stride, so this is the knob and the slot count is the
     /// outcome. `--expert-cache-slots` still wins if both are given.
     public let expertCacheBudgetBytes: Int?
-    /// Defer the model load to the first inference request.
+    /// Defer the model load to the first inference request. This is the
+    /// default behaviour; the flag remains accepted for compatibility.
     public let lazyLoad: Bool
     /// Release the weights after this many idle seconds; 0 disables unloading.
     public let idleUnloadSeconds: Int
-
-    /// Unloading implies deferring the first load — loading at boot only to
-    /// drop it moments later is incoherent. Derived rather than folded into
-    /// `lazyLoad` so the struct stays a faithful record of what was typed.
-    public var managesResidency: Bool { lazyLoad || idleUnloadSeconds > 0 }
+    /// Multi-model config file path; nil tries ~/.nvmai/server.json.
+    public let configPath: String?
+    /// Directory scanned for *.gturbo bundles; nil defers to the config
+    /// file's models_dir, else ~/nvmai-runtime/models.
+    public let modelsDir: String?
+    /// Load the default model at startup instead of on the first request.
+    public let preload: Bool
+    /// Whether the flag was typed, so config defaults know not to override it.
+    let maxContextWasSet: Bool
+    let idleUnloadWasSet: Bool
 
     /// Idle unloading discards the in-memory prefix cache with the session.
     /// With a disk cache configured the entries rehydrate on reload; without
@@ -45,9 +53,21 @@ public struct ServerArguments: Equatable, Sendable {
     }
 
     public static let usage = """
-    usage: NVMAIServer --model <completed .gturbo directory> [options]
+    usage: NVMAIServer [--model <completed .gturbo directory>] [options]
 
-      --model <dir>          Required model directory.
+      --model <dir>          Serve exactly this model, ignoring any config or
+                             roster. Without it the server scans a models
+                             directory and serves every bundle found, selected
+                             per request by the OpenAI "model" field.
+      --config <path>        Multi-model config file (default ~/.nvmai/server.json
+                             when it exists). Names, defaults and the default
+                             model. Cannot be combined with --model.
+      --models-dir <dir>     Directory scanned for *.gturbo bundles (default:
+                             the config file's models_dir, else
+                             ~/nvmai-runtime/models). Cannot be combined with
+                             --model.
+      --preload              Load the default model at startup instead of on
+                             the first request.
       --mtp-model <dir>      Optional native Qwen/Ornith MTP sidecar directory.
       --mtp-memory-mib <MiB> Strict incremental MTP budget, 256...512
                              (default 384).
@@ -90,8 +110,9 @@ public struct ServerArguments: Equatable, Sendable {
                              budgets are markedly slower because expert reads
                              bypass the page cache and have no fallback.
                              --expert-cache-slots overrides this.
-      --lazy-load            Bind the port immediately and defer the model load
-                             to the first inference request (default off).
+      --lazy-load            Defer the model load to the first inference
+                             request. This is the default; the flag remains
+                             accepted for compatibility.
       --idle-unload-seconds <n>
                              Release the model weights after n seconds with no
                              requests, 0...86400 (default 0, disabled). The
@@ -129,6 +150,10 @@ public struct ServerArguments: Equatable, Sendable {
         var expertCacheBudgetBytes: Int?
         var lazyLoad = false
         var idleUnloadSeconds = 0
+        var idleUnloadWasSet = false
+        var configPath: String?
+        var modelsDir: String?
+        var preload = false
         var index = 0
         while index < input.count {
             let flag = input[index]
@@ -138,6 +163,11 @@ public struct ServerArguments: Equatable, Sendable {
             // as this flag's value and then reject it as unknown.
             if flag == "--lazy-load" {
                 lazyLoad = true
+                index += 1
+                continue
+            }
+            if flag == "--preload" {
+                preload = true
                 index += 1
                 continue
             }
@@ -255,24 +285,39 @@ public struct ServerArguments: Equatable, Sendable {
                         "--idle-unload-seconds must be between 0 and 86400")
                 }
                 idleUnloadSeconds = parsed
+                idleUnloadWasSet = true
+            case "--config":
+                guard !value.isEmpty else {
+                    throw ServerArgumentError.invalid("--config must not be empty")
+                }
+                configPath = value
+            case "--models-dir":
+                guard !value.isEmpty else {
+                    throw ServerArgumentError.invalid("--models-dir must not be empty")
+                }
+                modelsDir = value
             default:
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
         }
-        guard let model else { throw ServerArgumentError.invalid("--model is required") }
-        if ropeScalingMode == .yarn {
-            if !maxContextWasSet {
-                maxContext = RuntimeConfiguration.defaultYaRNContextTokens
-            }
-            guard RuntimeConfiguration.supportedYaRNContextTokens.contains(maxContext) else {
-                throw ServerArgumentError.invalid(
-                    "YaRN --max-context must be 524288 or 1048576")
-            }
-        } else {
-            guard RuntimeConfiguration.supportedContextTokens.contains(maxContext) else {
-                throw ServerArgumentError.invalid("--max-context is not supported")
-            }
+        if model != nil, configPath != nil || modelsDir != nil {
+            throw ServerArgumentError.invalid(
+                "--model serves exactly one model; it cannot be combined with --config or --models-dir")
         }
+        if model == nil, modelIDOverride != nil {
+            throw ServerArgumentError.invalid(
+                "--model-id requires --model; config mode names models in the config file")
+        }
+        if model == nil, mtpModel != nil {
+            throw ServerArgumentError.invalid("--mtp-model requires --model")
+        }
+        if preload, lazyLoad {
+            throw ServerArgumentError.invalid("--preload and --lazy-load contradict each other")
+        }
+        if ropeScalingMode == .yarn, !maxContextWasSet {
+            maxContext = RuntimeConfiguration.defaultYaRNContextTokens
+        }
+        try validateMaxContext(maxContext, ropeScalingMode: ropeScalingMode)
         if ropeScalingMode == .yarn, mtpModel != nil {
             throw ServerArgumentError.invalid(
                 "--mtp-model cannot be combined with --rope-scaling yarn")
@@ -296,7 +341,69 @@ public struct ServerArguments: Equatable, Sendable {
                                expertCacheSlots: expertCacheSlots,
                                expertCacheBudgetBytes: expertCacheBudgetBytes,
                                lazyLoad: lazyLoad,
-                               idleUnloadSeconds: idleUnloadSeconds)
+                               idleUnloadSeconds: idleUnloadSeconds,
+                               configPath: configPath,
+                               modelsDir: modelsDir,
+                               preload: preload,
+                               maxContextWasSet: maxContextWasSet,
+                               idleUnloadWasSet: idleUnloadWasSet)
+    }
+
+    private static func validateMaxContext(_ value: Int,
+                                           ropeScalingMode: RuntimeRoPEScalingMode) throws {
+        if ropeScalingMode == .yarn {
+            guard RuntimeConfiguration.supportedYaRNContextTokens.contains(value) else {
+                throw ServerArgumentError.invalid(
+                    "YaRN --max-context must be 524288 or 1048576")
+            }
+        } else {
+            guard RuntimeConfiguration.supportedContextTokens.contains(value) else {
+                throw ServerArgumentError.invalid("--max-context is not supported")
+            }
+        }
+    }
+
+    /// Config defaults merge under flag > config > built-in, resolved in
+    /// memory. A flag never writes back into the config file.
+    public func merging(configDefaults defaults: ServerConfig.Defaults) throws -> ServerArguments {
+        var maxContext = self.maxContext
+        if !maxContextWasSet, let value = defaults.maxContext {
+            try Self.validateMaxContext(value, ropeScalingMode: ropeScalingMode)
+            maxContext = value
+        }
+        var idleUnloadSeconds = self.idleUnloadSeconds
+        if !idleUnloadWasSet, let value = defaults.idleUnloadSeconds {
+            idleUnloadSeconds = value
+        }
+        var expertCacheBudgetBytes = self.expertCacheBudgetBytes
+        if expertCacheBudgetBytes == nil, let text = defaults.ramBudget {
+            expertCacheBudgetBytes = RuntimeConfiguration.parseBudgetBytes(text)
+        }
+        return ServerArguments(model: model,
+                               mtpModel: mtpModel,
+                               mtpMemoryMiB: mtpMemoryMiB,
+                               port: port,
+                               modelIDOverride: modelIDOverride,
+                               maxContext: maxContext,
+                               queueLimit: queueLimit,
+                               promptCacheMode: promptCacheMode,
+                               promptCacheMaximumEntries: promptCacheMaximumEntries,
+                               promptCacheMemoryMiB: promptCacheMemoryMiB,
+                               promptCacheDiskDirectory: promptCacheDiskDirectory,
+                               promptCacheDiskMiB: promptCacheDiskMiB,
+                               prefillChunkTokens: prefillChunkTokens,
+                               kvCachePrecision: kvCachePrecision,
+                               ropeScalingMode: ropeScalingMode,
+                               thinkingMode: thinkingMode,
+                               expertCacheSlots: expertCacheSlots,
+                               expertCacheBudgetBytes: expertCacheBudgetBytes,
+                               lazyLoad: lazyLoad,
+                               idleUnloadSeconds: idleUnloadSeconds,
+                               configPath: configPath,
+                               modelsDir: modelsDir,
+                               preload: preload,
+                               maxContextWasSet: maxContextWasSet,
+                               idleUnloadWasSet: idleUnloadWasSet)
     }
 }
 

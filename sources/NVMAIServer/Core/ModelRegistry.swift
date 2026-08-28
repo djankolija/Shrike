@@ -367,6 +367,39 @@ public actor ModelRegistry {
         resident = nil
     }
 
+    // MARK: - Construction from a roster
+
+    /// One plan per roster entry from the (config-merged) arguments. Facts
+    /// answer from each manifest alone, so a broken bundle fails here at
+    /// launch, not on its first request.
+    public static func models(for roster: ModelRoster,
+                              arguments: ServerArguments) throws -> [Model] {
+        try roster.entries.map { entry in
+            let plan = ModelSessionPlan(
+                modelDirectory: entry.directory,
+                maxContext: arguments.maxContext,
+                promptCacheMode: arguments.promptCacheMode,
+                promptCacheMaximumEntries: arguments.promptCacheMaximumEntries,
+                promptCacheMemoryLimitBytes: arguments.promptCacheMemoryMiB * 1_048_576,
+                promptCacheDiskDirectory: arguments.promptCacheDiskDirectory.map {
+                    URL(fileURLWithPath: $0).standardizedFileURL
+                },
+                promptCacheDiskLimitBytes: arguments.promptCacheDiskMiB * 1_048_576,
+                prefillChunkTokens: arguments.prefillChunkTokens,
+                kvCachePrecision: arguments.kvCachePrecision,
+                ropeScalingMode: arguments.ropeScalingMode,
+                thinkingMode: arguments.thinkingMode,
+                expertCacheSlots: arguments.expertCacheSlots,
+                expertCacheBudgetBytes: arguments.expertCacheBudgetBytes,
+                mtpModelDirectory: arguments.mtpModel.map {
+                    URL(fileURLWithPath: $0).standardizedFileURL
+                },
+                mtpMemoryMiB: arguments.mtpMemoryMiB)
+            let facts = try plan.previewFacts(modelID: entry.id)
+            return Model(id: entry.id, plan: plan, facts: facts)
+        }
+    }
+
     // MARK: - Test hooks
 
     var residentModelID: String? { resident?.id }

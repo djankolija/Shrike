@@ -278,20 +278,6 @@ public extension ServerInferenceBackend {
     }
 }
 
-/// A backend that owns the model's residency and can release it on demand.
-///
-/// Kept separate from `ServerInferenceBackend` rather than added to it with a
-/// `false`-returning default: exactly one backend manages residency, and the
-/// wrapper design exists so the HTTP layer stays unaware of loading at all.
-/// Folding it into the inference protocol would make every conforming type —
-/// including the plain session and every test stub — carry a member that only
-/// answers "not me".
-public protocol ResidencyManaging: Sendable {
-    /// Releases the model's memory, waiting for in-flight requests to drain
-    /// first. Returns true when a resident model was actually released.
-    func unload() async -> Bool
-}
-
 public actor ServerCoordinator {
     private struct Waiter {
         let id: UUID
@@ -489,8 +475,6 @@ private enum KVNormalizationPlan: Sendable, Equatable {
 }
 
 public actor ServerModelSession: ServerInferenceBackend {
-    /// Manifest-derived API model identifier used when --model-id is absent.
-    public nonisolated let defaultModelID: String
     /// The session's configured context window; the HTTP layer validates
     /// max_tokens against it (S11).
     public nonisolated var maximumContext: Int { maxContext }
@@ -760,9 +744,6 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.model = model
         self.tokenizer = tokenizer
         self.modelFamily = model.config.family
-        self.defaultModelID = ServerModelIdentity.apiModelID(
-            manifestModelID: model.modelID,
-            family: model.config.family)
         self.runner = runner
         self.mtpDecoder = mtpDecoder
         self.scratch = scratch

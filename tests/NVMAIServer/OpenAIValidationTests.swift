@@ -291,6 +291,72 @@ struct ServerArgumentTests {
         #expect(arguments.thinkingMode == .off)
     }
 
+    @Test func configModeIsTheDefaultAndModelIsOptional() throws {
+        let arguments = try ServerArguments.parse([], environment: [:])
+        #expect(arguments.model == nil)
+        #expect(arguments.configPath == nil)
+        #expect(arguments.modelsDir == nil)
+        #expect(!arguments.preload)
+    }
+
+    @Test func parsesConfigModelsDirAndPreload() throws {
+        let arguments = try ServerArguments.parse(
+            ["--config", "/tmp/server.json", "--models-dir", "/models", "--preload"],
+            environment: [:])
+        #expect(arguments.configPath == "/tmp/server.json")
+        #expect(arguments.modelsDir == "/models")
+        #expect(arguments.preload)
+    }
+
+    @Test func modelExcludesConfigAndModelsDir() throws {
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse(["--model", "m.gturbo", "--config", "/tmp/c.json"])
+        }
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse(["--model", "m.gturbo", "--models-dir", "/models"])
+        }
+    }
+
+    @Test func modelIDAndMTPRequireModel() throws {
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse(["--model-id", "nice-name"])
+        }
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse(["--mtp-model", "mtp.gturbo"])
+        }
+    }
+
+    @Test func preloadContradictsLazyLoad() throws {
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse(["--preload", "--lazy-load"])
+        }
+    }
+
+    @Test func configDefaultsMergeUnderFlagPrecedence() throws {
+        let bare = try ServerArguments.parse([], environment: [:])
+        let merged = try bare.merging(configDefaults: .init(
+            maxContext: 32_768, ramBudget: "6G", idleUnloadSeconds: 300))
+        #expect(merged.maxContext == 32_768)
+        #expect(merged.expertCacheBudgetBytes == 6 << 30)
+        #expect(merged.idleUnloadSeconds == 300)
+
+        let flagged = try ServerArguments.parse(
+            ["--max-context", "65536", "--ram-budget", "2G", "--idle-unload-seconds", "0"],
+            environment: [:])
+        let kept = try flagged.merging(configDefaults: .init(
+            maxContext: 32_768, ramBudget: "6G", idleUnloadSeconds: 300))
+        #expect(kept.maxContext == 65_536)
+        #expect(kept.expertCacheBudgetBytes == 2 << 30)
+        #expect(kept.idleUnloadSeconds == 0)
+    }
+
+    @Test func aConfigContextOutsideTheSupportedSetFails() throws {
+        let bare = try ServerArguments.parse([], environment: [:])
+        #expect(throws: ServerArgumentError.self) {
+            _ = try bare.merging(configDefaults: .init(maxContext: 12_345))
+        }
+    }
+
     @Test func parsesOnlyBinaryThinkingModes() throws {
         let on = try ServerArguments.parse([
             "--model", "model.gturbo", "--thinking", "on",

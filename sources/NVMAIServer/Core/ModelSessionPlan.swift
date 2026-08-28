@@ -26,30 +26,11 @@ public struct ModelSessionFacts: Sendable, Equatable {
     }
 }
 
-enum ServerModelIdentity {
-    static func apiModelID(manifestModelID: String,
-                           family: ModelFamily) -> String {
-        let quantizationSuffixes = ["-4bit", "-8bit", "-6bit"]
-        for suffix in quantizationSuffixes where manifestModelID.hasSuffix(suffix) {
-            return String(manifestModelID.dropLast(suffix.count))
-        }
-        if manifestModelID != "unknown/snapshot" {
-            return manifestModelID
-        }
-        switch family {
-        case .qwen36: return "qwen3.6-35b-a3b"
-        case .qwen36MTP: return "qwen3.6-35b-a3b-mtp"
-        case .gptOss20b: return "gpt-oss-20b"
-        case .kimiLinear48b: return "kimi-linear-48b-a3b"
-        }
-    }
-}
-
 /// Everything needed to build a `ServerModelSession`, in one place.
 ///
-/// Both the eager path and the deferred path construct sessions through
+/// Every load — first request, swap, preload — constructs sessions through
 /// `makeSession`, so a parameter added to `ServerModelSession.load` cannot be
-/// wired into one path and forgotten in the other.
+/// wired into one path and forgotten in another.
 public struct ModelSessionPlan: Sendable {
     public let modelDirectory: URL
     public let maxContext: Int
@@ -123,16 +104,13 @@ public struct ModelSessionPlan: Sendable {
     }
 
     /// Resolve the banner facts by reading `manifest.json` only — no weights
-    /// are mapped and no Metal device is created.
+    /// are mapped and no Metal device is created. `modelID` is the roster's
+    /// canonical id; identity lives there, not in the manifest.
     ///
-    /// Throwing here also preserves the eager path's behaviour that a bad
-    /// `--model` fails at launch rather than on the first request.
-    public func previewFacts(modelIDOverride: String? = nil) throws -> ModelSessionFacts {
-        let identity = try ManifestReader.peekIdentity(directoryURL: modelDirectory)
-        let family = identity.family
-        let defaultModelID = ServerModelIdentity.apiModelID(
-            manifestModelID: identity.modelID,
-            family: family)
+    /// Throwing here preserves the property that a bad model directory fails
+    /// at launch rather than on the first request.
+    public func previewFacts(modelID: String) throws -> ModelSessionFacts {
+        let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
         // Mirrors the precedence in ServerModelSession.load: an explicit
         // --prefill-chunk wins, otherwise qwen36 takes the long-prefill chunk
         // and anything else takes the runtime default. Family is the only
@@ -142,7 +120,7 @@ public struct ModelSessionPlan: Sendable {
                 ? RuntimeConfiguration.qwenLongPrefillChunkTokens
                 : RuntimeConfiguration.production.prefillChunkTokens)
         return ModelSessionFacts(
-            modelID: modelIDOverride ?? defaultModelID,
+            modelID: modelID,
             prefillChunkTokens: resolvedChunk,
             promptCacheMode: ServerModelSession.effectivePromptCacheMode(
                 requested: promptCacheMode,
