@@ -147,7 +147,11 @@ it preserves the current property that facts are correct before anything is resi
 
 Requests **batch by model**: when the slot frees, every pending request for the resident
 model is served before a swap. Under alternating load that collapses into one swap per
-batch rather than one per request.
+batch rather than one per request. Measured at deploy (2026-08-28, the mini, 32k context,
+6G budget): a swapping request completes in ~7–9 s against ~3 s resident, so a swap costs
+roughly 4–6 s and batching is a convenience, not load-bearing. Across four swaps under a
+`memory_pressure` watch, free memory never dropped below 34% and the residency log shows
+every unload completing before the next load — the strict ordering holds live.
 
 Idle unload stays as `--idle-unload-seconds`, default 0. Its purpose is coexistence — the
 server otherwise holds roughly 5 GB of dense weights plus the expert budget for the
@@ -231,9 +235,6 @@ than a week. This is a shape, not a commitment: the server module has been read,
 
 ## Not established
 
-- **Swap latency composition.** Whether a swap is dominated by weight mapping or by expert
-  cache warm-up is unmeasured. It decides whether request batching is a convenience or
-  load-bearing. One measurement once this runs.
 - **Whether the disk prompt cache rehydrates across a swap.** The `--idle-unload-seconds`
   help text states "Pair with `--prompt-cache-disk`, since unloading discards the
   in-memory prefix cache," and entries are domain-keyed by `modelID`, so a swap back

@@ -107,11 +107,16 @@ straddle a task boundary with one accepting what the other no longer advertises.
   continuation/task-allocator false-positive family; nothing was suppressed, so a
   recurrence will still fail CI.
 
-- [ ] **Task 9 — deploy + live verification (needs explicit go-ahead; the mini is
-  shared).** Binary to `nvmai-runtime/bin` (previous preserved); write the mini's
-  `~/.nvmai/server.json` for its installed bundles; start; `GET /v1/models`; one
-  generation per model through an unmodified client; one forced swap watched with
-  `memory_pressure`; pre/post A/B generation on the same machine and model
-  (temperature 0, fixed seed) — the committed golden baseline is foreign hardware
-  (v6 plan, *Global constraints*). Record swap latency once; it settles the batching
-  question in the spec's *Not established*.
+- [x] **Task 9 — deploy + live verification** *(run 2026-08-28; the previous binary was
+  deleted rather than preserved, per decision at deploy time)*. Pre/post A/B on the mini
+  (ornith15, identical `--model` flags, temperature 0, seed 1234, 96 tokens, cold cache
+  both sides): **byte-identical content, identical usage** — numerics and the load path
+  unchanged. Config mode: 4 models resolved, both `-mtp` bundles excluded with logged
+  notices; per-model generation, canonical-id echo, omitted-model default, unknown-id
+  404 naming the valid ids, unload reporting the released id, and the load endpoint's
+  accept-then-preload all verified over plain HTTP. Swap latency ~4–6 s (7–9 s swapping
+  vs ~3 s resident) — batching is a convenience. `memory_pressure` never dropped below
+  34% free across four swaps and the residency log shows strict unload-before-load
+  throughout; oMLX on the same box stayed healthy. The mini was left as found (no
+  NVMAIServer running); its `~/.nvmai/server.json` is written, so
+  `nvmai-runtime/bin/NVMAIServer --port <p>` starts the full roster.
