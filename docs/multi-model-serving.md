@@ -190,6 +190,9 @@ not something a client can reach.
 - The eager branch in `main.swift`. Both paths become one managed path, and "eager"
   demotes to a `--preload` flag that changes *when* the first load happens rather than
   which code runs it. The residency code stops being dormant.
+- `ManagedModelBackend` itself — its body survives inside `ModelRegistry`, so the type,
+  the `ResidencyManaging` protocol, and the HTTP layer's runtime cross-cast to it all
+  go, along with `ServerModelSession.defaultModelID` (identity lives in the roster).
 
 ## What this needs
 

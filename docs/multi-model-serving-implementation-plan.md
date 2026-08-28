@@ -84,12 +84,13 @@ straddle a task boundary with one accepting what the other no longer advertises.
   unknown), `ServerPromptCacheTests` adapted; `CLIStripTests` untouched — the operator
   env lever remains.
 
-- [ ] **Task 6 — arguments.** `--config`, `--models-dir`, `--preload`; `--model` together
+- [x] **Task 6 — arguments** *(landed in one commit with Task 7 — making `--model`
+  optional spans both)*. `--config`, `--models-dir`, `--preload`; `--model` together
   with `--config` or `--models-dir` is a startup error; config defaults merge under
   flag > config > built-in, in memory, revalidating what they override; usage text
   updated. Tests: the arguments suite extended.
 
-- [ ] **Task 7 — main collapse.** One managed path: config load → bundle scan → roster →
+- [x] **Task 7 — main collapse.** One managed path: config load → bundle scan → roster →
   registry → server. `--model` builds a one-entry roster (`--model-id` as its canonical
   id); `--preload` fires `startLoad` on the default entry; the resolved roster is logged
   at startup. Delete: the eager branch, `ManagedModelBackend` and its test file (cases
@@ -97,9 +98,14 @@ straddle a task boundary with one accepting what the other no longer advertises.
   `ServerModelIdentity` and `ModelIdentityTests` (dead once `previewFacts` takes the
   roster id as its override). Tests: the full `NVMAIServerTests` target green.
 
-- [ ] **Task 8 — gates.** `swift build -c release` warning-free, `tools/lint.sh`,
-  `swift test --no-parallel`, the same suite under `--sanitize=thread`, markdown links
-  resolve. Reconcile the spec's *What this deletes* against what was actually deleted.
+- [x] **Task 8 — gates.** `swift build -c release` warning-free, `tools/lint.sh`,
+  `swift test --no-parallel` (1062 tests), the same suite under `--sanitize=thread`,
+  markdown links resolve. Reconciled the spec's *What this deletes* against what was
+  actually deleted. One TSan data-race report (`NVMAIHTTPServer.shutdown()` against an
+  `EventLoopFuture.get()` continuation resume) appeared once in the first full TSan run
+  and never again — four isolated re-runs and a full re-run all clean. Read as the
+  continuation/task-allocator false-positive family; nothing was suppressed, so a
+  recurrence will still fail CI.
 
 - [ ] **Task 9 — deploy + live verification (needs explicit go-ahead; the mini is
   shared).** Binary to `nvmai-runtime/bin` (previous preserved); write the mini's

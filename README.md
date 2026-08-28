@@ -50,9 +50,12 @@
 - **Concise mode:** An optional terse system prompt reduces generated text for
   workloads that benefit from it; standard responses are the default because
   they generalized more reliably in the coding/tooling qualification.
-- **Fast alias:** The chat-only `-fast` model alias strips coding-agent
-  boilerplate before prefill for quicker direct answers, while the base alias
+- **Fast mode:** The `NVMAI_STRIP_CLI_PROMPT` operator lever strips coding-agent
+  boilerplate before prefill for quicker direct answers; by default the server
   preserves tools and agent loops.
+- **Multi-model serving:** One server process serves every installed bundle,
+  selected per request by the OpenAI `model` field; one model is resident at a
+  time and swaps on demand.
 
 ### Usage
 
