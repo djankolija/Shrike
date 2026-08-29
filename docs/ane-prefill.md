@@ -1,15 +1,15 @@
-# NVMAI v4.5 — ANE prefill (experimental, opt-in)
+# NVMAI ANE prefill (experimental, opt-in)
 
 Routes the prefill attention block of every full-attention layer through the
 Neural Engine via a Core ML sidecar. GDN layers, the MoE, the `.gturbo`
 format, the KV cache, the server API, and all of decode are untouched. Off by
 default; nothing changes without `NVMAI_PREFILL_ANE=on`.
 
-The research behind this is in [v4.4, Track A](v4.4-decode-width-plan.md):
-on a real 6,103-token 4-bit prefill the ten full-attention layers cost 84.3 s
+On a real 6,103-token 4-bit prefill the ten full-attention layers cost 84.3 s
 of 133.2 s (63.3%, growing quadratically with prompt length), the ANE runs
 the same blocks 26.7x faster with the model's real weights, and the
-inexpressible Gated-DeltaNet share is only 10%.
+inexpressible Gated-DeltaNet share is only 10%. The measurements behind those
+numbers are in [Research](#research) below.
 
 ## Using it
 
@@ -30,7 +30,7 @@ the first request per *process* pays ~0.5 s per layer-chunk of model load.
 ## Measured result (M3, 24 GB, 4-bit, 6,103-token prompt, greedy, cache off)
 
 Interleaved gpu/ane/ane/gpu, fresh server per run, one discarded warmup per
-arm (`benchmark/nvmai_ane_prefill_ab.py`):
+arm (`tools/ane-probes/nvmai_ane_prefill_ab.py`):
 
 | | prefill median | runs | decode after prefill |
 | --- | ---: | --- | ---: |
@@ -89,6 +89,76 @@ each arm is internally deterministic, but long generations can diverge in
 low-probability positions. This is why the switch exists and defaults off,
 and why `tools/golden-baseline.sh` runs with it off. Promotion to default
 would require its own quality qualification, not just the speed number.
+
+## Research
+
+The measurements that retired every risk before the Swift integration was
+written, on a real 6,103-token 4-bit prefill (133.2 s, 97.3% occupancy).
+
+**The layer mix did not kill it — the opposite.** This architecture is 10
+full-attention + 30 Gated-DeltaNet layers, and the original ANE analysis was
+written for full-attention blocks only. Splitting the prefill instrumentation
+by layer kind (`prefill_attn_router` vs `prefill_gdn_router`):
+
+| | GPU s | share |
+| --- | ---: | ---: |
+| 10 full-attention layers (ANE-expressible) | **84.3** | **63.3%** |
+| MoE tiles + shared + reduce (stays GPU by design) | 33.9 | 25.5% |
+| 30 GDN layers (recurrent scan, not expressible) | 13.3 | 10.0% |
+
+The quadratic SDPA makes the expressible share dominant *and growing with
+prompt length*; the inexpressible share is 10%.
+
+**The block is fully expressible and correct.** The complete block — packed
+QKV with output gate, per-head q/k RMS norms, NeoX-subdim RoPE (64 of 256),
+GQA 16/2 SDPA against KV history, sigmoid gate, O projection — built in MIL
+(`tools/ane-probes/nvmai_ane_attention_probe.py`) matches a float32 NumPy
+reference at fp16-noise level.
+
+**One real ANE defect found and routed around:** the fused
+`scaled_dot_product_attention` op produces NaN/inf on this M3's ANE from
+sequence length 2048, even at score std 0.25. Decomposed attention
+(matmul+softmax+matmul) is clean and slightly faster (isolated A/B: rel err
+inf vs 0.007, 58.4 vs 50.0 ms at 2048). The integration uses the decomposed
+form.
+
+**Long-sequence fp16 softmax precision is a non-issue on real
+distributions.** The 8–12% rel err seen with uniform random attention at
+seq 6144 collapses to **0.0002** with realistically peaked scores (std 3.7,
+max 80).
+
+**Real-weight rehearsal** (`tools/ane-probes/nvmai_ane_realweight_rehearsal.py`):
+the actual int4 affine weights of all 10 full-attention layers, dequantized
+and baked into per-layer Core ML programs, replaying the exact 6,103-token
+chunk sequence (4096:0 then 2007:4096 per layer), prediction wall including
+marshaling:
+
+| | 20 layer-chunks |
+| --- | ---: |
+| ANE (CPU_AND_NE, measured) | **3.15 s** |
+| GPU (measured, same shapes) | 84.3 s |
+| speedup on the offloadable block | **26.7x** |
+| projected end-to-end prefill | 133.2 s → **52.1 s (2.56x)** |
+| worst per-layer rel err vs fp32 | 0.0101, zero NaN/inf |
+
+### Running the probes
+
+`nvmai_ane_attention_probe.py` and `nvmai_ane_realweight_rehearsal.py` are
+self-contained. `nvmai_ane_prefill_ab.py` is **not**: it imports all of
+`nvmai_gate0_profile.py` plus five names from `nvmai_profile.py`
+(`DEFAULT_API_MODEL`, `ROOT`, `benchmark_log_path`, `server_command`,
+`server_environment`), two harness modules that were not carried over.
+Restore them from the import commit before running it:
+
+```bash
+git show <import-commit>:benchmark/nvmai_profile.py > tools/ane-probes/nvmai_profile.py
+git show <import-commit>:benchmark/nvmai_gate0_profile.py > tools/ane-probes/nvmai_gate0_profile.py
+```
+
+They were left out deliberately: 24 KB of general gate-0 profiling machinery
+for a script nobody runs today. Do not vendor a shim instead —
+`gate0.preflight()` is the never-run-two-model-processes guard, and
+reimplementing a safety check is worse than restoring the real one.
 
 ## Known costs and future work
 
