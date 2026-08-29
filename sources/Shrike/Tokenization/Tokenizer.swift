@@ -147,7 +147,7 @@ public struct GFTokenizer: @unchecked Sendable {
             return sidecar
         }
 
-        guard let override = environment["TURBO_FIELDFARE_TOKENIZER_DIR"], !override.isEmpty else {
+        guard let override = environment["SHRIKE_TOKENIZER_DIR"], !override.isEmpty else {
             return nil
         }
         let overrideURL = URL(fileURLWithPath: override).standardizedFileURL

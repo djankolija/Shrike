@@ -1754,7 +1754,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             return ane
         }()
 
-        let prefillProfile = ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PHASES"] != nil
+        let prefillProfile = ProcessInfo.processInfo.environment["SHRIKE_PHASES"] != nil
         var prefillRouteNanos: UInt64 = 0
         var prefillTileNanos: UInt64 = 0
         var prefillTailNanos: UInt64 = 0

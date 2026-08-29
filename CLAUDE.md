@@ -67,7 +67,7 @@ tools/golden-baseline.sh --check 4
 
 It counts as a model run, so the process rules above apply first. Baselines are stored
 in `baselines/`, which starts empty: the two that shipped with the fork were captured on
-the original author's machine, and `1e06d42` established that their own scope note rules
+the original author's machine, and `d9b37b9` established that their own scope note rules
 them out for this hardware. So `--check` has nothing to compare against until you capture
 a baseline on the machine you intend to check.
 
@@ -102,7 +102,10 @@ together, or the service comes up subtly wrong:
    server's built-in models-directory default moved with the rename, so a server
    looking for `~/shrike-runtime/models` finds nothing if the directory still has its
    old name.
-3. **Every `NVMAI_*` variable in the launchd plist** → `SHRIKE_*`.
+3. **Every `NVMAI_*` variable in the launchd plist** → `SHRIKE_*`. Also check for
+   `TURBO_FIELDFARE_PHASES`, `TURBO_FIELDFARE_TOKENIZER_DIR` and `TURBO_FIELDFARE_MODEL`
+   — inherited from the fork this project came from, and renamed to `SHRIKE_PHASES`,
+   `SHRIKE_TOKENIZER_DIR` and `SHRIKE_MODEL`. They fail the same silent way.
 4. **The plist's program path and label**, to match 1 and 2.
 
 **The failure mode for 3 is the dangerous one: a stale `NVMAI_*` variable does not

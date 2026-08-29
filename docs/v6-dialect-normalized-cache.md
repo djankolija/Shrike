@@ -1,6 +1,6 @@
 # v6: a dialect-normalized prompt cache — design
 
-Status: implemented and live-verified 2026-08-28 — branch merge-ready at `60ba082`, full
+Status: implemented and live-verified 2026-08-28 — landed on `main`, full
 sweep green on both boxes. Implementation plan: `v6-implementation-plan.md`.
 
 ## Objective
@@ -39,7 +39,7 @@ multi-turn runs `S12` hit 0 of 5 opportunities — every miss `s12_short`, the r
 shorter than the blob by the retained thinking — and the structural path rescued every
 valid turn, once restoring 901 KV-backed tokens against a 76-token render: the model's
 own thinking, resurrected from state the client never sent. Mid-loop tool hops cached
-zero until d7acd76 fixed the render boundary that dropped `reasoning_content` on the
+zero until `e425421` fixed the render boundary that dropped `reasoning_content` on the
 tools path; after it, the mid-loop comparison is byte-exact — integer tool arguments
 through `tojson` included — and the one remaining mismatch is the post-loop flip
 (`s12_short rendered=395 kv=494`): `last_query_index` moves and the whole loop's

@@ -113,10 +113,10 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     }
 
     /// The descriptor the app products select at launch. Defaults to Ornith 1.5
-    /// 8-bit. `TURBO_FIELDFARE_MODEL` in the environment wins; otherwise the
+    /// 8-bit. `SHRIKE_MODEL` in the environment wins; otherwise the
     /// persisted `defaults write Shrike model <selector>` preference applies.
     public static var selected: AppModelInstallDescriptor {
-        let environmentValue = ProcessInfo.processInfo.environment["TURBO_FIELDFARE_MODEL"]
+        let environmentValue = ProcessInfo.processInfo.environment["SHRIKE_MODEL"]
         let preferenceValue = UserDefaults(suiteName: "Shrike")?
             .string(forKey: "model")
         return selectedDescriptor(for: environmentValue ?? preferenceValue)

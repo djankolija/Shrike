@@ -29,20 +29,24 @@ directly on the bounded-memory claim.
 
 ## What the fork starts from
 
-This repo is `Pummelchen/Shrike` at `4410d38`, itself a fork of `drumih/turbo-fieldfare`.
+This repo is `Pummelchen/NVMAI` at `4410d38`, itself a fork of `drumih/turbo-fieldfare`.
+(Upstream keeps the NVMAI name; the rename to Shrike is ours alone, and `4410d38` no
+longer resolves here — the imported history was squashed into the root commit.)
 Commit `19aafd8` ("Qwen-only") removed the second-architecture support that upstream
 still has: the `ChatDialect` enum, the Gemma family case, and the per-family branches in
 `Model.swift`, `ArchInfo.swift` and `RepackPlanner.swift`. That commit sits at 70 of 310;
 the v4.x engine — expert streaming, ANE prefill, tiled sampler, MTP — all came after it,
 which is why the fork is the right base and upstream is not.
 
-Recovery material for the removed abstractions is at `19aafd8~1` in this history.
+Recovery material for the removed abstractions is at `19aafd8~1` in `Pummelchen/NVMAI`.
+It is **not** in this repository: the imported history was squashed to a single root commit
+carrying only the fork-point tree, which is already after that removal.
 
 ## Steps
 
 1. **Fork and clone.** — done. `djankolija/Shrike`, standalone (a GitHub fork was not
    possible: `djankolija/turbo-fieldfare` already occupies that fork network).
-   `origin` = `djankolija/Shrike`, `upstream` = `Pummelchen/Shrike`, both over
+   `origin` = `djankolija/Shrike`, `upstream` = `Pummelchen/NVMAI`, both over
    `git@github-personal:`.
 
 2. **Restore the dialect seam.** — done, minimally. `ChatDialect` is resolved from the
@@ -102,6 +106,6 @@ sandwich norms; leave them deleted.
 
 ## One thing not to misread
 
-`d14376f` ("Route every Top-K in 1...64 through the tiled sampler") is the **sampling**
-top-k over the vocabulary. It is a different code path from the MoE **router** top-k, and
-does nothing for step 3.
+`d14376f` ("Route every Top-K in 1...64 through the tiled sampler" — upstream's commit, in
+`Pummelchen/NVMAI`, not resolvable here) is the **sampling** top-k over the vocabulary. It
+is a different code path from the MoE **router** top-k, and does nothing for step 3.

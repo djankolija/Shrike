@@ -197,7 +197,7 @@ public func run(args: Args,
                 }
             }
 
-        if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PHASES"] == "1" {
+        if ProcessInfo.processInfo.environment["SHRIKE_PHASES"] == "1" {
             let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
             let total = stats.decodeSeconds * 1000
             let accounted = Double(runner.totalCb1Nanos + runner.totalIoNanos
