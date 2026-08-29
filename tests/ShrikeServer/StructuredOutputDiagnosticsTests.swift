@@ -14,6 +14,7 @@ struct StructuredOutputDiagnosticsTests {
         let error = StructuredOutputFailure(
             kind: .orphanToolResponse,
             cause: .none,
+            unknownToolName: nil,
             diagnostics: diagnostics)
         let reflected = String(reflecting: error)
 
@@ -46,30 +47,29 @@ struct StructuredOutputDiagnosticsTests {
         #expect(!reflected.contains("]"))
     }
 
-    @Test func parserCausesAreFixedAndUnknownToolNameIsDiscarded() {
-        #expect(StructuredOutputFailureCause.classify(
-            ToolCallParserError.malformed) == .malformed)
-        #expect(StructuredOutputFailureCause.classify(
-            ToolCallParserError.oversized) == .oversized)
-        #expect(StructuredOutputFailureCause.classify(
-            UnexpectedError()) == .unexpected)
-
-        let cause = StructuredOutputFailureCause.classify(
-            ToolCallParserError.unknownTool("private-name"))
+    @Test func unknownToolNameSurvivesIntoTheFailureLog() throws {
+        let error = ToolCallParserError.unknownTool("missing_tool")
+        let cause = StructuredOutputFailureCause.classify(error)
         let reflected = String(reflecting: StructuredOutputFailure(
             kind: .decoderConsume,
             cause: cause,
+            unknownToolName: StructuredOutputFailureCause.unknownToolName(error),
             diagnostics: makeDiagnostics()))
         #expect(cause == .unknownTool)
+        #expect(StructuredOutputFailureCause.unknownToolName(error) == "missing_tool")
         #expect(reflected.contains("cause=unknown_tool"))
-        #expect(!reflected.contains("private-name"))
+        #expect(reflected.contains("unknown_tool_name=missing_tool"))
+    }
 
-        let unexpected = String(reflecting: StructuredOutputFailure(
-            kind: .decoderFinish,
-            cause: .classify(UnexpectedError()),
+    @Test func nonUnknownToolFailuresOmitTheNameField() throws {
+        let error = ToolCallParserError.malformed
+        let reflected = String(reflecting: StructuredOutputFailure(
+            kind: .decoderConsume,
+            cause: .classify(error),
+            unknownToolName: StructuredOutputFailureCause.unknownToolName(error),
             diagnostics: makeDiagnostics()))
-        #expect(unexpected.contains("cause=unexpected"))
-        #expect(!unexpected.contains("private-error-description"))
+        #expect(StructuredOutputFailureCause.unknownToolName(error) == nil)
+        #expect(!reflected.contains("unknown_tool_name="))
     }
 
     @Test func allFailureKindsShareTheSameDiagnosticSuffix() {
@@ -82,6 +82,7 @@ struct StructuredOutputDiagnosticsTests {
             let reflected = String(reflecting: StructuredOutputFailure(
                 kind: kind,
                 cause: .none,
+                unknownToolName: nil,
                 diagnostics: diagnostics))
             #expect(reflected.hasPrefix(
                 "structured_output_failure kind=\(kind.rawValue) cause=none "))

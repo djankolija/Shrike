@@ -57,6 +57,11 @@ enum StructuredOutputFailureCause: String, Equatable, Sendable {
         case .oversized: return .oversized
         }
     }
+
+    static func unknownToolName(_ error: Error) -> String? {
+        if case ToolCallParserError.unknownTool(let name) = error { return name }
+        return nil
+    }
 }
 
 /// Rich diagnostic snapshot collected at structured-output failure time.
@@ -254,11 +259,13 @@ struct StructuredOutputFailureDiagnostics: Equatable, Sendable {
 struct StructuredOutputFailure: Error, CustomDebugStringConvertible, Sendable {
     let kind: StructuredOutputFailureKind
     let cause: StructuredOutputFailureCause
+    let unknownToolName: String?
     let diagnostics: StructuredOutputFailureDiagnostics
 
     var debugDescription: String {
-        "structured_output_failure kind=\(kind.rawValue) "
-            + "cause=\(cause.rawValue) \(diagnostics.logDescription)"
+        let name = unknownToolName.map { " unknown_tool_name=\($0)" } ?? ""
+        return "structured_output_failure kind=\(kind.rawValue) "
+            + "cause=\(cause.rawValue)\(name) \(diagnostics.logDescription)"
     }
 }
 
@@ -1125,11 +1132,13 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
         func structuredFailure(
             kind: StructuredOutputFailureKind,
-            cause: StructuredOutputFailureCause
+            cause: StructuredOutputFailureCause,
+            unknownToolName: String? = nil
         ) -> StructuredOutputFailure {
             StructuredOutputFailure(
                 kind: kind,
                 cause: cause,
+                unknownToolName: unknownToolName,
                 diagnostics: StructuredOutputFailureDiagnostics(
                     renderedPromptIDs: promptIDs,
                     effectivePromptIDs: effectivePromptIDs,
@@ -1146,14 +1155,18 @@ public actor ServerModelSession: ServerInferenceBackend {
         if let decodingError {
             throw structuredFailure(
                 kind: .decoderConsume,
-                cause: .classify(decodingError))
+                cause: .classify(decodingError),
+                unknownToolName: StructuredOutputFailureCause
+                    .unknownToolName(decodingError))
         }
         do {
             try decoder?.finish()
         } catch {
             throw structuredFailure(
                 kind: .decoderFinish,
-                cause: .classify(error))
+                cause: .classify(error),
+                unknownToolName: StructuredOutputFailureCause
+                    .unknownToolName(error))
         }
         if needsToolTemplate, result.reason == .toolCalls, calls.isEmpty {
             throw structuredFailure(kind: .orphanToolResponse, cause: .none)
