@@ -1,5 +1,7 @@
 # Swift Package Manager
-.build/
+# No trailing slash: .build is a symlink to the external build SSD here, and
+# `.build/` matches only a real directory.
+.build
 .swiftpm/
 *.xcodeproj
 *.xcworkspace
