@@ -2,19 +2,19 @@
 import PackageDescription
 
 let package = Package(
-    name: "NVMAI",
+    name: "Shrike",
     platforms: [
         .macOS(.v26),
     ],
     products: [
-        .library(name: "NVMAI", targets: ["NVMAI"]),
-        .library(name: "NVMAIFormat", targets: ["NVMAIFormat"]),
-        .executable(name: "NVMAIRepack", targets: ["NVMAIRepack"]),
-        .executable(name: "NVMAICLI", targets: ["NVMAICLI"]),
-        .executable(name: "NVMAIMac", targets: ["NVMAIMac"]),
-        .executable(name: "NVMAIDecodeService", targets: ["NVMAIDecodeService"]),
-        .executable(name: "NVMAIServer", targets: ["NVMAIServer"]),
-        .executable(name: "NVMAIBench", targets: ["NVMAIBench"]),
+        .library(name: "Shrike", targets: ["Shrike"]),
+        .library(name: "ShrikeFormat", targets: ["ShrikeFormat"]),
+        .executable(name: "ShrikeRepack", targets: ["ShrikeRepack"]),
+        .executable(name: "ShrikeCLI", targets: ["ShrikeCLI"]),
+        .executable(name: "ShrikeMac", targets: ["ShrikeMac"]),
+        .executable(name: "ShrikeDecodeService", targets: ["ShrikeDecodeService"]),
+        .executable(name: "ShrikeServer", targets: ["ShrikeServer"]),
+        .executable(name: "ShrikeBench", targets: ["ShrikeBench"]),
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
@@ -24,8 +24,8 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "NVMAIFormat",
-            path: "sources/NVMAIFormat"
+            name: "ShrikeFormat",
+            path: "sources/ShrikeFormat"
         ),
         // C99 + NEON for the inner loops where Swift's vector types do not
         // lower well. Kept deliberately small: one file, one entry point,
@@ -33,132 +33,132 @@ let package = Package(
         // flags -- -O3 measured the same as SwiftPM's release default (0.675
         // vs 0.680 ms), so it is not worth the unsafeFlags constraint.
         .target(
-            name: "NVMAIKernelsC",
-            path: "sources/NVMAIKernelsC"
+            name: "ShrikeKernelsC",
+            path: "sources/ShrikeKernelsC"
         ),
         .target(
-            name: "NVMAI",
+            name: "Shrike",
             dependencies: [
-                "NVMAIFormat",
-                "NVMAIKernelsC",
+                "ShrikeFormat",
+                "ShrikeKernelsC",
                 .product(name: "Tokenizers", package: "swift-transformers"),
                 .product(name: "Jinja", package: "swift-jinja"),
                 .product(name: "OrderedCollections", package: "swift-collections"),
             ],
-            path: "sources/NVMAI",
+            path: "sources/Shrike",
             resources: [
                 .copy("Metal"),
             ]
         ),
         .target(
-            name: "NVMAIRepackCore",
-            dependencies: ["NVMAIFormat"],
-            path: "sources/NVMAIRepack/Core"
+            name: "ShrikeRepackCore",
+            dependencies: ["ShrikeFormat"],
+            path: "sources/ShrikeRepack/Core"
         ),
         .executableTarget(
-            name: "NVMAIRepack",
-            dependencies: ["NVMAIRepackCore"],
-            path: "sources/NVMAIRepack/Command"
+            name: "ShrikeRepack",
+            dependencies: ["ShrikeRepackCore"],
+            path: "sources/ShrikeRepack/Command"
         ),
         .target(
-            name: "NVMAICLICore",
-            dependencies: ["NVMAI"],
-            path: "sources/NVMAICLI",
+            name: "ShrikeCLICore",
+            dependencies: ["Shrike"],
+            path: "sources/ShrikeCLI",
             exclude: ["Command"]
         ),
         .executableTarget(
-            name: "NVMAICLI",
-            dependencies: ["NVMAICLICore"],
-            path: "sources/NVMAICLI/Command"
+            name: "ShrikeCLI",
+            dependencies: ["ShrikeCLICore"],
+            path: "sources/ShrikeCLI/Command"
         ),
         .target(
-            name: "NVMAIAppCore",
-            dependencies: ["NVMAI", "NVMAIRepackCore", "NVMAIDecodeProtocol"],
-            path: "sources/NVMAIApp/Core",
+            name: "ShrikeAppCore",
+            dependencies: ["Shrike", "ShrikeRepackCore", "ShrikeDecodeProtocol"],
+            path: "sources/ShrikeApp/Core",
             resources: [
                 .copy("Resources/app-prompts.json"),
             ]
         ),
         .target(
-            name: "NVMAIMacPresentation",
-            dependencies: ["NVMAIAppCore"],
-            path: "sources/NVMAIApp/MacPresentation"
+            name: "ShrikeMacPresentation",
+            dependencies: ["ShrikeAppCore"],
+            path: "sources/ShrikeApp/MacPresentation"
         ),
         .target(
-            name: "NVMAIDecodeProtocol",
-            path: "sources/NVMAIDecodeProtocol"
+            name: "ShrikeDecodeProtocol",
+            path: "sources/ShrikeDecodeProtocol"
         ),
         .executableTarget(
-            name: "NVMAIDecodeService",
-            dependencies: ["NVMAIAppCore", "NVMAIDecodeProtocol"],
-            path: "sources/NVMAIDecodeService"
+            name: "ShrikeDecodeService",
+            dependencies: ["ShrikeAppCore", "ShrikeDecodeProtocol"],
+            path: "sources/ShrikeDecodeService"
         ),
         .target(
-            name: "NVMAIServerCore",
+            name: "ShrikeServerCore",
             dependencies: [
-                "NVMAI",
+                "Shrike",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
-            path: "sources/NVMAIServer/Core"
+            path: "sources/ShrikeServer/Core"
         ),
         .executableTarget(
-            name: "NVMAIServer",
-            dependencies: ["NVMAIServerCore"],
-            path: "sources/NVMAIServer/Command"
+            name: "ShrikeServer",
+            dependencies: ["ShrikeServerCore"],
+            path: "sources/ShrikeServer/Command"
         ),
         .executableTarget(
-            name: "NVMAIBench",
-            dependencies: ["NVMAI"],
-            path: "sources/NVMAIBench"
+            name: "ShrikeBench",
+            dependencies: ["Shrike"],
+            path: "sources/ShrikeBench"
         ),
         .executableTarget(
-            name: "NVMAIMac",
-            dependencies: ["NVMAIAppCore", "NVMAIMacPresentation"],
-            path: "sources/NVMAIApp/Mac",
+            name: "ShrikeMac",
+            dependencies: ["ShrikeAppCore", "ShrikeMacPresentation"],
+            path: "sources/ShrikeApp/Mac",
             resources: [
-                .copy("Resources/nvmai-app-icon.png"),
+                .copy("Resources/shrike-app-icon.png"),
             ]
         ),
         .target(
-            name: "NVMAIValidationSupport",
-            dependencies: ["NVMAI"],
-            path: "sources/NVMAIValidation/Support"
+            name: "ShrikeValidationSupport",
+            dependencies: ["Shrike"],
+            path: "sources/ShrikeValidation/Support"
         ),
         .testTarget(
-            name: "NVMAITestsCore",
-            dependencies: ["NVMAI", "NVMAIValidationSupport", "NVMAIRepackCore", "NVMAICLICore"],
-            path: "tests/NVMAI/Core",
+            name: "ShrikeTestsCore",
+            dependencies: ["Shrike", "ShrikeValidationSupport", "ShrikeRepackCore", "ShrikeCLICore"],
+            path: "tests/Shrike/Core",
             resources: [.copy("Tokenization/Fixtures")]
         ),
         .testTarget(
-            name: "NVMAIRepackTests",
-            dependencies: ["NVMAIRepackCore"],
-            path: "tests/NVMAIRepack/Core"
+            name: "ShrikeRepackTests",
+            dependencies: ["ShrikeRepackCore"],
+            path: "tests/ShrikeRepack/Core"
         ),
         .testTarget(
-            name: "NVMAIAppCoreTests",
-            dependencies: ["NVMAIAppCore", "NVMAI", "NVMAIRepackCore", "NVMAIDecodeProtocol"],
-            path: "tests/NVMAIApp/Core"
+            name: "ShrikeAppCoreTests",
+            dependencies: ["ShrikeAppCore", "Shrike", "ShrikeRepackCore", "ShrikeDecodeProtocol"],
+            path: "tests/ShrikeApp/Core"
         ),
         .testTarget(
-            name: "NVMAIDecodeServiceTests",
-            dependencies: ["NVMAIDecodeService", "NVMAIAppCore", "NVMAIDecodeProtocol"],
-            path: "tests/NVMAIDecodeService"
+            name: "ShrikeDecodeServiceTests",
+            dependencies: ["ShrikeDecodeService", "ShrikeAppCore", "ShrikeDecodeProtocol"],
+            path: "tests/ShrikeDecodeService"
         ),
         .testTarget(
-            name: "NVMAIMacPresentationTests",
-            dependencies: ["NVMAIAppCore", "NVMAIMacPresentation"],
-            path: "tests/NVMAIApp/MacPresentation"
+            name: "ShrikeMacPresentationTests",
+            dependencies: ["ShrikeAppCore", "ShrikeMacPresentation"],
+            path: "tests/ShrikeApp/MacPresentation"
         ),
         .testTarget(
-            name: "NVMAIServerTests",
+            name: "ShrikeServerTests",
             dependencies: [
-                "NVMAIServerCore",
+                "ShrikeServerCore",
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
-            path: "tests/NVMAIServer",
+            path: "tests/ShrikeServer",
             resources: [.copy("Fixtures")]
         ),
     ],

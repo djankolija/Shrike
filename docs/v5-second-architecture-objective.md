@@ -29,7 +29,7 @@ directly on the bounded-memory claim.
 
 ## What the fork starts from
 
-This repo is `Pummelchen/NVMAI` at `4410d38`, itself a fork of `drumih/turbo-fieldfare`.
+This repo is `Pummelchen/Shrike` at `4410d38`, itself a fork of `drumih/turbo-fieldfare`.
 Commit `19aafd8` ("Qwen-only") removed the second-architecture support that upstream
 still has: the `ChatDialect` enum, the Gemma family case, and the per-family branches in
 `Model.swift`, `ArchInfo.swift` and `RepackPlanner.swift`. That commit sits at 70 of 310;
@@ -40,9 +40,9 @@ Recovery material for the removed abstractions is at `19aafd8~1` in this history
 
 ## Steps
 
-1. **Fork and clone.** — done. `djankolija/NVMAI`, standalone (a GitHub fork was not
+1. **Fork and clone.** — done. `djankolija/Shrike`, standalone (a GitHub fork was not
    possible: `djankolija/turbo-fieldfare` already occupies that fork network).
-   `origin` = `djankolija/NVMAI`, `upstream` = `Pummelchen/NVMAI`, both over
+   `origin` = `djankolija/Shrike`, `upstream` = `Pummelchen/Shrike`, both over
    `git@github-personal:`.
 
 2. **Restore the dialect seam.** — done, minimally. `ChatDialect` is resolved from the

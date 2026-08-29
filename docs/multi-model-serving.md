@@ -14,7 +14,7 @@ the request field is the same everywhere and always has been.
 
 The server is single-model down to the type level.
 
-- `NVMAIHTTPServer` holds `private let modelID: String` (`HTTPServer.swift:144`), fixed
+- `ShrikeHTTPServer` holds `private let modelID: String` (`HTTPServer.swift:144`), fixed
   for the process lifetime.
 - `GET /v1/models` advertises exactly two ids: `modelID` and `modelID + "-fast"`
   (`HTTPServer.swift:263-277`).
@@ -38,12 +38,12 @@ of them.
 
 | | job | written by | example |
 |---|---|---|---|
-| `manifest.modelID` | provenance — where the weights came from | NVMAIRepack at install | `mlx-community/Kimi-Linear-48B-A3B-Instruct-4bit` |
-| `arch.family` | dispatch — which runtime path executes them | NVMAIRepack, from architecture | `kimi_linear_48b` |
+| `manifest.modelID` | provenance — where the weights came from | ShrikeRepack at install | `mlx-community/Kimi-Linear-48B-A3B-Instruct-4bit` |
+| `arch.family` | dispatch — which runtime path executes them | ShrikeRepack, from architecture | `kimi_linear_48b` |
 | API model id | what a client types | the server | `kimi-linear-48b-a3b` |
 
-`manifest.json` is NVMAI's own artifact, not the provider's — the installer writes it
-beside the weights. `NVMAIRepack/Core/Remote/SupportedModelSource.swift` holds a table of
+`manifest.json` is Shrike's own artifact, not the provider's — the installer writes it
+beside the weights. `ShrikeRepack/Core/Remote/SupportedModelSource.swift` holds a table of
 recognized sources keyed by the SHA256 of the source safetensors index
 (`SourceFingerprint.modelID(forIndexSha256:)`), and records a curated name when the
 fingerprint matches. That is why provenance is clean for some models and an HF repo path
@@ -92,7 +92,7 @@ filesystem already guarantees unique bundle names within a directory.
 
 ```json
 {
-  "models_dir": "~/nvmai-runtime/models",
+  "models_dir": "~/shrike-runtime/models",
   "defaults": { "max_context": 32768, "ram_budget": "6G", "idle_unload_seconds": 0 },
   "models": [
     { "dir": "kimi-linear-48b-a3b-4bit.gturbo", "id": "kimi-linear-48b-a3b" },
@@ -111,7 +111,7 @@ today, the two carrying HF repo paths.
 entry and more than one model in the roster, an omitted `model` is an error naming the
 valid ids — the same error an unknown id produces.
 
-Default location `~/.nvmai/server.json`, selected with `--config`. Precedence is
+Default location `~/.shrike/server.json`, selected with `--config`. Precedence is
 flag > config > built-in default, resolved in memory. **A flag never writes back into the
 config file**: a launch argument that becomes a permanent setting defeats the purpose of
 being an argument, and makes a value fixed live revert on the next restart.
@@ -182,7 +182,7 @@ The `-fast` alias is removed from the HTTP surface; nothing deployed names it. W
 prompt contains is the client's decision; a server that silently rewrites it is answering a question nobody asked.
 `fastModelID` and the `stripCLIPrompt` branch leave `validate`, and
 `ValidatedChatRequest.stripCLIPrompt` goes with them — it would be permanently false.
-`CLIStrip.isEnabled()` / `NVMAI_STRIP_CLI_PROMPT` remains as an operator lever, which is
+`CLIStrip.isEnabled()` / `SHRIKE_STRIP_CLI_PROMPT` remains as an operator lever, which is
 not something a client can reach.
 
 ## What this deletes
@@ -257,7 +257,7 @@ than a week. This is a shape, not a commitment: the server module has been read,
   resident model. That is a real widening of what a caller can do, bounded by the existing
   network posture rather than by anything in this change.
 - **MTP is excluded, not removed.** Withdrawing it from `ServerModelSession.load`, the
-  `qwen36_mtp` family, `RepackPlanner` and NVMAIBench is a separate change with its own
+  `qwen36_mtp` family, `RepackPlanner` and ShrikeBench is a separate change with its own
   blast radius. Here the family is simply not servable, so the two `-mtp` bundles never
   enter the roster and config never sets `mtpModelDirectory`.
 - **Per-model overrides beyond `id` are not built.** The manifest already supplies what

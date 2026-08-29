@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Convert Kimi-Linear's tiktoken vocabulary into a Hugging Face
 `tokenizer.json` with a ByteLevel decoder (the streaming-decoder contract
-NVMAI requires).
+Shrike requires).
 
 The upstream checkpoint ships no `tokenizer.json` -- only `tiktoken.model`
 plus a custom `TikTokenTokenizer` class. This tool reproduces that class's

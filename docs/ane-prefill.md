@@ -1,9 +1,9 @@
-# NVMAI ANE prefill (experimental, opt-in)
+# Shrike ANE prefill (experimental, opt-in)
 
 Routes the prefill attention block of every full-attention layer through the
 Neural Engine via a Core ML sidecar. GDN layers, the MoE, the `.gturbo`
 format, the KV cache, the server API, and all of decode are untouched. Off by
-default; nothing changes without `NVMAI_PREFILL_ANE=on`.
+default; nothing changes without `SHRIKE_PREFILL_ANE=on`.
 
 On a real 6,103-token 4-bit prefill the ten full-attention layers cost 84.3 s
 of 133.2 s (63.3%, growing quadratically with prompt length), the ANE runs
@@ -18,10 +18,10 @@ numbers are in [Research](#research) below.
 ~/.venvs/coreml-py311/bin/python tools/export_ane_prefill.py \
     --model models/ornith-1.5_35B_A3B_4Bit --max-history 12288
 
-NVMAI_PREFILL_ANE=on .build/release/NVMAIServer --model ... # or NVMAICLI
+SHRIKE_PREFILL_ANE=on .build/release/ShrikeServer --model ... # or ShrikeCLI
 ```
 
-`NVMAI_PREFILL_ANE` accepts `off|on` and fails closed on anything else. With
+`SHRIKE_PREFILL_ANE` accepts `off|on` and fails closed on anything else. With
 `on` and no sidecar present, the runner fails at load with the export
 command. The first request per machine pays a one-time ANE specialization
 per function (~130 s across all variants), cached by the OS thereafter;
@@ -30,7 +30,7 @@ the first request per *process* pays ~0.5 s per layer-chunk of model load.
 ## Measured result (M3, 24 GB, 4-bit, 6,103-token prompt, greedy, cache off)
 
 Interleaved gpu/ane/ane/gpu, fresh server per run, one discarded warmup per
-arm (`tools/ane-probes/nvmai_ane_prefill_ab.py`):
+arm (`tools/ane-probes/shrike_ane_prefill_ab.py`):
 
 | | prefill median | runs | decode after prefill |
 | --- | ---: | --- | ---: |
@@ -112,7 +112,7 @@ prompt length*; the inexpressible share is 10%.
 **The block is fully expressible and correct.** The complete block — packed
 QKV with output gate, per-head q/k RMS norms, NeoX-subdim RoPE (64 of 256),
 GQA 16/2 SDPA against KV history, sigmoid gate, O projection — built in MIL
-(`tools/ane-probes/nvmai_ane_attention_probe.py`) matches a float32 NumPy
+(`tools/ane-probes/shrike_ane_attention_probe.py`) matches a float32 NumPy
 reference at fp16-noise level.
 
 **One real ANE defect found and routed around:** the fused
@@ -127,7 +127,7 @@ distributions.** The 8–12% rel err seen with uniform random attention at
 seq 6144 collapses to **0.0002** with realistically peaked scores (std 3.7,
 max 80).
 
-**Real-weight rehearsal** (`tools/ane-probes/nvmai_ane_realweight_rehearsal.py`):
+**Real-weight rehearsal** (`tools/ane-probes/shrike_ane_realweight_rehearsal.py`):
 the actual int4 affine weights of all 10 full-attention layers, dequantized
 and baked into per-layer Core ML programs, replaying the exact 6,103-token
 chunk sequence (4096:0 then 2007:4096 per layer), prediction wall including
@@ -143,16 +143,16 @@ marshaling:
 
 ### Running the probes
 
-`nvmai_ane_attention_probe.py` and `nvmai_ane_realweight_rehearsal.py` are
-self-contained. `nvmai_ane_prefill_ab.py` is **not**: it imports all of
-`nvmai_gate0_profile.py` plus five names from `nvmai_profile.py`
+`shrike_ane_attention_probe.py` and `shrike_ane_realweight_rehearsal.py` are
+self-contained. `shrike_ane_prefill_ab.py` is **not**: it imports all of
+`shrike_gate0_profile.py` plus five names from `shrike_profile.py`
 (`DEFAULT_API_MODEL`, `ROOT`, `benchmark_log_path`, `server_command`,
 `server_environment`), two harness modules that were not carried over.
 Restore them from the import commit before running it:
 
 ```bash
-git show <import-commit>:benchmark/nvmai_profile.py > tools/ane-probes/nvmai_profile.py
-git show <import-commit>:benchmark/nvmai_gate0_profile.py > tools/ane-probes/nvmai_gate0_profile.py
+git show <import-commit>:benchmark/nvmai_profile.py > tools/ane-probes/shrike_profile.py
+git show <import-commit>:benchmark/nvmai_gate0_profile.py > tools/ane-probes/shrike_gate0_profile.py
 ```
 
 They were left out deliberately: 24 KB of general gate-0 profiling machinery

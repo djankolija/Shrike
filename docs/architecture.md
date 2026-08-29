@@ -64,7 +64,7 @@ rewritten rather than patched.
 
 ## 4. C99 for hot loops, Swift for structure
 
-Swift owns lifetime, actors, and orchestration. Metal owns the GPU. `NVMAIKernelsC`
+Swift owns lifetime, actors, and orchestration. Metal owns the GPU. `ShrikeKernelsC`
 owns anything with a per-weight inner loop — it is deliberately small, 439 lines
 across `int4_affine_gemv.c` and `expert_io.c`.
 
@@ -76,8 +76,8 @@ a 47 ms token, and most of that is Metal API calls C would pay identically.
 ## Predictive prefetch: two different schemes, one of them disproven
 
 The core design contains a section titled *Predictive prefetch: PROVABLY CANNOT
-WORK*, while `ExpertPrefetchRing.swift`, `NVMAI_PREDICTIVE_PREFETCH`,
-`NVMAI_PREFETCH_TOP_M` and `NVMAI_PREFETCH_TRACE` all exist. This is not a
+WORK*, while `ExpertPrefetchRing.swift`, `SHRIKE_PREDICTIVE_PREFETCH`,
+`SHRIKE_PREFETCH_TOP_M` and `SHRIKE_PREFETCH_TRACE` all exist. This is not a
 contradiction — the proof and the code are about different predictors.
 
 **What the proof disproves** is prefetching layer L's experts from the *previous

@@ -1,8 +1,9 @@
-# NVMAI — working instructions
+# Shrike — working instructions
 
-This is a fork where active development happens. `origin` is `djankolija/NVMAI`; `upstream`
-is `Pummelchen/NVMAI`. Upstream's posture — run and report existing behaviour, don't edit
-source — **does not apply here**. Normal development is expected.
+This is a fork where active development happens. It was forked from `Pummelchen/NVMAI`,
+which keeps that name — the rename to Shrike is ours alone. Upstream's posture — run and
+report existing behaviour, don't edit source — **does not apply here**. Normal development
+is expected.
 
 What the project is, which models it supports and how to use it belong in
 [README.md](README.md) and `docs/`. This file is only what an agent has to do differently.
@@ -13,7 +14,7 @@ Before anything that loads a model — a server, the app, the CLI, a benchmark, 
 baseline — check:
 
 ```bash
-pgrep -fl 'NVMAIServer|NVMAIMac|NVMAIDecodeService|NVMAICLI|NVMAIPackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
+pgrep -fl 'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI|ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 ```
 
 If something is already running, **stop and say so**. Never terminate a process you did not
@@ -31,7 +32,7 @@ installed to, so **moving or renaming an installed model makes it fail to load**
 need a re-download. Re-issue the receipt in place:
 
 ```bash
-swift run -c release NVMAIRepack --verify-install --input-gturbo <model.gturbo>
+swift run -c release ShrikeRepack --verify-install --input-gturbo <model.gturbo>
 ```
 
 **Never hand-edit the receipt to match a new path.** The path binding is what detects a
@@ -86,6 +87,28 @@ check out, or build there.
 Reach it with `ssh macmini` — **never** the tailnet hostname, which is the HTTP endpoint
 only and fails ssh with a misleading `Host key verification failed`. `sudo` there needs
 `ssh -t`.
+
+### The next deploy carries the rename, and all of it lands at once
+
+The mini is still running a binary built before the rename to Shrike. That is fine —
+a build artifact does not care what its source was called, and binary and service
+config only couple at the next deploy. But at that deploy four things must change
+together, or the service comes up subtly wrong:
+
+1. **The executables.** `/Users/davor/nvmai-runtime/bin/` currently holds
+   `NVMAIServer`, `NVMAICLI`, and `NVMAIRepack`. They become `ShrikeServer`,
+   `ShrikeCLI`, `ShrikeRepack`.
+2. **The deploy directory itself** — `~/nvmai-runtime/` → `~/shrike-runtime/`. The
+   server's built-in models-directory default moved with the rename, so a server
+   looking for `~/shrike-runtime/models` finds nothing if the directory still has its
+   old name.
+3. **Every `NVMAI_*` variable in the launchd plist** → `SHRIKE_*`.
+4. **The plist's program path and label**, to match 1 and 2.
+
+**The failure mode for 3 is the dangerous one: a stale `NVMAI_*` variable does not
+error.** Nothing reads it, nothing complains, the built-in default is taken silently,
+and carefully tuned configuration disappears into a performance regression noticed
+days later with no obvious cause. Items 1 and 2 fail loudly; item 3 fails quietly.
 
 ## Where documents go
 

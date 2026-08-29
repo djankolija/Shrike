@@ -19,7 +19,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CLI="$ROOT/.build/arm64-apple-macosx/release/NVMAICLI"
+CLI="$ROOT/.build/arm64-apple-macosx/release/ShrikeCLI"
 OUT_DIR="${OUT_DIR:-$ROOT/baselines}"
 
 PROMPT="${PROMPT:-Explain what a mutex is and when you would use one.}"
@@ -37,7 +37,7 @@ fi
 
 # CLAUDE.md: never run alongside another model process, and never terminate one
 # we did not start. Refuse rather than race.
-if pgrep -f 'NVMAIServer|NVMAIMac|NVMAIDecodeService|NVMAICLI|NVMAIPackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' >/dev/null 2>&1; then
+if pgrep -f 'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI|ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' >/dev/null 2>&1; then
   echo "a model process is already running; stop it yourself, then re-run" >&2
   exit 3
 fi

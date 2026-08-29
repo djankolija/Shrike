@@ -1,4 +1,4 @@
-# NVMAI
+# Shrike
 
 An inference engine for mixture-of-experts models that are larger than the machine's
 RAM. Routed experts stay on SSD and are read per token into a bounded cache, so the
@@ -20,8 +20,8 @@ Mac app, and a repacking tool.
 swift build -c release
 ```
 
-Products land in `.build/release/`: `NVMAIServer`, `NVMAICLI`, `NVMAIRepack`,
-`NVMAIMac`, `NVMAIBench`, and `NVMAIDecodeService` (an out-of-process decode
+Products land in `.build/release/`: `ShrikeServer`, `ShrikeCLI`, `ShrikeRepack`,
+`ShrikeMac`, `ShrikeBench`, and `ShrikeDecodeService` (an out-of-process decode
 helper the Mac app spawns; not run directly).
 
 ## Install a model
@@ -30,7 +30,7 @@ Models are converted into the `.gturbo` format, which stores routed experts in a
 layout that can be read a single expert at a time.
 
 ```bash
-swift run -c release NVMAIRepack --help
+swift run -c release ShrikeRepack --help
 ```
 
 An install writes a `verified-install.json` receipt bound to the absolute path it was
@@ -38,23 +38,23 @@ installed to. Moving or renaming an installed model therefore makes it fail to l
 re-issue the receipt in place rather than editing it:
 
 ```bash
-swift run -c release NVMAIRepack --verify-install --input-gturbo <model.gturbo>
+swift run -c release ShrikeRepack --verify-install --input-gturbo <model.gturbo>
 ```
 
 ## Serve
 
 Config mode is the default. With no `--model`, the server scans a models directory
-and serves everything it finds, reading `~/.nvmai/server.json` unless given
+and serves everything it finds, reading `~/.shrike/server.json` unless given
 `--config`:
 
 ```bash
-.build/release/NVMAIServer
+.build/release/ShrikeServer
 ```
 
 To serve exactly one model and ignore any config or roster:
 
 ```bash
-.build/release/NVMAIServer --model models/<name>.gturbo
+.build/release/ShrikeServer --model models/<name>.gturbo
 ```
 
 `--help` lists the full flag set. The two worth knowing first:
@@ -92,7 +92,7 @@ add, since the parser, repacker, and inference path are shared.
 - **MTP is off by default.** Speculative decoding is experimental; measured runs
   showed no benefit, and it requires greedy decoding, native RoPE, and prompt-cache
   reuse disabled.
-- **ANE prefill is off by default.** Opt-in via `NVMAI_PREFILL_ANE=on`, worth a
+- **ANE prefill is off by default.** Opt-in via `SHRIKE_PREFILL_ANE=on`, worth a
   measured 2.31x on prefill for one qualified prompt. See
   [docs/ane-prefill.md](docs/ane-prefill.md).
 

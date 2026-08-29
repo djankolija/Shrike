@@ -241,7 +241,7 @@ Measured 2026-08-27 on the mini, `kimi-linear-48b-a3b-4bit`, `--ram-budget 6G`,
 `--max-context 32768`. Prefill is the slope between two fully uncached prompts (587 and
 2603 tokens, `cached=0` on both), which cancels fixed request overhead and decode time;
 each point cross-checks independently at 24.7 and 23.8 tok/s. Decode is the server's
-own accounting (`NVMAI_RUNNER_STATS`, 256-token decode cells) at the same standing
+own accounting (`SHRIKE_RUNNER_STATS`, 256-token decode cells) at the same standing
 config, from the expert-cache slots sweep.
 
 ⚠ Absolute rates are per-box and per-model — the mini is the IO-bound one. The **ratio**
