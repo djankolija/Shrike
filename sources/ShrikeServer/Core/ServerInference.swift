@@ -64,6 +64,24 @@ enum StructuredOutputFailureCause: String, Equatable, Sendable {
     }
 }
 
+/// Opt-in generated-token dump: set SHRIKE_GEN_DIAG=1 to log every
+/// completion's generated token IDs to stderr, so channel-marker questions
+/// (which 2000xx token preceded a text region) are answerable post-hoc.
+enum ShrikeGenDiag {
+    static let enabled =
+        ProcessInfo.processInfo.environment["SHRIKE_GEN_DIAG"] != nil
+
+    static func line(prefillTokens: Int,
+                     kvBackedTokenIDs: [Int32],
+                     boundaryTokenIDs: [Int32]) -> String {
+        let prefill = min(max(prefillTokens, 0), kvBackedTokenIDs.count)
+        let generated = Array(kvBackedTokenIDs.dropFirst(prefill))
+            + boundaryTokenIDs
+        return "Shrike gen_diag prefill=\(prefill) "
+            + "generated=\(generated.count) ids=\(generated)"
+    }
+}
+
 /// Rich diagnostic snapshot collected at structured-output failure time.
 /// Includes SHA-256 hashes of token sequences for forensic comparison.
 struct StructuredOutputFailureDiagnostics: Equatable, Sendable {
@@ -1129,6 +1147,12 @@ public actor ServerModelSession: ServerInferenceBackend {
             } catch {
                 decodingError = error
             }
+        }
+        if ShrikeGenDiag.enabled {
+            cacheDiag(ShrikeGenDiag.line(
+                prefillTokens: result.prefillTokens,
+                kvBackedTokenIDs: result.kvBackedTokenIDs,
+                boundaryTokenIDs: result.uncommittedBoundaryTokenIDs))
         }
         func structuredFailure(
             kind: StructuredOutputFailureKind,

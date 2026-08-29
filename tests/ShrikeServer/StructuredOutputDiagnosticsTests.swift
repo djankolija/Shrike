@@ -147,6 +147,22 @@ struct StructuredOutputDiagnosticsTests {
             toolResponseEndID: 103)
     }
 
+    @Test func genDiagLineListsGeneratedIDsAfterThePrefill() {
+        let line = ShrikeGenDiag.line(
+            prefillTokens: 2,
+            kvBackedTokenIDs: [10, 11, 200005, 42],
+            boundaryTokenIDs: [200008])
+        #expect(line == "Shrike gen_diag prefill=2 generated=3 ids=[200005, 42, 200008]")
+    }
+
+    @Test func genDiagLineClampsAnInvalidPrefillCount() {
+        let line = ShrikeGenDiag.line(
+            prefillTokens: 9,
+            kvBackedTokenIDs: [10, 11],
+            boundaryTokenIDs: [])
+        #expect(line == "Shrike gen_diag prefill=2 generated=0 ids=[]")
+    }
+
     private func isLowercaseSHA256(_ value: String) -> Bool {
         value.count == 64
             && value.allSatisfy { $0.isNumber || ("a"..."f").contains(String($0)) }
