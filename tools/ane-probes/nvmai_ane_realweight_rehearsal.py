@@ -12,7 +12,7 @@ Reports per-chunk latency, the 20-chunk total against the measured GPU
 reference (84.3 s on this machine, same prompt shape), and per-layer numerics
 against a float32 NumPy reference of the same math with the same real weights.
 
-  ~/.venvs/coreml-py311/bin/python benchmark/nvmai_ane_realweight_rehearsal.py
+  ~/.venvs/coreml-py311/bin/python tools/ane-probes/nvmai_ane_realweight_rehearsal.py
 """
 from __future__ import annotations
 

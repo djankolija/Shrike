@@ -20,7 +20,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CLI="$ROOT/.build/arm64-apple-macosx/release/NVMAICLI"
-OUT_DIR="${OUT_DIR:-$ROOT/benchmark/golden}"
+OUT_DIR="${OUT_DIR:-$ROOT/baselines}"
 
 PROMPT="${PROMPT:-Explain what a mutex is and when you would use one.}"
 MAX_NEW="${MAX_NEW:-96}"

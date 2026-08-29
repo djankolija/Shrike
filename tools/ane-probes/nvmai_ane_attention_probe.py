@@ -17,7 +17,7 @@ values). Numerics are sanity-checked against a float32 NumPy reference of the
 same math; exact parity with the Metal kernels' conventions is integration
 work, not probe work.
 
-  ~/.venvs/coreml-py311/bin/python benchmark/nvmai_ane_attention_probe.py
+  ~/.venvs/coreml-py311/bin/python tools/ane-probes/nvmai_ane_attention_probe.py
 """
 from __future__ import annotations
 

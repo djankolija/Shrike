@@ -14,7 +14,7 @@ Interpretation notes:
   reduction order (~1% per-layer deviation). The script prints both digests
   and the first line of each arm's continuation so plausibility is visible.
 
-  python3 benchmark/nvmai_ane_prefill_ab.py --quant 4bit --pairs 1
+  python3 tools/ane-probes/nvmai_ane_prefill_ab.py --quant 4bit --pairs 1
 """
 from __future__ import annotations
 
