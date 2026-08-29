@@ -72,6 +72,21 @@ struct StructuredOutputDiagnosticsTests {
         #expect(!reflected.contains("unknown_tool_name="))
     }
 
+    @Test func classifyCoversOversizedAndUnexpectedErrorsWithoutLeakingThem() {
+        #expect(StructuredOutputFailureCause.classify(
+            ToolCallParserError.oversized) == .oversized)
+        let unexpectedError = UnexpectedError()
+        #expect(StructuredOutputFailureCause.classify(unexpectedError) == .unexpected)
+        #expect(StructuredOutputFailureCause.unknownToolName(unexpectedError) == nil)
+        let reflected = String(reflecting: StructuredOutputFailure(
+            kind: .decoderFinish,
+            cause: .classify(unexpectedError),
+            unknownToolName: StructuredOutputFailureCause.unknownToolName(unexpectedError),
+            diagnostics: makeDiagnostics()))
+        #expect(reflected.contains("cause=unexpected"))
+        #expect(!reflected.contains("private-error-description"))
+    }
+
     @Test func allFailureKindsShareTheSameDiagnosticSuffix() {
         let diagnostics = makeDiagnostics()
         for kind in [
