@@ -9,7 +9,7 @@ at 4096 — the production prefill chunk — with the causal mask and NeoX RoPE
 tables built in-graph, so the Swift runtime feeds only the normed hidden
 chunk and the token-major fp16 K/V history.
 
-Why these choices (all measured, see docs/v4.4-decode-width-plan.md Track A):
+Why these choices (all measured, see docs/ane-prefill.md "Research"):
 - decomposed attention, never the fused SDPA op — the fused op produces
   NaN/inf on this M3's ANE from sequence length 2048;
 - fp16 weights — they amortize over 4,096-token chunks, so quantized palettes

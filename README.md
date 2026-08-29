@@ -1,128 +1,125 @@
-<img width="2456" height="930" alt="image" src="https://github.com/user-attachments/assets/737b0ff8-1f55-4456-bc32-89a532cbd716" />
-
-
 # NVMAI
 
-## Core Benefits
+An inference engine for mixture-of-experts models that are larger than the machine's
+RAM. Routed experts stay on SSD and are read per token into a bounded cache, so the
+memory ceiling is a number you declare rather than one you discover.
 
-### Project Purpose
+It serves an OpenAI-compatible HTTP API on loopback, and also ships a CLI, a native
+Mac app, and a repacking tool.
 
-- **SSD-streamed inference:** NVMAI runs large mixture-of-experts (MOE) models on
-  low-RAM Apple Silicon Macs by keeping routed experts on SSD/NVMe storage and
-  loading only the experts selected for each token.
+## Requirements
 
-### Supported LLMs
+- Apple Silicon Mac
+- macOS 26 or later
+- Swift 6.3 or later
+- Disk space for the models you install — these are 35B-class checkpoints
 
-- **Verified models:** NVMAI supports text-only Ornith 1.5 35B-A3B and Qwen
-  3.6 35B-A3B in 4-bit and 8-bit quantization.
-- **Adaptable runtime:** The shared Qwen3.5-MoE parser, repacker, and inference
-  path make other tensor-compatible Qwen-based MoE models straightforward to
-  add after validation.
+## Build
 
-### Special Features
+```bash
+swift build -c release
+```
 
-- **Bounded expert RAM:** The server accepts common 1, 2, 4, 8, or 16 GiB RAM
-  budgets to limit the resident expert cache, while model state, KV cache, and
-  runtime scratch use additional memory.
-- **Long context:** Native RoPE supports up to 262K tokens, while optional YaRN
-  extends the context to 512K or 1M tokens.
-- **Compressed KV cache:** Live attention state can use 16-bit, 8-bit, or 4-bit
-  storage independently of the installed model quantization, with 8-bit as the
-  default.
-- **Thinking mode:** Ornith and Qwen support truthful Off/On reasoning control;
-  their chat templates do not define Low, Medium, or High effort levels.
-- **MTP off by default:** Native speculative decoding remains experimental and
-  disabled because measured Ornith runs showed no speed benefit and it
-  currently requires greedy decoding, native RoPE, and prompt-cache reuse off.
+Products land in `.build/release/`: `NVMAIServer`, `NVMAICLI`, `NVMAIRepack`,
+`NVMAIMac`, `NVMAIBench`, and `NVMAIDecodeService` (an out-of-process decode
+helper the Mac app spawns; not run directly).
 
-### Performance Improvements
+## Install a model
 
-- **Tiled Top-K sampling:** Production sampling (Top-K 1–64) runs a
-  three-stage tiled GPU reduction, cutting per-token sampling cost from
-  15.5 ms to 1.4 ms with a token-for-token identical stream — the main
-  source of the v4.6 decode gain.
-- **ANE prefill (experimental, opt-in):** `NVMAI_PREFILL_ANE=on` runs
-  full-attention prefill blocks on the Neural Engine from a one-time
-  exported Core ML sidecar, roughly halving long-prompt time to first
-  token; short prompts and decode are untouched.
-- **Follow-up cache:** Exact live and multi-prefix prompt-state reuse avoids
-  repeating compatible prefill work across conversation turns.
-- **Concise mode:** An optional terse system prompt reduces generated text for
-  workloads that benefit from it; standard responses are the default because
-  they generalized more reliably in the coding/tooling qualification.
-- **Fast mode:** The `NVMAI_STRIP_CLI_PROMPT` operator lever strips coding-agent
-  boilerplate before prefill for quicker direct answers; by default the server
-  preserves tools and agent loops.
-- **Multi-model serving:** One server process serves every installed bundle,
-  selected per request by the OpenAI `model` field; one model is resident at a
-  time and swaps on demand.
+Models are converted into the `.gturbo` format, which stores routed experts in a
+layout that can be read a single expert at a time.
 
-### Usage
+```bash
+swift run -c release NVMAIRepack --help
+```
 
-- **OpenAI-compatible server:** A loopback Chat Completions and Responses API
-  includes launch scripts for starting NVMAI and connecting supported coding
-  clients.
-- **Tested coding CLIs:** The launch workflow supports Codex, Qwen Code, and
-  OpenCode against the local server.
-- **Mac app and tools:** NVMAI also provides a native Mac app, direct CLI
-  generation, streaming responses, and client-authorized function-tool calls.
+An install writes a `verified-install.json` receipt bound to the absolute path it was
+installed to. Moving or renaming an installed model therefore makes it fail to load;
+re-issue the receipt in place rather than editing it:
 
-## Ornith 1.5 35B A3B
+```bash
+swift run -c release NVMAIRepack --verify-install --input-gturbo <model.gturbo>
+```
 
-> [!IMPORTANT]
-> NVMAI now supports text-only **Ornith-1.5-35B-A3B** installation and inference
-> in 4-bit and 8-bit. It reuses the verified Qwen3.5-MoE runtime and keeps routed
-> experts SSD-streamed with the same bounded-memory design. Ornith's native MTP
-> draft is available as an optional experimental sidecar; current M3 benchmarks
-> do not show a speed benefit. Vision is not included, and Qwen 3.6 remains
-> supported. **Ornith 1.5 8-bit is the default installer, app, launcher,
-> benchmark, and real-inference test baseline; Concise and Thinking default
-> to off.**
+## Serve
 
-[![Published Ornith 1.5 benchmark overview](assets/stats.png)](https://ornith.ai/ornith_1_5.html)
+Config mode is the default. With no `--model`, the server scans a models directory
+and serves everything it finds, reading `~/.nvmai/server.json` unless given
+`--config`:
 
-Ornith is a 35B mixture-of-experts model with approximately 3B active
-parameters per token. The chart above is publisher-supplied, not an NVMAI
-measurement. See the [Ornith 1.5 announcement](https://ornith.ai/ornith_1_5.html)
-and [model card](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B).
+```bash
+.build/release/NVMAIServer
+```
 
-## Benchmarks
+To serve exactly one model and ignore any config or roster:
 
-NVMAI v4.6 median results on a base 8-core M3 MacBook Pro with 24 GB. Ornith
-generated 512 tokens of continuous plain English about an ordinary day in a
-small town; each row used one discarded warmup and three fresh-process runs.
+```bash
+.build/release/NVMAIServer --model models/<name>.gturbo
+```
 
-| Quantization | Median decode | Median wall time | Change from v4.1 |
-| --- | ---: | ---: | ---: |
-| 4-bit | **22.53 tok/s** | 25.59 s | **+37.0%** |
-| 8-bit | **9.40 tok/s** | 59.48 s | **+7.4%** |
+`--help` lists the full flag set. The two worth knowing first:
 
-Settings: temperature `0.6`, Top-P `0.95`, Top-K `20`, presence penalty `0.0`,
-native 262K context, prompt cache on, 8-bit KV, and MTP off. The gain over
-v4.1 is the tiled Top-K sampler; the sampled token stream at a fixed seed is
-unchanged. With the experimental opt-in ANE prefill enabled, a 6,103-token
-prompt additionally measured **2.31x** faster prefill (132.9 s → 57.5 s) with
-decode speed unchanged.
+- `--ram-budget <size>` — bytes the routed-expert cache may use (default `8G`).
+  This is the knob; slot count is derived from it and the model's expert stride.
+  Smaller budgets are markedly slower, because expert reads bypass the page cache
+  and have no fallback.
+- `--kv-bits <4|8|16>` — KV-cache precision, independent of model quantization
+  (default 8).
 
-[Full benchmark results](https://github.com/Pummelchen/NVMAI/wiki/Benchmarks)
+Any OpenAI-compatible client can point at the loopback endpoint. The repository no
+longer ships launcher scripts; a server has no business shipping its own launcher,
+and client configuration belongs on the client.
 
-## Core Links
+## Supported models
 
-- [Getting started](https://github.com/Pummelchen/NVMAI/wiki/Getting-Started)
-- [Features](https://github.com/Pummelchen/NVMAI/wiki/Features)
-- [Local server and launchers](https://github.com/Pummelchen/NVMAI/wiki/OpenAI-Compatible-Server)
-- [Runtime controls](https://github.com/Pummelchen/NVMAI/wiki/Runtime-Controls)
-- [Benchmarks](https://github.com/Pummelchen/NVMAI/wiki/Benchmarks)
-- [Changelog](https://github.com/Pummelchen/NVMAI/wiki/Changelog)
+Three architecture families, in 4-bit and 8-bit:
 
-## Credits
+| Family | Models | Chat dialect |
+| --- | --- | --- |
+| Qwen3.5/3.6 MoE | Ornith 1.5 35B-A3B, Qwen 3.6 35B-A3B | ChatML |
+| gpt-oss | gpt-oss 20B | Harmony |
+| Kimi Linear | Kimi Linear 48B | Kimi |
 
-NVMAI is a focused fork of
-[drumih/turbo-fieldfare](https://github.com/drumih/turbo-fieldfare), which
-provides the bounded-memory runtime, installer, CLI, Mac app, and local server.
-The Qwen 3.6 integration was created by
-[NeelM0906](https://github.com/NeelM0906) in
-[upstream PR #29](https://github.com/drumih/turbo-fieldfare/pull/29). Concise
-mode is derived from the
-[Nail-Qwen3.6-35B-A3B](https://huggingface.co/peculiar-ragdoll/Nail-Qwen3.6-35B-A3B-MLX)
-chat template by [peculiar-ragdoll](https://huggingface.co/peculiar-ragdoll).
+Other tensor-compatible Qwen-based MoE checkpoints are usually straightforward to
+add, since the parser, repacker, and inference path are shared.
+
+## Notable behaviour
+
+- **Long context.** Native RoPE to 262K tokens; optional YaRN extends to 512K or 1M.
+- **Compressed KV cache.** 16-, 8-, or 4-bit, independent of model quantization.
+- **Thinking mode.** Off/on for the Qwen-family templates. Those templates do not
+  define low/medium/high effort levels, so neither does this.
+- **MTP is off by default.** Speculative decoding is experimental; measured runs
+  showed no benefit, and it requires greedy decoding, native RoPE, and prompt-cache
+  reuse disabled.
+- **ANE prefill is off by default.** Opt-in via `NVMAI_PREFILL_ANE=on`, worth a
+  measured 2.31x on prefill for one qualified prompt. See
+  [docs/ane-prefill.md](docs/ane-prefill.md).
+
+## Performance
+
+There are no published numbers in this repository, deliberately. Throughput depends
+on the machine, the model, the quantization, and the RAM budget, and figures measured
+on someone else's hardware do not transfer.
+
+To measure your own:
+
+```bash
+tools/golden-baseline.sh --check 4
+```
+
+A baseline is valid for one (machine, build, model) triple and must be captured on
+the machine it will be checked against. It is the only check in the repository that
+exercises real inference — the unit tests never load a model.
+
+## Documentation
+
+- [docs/architecture.md](docs/architecture.md) — how the engine works and why
+- [docs/ane-prefill.md](docs/ane-prefill.md) — Neural Engine prefill, opt-in
+- [docs/multi-model-serving.md](docs/multi-model-serving.md) — serving several models
+- [docs/v5-second-architecture-objective.md](docs/v5-second-architecture-objective.md)
+- [docs/v6-dialect-normalized-cache.md](docs/v6-dialect-normalized-cache.md)
+
+## License
+
+See [LICENSE](LICENSE).

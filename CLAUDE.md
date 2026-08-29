@@ -39,14 +39,17 @@ moved or swapped directory; editing it forges the attestation instead of re-esta
 
 ## Gates that must pass before calling work done
 
-CI runs five things. All of them constrain how code gets written here:
+Five local gates. Nothing runs them for you — there is no CI — so run them yourself
+before calling work done. All of them constrain how code gets written here:
 
 1. **Release build with zero warnings.** A new warning fails the build.
-2. **`tools/lint.sh`** — two rules: no `as!` or `try!` under `sources/` without a
-   `lint:allow-force <reason>` comment directly above it, and no *new* function over 120
-   lines. Existing long ones are exempted in `tools/func-length-baseline.txt`; drop a row
-   when its function shrinks, or the gate fails on the stale exemption. Decompose as you
-   write rather than discovering this at CI.
+2. **`swiftlint lint --strict --baseline .swiftlint-baseline.json`** — three rules:
+   `force_cast`, `force_try`, and `function_body_length` (warn 120, error 400). A
+   force cast or force try needs `// swiftlint:disable:next force_cast` (or
+   `force_try`) on the line above it, with the reason stated in a comment. The 22
+   functions already over 120 lines are recorded in the baseline; anything new fails.
+   Regenerate with `swiftlint lint --write-baseline .swiftlint-baseline.json` when you
+   legitimately fix one, or the gate fails on a stale entry. Decompose as you write.
 3. **Markdown link check** — globs every `*.md` in the repo, so it binds on any document
    you add. Relative links must resolve.
 4. **`swift test --no-parallel`** — serial, always. Pass `--filter` through as needed.
@@ -61,9 +64,14 @@ model-load path. The only check that exercises real inference is:
 tools/golden-baseline.sh --check 4
 ```
 
-It is not in CI, so it will not run unless you run it. It counts as a model run, so the
-process rules above apply first. A baseline is valid for one (machine, build, model) triple;
-re-capture only for a deliberate numerics change, never to make a mismatch go away.
+It counts as a model run, so the process rules above apply first. Baselines are stored
+in `baselines/`, which starts empty: the two that shipped with the fork were captured on
+the original author's machine, and `1e06d42` established that their own scope note rules
+them out for this hardware. So `--check` has nothing to compare against until you capture
+a baseline on the machine you intend to check.
+
+A baseline is valid for one (machine, build, model) triple; re-capture only for a
+deliberate numerics change, never to make a mismatch go away.
 
 ## Do not do these to get tests running
 
@@ -78,17 +86,6 @@ check out, or build there.
 Reach it with `ssh macmini` — **never** the tailnet hostname, which is the HTTP endpoint
 only and fails ssh with a misleading `Host key verification failed`. `sudo` there needs
 `ssh -t`.
-
-## AGENTS.md is a benchmark fixture — needs deleting
-
-`benchmark/coder_cli_benchmark.py` and `benchmark/nvmai_hit_fixup_ab.py` both read
-`AGENTS.md` at runtime as their long-prompt input, so its **byte count is load-bearing**.
-Editing it silently changes the measured prompt and breaks comparison with past runs —
-`docs/v4.6-optimization-inventory.md` records that happening once already. Deleting it
-breaks both scripts outright.
-
-Its content is stale and its scope note is wrong for this fork; that is known, and
-relocating it to a frozen fixture is deferred work. Until then, leave it alone.
 
 ## Where documents go
 

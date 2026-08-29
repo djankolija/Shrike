@@ -19,8 +19,9 @@ import NVMAIKernelsC
 /// `acc += scale * Σ(q·x) + bias * Σ(x)` -- so the two paths agree on more
 /// than just the algebra. It does not agree bit-for-bit: accumulation order
 /// differs, so a layer computed here will not reproduce the GPU's last-bit
-/// rounding. See `docs/cpu-coexecution-plan.md` for what that means for the
-/// golden baseline.
+/// rounding. A golden baseline captured with any CPU expert execution is
+/// therefore valid only for that same CPU/GPU split — the split ratio becomes
+/// part of what the baseline pins.
 public enum CPUExpertFFN {
     public static let groupSize = 64
 

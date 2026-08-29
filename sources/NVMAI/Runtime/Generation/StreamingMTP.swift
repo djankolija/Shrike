@@ -141,9 +141,11 @@ struct TargetPairVerification: Sendable {
     let predictionAfterSecond: Int32
     /// Two contiguous FP16 pre-final-norm target hidden rows.
     let hiddenRows: Data
-    /// Phase attribution for the B1 investigation (docs/v4.4 Track B):
-    /// wall nanos in the 40-layer prefill-path traversal, the two-row final
-    /// head command buffer, and the two CPU argmax scans respectively.
+    /// Phase attribution: wall nanos in the 40-layer prefill-path traversal,
+    /// the two-row final head command buffer, and the two CPU argmax scans
+    /// respectively. Measured 8-bit greedy over 163 passes, the verify
+    /// backbone alone cost 2.25x a scalar token and the whole pass 2.59x,
+    /// which is why MTP stays off by default.
     let backboneNanos: UInt64
     let headNanos: UInt64
     let argmaxNanos: UInt64
