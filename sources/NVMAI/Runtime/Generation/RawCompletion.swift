@@ -174,8 +174,9 @@ public func runRawCompletion(producer: any LogitProducer,
     let prefillTokens = promptIds[cachedPromptTokens...]
     switch prefillConfig.mode {
     case .chunked where producer is any ChunkedPrefillRunner:
-        // lint:allow-force the `where` clause one line above is the guard; a
-        // producer without the conformance falls through to plain `.chunked`.
+        // The `where` clause one line above is the guard; a producer without
+        // the conformance falls through to plain `.chunked`.
+        // swiftlint:disable:next force_cast
         let chunked = producer as! any ChunkedPrefillRunner
         let mode: PrefillOutputMode = fusedGreedy ? .greedyIfAvailable : .logits
         let result = try await chunked.prefillChunked(tokens: prefillTokens,

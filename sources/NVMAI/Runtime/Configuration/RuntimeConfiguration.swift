@@ -280,9 +280,10 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     }
 
     public static var production: RuntimeConfiguration {
-        // lint:allow-force every default is a compile-time constant on the
-        // allowed lists, so the validating init cannot throw here;
-        // RuntimeConfigurationTests pins that.
+        // Every default is a compile-time constant on the allowed lists, so
+        // the validating init cannot throw here; RuntimeConfigurationTests
+        // pins that.
+        // swiftlint:disable:next force_try
         try! RuntimeConfiguration()
     }
 

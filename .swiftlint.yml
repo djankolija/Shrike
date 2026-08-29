@@ -1,0 +1,12 @@
+only_rules:
+  - force_cast
+  - force_try
+  - function_body_length
+
+function_body_length:
+  warning: 120
+  error: 400
+
+excluded:
+  - .build
+  - tests
