@@ -25,12 +25,15 @@ Numbers cited as baselines are ornith15, n=12.
 
 ## S1 — classifier writes the speculative dispatch surface
 
-- [ ] Extend the residency-classification kernel to write indirect dispatch
+- [x] Extend the residency-classification kernel to write indirect dispatch
       arguments (full grid iff `missCount == 0`, zero otherwise) and keep
       `resolvedSlots`/`resolvedGenerations` as today.
-- [ ] Unit tests for the argument encoding (CPU-readback comparison across
+      (`moe_classify_expert_residency_spec` + `MoE.SpeculativeDispatchArguments`,
+      `f662d4a`.)
+- [x] Unit tests for the argument encoding (CPU-readback comparison across
       hit/miss permutations; no model load).
-- [ ] Gates. No behavior change in any existing mode.
+- [x] Gates: build 0 warnings, lint clean, 1080 tests, TSan 0 races. No
+      behavior change in any existing mode (base kernel untouched).
 
 ## S2 — pool-addressed spec kernels, still host-waited
 
