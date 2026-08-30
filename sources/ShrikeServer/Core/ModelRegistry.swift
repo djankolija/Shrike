@@ -389,6 +389,7 @@ public actor ModelRegistry {
                 kvCachePrecision: arguments.kvCachePrecision,
                 ropeScalingMode: arguments.ropeScalingMode,
                 thinkingMode: arguments.thinkingMode,
+                reasoningEffort: arguments.reasoningEffort,
                 expertCacheSlots: arguments.expertCacheSlots,
                 expertCacheBudgetBytes: arguments.expertCacheBudgetBytes,
                 mtpModelDirectory: arguments.mtpModel.map {

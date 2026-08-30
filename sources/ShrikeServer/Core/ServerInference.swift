@@ -508,6 +508,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     private let context: MetalContext
     private let model: Model
     private let tokenizer: GFTokenizer
+    private let defaultReasoningEffort: ReasoningEffort
     private let runner: RealForwardRunner
     private let mtpDecoder: StreamingMTPDecoder?
     private let scratch: RawCompletionScratch
@@ -553,6 +554,19 @@ public actor ServerModelSession: ServerInferenceBackend {
         mtpEnabled ? .off : requested
     }
 
+    static func defaultReasoningEffort(
+        explicit: ReasoningEffort?,
+        dialect: ChatDialect,
+        thinkingMode: ModelThinkingMode
+    ) -> (effort: ReasoningEffort, warning: String?) {
+        if let explicit { return (explicit, nil) }
+        guard dialect == .harmony, thinkingMode == .off else {
+            return (.medium, nil)
+        }
+        return (.low, "Shrike reasoning_effort: harmony cannot disable thinking; "
+            + "--thinking off maps to reasoning effort low")
+    }
+
     /// lint:allow-long a sequential construction pipeline: tokenizer, Metal
     /// context, runtime config, model, optional MTP sidecar, runner, scratch.
     /// Each step consumes the last, so extracting any of them would return a
@@ -568,6 +582,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                             kvCachePrecision: KVCachePrecision = .int8,
                             ropeScalingMode: RuntimeRoPEScalingMode = .none,
                             thinkingMode: ModelThinkingMode = .off,
+                            reasoningEffort: ReasoningEffort? = nil,
                             expertCacheSlots requestedExpertCacheSlots: Int? = nil,
                             expertCacheBudgetBytes: Int? = nil,
                             mtpModelDirectory: URL? = nil,
@@ -584,6 +599,13 @@ public actor ServerModelSession: ServerInferenceBackend {
         let tokenizer = try await GFTokenizer.load(
             from: tokenizerFolder,
             thinkingMode: thinkingMode)
+        let resolvedReasoningEffort = Self.defaultReasoningEffort(
+            explicit: reasoningEffort,
+            dialect: tokenizer.dialect,
+            thinkingMode: thinkingMode)
+        if let warning = resolvedReasoningEffort.warning {
+            FileHandle.standardError.write(Data((warning + "\n").utf8))
+        }
         // A caller managing model residency supplies its own context so one
         // MTLCommandQueue and one compiled shader library survive across
         // unload/reload cycles (MetalContext.deinit documents that queue
@@ -737,6 +759,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         return ServerModelSession(context: context,
                                   model: model,
                                   tokenizer: tokenizer,
+                                  defaultReasoningEffort: resolvedReasoningEffort.effort,
                                   runner: runner,
                                   mtpDecoder: mtpDecoder,
                                   scratch: scratch,
@@ -754,6 +777,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     private init(context: MetalContext,
                  model: Model,
                  tokenizer: GFTokenizer,
+                 defaultReasoningEffort: ReasoningEffort,
                  runner: RealForwardRunner,
                  mtpDecoder: StreamingMTPDecoder?,
                  scratch: RawCompletionScratch,
@@ -768,6 +792,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.context = context
         self.model = model
         self.tokenizer = tokenizer
+        self.defaultReasoningEffort = defaultReasoningEffort
         self.modelFamily = model.config.family
         self.runner = runner
         self.mtpDecoder = mtpDecoder
@@ -840,7 +865,8 @@ public actor ServerModelSession: ServerInferenceBackend {
         let promptIDs = try encodePrompt(
             messages: effectiveMessages,
             tools: filteredTools,
-            usesToolTemplate: needsToolTemplate)
+            usesToolTemplate: needsToolTemplate,
+            reasoningEffort: defaultReasoningEffort)
         if let stats = stripStats {
             ServerLog.strip(stats: stats,
                             promptTokens: promptIDs.count)
@@ -1748,12 +1774,15 @@ public actor ServerModelSession: ServerInferenceBackend {
     private func encodePrompt(
         messages: [GFTokenizer.Message],
         tools: [GFTokenizer.FunctionDefinition],
-        usesToolTemplate: Bool
+        usesToolTemplate: Bool,
+        reasoningEffort: ReasoningEffort
     ) throws -> [Int32] {
         if usesToolTemplate {
-            return try tokenizer.encodeToolChat(messages: messages, tools: tools)
+            return try tokenizer.encodeToolChat(
+                messages: messages, tools: tools, reasoningEffort: reasoningEffort)
         }
-        let rendered = try tokenizer.applyChatTemplate(messages)
+        let rendered = try tokenizer.applyChatTemplate(
+            messages, reasoningEffort: reasoningEffort)
         return tokenizer.encode(rendered, addBOS: false)
     }
 

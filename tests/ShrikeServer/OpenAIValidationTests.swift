@@ -373,6 +373,21 @@ struct ServerArgumentTests {
         }
     }
 
+    @Test func parsesReasoningEffortLevels() throws {
+        let parsed = try ServerArguments.parse(
+            ["--model", "m", "--reasoning-effort", "low"], environment: [:])
+        #expect(parsed.reasoningEffort == .low)
+        #expect(try ServerArguments.parse(["--model", "m"], environment: [:])
+            .reasoningEffort == nil)
+        #expect(try ServerArguments.parse(
+            ["--model", "m"],
+            environment: ["SHRIKE_REASONING_EFFORT": "HIGH"]).reasoningEffort == .high)
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse(
+                ["--model", "m", "--reasoning-effort", "max"], environment: [:])
+        }
+    }
+
     @Test func parsesKVPrecisionAndYaRNContexts() throws {
         let defaults = try ServerArguments.parse([
             "--model", "model.gturbo", "--kv-bits", "16",

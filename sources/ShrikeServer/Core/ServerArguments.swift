@@ -22,6 +22,7 @@ public struct ServerArguments: Equatable, Sendable {
     public let kvCachePrecision: KVCachePrecision
     public let ropeScalingMode: RuntimeRoPEScalingMode
     public let thinkingMode: ModelThinkingMode
+    public let reasoningEffort: ReasoningEffort?
     public let expertCacheSlots: Int?
     /// Bytes the routed-expert cache may use. Slots are derived from it and the
     /// model's own expert stride, so this is the knob and the slot count is the
@@ -98,6 +99,10 @@ public struct ServerArguments: Equatable, Sendable {
                              SHRIKE_THINKING_MODE). Adaptive injects nothing
                              and lets the model decide. The model does not
                              expose low/medium/high effort levels.
+      --reasoning-effort <low|medium|high>
+                             Harmony deliberation level: low, medium or high
+                             (default medium; --thinking off on a Harmony
+                             model implies low).
       --expert-cache-slots <count>
                              Routed-expert cache slots per layer: 8, 16, 24,
                              32, 64, 96, or 128 (default 64). Environment
@@ -146,6 +151,7 @@ public struct ServerArguments: Equatable, Sendable {
         var kvCachePrecision: KVCachePrecision = .int8
         var ropeScalingMode: RuntimeRoPEScalingMode = .none
         var thinkingMode = ModelThinkingMode.resolved(environment: environment)
+        var reasoningEffort = ReasoningEffort.resolved(environment: environment)
         var expertCacheSlots: Int?
         var expertCacheBudgetBytes: Int?
         var lazyLoad = false
@@ -266,6 +272,12 @@ public struct ServerArguments: Equatable, Sendable {
                         "--thinking must be off, on or adaptive")
                 }
                 thinkingMode = parsed
+            case "--reasoning-effort":
+                guard let parsed = ReasoningEffort(rawValue: value) else {
+                    throw ServerArgumentError.invalid(
+                        "--reasoning-effort must be low, medium or high")
+                }
+                reasoningEffort = parsed
             case "--expert-cache-slots":
                 guard let parsed = Int(value),
                       RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) else {
@@ -338,6 +350,7 @@ public struct ServerArguments: Equatable, Sendable {
                                kvCachePrecision: kvCachePrecision,
                                ropeScalingMode: ropeScalingMode,
                                thinkingMode: thinkingMode,
+                               reasoningEffort: reasoningEffort,
                                expertCacheSlots: expertCacheSlots,
                                expertCacheBudgetBytes: expertCacheBudgetBytes,
                                lazyLoad: lazyLoad,
@@ -395,6 +408,7 @@ public struct ServerArguments: Equatable, Sendable {
                                kvCachePrecision: kvCachePrecision,
                                ropeScalingMode: ropeScalingMode,
                                thinkingMode: thinkingMode,
+                               reasoningEffort: reasoningEffort,
                                expertCacheSlots: expertCacheSlots,
                                expertCacheBudgetBytes: expertCacheBudgetBytes,
                                lazyLoad: lazyLoad,
