@@ -246,6 +246,31 @@ final class Attention {
                            scale: Float? = nil,
                            sinks: MTLBuffer? = nil, sinksOffset: Int = 0,
                            kvFormat: KVView? = nil) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        defer { encoder.endEncoding() }
+        try encodeFull(encoder: encoder,
+                       q: q, qOffset: qOffset, k: k, kOffset: kOffset,
+                       v: v, vOffset: vOffset, out: out, outOffset: outOffset,
+                       headDim: headDim, numQHeads: numQHeads,
+                       numKVHeads: numKVHeads, seqLen: seqLen, scale: scale,
+                       sinks: sinks, sinksOffset: sinksOffset,
+                       kvFormat: kvFormat)
+    }
+
+    func encodeFull(encoder: MTLComputeCommandEncoder,
+                           q: MTLBuffer, qOffset: Int = 0,
+                           k: MTLBuffer, kOffset: Int = 0,
+                           v: MTLBuffer, vOffset: Int = 0,
+                           out: MTLBuffer, outOffset: Int = 0,
+                           headDim: UInt32,
+                           numQHeads: UInt32,
+                           numKVHeads: UInt32,
+                           seqLen: UInt32,
+                           scale: Float? = nil,
+                           sinks: MTLBuffer? = nil, sinksOffset: Int = 0,
+                           kvFormat: KVView? = nil) throws {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
         precondition(headDim <= 512,
@@ -253,8 +278,7 @@ final class Attention {
         precondition(seqLen > 0, "full attention requires at least one KV position")
         let sc = scale ?? Self.defaultScale(headDim: headDim)
 
-
-        try encodeSplit(commandBuffer: commandBuffer,
+        try encodeSplit(encoder: encoder,
                     q: q, qOffset: qOffset, k: k, kOffset: kOffset,
                     v: v, vOffset: vOffset, out: out, outOffset: outOffset,
                     headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
@@ -365,6 +389,32 @@ final class Attention {
                              ringCapacity: UInt32 = 0,
                              sinks: MTLBuffer? = nil, sinksOffset: Int = 0,
                              kvFormat: KVView? = nil) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        defer { encoder.endEncoding() }
+        try encodeSplit(encoder: encoder,
+                        q: q, qOffset: qOffset, k: k, kOffset: kOffset,
+                        v: v, vOffset: vOffset, out: out, outOffset: outOffset,
+                        headDim: headDim, numQHeads: numQHeads,
+                        numKVHeads: numKVHeads, seqLen: seqLen, kvStart: kvStart,
+                        scale: scale, preferGQASWA: preferGQASWA,
+                        ringCapacity: ringCapacity,
+                        sinks: sinks, sinksOffset: sinksOffset,
+                        kvFormat: kvFormat)
+    }
+
+    private func encodeSplit(encoder: MTLComputeCommandEncoder,
+                             q: MTLBuffer, qOffset: Int,
+                             k: MTLBuffer, kOffset: Int,
+                             v: MTLBuffer, vOffset: Int,
+                             out: MTLBuffer, outOffset: Int,
+                             headDim: UInt32, numQHeads: UInt32, numKVHeads: UInt32,
+                             seqLen: UInt32, kvStart: UInt32, scale: Float,
+                             preferGQASWA: Bool,
+                             ringCapacity: UInt32 = 0,
+                             sinks: MTLBuffer? = nil, sinksOffset: Int = 0,
+                             kvFormat: KVView? = nil) throws {
         precondition(Int(numQHeads) <= maxQHeads,
                      "numQHeads \(numQHeads) exceeds split-KV scratch (max \(maxQHeads))")
         precondition(Int(headDim) <= maxHeadDim,
@@ -400,9 +450,7 @@ final class Attention {
                                          ringCapacity: ringCapacity)
         let tgWidth = min(Self.threadsPerGroup, Int(partialPSO.maxTotalThreadsPerThreadgroup))
 
-        guard let p1 = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
+        let p1 = encoder
         p1.setComputePipelineState(partialPSO)
         p1.setBuffer(q, offset: qOffset, index: 0)
         p1.setBuffer(k, offset: kOffset, index: 1)
@@ -431,11 +479,8 @@ final class Attention {
         let partialGroups = geometry.partialThreadgroups
         p1.dispatchThreadgroups(MTLSize(width: partialGroups, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
-        p1.endEncoding()
 
-        guard let p2 = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
+        let p2 = encoder
         let combinePSO: MTLComputePipelineState
         if sinks != nil {
             guard let sinkPSO = psoCombineSinks else {
@@ -462,7 +507,6 @@ final class Attention {
                                  Int(combinePSO.maxTotalThreadsPerThreadgroup))
         p2.dispatchThreadgroups(MTLSize(width: Int(numQHeads), height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: combineTGWidth, height: 1, depth: 1))
-        p2.endEncoding()
     }
 
     /// `1 / sqrt(head_dim)` — the classic transformer scaling. Used as the

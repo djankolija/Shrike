@@ -52,15 +52,50 @@ final class FusedQKVGEMV {
                        qRows: UInt32,
                        kvRows: UInt32,
                        n: UInt32) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encode(encoder: enc,
+               qWeights: qWeights, qWeightsOffset: qWeightsOffset,
+               qScales: qScales, qScalesOffset: qScalesOffset,
+               qBiases: qBiases, qBiasesOffset: qBiasesOffset,
+               kWeights: kWeights, kWeightsOffset: kWeightsOffset,
+               kScales: kScales, kScalesOffset: kScalesOffset,
+               kBiases: kBiases, kBiasesOffset: kBiasesOffset,
+               vWeights: vWeights, vWeightsOffset: vWeightsOffset,
+               vScales: vScales, vScalesOffset: vScalesOffset,
+               vBiases: vBiases, vBiasesOffset: vBiasesOffset,
+               x: x,
+               qOut: qOut, qOutOffset: qOutOffset,
+               kOut: kOut, kOutOffset: kOutOffset,
+               vOut: vOut, vOutOffset: vOutOffset,
+               qRows: qRows, kvRows: kvRows, n: n)
+        enc.endEncoding()
+    }
+
+    func encode(encoder enc: MTLComputeCommandEncoder,
+                       qWeights: MTLBuffer, qWeightsOffset: Int = 0,
+                       qScales: MTLBuffer, qScalesOffset: Int = 0,
+                       qBiases: MTLBuffer, qBiasesOffset: Int = 0,
+                       kWeights: MTLBuffer, kWeightsOffset: Int = 0,
+                       kScales: MTLBuffer, kScalesOffset: Int = 0,
+                       kBiases: MTLBuffer, kBiasesOffset: Int = 0,
+                       vWeights: MTLBuffer, vWeightsOffset: Int = 0,
+                       vScales: MTLBuffer, vScalesOffset: Int = 0,
+                       vBiases: MTLBuffer, vBiasesOffset: Int = 0,
+                       x: MTLBuffer,
+                       qOut: MTLBuffer, qOutOffset: Int = 0,
+                       kOut: MTLBuffer, kOutOffset: Int = 0,
+                       vOut: MTLBuffer, vOutOffset: Int = 0,
+                       qRows: UInt32,
+                       kvRows: UInt32,
+                       n: UInt32) {
         precondition(n % UInt32(Quantization.groupSize) == 0,
                      "N must be a multiple of \(Quantization.groupSize)")
         precondition(qWeightsOffset % 2 == 0 &&
                      kWeightsOffset % 2 == 0 &&
                      vWeightsOffset % 2 == 0,
                      "FusedQKVGEMV needs 2-aligned weights offsets")
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
         let shape = Shape(qRows: qRows, kvRows: kvRows, n: n)
         enc.setComputePipelineState(specializedPSOs[shape] ?? pso)
         enc.setBuffer(qWeights, offset: qWeightsOffset, index: 0)
@@ -89,6 +124,5 @@ final class FusedQKVGEMV {
                                  threadsPerThreadgroup: MTLSize(width: 256,
                                                                  height: 1,
                                                                  depth: 1))
-        enc.endEncoding()
     }
 }

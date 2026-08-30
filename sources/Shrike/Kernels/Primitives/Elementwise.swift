@@ -32,10 +32,21 @@ final class Elementwise {
                           q: MTLBuffer, qOffset: Int = 0,
                           gate: MTLBuffer, gateOffset: Int = 0,
                           heads: Int, dim: Int, rows: Int = 1) throws {
-        let rowElems = heads * dim
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
+        encodeSplitQGate(encoder: encoder, packed: packed, packedOffset: packedOffset,
+                         q: q, qOffset: qOffset, gate: gate, gateOffset: gateOffset,
+                         heads: heads, dim: dim, rows: rows)
+        encoder.endEncoding()
+    }
+
+    func encodeSplitQGate(encoder: MTLComputeCommandEncoder,
+                          packed: MTLBuffer, packedOffset: Int = 0,
+                          q: MTLBuffer, qOffset: Int = 0,
+                          gate: MTLBuffer, gateOffset: Int = 0,
+                          heads: Int, dim: Int, rows: Int = 1) {
+        let rowElems = heads * dim
         encoder.setComputePipelineState(splitQGatePSO)
         var headCount = UInt32(heads)
         var headDim = UInt32(dim)
@@ -47,7 +58,6 @@ final class Elementwise {
             encoder.setBuffer(gate, offset: gateOffset + row * rowElems * 2, index: 2)
             dispatch(encoder, pipeline: splitQGatePSO, threads: rowElems)
         }
-        encoder.endEncoding()
     }
 
     /// out[i] *= sigmoid(gate[i])
@@ -58,13 +68,21 @@ final class Elementwise {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
+        encodeSigmoidGateMul(encoder: encoder, out: out, outOffset: outOffset,
+                             gate: gate, gateOffset: gateOffset, count: count)
+        encoder.endEncoding()
+    }
+
+    func encodeSigmoidGateMul(encoder: MTLComputeCommandEncoder,
+                              out: MTLBuffer, outOffset: Int = 0,
+                              gate: MTLBuffer, gateOffset: Int = 0,
+                              count: Int) {
         encoder.setComputePipelineState(sigmoidGateMulPSO)
         encoder.setBuffer(out, offset: outOffset, index: 0)
         encoder.setBuffer(gate, offset: gateOffset, index: 1)
         var elementCount = UInt32(count)
         encoder.setBytes(&elementCount, length: MemoryLayout<UInt32>.size, index: 2)
         dispatch(encoder, pipeline: sigmoidGateMulPSO, threads: count)
-        encoder.endEncoding()
     }
 
     /// y[i] *= sigmoid(gate[0])
@@ -112,13 +130,21 @@ final class Elementwise {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
+        encodeResidualAdd(encoder: encoder, hidden: hidden, hiddenOffset: hiddenOffset,
+                          delta: delta, deltaOffset: deltaOffset, count: count)
+        encoder.endEncoding()
+    }
+
+    func encodeResidualAdd(encoder: MTLComputeCommandEncoder,
+                           hidden: MTLBuffer, hiddenOffset: Int = 0,
+                           delta: MTLBuffer, deltaOffset: Int = 0,
+                           count: Int) {
         encoder.setComputePipelineState(residualAddPSO)
         encoder.setBuffer(hidden, offset: hiddenOffset, index: 0)
         encoder.setBuffer(delta, offset: deltaOffset, index: 1)
         var elementCount = UInt32(count)
         encoder.setBytes(&elementCount, length: MemoryLayout<UInt32>.size, index: 2)
         dispatch(encoder, pipeline: residualAddPSO, threads: count)
-        encoder.endEncoding()
     }
 
     func encodeConcatRows(commandBuffer: MTLCommandBuffer,

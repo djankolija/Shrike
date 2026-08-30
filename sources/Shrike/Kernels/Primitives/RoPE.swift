@@ -54,18 +54,33 @@ final class RoPE {
                           rotaryDim: UInt32,
                           numTokens: UInt32 = 1,
                           theta: Float) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encodeNeoxSubdim(encoder: encoder, data: data, dataOffset: dataOffset,
+                         position: position, headDim: headDim, numHeads: numHeads,
+                         rotaryDim: rotaryDim, numTokens: numTokens, theta: theta)
+        encoder.endEncoding()
+    }
+
+    func encodeNeoxSubdim(encoder: MTLComputeCommandEncoder,
+                          data: MTLBuffer,
+                          dataOffset: Int = 0,
+                          position: UInt32,
+                          headDim: UInt32,
+                          numHeads: UInt32,
+                          rotaryDim: UInt32,
+                          numTokens: UInt32 = 1,
+                          theta: Float) {
         precondition(rotaryDim.isMultiple(of: 2), "rotary_dim must be even")
         precondition(rotaryDim <= headDim, "rotary_dim must not exceed head_dim")
         if let frequencies = yarnInverseFrequencies {
-            try encodeYaRNNeoxSubdim(commandBuffer: commandBuffer, data: data,
-                                     dataOffset: dataOffset, position: position,
-                                     headDim: headDim, numHeads: numHeads,
-                                     rotaryDim: rotaryDim, numTokens: numTokens,
-                                     frequencies: frequencies)
+            encodeYaRNNeoxSubdim(encoder: encoder, data: data,
+                                 dataOffset: dataOffset, position: position,
+                                 headDim: headDim, numHeads: numHeads,
+                                 rotaryDim: rotaryDim, numTokens: numTokens,
+                                 frequencies: frequencies)
             return
-        }
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
         }
         encoder.setComputePipelineState(neoxSubdim)
         encoder.setBuffer(data, offset: dataOffset, index: 0)
@@ -84,10 +99,9 @@ final class RoPE {
                  pairs: Int(rotaryDim) / 2,
                  heads: Int(numHeads),
                  tokens: Int(numTokens))
-        encoder.endEncoding()
     }
 
-    private func encodeYaRNNeoxSubdim(commandBuffer: MTLCommandBuffer,
+    private func encodeYaRNNeoxSubdim(encoder: MTLComputeCommandEncoder,
                                       data: MTLBuffer,
                                       dataOffset: Int,
                                       position: UInt32,
@@ -95,10 +109,7 @@ final class RoPE {
                                       numHeads: UInt32,
                                       rotaryDim: UInt32,
                                       numTokens: UInt32,
-                                      frequencies: MTLBuffer) throws {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
+                                      frequencies: MTLBuffer) {
         encoder.setComputePipelineState(yarnNeoxSubdim)
         encoder.setBuffer(data, offset: dataOffset, index: 0)
         encoder.setBuffer(frequencies, offset: 0, index: 1)
@@ -112,7 +123,6 @@ final class RoPE {
         dispatch(encoder: encoder, pipeline: yarnNeoxSubdim,
                  pairs: Int(rotaryDim) / 2, heads: Int(numHeads),
                  tokens: Int(numTokens))
-        encoder.endEncoding()
     }
 
     func encodeDefaultNeox(commandBuffer: MTLCommandBuffer,

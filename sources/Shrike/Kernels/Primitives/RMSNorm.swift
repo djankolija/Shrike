@@ -57,7 +57,22 @@ final class RMSNorm {
                             out: MTLBuffer, outOffset: Int = 0,
                             d: UInt32,
                             eps: Float) throws {
-        try encodeWeighted(commandBuffer: commandBuffer,
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encodeBF16W(encoder: enc, x: x, xOffset: xOffset,
+                    weight: weight, weightOffset: weightOffset,
+                    out: out, outOffset: outOffset, d: d, eps: eps)
+        enc.endEncoding()
+    }
+
+    func encodeBF16W(encoder: MTLComputeCommandEncoder,
+                            x: MTLBuffer, xOffset: Int = 0,
+                            weight: MTLBuffer, weightOffset: Int = 0,
+                            out: MTLBuffer, outOffset: Int = 0,
+                            d: UInt32,
+                            eps: Float) {
+        encodeWeighted(encoder: encoder,
                        pso: d == 2816 ? psoBF16D2816 : psoBF16,
                        x: x, xOffset: xOffset,
                        weight: weight, weightOffset: weightOffset,
@@ -99,6 +114,19 @@ final class RMSNorm {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
+        encodeBF16WPerHead(encoder: enc, x: x, xOffset: xOffset,
+                           weight: weight, weightOffset: weightOffset,
+                           out: out, outOffset: outOffset,
+                           headDim: headDim, numHeads: numHeads, eps: eps)
+        enc.endEncoding()
+    }
+
+    func encodeBF16WPerHead(encoder enc: MTLComputeCommandEncoder,
+                                   x: MTLBuffer, xOffset: Int = 0,
+                                   weight: MTLBuffer, weightOffset: Int = 0,
+                                   out: MTLBuffer, outOffset: Int = 0,
+                                   headDim: UInt32, numHeads: Int,
+                                   eps: Float) {
         let pso = perHeadPipeline(headDim: headDim,
                                   base: psoBF16PerHead,
                                   p256: psoBF16PerHead256,
@@ -114,7 +142,6 @@ final class RMSNorm {
         let w = min(Int(pso.maxTotalThreadsPerThreadgroup), 256)
         enc.dispatchThreadgroups(MTLSize(width: numHeads, height: 1, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
-        enc.endEncoding()
     }
 
     /// No-scale RMSNorm over `numHeads` contiguous heads (v_norm), one dispatch.
@@ -171,16 +198,13 @@ final class RMSNorm {
         enc.endEncoding()
     }
 
-    private func encodeWeighted(commandBuffer: MTLCommandBuffer,
+    private func encodeWeighted(encoder enc: MTLComputeCommandEncoder,
                                 pso: MTLComputePipelineState,
                                 x: MTLBuffer, xOffset: Int,
                                 weight: MTLBuffer, weightOffset: Int,
                                 out: MTLBuffer, outOffset: Int,
                                 d: UInt32,
-                                eps: Float) throws {
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
+                                eps: Float) {
         enc.setComputePipelineState(pso)
         enc.setBuffer(x,      offset: xOffset,      index: 0)
         enc.setBuffer(weight, offset: weightOffset, index: 1)
@@ -190,7 +214,6 @@ final class RMSNorm {
         enc.setBytes(&dVar,   length: MemoryLayout<UInt32>.size, index: 3)
         enc.setBytes(&epsVar, length: MemoryLayout<Float>.size,  index: 4)
         dispatchOneRow(enc: enc, pso: pso)
-        enc.endEncoding()
     }
 
     private func dispatchOneRow(enc: MTLComputeCommandEncoder,

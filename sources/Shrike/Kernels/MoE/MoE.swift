@@ -197,6 +197,37 @@ final class MoE {
                                    numExperts: UInt32,
                                    d: UInt32,
                                    topK: UInt32) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encodeRouter(encoder: encoder,
+                     weights: weights, weightsOffset: weightsOffset,
+                     scales: scales, scalesOffset: scalesOffset,
+                     biases: biases, biasesOffset: biasesOffset,
+                     hidden: hidden,
+                     effectiveScale: effectiveScale,
+                     effectiveScaleOffset: effectiveScaleOffset,
+                     perExpertScale: perExpertScale,
+                     perExpertScaleOffset: perExpertScaleOffset,
+                     logitBias: logitBias, logitBiasOffset: logitBiasOffset,
+                     outIndices: outIndices, outWeights: outWeights,
+                     numExperts: numExperts, d: d, topK: topK)
+        encoder.endEncoding()
+    }
+
+    func encodeRouter(encoder: MTLComputeCommandEncoder,
+                                   weights: MTLBuffer, weightsOffset: Int = 0,
+                                   scales: MTLBuffer, scalesOffset: Int = 0,
+                                   biases: MTLBuffer, biasesOffset: Int = 0,
+                                   hidden: MTLBuffer,
+                                   effectiveScale: MTLBuffer, effectiveScaleOffset: Int = 0,
+                                   perExpertScale: MTLBuffer, perExpertScaleOffset: Int = 0,
+                                   logitBias: MTLBuffer, logitBiasOffset: Int = 0,
+                                   outIndices: MTLBuffer,
+                                   outWeights: MTLBuffer,
+                                   numExperts: UInt32,
+                                   d: UInt32,
+                                   topK: UInt32) {
         precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
         precondition(numExperts <= 256)
         precondition((1...UInt32(Self.maxStreamedExperts)).contains(topK))
@@ -220,9 +251,6 @@ final class MoE {
         let useSpecialized = numExperts == realDecodeNumExperts
             && d == realDecodeD
             && topK == realDecodeTopK
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
         encoder.setComputePipelineState(
             useSpecialized ? routerGemvSpecializedPSO : routerGemvPSO)
         encoder.setBuffer(weights, offset: weightsOffset, index: 0)
@@ -236,11 +264,8 @@ final class MoE {
         encoder.dispatchThreadgroups(
             MTLSize(width: (Int(numExperts) + 3) / 4, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
-        encoder.endEncoding()
 
-        guard let selector = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
+        let selector = encoder
         selector.setComputePipelineState(
             useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO)
         selector.setBuffer(routerLogits, offset: 0, index: 0)
@@ -257,7 +282,6 @@ final class MoE {
         selector.dispatchThreadgroups(
             MTLSize(width: 1, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-        selector.endEncoding()
     }
 
     func makeRoutedArgumentBuffer(routedBlobs: [MTLBuffer],
@@ -288,12 +312,37 @@ final class MoE {
         topK: UInt32,
         numExperts: UInt32
     ) throws {
-        precondition(topK <= UInt32(Self.maxStreamedExperts))
-        var topKValue = topK
-        var expertCount = numExperts
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
+        encodeResidencyClassification(
+            encoder: encoder, topKIndices: topKIndices,
+            residencyTable: residencyTable,
+            hitCount: hitCount, hitPositions: hitPositions,
+            missCount: missCount, missPositions: missPositions,
+            missExperts: missExperts, resolvedSlots: resolvedSlots,
+            resolvedGenerations: resolvedGenerations,
+            topK: topK, numExperts: numExperts)
+        encoder.endEncoding()
+    }
+
+    func encodeResidencyClassification(
+        encoder: MTLComputeCommandEncoder,
+        topKIndices: MTLBuffer,
+        residencyTable: MTLBuffer,
+        hitCount: MTLBuffer,
+        hitPositions: MTLBuffer,
+        missCount: MTLBuffer,
+        missPositions: MTLBuffer,
+        missExperts: MTLBuffer,
+        resolvedSlots: MTLBuffer,
+        resolvedGenerations: MTLBuffer,
+        topK: UInt32,
+        numExperts: UInt32
+    ) {
+        precondition(topK <= UInt32(Self.maxStreamedExperts))
+        var topKValue = topK
+        var expertCount = numExperts
         encoder.setComputePipelineState(residencyClassifyPSO)
         encoder.setBuffer(topKIndices, offset: 0, index: 0)
         encoder.setBuffer(residencyTable, offset: 0, index: 1)
@@ -309,7 +358,6 @@ final class MoE {
         encoder.dispatchThreadgroups(
             MTLSize(width: 1, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-        encoder.endEncoding()
     }
 
     /// An argument buffer with no views encoded yet, for callers that

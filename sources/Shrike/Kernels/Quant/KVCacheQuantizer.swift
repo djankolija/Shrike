@@ -17,15 +17,29 @@ final class KVCacheQuantizer {
                 destination: KVView,
                 tokenCount: Int,
                 elementCount: Int) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encode(encoder: encoder, source: source, sourceOffset: sourceOffset,
+               sourceTokenStrideElements: sourceTokenStrideElements,
+               destination: destination, tokenCount: tokenCount,
+               elementCount: elementCount)
+        encoder.endEncoding()
+    }
+
+    func encode(encoder: MTLComputeCommandEncoder,
+                source: MTLBuffer,
+                sourceOffset: Int = 0,
+                sourceTokenStrideElements: Int,
+                destination: KVView,
+                tokenCount: Int,
+                elementCount: Int) {
         precondition(destination.precision.isQuantized,
                      "KV quantizer requires 4-bit or 8-bit destination")
         precondition(tokenCount > 0, "tokenCount must be positive")
         precondition(elementCount > 0, "elementCount must be positive")
         precondition(sourceTokenStrideElements >= elementCount,
                      "source token stride is too small")
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(source, offset: sourceOffset, index: 0)
         encoder.setBuffer(destination.buffer, offset: destination.offset, index: 1)
@@ -46,6 +60,5 @@ final class KVCacheQuantizer {
             MTLSize(width: groups, height: tokenCount, depth: 1),
             threadsPerThreadgroup: MTLSize(width: KVCacheManager.quantizationGroupSize,
                                            height: 1, depth: 1))
-        encoder.endEncoding()
     }
 }

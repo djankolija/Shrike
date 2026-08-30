@@ -2053,18 +2053,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                       softmaxCB: &softmaxCB,
                                       layer: L, position: position,
                                       isLinear: isLinear, rmsEps: eps)
-            try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
-                                           hidden: hidden,
-                                           delta: oOut,
-                                           count: cfg.hiddenSize)
-            try rms.encodeBF16W(commandBuffer: tailCB,
-                            x: hidden,
-                            weight: postAttn.buffer,
-                            weightOffset: Int(postAttn.offset),
-                            out: routedX,
-                            d: D, eps: eps)
-
             if isDense {
+                try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
+                                               hidden: hidden,
+                                               delta: oOut,
+                                               count: cfg.hiddenSize)
+                try rms.encodeBF16W(commandBuffer: tailCB,
+                                x: hidden,
+                                weight: postAttn.buffer,
+                                weightOffset: Int(postAttn.offset),
+                                out: routedX,
+                                d: D, eps: eps)
                 // Leading dense-MLP layer (Kimi layer 0): no router, no
                 // routed experts — the shared-expert kernels run the layer's
                 // own SwiGLU and the residual folds here.
@@ -2101,53 +2100,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 throw ModelError.internalInconsistency(
                     detail: "layer \(L) has no router view outside the dense prefix")
             }
-            try moe.encodeRouter(commandBuffer: tailCB,
-                weights: routerW.buffer, weightsOffset: Int(routerW.offset),
-                scales:  routerW.buffer, scalesOffset:  Int(routerW.scaleOffset),
-                biases:  routerW.buffer, biasesOffset:  Int(routerW.biasOffset),
-                hidden: routedX,
-                effectiveScale: effectiveScaleBuffers[L],
-                perExpertScale: perExpertScale.buffer,
-                perExpertScaleOffset: perExpertScale.offset,
-                logitBias: routerLogitBias[L].buffer,
-                logitBiasOffset: routerLogitBias[L].offset,
-                outIndices: outIndices, outWeights: outWeights,
-                numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
-            if let nextRouterW {
-                // Probe only: score the next router against the current
-                // post-attention normalized residual. The exact router above
-                // remains authoritative; this result is emitted solely to
-                // SHRIKE_PREFETCH_TRACE for predictor qualification.
-                try moe.encodeRouter(commandBuffer: tailCB,
-                    weights: nextRouterW.buffer, weightsOffset: Int(nextRouterW.offset),
-                    scales: nextRouterW.buffer, scalesOffset: Int(nextRouterW.scaleOffset),
-                    biases: nextRouterW.buffer, biasesOffset: Int(nextRouterW.biasOffset),
-                    hidden: routedX,
-                    effectiveScale: effectiveScaleBuffers[L + 1],
-                    perExpertScale: perExpertScale.buffer,
-                    perExpertScaleOffset: perExpertScale.offset,
-                    logitBias: routerLogitBias[L + 1].buffer,
-                    logitBiasOffset: routerLogitBias[L + 1].offset,
-                    outIndices: prefetchPredictionIndices,
-                    outWeights: prefetchPredictionWeights,
-                    numExperts: UInt32(cfg.numExperts), d: D,
-                    topK: UInt32(cfg.topKExperts))
-            }
-            if let residencyResources {
-                try moe.encodeResidencyClassification(
-                    commandBuffer: tailCB,
-                    topKIndices: outIndices,
-                    residencyTable: residencyResources.table,
-                    hitCount: residencyHitCount,
-                    hitPositions: residencyHitPositions,
-                    missCount: residencyMissCount,
-                    missPositions: residencyMissPositions,
-                    missExperts: residencyMissExperts,
-                    resolvedSlots: residencyResolvedSlots,
-                    resolvedGenerations: residencyResolvedGenerations,
-                    topK: UInt32(cfg.topKExperts),
-                    numExperts: UInt32(cfg.numExperts))
-            }
+            try encodeDecodeTailStage(
+                tailCB: tailCB, layer: L, routerW: routerW,
+                nextRouterW: nextRouterW, postAttn: postAttn,
+                perExpertScale: perExpertScale,
+                residencyTable: residencyResources?.table,
+                d: D, eps: eps)
             attnCB.commit()
             if let attentionCB = softmaxCB {
                 attentionCB.commit()
@@ -2476,8 +2434,85 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// [query ; gate] q_proj split per head, weighted per-head q/k norms
     /// (no V norm), NeoX sub-dim RoPE, full attention with the configured
     /// scale, sigmoid output gate, then o_proj into `oOut`.
+    /// Tail stage of one routed decode layer: residual fold, post-attention
+    /// norm, router (+ next-layer probe), and residency classification, in
+    /// one serial encoder.
+    private func encodeDecodeTailStage(
+        tailCB: MTLCommandBuffer,
+        layer L: Int,
+        routerW: TensorView,
+        nextRouterW: TensorView?,
+        postAttn: TensorView,
+        perExpertScale: (buffer: any MTLBuffer, offset: Int),
+        residencyTable: (any MTLBuffer)?,
+        d D: UInt32,
+        eps: Float
+    ) throws {
+        guard let tailEncoder = tailCB.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        elementwise!.encodeResidualAdd(encoder: tailEncoder,
+                                       hidden: hidden,
+                                       delta: oOut,
+                                       count: cfg.hiddenSize)
+        rms.encodeBF16W(encoder: tailEncoder,
+                        x: hidden,
+                        weight: postAttn.buffer,
+                        weightOffset: Int(postAttn.offset),
+                        out: routedX,
+                        d: D, eps: eps)
+        moe.encodeRouter(encoder: tailEncoder,
+            weights: routerW.buffer, weightsOffset: Int(routerW.offset),
+            scales:  routerW.buffer, scalesOffset:  Int(routerW.scaleOffset),
+            biases:  routerW.buffer, biasesOffset:  Int(routerW.biasOffset),
+            hidden: routedX,
+            effectiveScale: effectiveScaleBuffers[L],
+            perExpertScale: perExpertScale.buffer,
+            perExpertScaleOffset: perExpertScale.offset,
+            logitBias: routerLogitBias[L].buffer,
+            logitBiasOffset: routerLogitBias[L].offset,
+            outIndices: outIndices, outWeights: outWeights,
+            numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
+        if let nextRouterW {
+            // Probe only: score the next router against the current
+            // post-attention normalized residual. The exact router above
+            // remains authoritative; this result is emitted solely to
+            // SHRIKE_PREFETCH_TRACE for predictor qualification.
+            moe.encodeRouter(encoder: tailEncoder,
+                weights: nextRouterW.buffer, weightsOffset: Int(nextRouterW.offset),
+                scales: nextRouterW.buffer, scalesOffset: Int(nextRouterW.scaleOffset),
+                biases: nextRouterW.buffer, biasesOffset: Int(nextRouterW.biasOffset),
+                hidden: routedX,
+                effectiveScale: effectiveScaleBuffers[L + 1],
+                perExpertScale: perExpertScale.buffer,
+                perExpertScaleOffset: perExpertScale.offset,
+                logitBias: routerLogitBias[L + 1].buffer,
+                logitBiasOffset: routerLogitBias[L + 1].offset,
+                outIndices: prefetchPredictionIndices,
+                outWeights: prefetchPredictionWeights,
+                numExperts: UInt32(cfg.numExperts), d: D,
+                topK: UInt32(cfg.topKExperts))
+        }
+        if let residencyTable {
+            moe.encodeResidencyClassification(
+                encoder: tailEncoder,
+                topKIndices: outIndices,
+                residencyTable: residencyTable,
+                hitCount: residencyHitCount,
+                hitPositions: residencyHitPositions,
+                missCount: residencyMissCount,
+                missPositions: residencyMissPositions,
+                missExperts: residencyMissExperts,
+                resolvedSlots: residencyResolvedSlots,
+                resolvedGenerations: residencyResolvedGenerations,
+                topK: UInt32(cfg.topKExperts),
+                numExperts: UInt32(cfg.numExperts))
+        }
+        tailEncoder.endEncoding()
+    }
+
     private func encodeGatedFullQKVProjection(
-        _ cb: MTLCommandBuffer,
+        encoder: MTLComputeCommandEncoder,
         layer: Int,
         qOutput: MTLBuffer,
         kOutput: (buffer: MTLBuffer, offset: Int),
@@ -2490,7 +2525,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let v = try model.vProj(layer: layer)
         let hiddenDimension = UInt32(cfg.hiddenSize)
         if model.attentionWeightBits == 4 {
-            try fusedQKVGEMV.encode(commandBuffer: cb,
+            fusedQKVGEMV.encode(encoder: encoder,
                             qWeights: q.buffer, qWeightsOffset: Int(q.offset),
                             qScales: q.buffer, qScalesOffset: Int(q.scaleOffset),
                             qBiases: q.buffer, qBiasesOffset: Int(q.biasOffset),
@@ -2508,14 +2543,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             kvRows: kvDimension,
                             n: hiddenDimension)
         } else {
-            try encodePrimaryGEMV(commandBuffer: cb, projection: q,
+            encodePrimaryGEMV(encoder: encoder, projection: q,
                               x: normed, y: qOutput,
                               m: 2 * qDimension, n: hiddenDimension)
-            try encodePrimaryGEMV(commandBuffer: cb, projection: k,
+            encodePrimaryGEMV(encoder: encoder, projection: k,
                               x: normed, y: kOutput.buffer,
                               yOffset: kOutput.offset,
                               m: kvDimension, n: hiddenDimension)
-            try encodePrimaryGEMV(commandBuffer: cb, projection: v,
+            encodePrimaryGEMV(encoder: encoder, projection: v,
                               x: normed, y: vOutput.buffer,
                               yOffset: vOutput.offset,
                               m: kvDimension, n: hiddenDimension)
@@ -2550,17 +2585,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let kNormW = try model.kNorm(layer: L)
         let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
 
+        // Safe to share one encoder: a serial compute encoder guarantees each
+        // dispatch sees the previous dispatch's writes.
+        guard let encoder = cb.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        defer { encoder.endEncoding() }
         try encodeGatedFullQKVProjection(
-            cb, layer: L, qOutput: qPackedScratch,
+            encoder: encoder, layer: L, qOutput: qPackedScratch,
             kOutput: kWrite, vOutput: vWrite,
             qDimension: qDim, kvDimension: kvDim)
-        try elementwise.encodeSplitQGate(commandBuffer: cb,
+        elementwise.encodeSplitQGate(encoder: encoder,
                                      packed: qPackedScratch,
                                      q: qScratch,
                                      gate: attnGateScratch,
                                      heads: cfg.numHeads,
                                      dim: headDim)
-        try rms.encodeBF16WPerHead(commandBuffer: cb,
+        rms.encodeBF16WPerHead(encoder: encoder,
                                x: qScratch,
                                weight: qNormW.buffer,
                                weightOffset: Int(qNormW.offset),
@@ -2568,7 +2609,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                headDim: UInt32(headDim),
                                numHeads: cfg.numHeads,
                                eps: eps)
-        try rms.encodeBF16WPerHead(commandBuffer: cb,
+        rms.encodeBF16WPerHead(encoder: encoder,
                                x: kWrite.buffer, xOffset: kWrite.offset,
                                weight: kNormW.buffer,
                                weightOffset: Int(kNormW.offset),
@@ -2576,14 +2617,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                headDim: UInt32(headDim),
                                numHeads: numKV,
                                eps: eps)
-        try rope.encodeNeoxSubdim(commandBuffer: cb,
+        rope.encodeNeoxSubdim(encoder: encoder,
                               data: qScratch,
                               position: UInt32(position),
                               headDim: UInt32(headDim),
                               numHeads: UInt32(cfg.numHeads),
                               rotaryDim: rotaryDim,
                               theta: Float(cfg.fullRopeTheta))
-        try rope.encodeNeoxSubdim(commandBuffer: cb,
+        rope.encodeNeoxSubdim(encoder: encoder,
                               data: kWrite.buffer,
                               dataOffset: kWrite.offset,
                               position: UInt32(position),
@@ -2592,13 +2633,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                               rotaryDim: rotaryDim,
                               theta: Float(cfg.fullRopeTheta))
         if quantizedKV {
-            try encodeQuantizedKV(commandBuffer: cb, kv: kv, layer: L,
+            try encodeQuantizedKV(encoder: encoder, kv: kv, layer: L,
                                   position: position, keySource: kStage,
                                   valueSource: vStage, elementCount: Int(kvDim))
         }
         let keyView = kv.keyView(layer: L, validTokenCount: Int(seqLen))
         let valueView = kv.valueView(layer: L, validTokenCount: Int(seqLen))
-        try attention.encodeFull(commandBuffer: cb,
+        try attention.encodeFull(encoder: encoder,
                              q: qScratch,
                              k: keyView.buffer, kOffset: keyView.offset,
                              v: valueView.buffer, vOffset: valueView.offset,
@@ -2609,11 +2650,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                              seqLen: seqLen,
                              scale: Float(cfg.attentionScale),
                              kvFormat: keyView)
-        try elementwise.encodeSigmoidGateMul(commandBuffer: cb,
+        elementwise.encodeSigmoidGateMul(encoder: encoder,
                                          out: attnOut,
                                          gate: attnGateScratch,
                                          count: Int(qDim))
-        try encodePrimaryGEMV(commandBuffer: cb,
+        encodePrimaryGEMV(encoder: encoder,
                     weights: o.buffer, weightsOffset: Int(o.offset),
                     scales: o.buffer, scalesOffset: Int(o.scaleOffset),
                     biases: o.buffer, biasesOffset: Int(o.biasOffset),
@@ -3119,19 +3160,35 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                    keySource: MTLBuffer,
                                    valueSource: MTLBuffer,
                                    elementCount: Int) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        defer { encoder.endEncoding() }
+        try encodeQuantizedKV(encoder: encoder, kv: kv, layer: layer,
+                              position: position, keySource: keySource,
+                              valueSource: valueSource, elementCount: elementCount)
+    }
+
+    private func encodeQuantizedKV(encoder: MTLComputeCommandEncoder,
+                                   kv: KVCacheManager,
+                                   layer: Int,
+                                   position: Int,
+                                   keySource: MTLBuffer,
+                                   valueSource: MTLBuffer,
+                                   elementCount: Int) throws {
         guard let kvQuantizer else {
             throw ModelError.internalInconsistency(
                 detail: "quantized KV cache has no quantizer")
         }
-        try kvQuantizer.encode(
-            commandBuffer: commandBuffer,
+        kvQuantizer.encode(
+            encoder: encoder,
             source: keySource,
             sourceTokenStrideElements: elementCount,
             destination: kv.keyRangeView(layer: layer, start: position, count: 1),
             tokenCount: 1,
             elementCount: elementCount)
-        try kvQuantizer.encode(
-            commandBuffer: commandBuffer,
+        kvQuantizer.encode(
+            encoder: encoder,
             source: valueSource,
             sourceTokenStrideElements: elementCount,
             destination: kv.valueRangeView(layer: layer, start: position, count: 1),
