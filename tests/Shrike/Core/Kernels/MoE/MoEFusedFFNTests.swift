@@ -294,10 +294,11 @@ import ShrikeValidationSupport
         fullCommand.waitUntilCompleted()
         #expect(fullCommand.error == nil)
 
-        func writeGrids(phase1: MTLSize, phase2: MTLSize) {
+        func writeGrids(phase1: MTLSize, phase2: MTLSize, tail: MTLSize) {
             let grids: [UInt32] = [
                 UInt32(phase1.width), UInt32(phase1.height), UInt32(phase1.depth),
                 UInt32(phase2.width), UInt32(phase2.height), UInt32(phase2.depth),
+                UInt32(tail.width), UInt32(tail.height), UInt32(tail.depth),
             ]
             grids.withUnsafeBytes {
                 indirectArgs.contents().copyMemory(
@@ -340,12 +341,39 @@ import ShrikeValidationSupport
         writeGrids(
             phase1: MoE.specPhase1FullGrid(f: UInt32(Self.intermediate),
                                            topK: UInt32(Self.topK)),
-            phase2: MoE.specPhase2FullGrid(d: UInt32(Self.dimension)))
+            phase2: MoE.specPhase2FullGrid(d: UInt32(Self.dimension)),
+            tail: MoE.specTailFullGrid(
+                d: UInt32(Self.dimension),
+                threadgroupWidth: Elementwise.residualAddThreadgroupWidth))
         try runSpec()
         #expect(Fp16Buffer.read(specActs, count: Self.topK * Self.intermediate)
                 == Fp16Buffer.read(fullActs, count: Self.topK * Self.intermediate))
         #expect(Fp16Buffer.read(specOutput, count: Self.dimension)
                 == Fp16Buffer.read(fullOutput, count: Self.dimension))
+
+        let elementwise = try Elementwise(context: context)
+        guard let hiddenClassic = Fp16Buffer.make(context.device, values: residual),
+              let hiddenSpec = Fp16Buffer.make(context.device, values: residual) else {
+            Issue.record("hidden buffer allocation failed")
+            return
+        }
+        let tailCommand = context.queue.makeCommandBuffer()!
+        try elementwise.encodeResidualAdd(commandBuffer: tailCommand,
+                                          hidden: hiddenClassic,
+                                          delta: fullOutput,
+                                          count: Self.dimension)
+        try elementwise.encodeResidualAddIndirect(
+            commandBuffer: tailCommand,
+            hidden: hiddenSpec,
+            delta: specOutput,
+            count: Self.dimension,
+            indirectArguments: indirectArgs,
+            indirectOffset: MoE.specTailArgsOffset)
+        tailCommand.commit()
+        tailCommand.waitUntilCompleted()
+        #expect(tailCommand.error == nil)
+        #expect(Fp16Buffer.read(hiddenSpec, count: Self.dimension)
+                == Fp16Buffer.read(hiddenClassic, count: Self.dimension))
 
         let sentinel: [Float] = (0..<Self.dimension).map { Float($0 % 7) - 3 }
         sentinel.enumerated().forEach { index, value in
@@ -354,7 +382,8 @@ import ShrikeValidationSupport
                 = Float16(value)
         }
         writeGrids(phase1: MTLSize(width: 0, height: 1, depth: 1),
-                   phase2: MTLSize(width: 0, height: 1, depth: 1))
+                   phase2: MTLSize(width: 0, height: 1, depth: 1),
+                   tail: MTLSize(width: 0, height: 1, depth: 1))
         try runSpec()
         #expect(Fp16Buffer.read(specOutput, count: Self.dimension)
                 == sentinel.map { Float(Float16($0)) })

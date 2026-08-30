@@ -317,17 +317,20 @@ final class MoE {
         return buffer
     }
 
-    /// `arguments` receives two MTLDispatchThreadgroupsIndirectArguments
-    /// (phase-1 at offset 0, phase-2 at `specPhase2ArgsOffset`); the grids are
-    /// what the classifier publishes when every routed expert is resident.
+    /// `arguments` receives three MTLDispatchThreadgroupsIndirectArguments
+    /// (phase-1 at offset 0, phase-2 at `specPhase2ArgsOffset`, residual tail
+    /// at `specTailArgsOffset`); the grids are what the classifier publishes
+    /// when every routed expert is resident.
     struct SpeculativeDispatchArguments {
         let arguments: MTLBuffer
         let phase1Threadgroups: MTLSize
         let phase2Threadgroups: MTLSize
+        let tailThreadgroups: MTLSize
     }
 
-    static let specDispatchArgsLength = MemoryLayout<UInt32>.stride * 6
+    static let specDispatchArgsLength = MemoryLayout<UInt32>.stride * 9
     static let specPhase2ArgsOffset = MemoryLayout<UInt32>.stride * 3
+    static let specTailArgsOffset = MemoryLayout<UInt32>.stride * 6
 
     func encodeResidencyClassification(
         commandBuffer: MTLCommandBuffer,
@@ -401,6 +404,9 @@ final class MoE {
                 UInt32(speculative.phase2Threadgroups.width),
                 UInt32(speculative.phase2Threadgroups.height),
                 UInt32(speculative.phase2Threadgroups.depth),
+                UInt32(speculative.tailThreadgroups.width),
+                UInt32(speculative.tailThreadgroups.height),
+                UInt32(speculative.tailThreadgroups.depth),
             ]
             encoder.setBytes(&grids, length: Self.specDispatchArgsLength, index: 11)
             encoder.setBuffer(speculative.arguments, offset: 0, index: 12)
@@ -595,6 +601,11 @@ final class MoE {
 
     static func specPhase2FullGrid(d: UInt32) -> MTLSize {
         MTLSize(width: Int(d), height: 1, depth: 1)
+    }
+
+    static func specTailFullGrid(d: UInt32, threadgroupWidth: Int) -> MTLSize {
+        MTLSize(width: (Int(d) + threadgroupWidth - 1) / threadgroupWidth,
+                height: 1, depth: 1)
     }
 
     func encodeSpecPhase1U16Load(

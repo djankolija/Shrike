@@ -15,8 +15,9 @@ import Testing
 
     private static let phase1FullGrid = MTLSize(width: 256, height: 1, depth: 1)
     private static let phase2FullGrid = MTLSize(width: 13, height: 7, depth: 1)
-    private static let zeroGrids: [UInt32] = [0, 1, 1, 0, 1, 1]
-    private static let fullGrids: [UInt32] = [256, 1, 1, 13, 7, 1]
+    private static let tailFullGrid = MTLSize(width: 4, height: 1, depth: 1)
+    private static let zeroGrids: [UInt32] = [0, 1, 1, 0, 1, 1, 0, 1, 1]
+    private static let fullGrids: [UInt32] = [256, 1, 1, 13, 7, 1, 4, 1, 1]
 
     @Test func loadingResidentAndEvictedEntriesClassifyCorrectly() throws {
         let url = try PreadExpertStreamerTests.writeSyntheticLayer()
@@ -143,7 +144,8 @@ import Testing
                 MoE.SpeculativeDispatchArguments(
                     arguments: $0,
                     phase1Threadgroups: Self.phase1FullGrid,
-                    phase2Threadgroups: Self.phase2FullGrid)
+                    phase2Threadgroups: Self.phase2FullGrid,
+                    tailThreadgroups: Self.tailFullGrid)
             })
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
@@ -163,7 +165,7 @@ import Testing
             slots: values(slots, count: experts.count, as: UInt32.self),
             generations: values(generations, count: experts.count, as: UInt64.self),
             specArgs: specArgsBuffer.map {
-                values($0, count: 6, as: UInt32.self)
+                values($0, count: 9, as: UInt32.self)
             } ?? [])
     }
 }

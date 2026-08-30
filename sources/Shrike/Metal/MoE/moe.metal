@@ -110,11 +110,12 @@ struct ExpertResidencyGPU {
     ulong generation;
 };
 
-/// Indirect threadgroup counts for the speculative phase-1/phase-2 command
-/// buffers, in MTLDispatchThreadgroupsIndirectArguments layout.
+/// Indirect threadgroup counts for the speculative phase-1/phase-2/residual
+/// command buffers, in MTLDispatchThreadgroupsIndirectArguments layout.
 struct MoESpecDispatchArgs {
     uint phase1_threadgroups[3];
     uint phase2_threadgroups[3];
+    uint tail_threadgroups[3];
 };
 
 /// Classifies the router's exact top-k result against the CPU-published cache
@@ -204,6 +205,8 @@ kernel void moe_classify_expert_residency_spec(
             ? spec_full_grids.phase1_threadgroups[i] : zero_grid;
         spec_args->phase2_threadgroups[i] = all_hit
             ? spec_full_grids.phase2_threadgroups[i] : zero_grid;
+        spec_args->tail_threadgroups[i] = all_hit
+            ? spec_full_grids.tail_threadgroups[i] : zero_grid;
     }
 }
 
