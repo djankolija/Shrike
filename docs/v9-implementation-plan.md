@@ -73,6 +73,18 @@ Numbers cited as baselines are ornith15, n=12.
       `moe_spec_routed → attn_norm_qkv` (8.2 ms/token) — the host wake that
       S3b removes.
 
+## S3b-lite — encode-ahead, commits-only critical path (landed `26ed857`)
+
+- [x] `encodeLayerCommands` builds a routed layer's five CBs uncommitted
+      (`HeldLayerCommands`); in speculative mode the loop pre-encodes layer
+      L+1 during GPU-busy time and the post-readback critical path is commits
+      only. Miss ordering is host-controlled by commit order (fixup before the
+      held successor) — no events, no second queue, no eviction change.
+- [x] Acceptance n=12 (2026-08-30): **body 59.46 → 55.03 (−7.5 %), wall
+      12.58 s, digest byte-identical; spec→attn gap 8.2 → 4.2 ms/token.**
+      Remaining gaps: miss fixup 6.5, spec→attn residual 4.2 (wake + plan —
+      true event-machinery territory), spec→hit 3.2.
+
 ## S3b — event-gated successors, host off the per-layer critical path
 
 - [ ] Micro-test of the same-queue commit-order + cross-queue event
