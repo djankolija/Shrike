@@ -204,8 +204,8 @@ struct HarmonyTemplateTests {
             + "} // namespace functions<|end|>"
             + "<|start|>user<|message|>Weather in Paris?<|end|>"
             + "<|start|>assistant<|channel|>analysis<|message|>Need the live number.<|end|>"
-            + "<|start|>assistant to=functions.get_weather<|channel|>commentary json"
-            + "<|message|>{\"city\":\"Paris\"}<|call|>"
+            + "<|start|>assistant<|channel|>commentary to=functions.get_weather"
+            + " <|constrain|>json<|message|>{\"city\":\"Paris\"}<|call|>"
             + "<|start|>functions.get_weather to=assistant<|channel|>commentary"
             + "<|message|>\"22C, clear\"<|end|><|start|>assistant")
     }
@@ -462,7 +462,9 @@ struct HarmonyTemplateTests {
         #expect(liveText.contains(
             "<|start|>assistant<|channel|>analysis<|message|>Paris first.<|end|>"))
         #expect(!liveText.contains("That is warm."))
-        #expect(liveText.contains("<|channel|>commentary json<|message|>{\"city\":\"Paris\"}"))
+        #expect(liveText.contains(
+            "<|channel|>commentary to=functions.get_weather"
+                + " <|constrain|>json<|message|>{\"city\":\"Paris\"}"))
         #expect(liveText.hasSuffix(
             "<|start|>assistant<|channel|>final<|message|>18C.<|end|>"))
     }

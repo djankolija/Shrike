@@ -744,8 +744,16 @@ public struct GFTokenizer: @unchecked Sendable {
     /// Hand port of the gpt-oss `chat_template.jinja` (Harmony), byte-exact
     /// against jinja2 renders of the real template — including its whitespace
     /// artifacts in nested TypeScript types — except that object properties
-    /// render in sorted key order (JSON order does not survive decoding) and
-    /// `tojson` output is compact with sorted keys.
+    /// render in sorted key order (JSON order does not survive decoding),
+    /// `tojson` output is compact with sorted keys, and assistant tool-call
+    /// turns render in the model's own emission form
+    /// (`<|channel|>commentary to=functions.NAME <|constrain|>json`), not the
+    /// template's reordered one (`to=` before the channel, plain " json").
+    /// The template form does not round-trip what gpt-oss actually emits, and
+    /// feeding it back corrupts the model's next call at the seam where the
+    /// orders differ (see docs/v8-emission-form-tool-calls.md); it also splits
+    /// the KV prefix at every tool hop. Do not "fix" this back to match the
+    /// jinja.
     static let harmonyModelIdentity =
         "You are ChatGPT, a large language model trained by OpenAI."
     static let harmonyGenerationSuffix = "<|start|>assistant"
@@ -890,8 +898,8 @@ public struct GFTokenizer: @unchecked Sendable {
             s += "<|start|>assistant<|channel|>analysis<|message|>" + analysis + "<|end|>"
         }
         let call = message.toolCalls[0]
-        s += "<|start|>assistant to=functions.\(call.name)"
-        s += "<|channel|>commentary json<|message|>"
+        s += "<|start|>assistant<|channel|>commentary to=functions.\(call.name)"
+        s += " <|constrain|>json<|message|>"
         s += call.arguments
         s += "<|call|>"
         lastToolCallName = call.name
