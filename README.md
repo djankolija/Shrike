@@ -87,8 +87,10 @@ add, since the parser, repacker, and inference path are shared.
 
 - **Long context.** Native RoPE to 262K tokens; optional YaRN extends to 512K or 1M.
 - **Compressed KV cache.** 16-, 8-, or 4-bit, independent of model quantization.
-- **Thinking mode.** Off/on for the Qwen-family templates. Those templates do not
-  define low/medium/high effort levels, so neither does this.
+- **Thinking mode.** Off/on/adaptive for the Qwen-family templates. gpt-oss
+  cannot disable thinking; its knob is `--reasoning-effort low|medium|high`
+  (per-request via the OpenAI `reasoning_effort` field), and `--thinking off`
+  on a Harmony model warns and maps to effort `low`.
 - **MTP is off by default.** Speculative decoding is experimental; measured runs
   showed no benefit, and it requires greedy decoding, native RoPE, and prompt-cache
   reuse disabled.
