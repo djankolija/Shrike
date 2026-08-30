@@ -1960,6 +1960,78 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     /// lint:allow-long the orchestrator for one decode step, in the same
     /// shape as executePrefillChunk: embed, the per-layer dispatch, the head.
+    /// One routed decode layer's command buffers, encoded but not committed.
+    /// In speculative mode the next layer is encoded while the GPU runs the
+    /// current one, so the post-readback critical path is commits only.
+    private struct HeldLayerCommands {
+        let layer: Int
+        let attnCB: MTLCommandBuffer
+        let softmaxCB: MTLCommandBuffer?
+        let tailCB: MTLCommandBuffer
+        let sharedCB: MTLCommandBuffer
+        let specCB: MTLCommandBuffer?
+        let overlapCompletionClock: CommandCompletionClock?
+    }
+
+    private func encodeLayerCommands(layer L: Int, position: Int)
+        throws -> HeldLayerCommands {
+        let D = UInt32(cfg.hiddenSize)
+        let eps: Float = cfg.rmsNormEps
+        let isLinear = cfg.layerIsLinear(L)
+        let inNorm = try model.inputNorm(layer: L)
+        let postAttn = try model.postAttnNorm(layer: L)
+        let routerW = try model.router(layer: L)
+        let nextRouterW: TensorView?
+        if nextLayerPredictionEnabled, L + 1 < cfg.numLayers,
+           L + 1 >= cfg.numLeadingDenseLayers {
+            nextRouterW = try model.router(layer: L + 1)
+        } else {
+            nextRouterW = nil
+        }
+        let residencyResources = (decodeExpertExecution == .gpuResidency
+            || decodeExpertExecution == .speculative
+            || decodeExpertExecution == .speculativeValidate)
+            ? try model.routedExpertResidency(layer: L) : nil
+        let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
+            (onesPerExpertScale!, 0)
+        guard let attnCB = ctx.queue.makeCommandBuffer(),
+              let tailCB = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        try rms.encodeBF16W(commandBuffer: attnCB,
+                        x: hidden,
+                        weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
+                        out: normed,
+                        d: D, eps: eps)
+        var softmaxCB: MTLCommandBuffer?
+        try encodeDecodeAttention(attnCB: attnCB, tailCB: tailCB,
+                                  softmaxCB: &softmaxCB,
+                                  layer: L, position: position,
+                                  isLinear: isLinear, rmsEps: eps)
+        try encodeDecodeTailStage(
+            tailCB: tailCB, layer: L, routerW: routerW,
+            nextRouterW: nextRouterW, postAttn: postAttn,
+            perExpertScale: perExpertScale,
+            residencyTable: residencyResources?.table,
+            speculative: residencyResources != nil ? specDispatchArguments : nil,
+            d: D, eps: eps)
+        let overlapCompletionClock = runnerStatsEnabled ? CommandCompletionClock() : nil
+        let sharedCB = try encodeSharedExpert(
+            layer: L,
+            completionClock: overlapCompletionClock)
+        var specCB: MTLCommandBuffer?
+        if let specDispatchArguments, let residencyResources {
+            specCB = try encodeSpeculativeRouted(
+                layer: L,
+                residency: residencyResources,
+                arguments: specDispatchArguments)
+        }
+        return HeldLayerCommands(
+            layer: L, attnCB: attnCB, softmaxCB: softmaxCB, tailCB: tailCB,
+            sharedCB: sharedCB, specCB: specCB,
+            overlapCompletionClock: overlapCompletionClock)
+    }
+
     private func produceToken(token: Int32,
                               position: Int,
                               into logits: MTLBuffer,
@@ -2023,28 +2095,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         if let embedCB { recordKernelGPU(role: "embed", embedCB) }
 
+        var heldNext: HeldLayerCommands?
         for L in 0..<cfg.numLayers {
             let tBodyStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let isLinear = cfg.layerIsLinear(L)
             let isDense = L < cfg.numLeadingDenseLayers
-
-            let inNorm   = try model.inputNorm(layer: L)
-            let postAttn = try model.postAttnNorm(layer: L)
-            let routerW  = isDense ? nil : try model.router(layer: L)
-            let nextRouterW: TensorView?
-            if nextLayerPredictionEnabled, L + 1 < cfg.numLayers,
-               L + 1 >= cfg.numLeadingDenseLayers {
-                nextRouterW = try model.router(layer: L + 1)
-            } else {
-                nextRouterW = nil
-            }
-            let residencyResources = (!isDense
-                && (decodeExpertExecution == .gpuResidency
-                    || decodeExpertExecution == .speculative
-                    || decodeExpertExecution == .speculativeValidate))
-                ? try model.routedExpertResidency(layer: L) : nil
-            let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
-                (onesPerExpertScale!, 0)
 
             let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             // Attention+router split into measured sub-command-buffers
@@ -2053,24 +2108,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // attention pass on full layers, tailCB = O-proj + residual +
             // post-norm + router. Same queue, same order, one wait on the
             // last CB; only the router readback forces the barrier.
-            guard let attnCB = ctx.queue.makeCommandBuffer() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            try rms.encodeBF16W(commandBuffer: attnCB,
-                            x: hidden,
-                            weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
-                            out: normed,
-                            d: D, eps: eps)
-            var softmaxCB: MTLCommandBuffer?
-            guard let tailCB = ctx.queue.makeCommandBuffer() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-
-            try encodeDecodeAttention(attnCB: attnCB, tailCB: tailCB,
-                                      softmaxCB: &softmaxCB,
-                                      layer: L, position: position,
-                                      isLinear: isLinear, rmsEps: eps)
             if isDense {
+                let inNorm = try model.inputNorm(layer: L)
+                let postAttn = try model.postAttnNorm(layer: L)
+                guard let attnCB = ctx.queue.makeCommandBuffer(),
+                      let tailCB = ctx.queue.makeCommandBuffer() else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                try rms.encodeBF16W(commandBuffer: attnCB,
+                                x: hidden,
+                                weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
+                                out: normed,
+                                d: D, eps: eps)
+                var softmaxCB: MTLCommandBuffer?
+                try encodeDecodeAttention(attnCB: attnCB, tailCB: tailCB,
+                                          softmaxCB: &softmaxCB,
+                                          layer: L, position: position,
+                                          isLinear: isLinear, rmsEps: eps)
                 try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
                                                hidden: hidden,
                                                delta: oOut,
@@ -2113,42 +2167,34 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
                 continue
             }
-            guard let routerW else {
-                throw ModelError.internalInconsistency(
-                    detail: "layer \(L) has no router view outside the dense prefix")
+            let cmds: HeldLayerCommands
+            if let held = heldNext, held.layer == L {
+                cmds = held
+                heldNext = nil
+            } else {
+                heldNext = nil
+                cmds = try encodeLayerCommands(layer: L, position: position)
             }
-            try encodeDecodeTailStage(
-                tailCB: tailCB, layer: L, routerW: routerW,
-                nextRouterW: nextRouterW, postAttn: postAttn,
-                perExpertScale: perExpertScale,
-                residencyTable: residencyResources?.table,
-                speculative: residencyResources != nil ? specDispatchArguments : nil,
-                d: D, eps: eps)
-            attnCB.commit()
-            if let attentionCB = softmaxCB {
-                attentionCB.commit()
-            }
-            tailCB.commit()
+            cmds.attnCB.commit()
+            cmds.softmaxCB?.commit()
+            cmds.tailCB.commit()
             // Queued before the wait below, not after: the GPU runs the shared
-            // MLP while the CPU blocks on tailCB for the routing.
-            let overlapCompletionClock = runnerStatsEnabled ? CommandCompletionClock() : nil
-            let sharedCB = try encodeAndCommitSharedExpert(
-                layer: L,
-                completionClock: overlapCompletionClock)
-            var specCB: MTLCommandBuffer?
-            if let specDispatchArguments, let residencyResources {
-                specCB = try encodeAndCommitSpeculativeRouted(
-                    layer: L,
-                    residency: residencyResources,
-                    arguments: specDispatchArguments)
+            // MLP (and in speculative mode the whole routed layer) while the
+            // CPU blocks on tailCB for the routing.
+            cmds.sharedCB.commit()
+            cmds.specCB?.commit()
+            if decodeExpertExecution == .speculative,
+               L + 1 < cfg.numLayers,
+               L + 1 >= cfg.numLeadingDenseLayers {
+                heldNext = try encodeLayerCommands(layer: L + 1, position: position)
             }
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            try waitForCompletion(tailCB)
-            recordKernelGPU(role: "attn_norm_qkv", attnCB)
-            if let attentionCB = softmaxCB {
+            try waitForCompletion(cmds.tailCB)
+            recordKernelGPU(role: "attn_norm_qkv", cmds.attnCB)
+            if let attentionCB = cmds.softmaxCB {
                 recordKernelGPU(role: "attn_softmax", attentionCB)
             }
-            recordKernelGPU(role: "attn_tail_router", tailCB)
+            recordKernelGPU(role: "attn_tail_router", cmds.tailCB)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
             totalWaitNanos &+= waitNanos
             var prevRoutedUs: Double = 0
@@ -2174,10 +2220,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // per generation, so it never aliases concurrent decode work.
             try await encodeDecodeRoutedMoE(
                 layer: L, position: position,
-                attnCB: attnCB, tailCB: tailCB,
-                sharedCB: sharedCB,
-                specCB: specCB,
-                overlapCompletionClock: overlapCompletionClock,
+                attnCB: cmds.attnCB, tailCB: cmds.tailCB,
+                sharedCB: cmds.sharedCB,
+                specCB: cmds.specCB,
+                overlapCompletionClock: cmds.overlapCompletionClock,
                 pending: &pendingRoutedCommand,
                 bodyStart: tBodyStart, cb1Start: tCb1Start,
                 waitMark: tWait, waitNanos: waitNanos,
@@ -4791,7 +4837,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// `attn_tail_router -> shared_expert` transition -- 0.197 ms per layer of
     /// command-buffer round trip during which the GPU had nothing queued, and
     /// the largest single component of decode's idle time.
-    private func encodeAndCommitSharedExpert(
+    private func encodeSharedExpert(
         layer L: Int,
         completionClock: CommandCompletionClock?
     ) throws -> MTLCommandBuffer {
@@ -4810,7 +4856,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                       value: 0)
             blit.endEncoding()
             completionClock?.track(sharedCB)
-            sharedCB.commit()
             return sharedCB
         }
         let sharedProj = sharedExpertProjections[L]
@@ -4842,7 +4887,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                 count: cfg.hiddenSize)
         }
         completionClock?.track(sharedCB)
-        sharedCB.commit()
         return sharedCB
     }
 
@@ -4884,7 +4928,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// committed before the tail wait so it sizes itself from the classifier's
     /// indirect arguments; outputs go to scratch and are cross-checked against
     /// the classic path in finishPendingRoutedCommand.
-    private func encodeAndCommitSpeculativeRouted(
+    private func encodeSpeculativeRouted(
         layer L: Int,
         residency: ExpertResidencyResources,
         arguments: MoE.SpeculativeDispatchArguments
@@ -4946,7 +4990,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 indirectArguments: arguments.arguments,
                 indirectOffset: MoE.specTailArgsOffset)
         }
-        cb.commit()
         return cb
     }
 
