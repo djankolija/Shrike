@@ -88,30 +88,25 @@ Reach it with `ssh macmini` — **never** the tailnet hostname, which is the HTT
 only and fails ssh with a misleading `Host key verification failed`. `sudo` there needs
 `ssh -t`.
 
-### The next deploy carries the rename, and all of it lands at once
+### The mini's layout (rename landed 2026-08-30)
 
-The mini is still running a binary built before the rename to Shrike. That is fine —
-a build artifact does not care what its source was called, and binary and service
-config only couple at the next deploy. But at that deploy four things must change
-together, or the service comes up subtly wrong:
+The runtime is `~/shrike-runtime/` — `bin/` holds `ShrikeServer`, `ShrikeCLI`,
+`ShrikeRepack` plus their resource bundles (a deploy copies the `*.bundle`
+directories from `.build/release/` alongside the binaries, or resource lookups
+fail at runtime); `models/` holds the six `.gturbo`s, receipts bound to the
+`shrike-runtime` path. Old NVMAI artifacts are parked in `~/nvmai-retired/`,
+kept only as rollback insurance.
 
-1. **The executables.** `/Users/davor/nvmai-runtime/bin/` currently holds
-   `NVMAIServer`, `NVMAICLI`, and `NVMAIRepack`. They become `ShrikeServer`,
-   `ShrikeCLI`, `ShrikeRepack`.
-2. **The deploy directory itself** — `~/nvmai-runtime/` → `~/shrike-runtime/`. The
-   server's built-in models-directory default moved with the rename, so a server
-   looking for `~/shrike-runtime/models` finds nothing if the directory still has its
-   old name.
-3. **Every `NVMAI_*` variable in the launchd plist** → `SHRIKE_*`. Also check for
-   `TURBO_FIELDFARE_PHASES`, `TURBO_FIELDFARE_TOKENIZER_DIR` and `TURBO_FIELDFARE_MODEL`
-   — inherited from the fork this project came from, and renamed to `SHRIKE_PHASES`,
-   `SHRIKE_TOKENIZER_DIR` and `SHRIKE_MODEL`. They fail the same silent way.
-4. **The plist's program path and label**, to match 1 and 2.
+There is **no launchd service** — the server is launched manually
+(`cd ~/shrike-runtime && nohup ./bin/ShrikeServer … > /tmp/shrike-server.log 2>&1 &`),
+usually serving one model on port 8081. Turbo (a separate project) serves on
+8080; never touch it.
 
-**The failure mode for 3 is the dangerous one: a stale `NVMAI_*` variable does not
-error.** Nothing reads it, nothing complains, the built-in default is taken silently,
-and carefully tuned configuration disappears into a performance regression noticed
-days later with no obvious cause. Items 1 and 2 fail loudly; item 3 fails quietly.
+Configuration is `SHRIKE_*` env vars only. A resurrected old command or script
+carrying `NVMAI_*` or `TURBO_FIELDFARE_*` names fails **silently** — nothing
+reads those vars, the built-in defaults are taken, and tuned configuration
+quietly vanishes. If a launch config ever graduates to a launchd plist, audit
+every env var name against the current `SHRIKE_*` set first.
 
 ## Where documents go
 
