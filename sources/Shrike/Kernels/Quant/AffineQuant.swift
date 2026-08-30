@@ -62,11 +62,27 @@ final class AffineQuantGEMV {
                 x: MTLBuffer, xOffset: Int = 0,
                 y: MTLBuffer, yOffset: Int = 0,
                 m: UInt32, n: UInt32) throws {
-        precondition(n.isMultiple(of: UInt32(Quantization.groupSize)))
-        precondition(weightsOffset.isMultiple(of: MemoryLayout<UInt32>.alignment))
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
+        encode(encoder: encoder,
+               weights: weights, weightsOffset: weightsOffset,
+               scales: scales, scalesOffset: scalesOffset,
+               biases: biases, biasesOffset: biasesOffset,
+               x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+               m: m, n: n)
+        encoder.endEncoding()
+    }
+
+    func encode(encoder: MTLComputeCommandEncoder,
+                weights: MTLBuffer, weightsOffset: Int = 0,
+                scales: MTLBuffer, scalesOffset: Int = 0,
+                biases: MTLBuffer, biasesOffset: Int = 0,
+                x: MTLBuffer, xOffset: Int = 0,
+                y: MTLBuffer, yOffset: Int = 0,
+                m: UInt32, n: UInt32) {
+        precondition(n.isMultiple(of: UInt32(Quantization.groupSize)))
+        precondition(weightsOffset.isMultiple(of: MemoryLayout<UInt32>.alignment))
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(weights, offset: weightsOffset, index: 0)
         encoder.setBuffer(scales, offset: scalesOffset, index: 1)
@@ -83,7 +99,6 @@ final class AffineQuantGEMV {
                     height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32 * rowsPerThreadgroup,
                                            height: 1, depth: 1))
-        encoder.endEncoding()
     }
 
     func encodeTwoRows(commandBuffer: MTLCommandBuffer,

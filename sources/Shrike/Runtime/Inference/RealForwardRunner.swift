@@ -2282,10 +2282,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let dtBias = try model.linearDtBias(layer: L)
         let gatedNormW = try model.linearNorm(layer: L)
 
-        // One dispatch over the concatenated qkv/z/a/b row space instead of four
-        // separate GEMVs (a and b were 4 threadgroups each).
+        // Safe to share one encoder: a serial compute encoder guarantees each
+        // dispatch sees the previous dispatch's writes.
+        guard let encoder = cb.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         if model.attentionWeightBits == 4 {
-            try gdn.encodeInputProjections(commandBuffer: cb,
+            gdn.encodeInputProjections(encoder: encoder,
                                    x: normed,
                                    qkv: qkvW, qkvOut: gdnQKVRaw,
                                    z: zW, zOut: gdnZ,
@@ -2293,28 +2296,28 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                    b: bW, bOut: gdnB,
                                    hiddenSize: cfg.hiddenSize)
         } else {
-            try encodePrimaryGEMV(commandBuffer: cb, projection: qkvW,
+            encodePrimaryGEMV(encoder: encoder, projection: qkvW,
                               x: normed, y: gdnQKVRaw,
                               m: UInt32(la.qkvDim), n: D)
-            try encodePrimaryGEMV(commandBuffer: cb, projection: zW,
+            encodePrimaryGEMV(encoder: encoder, projection: zW,
                               x: normed, y: gdnZ,
                               m: UInt32(la.valueDim), n: D)
-            try encodePrimaryGEMV(commandBuffer: cb, projection: aW,
+            encodePrimaryGEMV(encoder: encoder, projection: aW,
                               x: normed, y: gdnA,
                               m: UInt32(la.numVHeads), n: D)
-            try encodePrimaryGEMV(commandBuffer: cb, projection: bW,
+            encodePrimaryGEMV(encoder: encoder, projection: bW,
                               x: normed, y: gdnB,
                               m: UInt32(la.numVHeads), n: D)
         }
 
-        try gdn.encodeConvDecode(commandBuffer: cb,
+        gdn.encodeConvDecode(encoder: encoder,
                              tail: gdnState.convTailBuffer(layer: L),
                              qkv: gdnQKVRaw,
                              convWeight: convW.buffer,
                              convWeightOffset: Int(convW.offset),
                              out: gdnConvOut)
-        try gdn.encodeQKNorm(commandBuffer: cb, convOut: gdnConvOut)
-        try gdn.encodeDeltaStepDecode(commandBuffer: cb,
+        gdn.encodeQKNorm(encoder: encoder, convOut: gdnConvOut)
+        gdn.encodeDeltaStepDecode(encoder: encoder,
                                   convOut: gdnConvOut,
                                   aProj: gdnA,
                                   bProj: gdnB,
@@ -2322,17 +2325,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                   dtBias: dtBias.buffer, dtBiasOffset: Int(dtBias.offset),
                                   state: gdnState.stateBuffer(layer: L),
                                   y: gdnY)
-        try gdn.encodeGatedNorm(commandBuffer: cb,
+        gdn.encodeGatedNorm(encoder: encoder,
                             y: gdnY,
                             z: gdnZ,
                             weight: gatedNormW.buffer,
                             weightOffset: Int(gatedNormW.offset),
                             out: gdnOut)
-        try encodePrimaryGEMV(commandBuffer: cb,
+        encodePrimaryGEMV(encoder: encoder,
                     weights: outW.buffer, weightsOffset: Int(outW.offset),
                     scales: outW.buffer, scalesOffset: Int(outW.scaleOffset),
                     biases: outW.buffer, biasesOffset: Int(outW.biasOffset),
                     x: gdnOut, y: oOut, m: D, n: UInt32(la.valueDim))
+        encoder.endEncoding()
     }
 
     /// Kimi MLA, one decode step: q_proj GEMV, per-head absorbed embed
@@ -2785,6 +2789,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                           m: m, n: n)
     }
 
+    private func encodePrimaryGEMV(encoder: MTLComputeCommandEncoder,
+                                   projection p: TensorView,
+                                   x: MTLBuffer, xOffset: Int = 0,
+                                   y: MTLBuffer, yOffset: Int = 0,
+                                   m: UInt32, n: UInt32) {
+        encodePrimaryGEMV(encoder: encoder,
+                          weights: p.buffer, weightsOffset: Int(p.offset),
+                          scales: p.buffer, scalesOffset: Int(p.scaleOffset),
+                          biases: p.buffer, biasesOffset: Int(p.biasOffset),
+                          x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                          m: m, n: n)
+    }
+
     private func encodePrimaryGEMV(commandBuffer cb: MTLCommandBuffer,
                                    weights: MTLBuffer, weightsOffset: Int,
                                    scales: MTLBuffer, scalesOffset: Int,
@@ -2801,6 +2818,30 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                           m: m, n: n)
         } else {
             try int4.encode(commandBuffer: cb,
+                        weights: weights, weightsOffset: weightsOffset,
+                        scales: scales, scalesOffset: scalesOffset,
+                        biases: biases, biasesOffset: biasesOffset,
+                        x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                        m: m, n: n)
+        }
+    }
+
+    private func encodePrimaryGEMV(encoder: MTLComputeCommandEncoder,
+                                   weights: MTLBuffer, weightsOffset: Int,
+                                   scales: MTLBuffer, scalesOffset: Int,
+                                   biases: MTLBuffer, biasesOffset: Int,
+                                   x: MTLBuffer, xOffset: Int = 0,
+                                   y: MTLBuffer, yOffset: Int = 0,
+                                   m: UInt32, n: UInt32) {
+        if let affine {
+            affine.encode(encoder: encoder,
+                          weights: weights, weightsOffset: weightsOffset,
+                          scales: scales, scalesOffset: scalesOffset,
+                          biases: biases, biasesOffset: biasesOffset,
+                          x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                          m: m, n: n)
+        } else {
+            int4.encode(encoder: encoder,
                         weights: weights, weightsOffset: weightsOffset,
                         scales: scales, scalesOffset: scalesOffset,
                         biases: biases, biasesOffset: biasesOffset,
