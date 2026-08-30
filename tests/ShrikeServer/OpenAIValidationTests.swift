@@ -251,6 +251,27 @@ struct OpenAIValidationTests {
         let validated = try OpenAIRequestValidator.validate(request)
         #expect(validated.tools.count == 1)
     }
+
+    @Test func reasoningEffortParsesAndValidates() throws {
+        let data = Data(#"{"model":"m","messages":[{"role":"user","content":"x"}],"reasoning_effort":"low"}"#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(request)
+        #expect(validated.reasoningEffort == .low)
+    }
+
+    @Test func omittedReasoningEffortStaysNil() throws {
+        let data = Data(#"{"model":"m","messages":[{"role":"user","content":"x"}]}"#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        #expect(try OpenAIRequestValidator.validate(request).reasoningEffort == nil)
+    }
+
+    @Test func invalidReasoningEffortIsRejected() throws {
+        let data = Data(#"{"model":"m","messages":[{"role":"user","content":"x"}],"reasoning_effort":"minimal"}"#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        #expect(throws: ServerRequestError.self) {
+            try OpenAIRequestValidator.validate(request)
+        }
+    }
 }
 
 @Suite("Streaming stop matcher")

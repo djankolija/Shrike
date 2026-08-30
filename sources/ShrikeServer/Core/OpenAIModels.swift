@@ -172,6 +172,7 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     public let logprobs: Bool?
     public let presencePenalty: Float?
     public let frequencyPenalty: Float?
+    public let reasoningEffort: String?
 
     enum CodingKeys: String, CodingKey {
         case model, messages, stream, temperature, stop, seed, tools, n, logprobs
@@ -185,6 +186,7 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         case repetitionPenalty = "repetition_penalty"
         case presencePenalty = "presence_penalty"
         case frequencyPenalty = "frequency_penalty"
+        case reasoningEffort = "reasoning_effort"
     }
 }
 
@@ -280,19 +282,22 @@ public struct ValidatedChatRequest: Sendable {
     public let includeUsage: Bool
     public let generationConfig: GenerationConfig
     public let maximumCompletionTokens: Int
+    public let reasoningEffort: ReasoningEffort?
 
     public init(messages: [GFTokenizer.Message],
                 tools: [GFTokenizer.FunctionDefinition],
                 stream: Bool,
                 includeUsage: Bool,
                 generationConfig: GenerationConfig,
-                maximumCompletionTokens: Int) {
+                maximumCompletionTokens: Int,
+                reasoningEffort: ReasoningEffort? = nil) {
         self.messages = messages
         self.tools = tools
         self.stream = stream
         self.includeUsage = includeUsage
         self.generationConfig = generationConfig
         self.maximumCompletionTokens = maximumCompletionTokens
+        self.reasoningEffort = reasoningEffort
     }
 
     /// The post-strip view of this request: the same request carrying the
@@ -313,7 +318,8 @@ public struct ValidatedChatRequest: Sendable {
             stream: stream,
             includeUsage: includeUsage,
             generationConfig: generationConfig,
-            maximumCompletionTokens: maximumCompletionTokens)
+            maximumCompletionTokens: maximumCompletionTokens,
+            reasoningEffort: reasoningEffort)
     }
 }
 
@@ -434,6 +440,7 @@ public enum OpenAIRequestValidator {
             try validateTool($0)
         }
         let messages = try validateMessages(request.messages)
+        let reasoningEffort = try validatedReasoningEffort(request.reasoningEffort)
         // A client-supplied seed makes sampling deterministic.
         let config = GenerationConfig(maxNewTokens: maximum,
                                       temperature: temperature,
@@ -449,7 +456,19 @@ public enum OpenAIRequestValidator {
                                     stream: request.stream ?? false,
                                     includeUsage: request.streamOptions?.includeUsage ?? false,
                                     generationConfig: config,
-                                    maximumCompletionTokens: maximum)
+                                    maximumCompletionTokens: maximum,
+                                    reasoningEffort: reasoningEffort)
+    }
+
+    private static func validatedReasoningEffort(
+        _ raw: String?
+    ) throws -> ReasoningEffort? {
+        guard let raw else { return nil }
+        guard let effort = ReasoningEffort(rawValue: raw) else {
+            throw invalid("reasoning_effort must be low, medium or high",
+                          "reasoning_effort", "unsupported_value")
+        }
+        return effort
     }
 
     private static func validateTool(_ tool: OpenAITool) throws -> GFTokenizer.FunctionDefinition {

@@ -187,7 +187,8 @@ public enum ResponsesAPIMapper {
             logprobs: nil,
             presencePenalty: request.presencePenalty
                 ?? GenerationDefaults.presencePenalty,
-            frequencyPenalty: nil)
+            frequencyPenalty: nil,
+            reasoningEffort: nil)
     }
 }
 

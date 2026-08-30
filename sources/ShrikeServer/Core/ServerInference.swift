@@ -834,7 +834,8 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// a stripped prefix, silently losing the strip on every cached
     /// continuation turn.
     private func preparePrompt(
-        _ request: ValidatedChatRequest
+        _ request: ValidatedChatRequest,
+        reasoningEffort: ReasoningEffort
     ) throws -> (promptIDs: [Int32],
                  cacheRequest: ValidatedChatRequest,
                  effectiveMessages: [GFTokenizer.Message],
@@ -866,7 +867,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             messages: effectiveMessages,
             tools: filteredTools,
             usesToolTemplate: needsToolTemplate,
-            reasoningEffort: defaultReasoningEffort)
+            reasoningEffort: reasoningEffort)
         if let stats = stripStats {
             ServerLog.strip(stats: stats,
                             promptTokens: promptIDs.count)
@@ -1019,7 +1020,14 @@ public actor ServerModelSession: ServerInferenceBackend {
         // prefilling for must cancel it rather than queue behind it. The reset
         // guard below stays under this, so a request rejected here cannot reset
         // a runner the rewrite is still driving.
-        let prepared = try preparePrompt(request)
+        if request.reasoningEffort != nil, tokenizer.dialect != .harmony {
+            throw ServerRequestError.invalid(
+                message: "reasoning_effort is not supported by this model",
+                param: "reasoning_effort",
+                code: "unsupported_parameter")
+        }
+        let effectiveReasoningEffort = request.reasoningEffort ?? defaultReasoningEffort
+        let prepared = try preparePrompt(request, reasoningEffort: effectiveReasoningEffort)
         await arbitratePendingRewrite(renderedPromptIDs: prepared.promptIDs)
         // Stage-split measurement (SHRIKE_RUNNER_STATS): snapshot the runner's
         // lifetime counters so the footer can report this request's delta.
