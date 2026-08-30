@@ -31,6 +31,7 @@ public enum RuntimeDecodeExpertExecution: String, Codable, Sendable {
     case hitFixup = "hit-fixup"
     case barrier
     case gpuResidency = "gpu-residency"
+    case speculative
 
     public static func environmentValue(
         _ environment: [String: String] = ProcessInfo.processInfo.environment

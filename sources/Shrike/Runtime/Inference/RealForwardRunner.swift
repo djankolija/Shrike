@@ -206,6 +206,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let prefetchPredictionWeights: MTLBuffer
     // Persistent MoE scratch, allocated once; about 56 KiB at production shape.
     private let moeActs: MTLBuffer       // [topK * FmoE] FP16
+    private let specActsBuf: MTLBuffer?  // v9 S2 cross-check scratch
+    private let specYBuf: MTLBuffer?
+    private let specArgsBuf: MTLBuffer?
+    private let specDispatchArguments: MoE.SpeculativeDispatchArguments?
     /// Width-2 MTP verify scratch (B2 pair schedule): per-row activation and
     /// output buffers plus two persistent routed argument buffers, created on
     /// first verify. Per-row buffers are deliberately *separate allocations*,
@@ -551,6 +555,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.prefetchPredictionWeights = try buf(
             cfg.topKExperts, label: "decode.prefetchPredictionWeights")
         self.moeActs       = try buf(cfg.topKExperts * cfg.moeIntermediateSize, label: "decode.moeActs")
+        let spec = runtimeConfiguration.decodeExpertExecution == .speculative
+            ? try Self.makeSpeculativeScratch(cfg: cfg, device: device) : nil
+        self.specActsBuf = spec?.acts
+        self.specYBuf = spec?.y
+        self.specArgsBuf = spec?.dispatch.arguments
+        self.specDispatchArguments = spec?.dispatch
         self.moeHitActiveSlots = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size, label: "decode.moeHitActiveSlots")
         self.moeMissActiveSlots = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size, label: "decode.moeMissActiveSlots")
         self.residencyHitCount = try buf(1, MemoryLayout<UInt32>.size,
@@ -2024,7 +2034,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             } else {
                 nextRouterW = nil
             }
-            let residencyResources = (!isDense && decodeExpertExecution == .gpuResidency)
+            let residencyResources = (!isDense
+                && (decodeExpertExecution == .gpuResidency
+                    || decodeExpertExecution == .speculative))
                 ? try model.routedExpertResidency(layer: L) : nil
             let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
                 (onesPerExpertScale!, 0)
@@ -2105,6 +2117,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 nextRouterW: nextRouterW, postAttn: postAttn,
                 perExpertScale: perExpertScale,
                 residencyTable: residencyResources?.table,
+                speculative: residencyResources != nil ? specDispatchArguments : nil,
                 d: D, eps: eps)
             attnCB.commit()
             if let attentionCB = softmaxCB {
@@ -2117,6 +2130,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let sharedCB = try encodeAndCommitSharedExpert(
                 layer: L,
                 completionClock: overlapCompletionClock)
+            var specCB: MTLCommandBuffer?
+            if let specDispatchArguments, let residencyResources {
+                specCB = try encodeAndCommitSpeculativeRouted(
+                    layer: L,
+                    residency: residencyResources,
+                    arguments: specDispatchArguments)
+            }
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try waitForCompletion(tailCB)
             recordKernelGPU(role: "attn_norm_qkv", attnCB)
@@ -2151,6 +2171,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 layer: L, position: position,
                 attnCB: attnCB, tailCB: tailCB,
                 sharedCB: sharedCB,
+                specCB: specCB,
                 overlapCompletionClock: overlapCompletionClock,
                 pending: &pendingRoutedCommand,
                 bodyStart: tBodyStart, cb1Start: tCb1Start,
@@ -2445,6 +2466,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         postAttn: TensorView,
         perExpertScale: (buffer: any MTLBuffer, offset: Int),
         residencyTable: (any MTLBuffer)?,
+        speculative: MoE.SpeculativeDispatchArguments? = nil,
         d D: UInt32,
         eps: Float
     ) throws {
@@ -2506,7 +2528,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 resolvedSlots: residencyResolvedSlots,
                 resolvedGenerations: residencyResolvedGenerations,
                 topK: UInt32(cfg.topKExperts),
-                numExperts: UInt32(cfg.numExperts))
+                numExperts: UInt32(cfg.numExperts),
+                speculative: speculative)
         }
         tailEncoder.endEncoding()
     }
@@ -4623,6 +4646,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let cb: MTLCommandBuffer
         let sharedCB: MTLCommandBuffer?
         let phase1HitCB: MTLCommandBuffer?
+        let specCB: MTLCommandBuffer?
+        let specAllHit: Bool
         let expertLease: RoutedExpertLease?
         let storageOperation: RoutedExpertLoadOperation?
         let overlapCompletionClock: CommandCompletionClock?
@@ -4687,6 +4712,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         } else if let err = pending.cb.error {
             throw ModelError.commandBufferFailed(
                 detail: "routed layer command buffer: \(err)")
+        }
+        if let specCB = pending.specCB {
+            try waitForCompletion(specCB)
+            recordKernelGPU(role: "moe_spec_routed", specCB)
+            if pending.specAllHit, let specActsBuf, let specYBuf {
+                let actsBytes = cfg.topKExperts * cfg.moeIntermediateSize
+                    * MemoryLayout<Float16>.size
+                let yBytes = cfg.hiddenSize * MemoryLayout<Float16>.size
+                if memcmp(specActsBuf.contents(), moeActs.contents(), actsBytes) != 0
+                    || memcmp(specYBuf.contents(), h2Buf.contents(), yBytes) != 0 {
+                    throw ModelError.internalInconsistency(
+                        detail: "speculative routed output diverged from the "
+                            + "classic path (v9 S2 cross-check)")
+                }
+            }
         }
         if let operation = pending.storageOperation {
             // Event-gated commands cannot complete before this operation is
@@ -4800,6 +4840,80 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return sharedCB
     }
 
+    private static func makeSpeculativeScratch(
+        cfg: ArchConfig,
+        device: MTLDevice
+    ) throws -> (acts: MTLBuffer, y: MTLBuffer,
+                 dispatch: MoE.SpeculativeDispatchArguments) {
+        func make(_ length: Int, _ label: String) throws -> MTLBuffer {
+            guard let buffer = device.makeBuffer(length: length,
+                                                 options: .storageModeShared) else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            buffer.label = label
+            return buffer
+        }
+        let acts = try make(cfg.topKExperts * cfg.moeIntermediateSize
+                                * MemoryLayout<Float16>.size, "decode.specActs")
+        let y = try make(cfg.hiddenSize * MemoryLayout<Float16>.size, "decode.specY")
+        let args = try make(MoE.specDispatchArgsLength, "decode.specArgs")
+        return (acts, y, MoE.SpeculativeDispatchArguments(
+            arguments: args,
+            phase1Threadgroups: MoE.specPhase1FullGrid(
+                f: UInt32(cfg.moeIntermediateSize),
+                topK: UInt32(cfg.topKExperts)),
+            phase2Threadgroups: MoE.specPhase2FullGrid(
+                d: UInt32(cfg.hiddenSize))))
+    }
+
+    /// v9 S2 validation: the speculative pool-addressed phase-1/phase-2,
+    /// committed before the tail wait so it sizes itself from the classifier's
+    /// indirect arguments; outputs go to scratch and are cross-checked against
+    /// the classic path in finishPendingRoutedCommand.
+    private func encodeAndCommitSpeculativeRouted(
+        layer L: Int,
+        residency: ExpertResidencyResources,
+        arguments: MoE.SpeculativeDispatchArguments
+    ) throws -> MTLCommandBuffer {
+        guard let pool = residency.expertPool else {
+            throw ModelError.internalInconsistency(
+                detail: "speculative decode requires SHRIKE_EXPERT_CACHE_LAYOUT=pool")
+        }
+        guard let specActsBuf, let specYBuf,
+              let cb = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        let offsets = try model.routedExpertOffsets(layer: L)
+        try moe.encodeSpecPhase1U16Load(
+            commandBuffer: cb,
+            expertPool: pool,
+            poolSlotStride: residency.poolSlotStride,
+            resolvedSlots: residencyResolvedSlots,
+            routedOffsets: offsets,
+            x: routedX,
+            acts: specActsBuf,
+            d: UInt32(cfg.hiddenSize),
+            f: UInt32(cfg.moeIntermediateSize),
+            topK: UInt32(cfg.topKExperts),
+            indirectArguments: arguments.arguments)
+        try moe.encodeSpecPhase2Reduce(
+            commandBuffer: cb,
+            expertPool: pool,
+            poolSlotStride: residency.poolSlotStride,
+            resolvedSlots: residencyResolvedSlots,
+            routedOffsets: offsets,
+            acts: specActsBuf,
+            routingWeights: outWeights,
+            residual: h1Buf,
+            y: specYBuf,
+            d: UInt32(cfg.hiddenSize),
+            f: UInt32(cfg.moeIntermediateSize),
+            topK: UInt32(cfg.topKExperts),
+            indirectArguments: arguments.arguments)
+        cb.commit()
+        return cb
+    }
+
     /// Routed-expert stage of one decode layer: top-k readback, expert fetch,
     /// phase-1/phase-2 encode, and the deferred completion hand-off.
     ///
@@ -4813,6 +4927,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         attnCB: MTLCommandBuffer,
         tailCB: MTLCommandBuffer,
         sharedCB: MTLCommandBuffer,
+        specCB: MTLCommandBuffer?,
         overlapCompletionClock: CommandCompletionClock?,
         pending pendingRoutedCommand: inout PendingRoutedCommand?,
         bodyStart tBodyStart: UInt64,
@@ -4892,7 +5007,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         if let plan = plannedFetch,
            (decodeExpertExecution == .hitFixup
-                || decodeExpertExecution == .gpuResidency) {
+                || decodeExpertExecution == .gpuResidency
+                || decodeExpertExecution == .speculative) {
             if decodeExpertExecution == .gpuResidency {
                 let hitCount = min(
                     Int(residencyHitCount.contents().load(as: UInt32.self)),
@@ -5181,6 +5297,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             cb: routedCB,
             sharedCB: sharedCB,
             phase1HitCB: phase1HitCB,
+            specCB: specCB,
+            specAllHit: missCount == 0,
             expertLease: expertLease,
             storageOperation: eventLoad,
             overlapCompletionClock: eventLoad == nil ? nil : overlapCompletionClock,
