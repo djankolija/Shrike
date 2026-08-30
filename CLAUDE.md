@@ -108,6 +108,16 @@ reads those vars, the built-in defaults are taken, and tuned configuration
 quietly vanishes. If a launch config ever graduates to a launchd plist, audit
 every env var name against the current `SHRIKE_*` set first.
 
+**The perf env set is load-bearing (2026-08-30): launching ShrikeServer without
+`SHRIKE_EXPERT_IO_SYNC=event SHRIKE_EXPERT_IO_SUBMISSION=immediate
+SHRIKE_EXPERT_CACHE_LAYOUT=pool SHRIKE_DECODE_EXPERT_EXECUTION=speculative`
+silently halves decode throughput** — those modes are deliberately not code
+defaults yet (pool needs an allocation fallback; speculative needs soak beyond
+the fixed rig prompt — see `docs/v9-implementation-plan.md`). Output is
+byte-identical with or without them; only speed changes. Add
+`SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1` when measuring with
+`tools/decode-measure.sh` and the `tools/parse-*-stats.py` parsers.
+
 ## Where documents go
 
 `docs/` pairs a design document with its implementation plan, named for the work rather than
