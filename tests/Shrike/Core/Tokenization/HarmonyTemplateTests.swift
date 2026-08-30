@@ -34,11 +34,12 @@ struct HarmonyTemplateTests {
                                     currentDate: Self.goldenDate)
     }
 
-    private func systemBlock(withTools: Bool = false) -> String {
+    private func systemBlock(withTools: Bool = false,
+                             effort: String = "medium") -> String {
         "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\n"
             + "Knowledge cutoff: 2024-06\n"
             + "Current date: 2026-08-26\n\n"
-            + "Reasoning: medium\n\n"
+            + "Reasoning: \(effort)\n\n"
             + "# Valid channels: analysis, commentary, final. Channel must be included for every message."
             + (withTools
                 ? "\nCalls to these tools must go to the commentary channel: 'functions'."
@@ -116,6 +117,19 @@ struct HarmonyTemplateTests {
         let p = try render([Message(role: .user, content: "Hi")])
         #expect(p == systemBlock()
             + "<|start|>user<|message|>Hi<|end|><|start|>assistant")
+    }
+
+    @Test("Reasoning effort parameterizes the system block")
+    func reasoningEffortParameterizesTheSystemBlock() throws {
+        let messages = [Message(role: .user, content: "Hi")]
+        for effort in ReasoningEffort.allCases {
+            let rendered = try tok.harmonyChatTemplate(
+                messages, tools: [],
+                reasoningEffort: effort,
+                currentDate: Self.goldenDate)
+            #expect(rendered.contains("Reasoning: \(effort.rawValue)\n\n"))
+            #expect(rendered.hasPrefix(systemBlock(effort: effort.rawValue)))
+        }
     }
 
     @Test("Public template uses today's date and the generation suffix")

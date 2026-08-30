@@ -55,6 +55,22 @@ public enum ModelThinkingMode: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// Harmony's trained deliberation knob: the literal word after "Reasoning:"
+/// in the system block. Meaningless for other dialects, which ignore it.
+public enum ReasoningEffort: String, Codable, CaseIterable, Sendable {
+    case low
+    case medium
+    case high
+
+    public static func resolved(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> ReasoningEffort? {
+        environment["SHRIKE_REASONING_EFFORT"].flatMap {
+            ReasoningEffort(rawValue: $0.lowercased())
+        }
+    }
+}
+
 /// Tokenizer wrapper for the compatible Qwen3.5-MoE ChatML model family.
 ///
 /// Loads tokenizer sidecars in a completed `.gturbo/tokenizer/` directory.
@@ -690,10 +706,15 @@ public struct GFTokenizer: @unchecked Sendable {
         }
     }
 
-    public func applyChatTemplate(_ messages: [Message]) throws -> String {
+    public func applyChatTemplate(
+        _ messages: [Message],
+        reasoningEffort: ReasoningEffort = .medium
+    ) throws -> String {
         switch dialect {
         case .chatml: return try chatMLChatTemplate(messages)
-        case .harmony: return try harmonyChatTemplate(messages, tools: [])
+        case .harmony:
+            return try harmonyChatTemplate(messages, tools: [],
+                                           reasoningEffort: reasoningEffort)
         case .kimi: return try kimiChatTemplate(messages, tools: [])
         }
     }
@@ -734,11 +755,13 @@ public struct GFTokenizer: @unchecked Sendable {
 
     func harmonyChatTemplate(_ messages: [Message],
                              tools: [FunctionDefinition],
+                             reasoningEffort: ReasoningEffort = .medium,
                              currentDate: String? = nil,
                              addGenerationPrompt: Bool = true) throws -> String {
         var s = Self.harmonySystemBlock(
             hasTools: !tools.isEmpty,
-            currentDate: currentDate ?? Self.harmonyCurrentDate())
+            currentDate: currentDate ?? Self.harmonyCurrentDate(),
+            reasoningEffort: reasoningEffort)
         var loop = messages[...]
         var developerInstructions: String?
         if let first = loop.first, first.role == .system || first.role == .developer {
@@ -768,12 +791,13 @@ public struct GFTokenizer: @unchecked Sendable {
     }
 
     private static func harmonySystemBlock(hasTools: Bool,
-                                           currentDate: String) -> String {
+                                           currentDate: String,
+                                           reasoningEffort: ReasoningEffort) -> String {
         var s = "<|start|>system<|message|>"
         s += Self.harmonyModelIdentity + "\n"
         s += "Knowledge cutoff: 2024-06\n"
         s += "Current date: " + currentDate + "\n\n"
-        s += "Reasoning: medium\n\n"
+        s += "Reasoning: " + reasoningEffort.rawValue + "\n\n"
         s += "# Valid channels: analysis, commentary, final. "
         s += "Channel must be included for every message."
         if hasTools {
@@ -1108,9 +1132,11 @@ public struct GFTokenizer: @unchecked Sendable {
     }
 
     public func encodeToolChat(messages: [Message],
-                               tools: [FunctionDefinition]) throws -> [Int32] {
+                               tools: [FunctionDefinition],
+                               reasoningEffort: ReasoningEffort = .medium) throws -> [Int32] {
         if dialect == .harmony {
-            return encode(try harmonyChatTemplate(messages, tools: tools),
+            return encode(try harmonyChatTemplate(messages, tools: tools,
+                                                  reasoningEffort: reasoningEffort),
                           addBOS: false)
         }
         if dialect == .kimi {
