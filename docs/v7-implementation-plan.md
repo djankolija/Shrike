@@ -43,7 +43,7 @@ silently no-op.
 - Consumes: `ToolCallParserError.unknownTool(String)` (thrown by `HarmonyToolCallParser.parse`, sources/Shrike/Tokenization/HarmonyToolCallParser.swift:41).
 - Produces: `StructuredOutputFailure` gains `let unknownToolName: String?`; its `debugDescription` includes `unknown_tool_name=<name>` when non-nil. `StructuredOutputFailureCause` gains `static func unknownToolName(_ error: Error) -> String?`.
 
-- [ ] **Step 1: Read the existing test and rewrite it as a failing test**
+- [x] **Step 1: Read the existing test and rewrite it as a failing test**
 
 Read `tests/ShrikeServer/StructuredOutputDiagnosticsTests.swift` in full (it is
 ~110 lines). Rewrite `parserCausesAreFixedAndUnknownToolNameIsDiscarded()` —
@@ -75,12 +75,12 @@ Also add the negative case (a `malformed` error must not emit the field):
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `swift test --no-parallel --filter StructuredOutputDiagnosticsTests`
 Expected: compile failure — `unknownToolName` and the init parameter do not exist yet.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `sources/ShrikeServer/Core/ServerInference.swift`:
 
@@ -124,12 +124,12 @@ throw structuredFailure(kind: .decoderConsume,
 (same shape at the `.decoderFinish` site with `error`; the
 `.orphanToolResponse` site at :1159 stays as-is, taking the nil default).
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `swift test --no-parallel --filter StructuredOutputDiagnosticsTests`
 Expected: PASS, including the untouched suite members.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add sources/ShrikeServer/Core/ServerInference.swift tests/ShrikeServer/StructuredOutputDiagnosticsTests.swift
@@ -148,7 +148,7 @@ git commit -m "v7 1/6: carry the unknown tool name into the failure log"
 - Consumes: `RawDecodeResult.prefillTokens: Int`, `.kvBackedTokenIDs: [Int32]`, `.uncommittedBoundaryTokenIDs: [Int32]` (already used by `StructuredOutputFailureDiagnostics.init` at :109-114).
 - Produces: `ShrikeGenDiag.enabled: Bool` and `ShrikeGenDiag.line(prefillTokens:kvBackedTokenIDs:boundaryTokenIDs:) -> String`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `StructuredOutputDiagnosticsTests.swift`:
 
@@ -170,12 +170,12 @@ Append to `StructuredOutputDiagnosticsTests.swift`:
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `swift test --no-parallel --filter StructuredOutputDiagnosticsTests`
 Expected: compile failure — `ShrikeGenDiag` does not exist.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `ServerInference.swift`, after the `// MARK: - Structured Output
 Diagnostics` section opener:
@@ -216,12 +216,12 @@ if ShrikeGenDiag.enabled {
 (`cacheDiag(_:)` at :832 is a bare stderr write, not env-gated — the
 `ShrikeGenDiag.enabled` guard is what gates this.)
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
 
 Run: `swift test --no-parallel --filter StructuredOutputDiagnosticsTests`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add sources/ShrikeServer/Core/ServerInference.swift tests/ShrikeServer/StructuredOutputDiagnosticsTests.swift
@@ -246,7 +246,7 @@ explicit go-ahead before Task 3.**
   - `public func encodeToolChat(messages: [Message], tools: [FunctionDefinition], reasoningEffort: ReasoningEffort = .medium) throws -> [Int32]`
   - `func harmonyChatTemplate(_ messages: [Message], tools: [FunctionDefinition], reasoningEffort: ReasoningEffort = .medium, currentDate: String? = nil, addGenerationPrompt: Bool = true) throws -> String`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `HarmonyTemplateTests.swift`, extend the `systemBlock` helper (:37) with an
 effort parameter, replacing the hardcoded literal:
@@ -283,12 +283,12 @@ func reasoningEffortParameterizesTheSystemBlock() throws {
 `Message` typealias at :28.) The existing tests keep passing unchanged because
 the default stays `.medium`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `swift test --no-parallel --filter HarmonyTemplateTests`
 Expected: compile failure — `ReasoningEffort` and the parameter do not exist.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `Tokenizer.swift`, directly below `ModelThinkingMode` (:56):
 
@@ -324,13 +324,13 @@ Thread the parameter:
 Defaults keep every existing call site (CLI, app, decode service, tests)
 compiling unchanged.
 
-- [ ] **Step 4: Run the full tokenization suites**
+- [x] **Step 4: Run the full tokenization suites**
 
 Run: `swift test --no-parallel --filter Tokenization`
 Expected: PASS — including every golden Harmony test, byte-identical at the
 default.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add sources/Shrike/Tokenization/Tokenizer.swift tests/Shrike/Core/Tokenization/HarmonyTemplateTests.swift
@@ -356,7 +356,7 @@ git commit -m "v7 3/6: ReasoningEffort parameterizes the harmony system block"
   - `ModelSessionPlan.reasoningEffort: ReasoningEffort?`.
   - `ServerModelSession.defaultReasoningEffort(explicit:dialect:thinkingMode:) -> (effort: ReasoningEffort, warning: String?)` — static, pure, and the session stores its result as `let defaultReasoningEffort: ReasoningEffort`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `ServerArgumentTests` (mirror the style of
 `parsesOnlyBinaryThinkingModes()` at :360):
@@ -406,12 +406,12 @@ struct ReasoningEffortDefaultTests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `swift test --no-parallel --filter "ServerArgumentTests|ReasoningEffortDefaultTests"`
 Expected: compile failure — the field, flag, and function do not exist.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `ServerArguments.swift`:
 - Field `public let reasoningEffort: ReasoningEffort?` (plus memberwise-init
@@ -478,13 +478,13 @@ static func defaultReasoningEffort(
 `main.swift` :83 — append to the ready line:
 `reasoning_effort=\(effective.reasoningEffort?.rawValue ?? "auto")`.
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
 
 Run: `swift test --no-parallel --filter "ServerArgumentTests|ReasoningEffortDefaultTests"`
 Expected: PASS. Then `swift build` to confirm all `ModelSessionPlan`/`load`
 call sites (including tests) still compile.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add sources/ShrikeServer sources/Shrike tests/ShrikeServer
@@ -504,7 +504,7 @@ git commit -m "v7 4/6: --reasoning-effort server default and the --thinking off 
 - Consumes: `ReasoningEffort` (Task 3), `ValidatedChatRequest` (existing), `ServerModelSession.defaultReasoningEffort` stored property (Task 4).
 - Produces: `OpenAIChatRequest.reasoningEffort: String?` (wire key `reasoning_effort`); `ValidatedChatRequest.reasoningEffort: ReasoningEffort?` (init parameter defaulted to nil, preserved by `replacingMessages`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `OpenAIValidationTests` (matching the raw-JSON style at the top of that
 suite):
@@ -532,13 +532,13 @@ suite):
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `swift test --no-parallel --filter OpenAIValidationTests`
 Expected: compile failure (`reasoningEffort` member missing), then after
 decode-only stubs an assertion failure.
 
-- [ ] **Step 3: Implement parsing and validation**
+- [x] **Step 3: Implement parsing and validation**
 
 `OpenAIChatRequest`: add `public let reasoningEffort: String?` and CodingKeys
 entry `case reasoningEffort = "reasoning_effort"`.
@@ -566,7 +566,7 @@ private static func validatedReasoningEffort(
 
 called from `validate` and passed into the `ValidatedChatRequest` it returns.
 
-- [ ] **Step 4: Thread the override and the dialect guard**
+- [x] **Step 4: Thread the override and the dialect guard**
 
 In `ServerModelSession.generate` (:962), before `preparePrompt` runs (:971):
 
@@ -592,12 +592,12 @@ returns HTTP 400 like one thrown from `validate` (they share the error type;
 if the handler only catches it around validation, widen that catch to the
 generate call in the same style).
 
-- [ ] **Step 5: Run to verify pass**
+- [x] **Step 5: Run to verify pass**
 
 Run: `swift test --no-parallel --filter OpenAIValidationTests`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add sources/ShrikeServer/Core/OpenAIModels.swift sources/ShrikeServer/Core/ServerInference.swift tests/ShrikeServer/OpenAIValidationTests.swift
@@ -612,7 +612,7 @@ git commit -m "v7 5/6: per-request reasoning_effort with strict validation"
 - Modify: `README.md` (:90-91, the thinking-mode bullet)
 - Modify: `docs/v7-reasoning-effort.md` (only if implementation diverged from the spec)
 
-- [ ] **Step 1: Update README**
+- [x] **Step 1: Update README**
 
 Replace the bullet at README.md:90-91 with:
 
@@ -623,7 +623,7 @@ Replace the bullet at README.md:90-91 with:
   on a Harmony model warns and maps to effort `low`.
 ```
 
-- [ ] **Step 2: Run the five gates**
+- [x] **Step 2: Run the five gates**
 
 Delegate each run to a haiku subagent (return pass/fail plus ALL errors,
 warnings and failing test names verbatim — nothing else):
@@ -639,7 +639,7 @@ warnings and failing test names verbatim — nothing else):
 4. `swift test --no-parallel`.
 5. The same suite under ThreadSanitizer.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add README.md docs/v7-reasoning-effort.md docs/v7-implementation-plan.md
