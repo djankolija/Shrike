@@ -10,7 +10,13 @@ import Testing
         let missExperts: [UInt32]
         let slots: [UInt32]
         let generations: [UInt64]
+        var specArgs: [UInt32] = []
     }
+
+    private static let phase1FullGrid = MTLSize(width: 256, height: 1, depth: 1)
+    private static let phase2FullGrid = MTLSize(width: 13, height: 7, depth: 1)
+    private static let zeroGrids: [UInt32] = [0, 1, 1, 0, 1, 1]
+    private static let fullGrids: [UInt32] = [256, 1, 1, 13, 7, 1]
 
     @Test func loadingResidentAndEvictedEntriesClassifyCorrectly() throws {
         let url = try PreadExpertStreamerTests.writeSyntheticLayer()
@@ -54,10 +60,50 @@ import Testing
                 == ExpertResidencyEntry.empty)
     }
 
+    @Test func speculativeDispatchArgumentsFollowResidency() throws {
+        let url = try PreadExpertStreamerTests.writeSyntheticLayer()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let context = try MetalContext()
+        let streamer = try PreadExpertStreamer(
+            layout: PreadExpertStreamerTests.makeLayout(path: url.path),
+            device: context.device,
+            slotCount: 2)
+        let moe = try MoE(context: context,
+                          siluActivation: true,
+                          specializedD: 2048,
+                          specializedF: 512,
+                          specializedNumExperts: 4)
+
+        var result = try classify([0, 1, 2, 3], streamer: streamer,
+                                  moe: moe, context: context, speculative: true)
+        #expect(result.misses == [0, 1, 2, 3])
+        #expect(result.specArgs == Self.zeroGrids)
+
+        _ = try streamer.executeExpertCachePlan(
+            try streamer.planExpertsCached(experts: [1]))
+        _ = try streamer.loadExpertsCached(experts: [3])
+        result = try classify([0, 1, 2, 3], streamer: streamer,
+                              moe: moe, context: context, speculative: true)
+        #expect(result.hits == [1, 3])
+        #expect(result.specArgs == Self.zeroGrids)
+
+        result = try classify([1, 3], streamer: streamer,
+                              moe: moe, context: context, speculative: true)
+        #expect(result.misses.isEmpty)
+        #expect(result.specArgs == Self.fullGrids)
+
+        let base = try classify([1, 3], streamer: streamer,
+                                moe: moe, context: context)
+        #expect(base.hits == result.hits)
+        #expect(base.slots == result.slots)
+        #expect(base.generations == result.generations)
+    }
+
     private func classify(_ experts: [UInt32],
                           streamer: PreadExpertStreamer,
                           moe: MoE,
-                          context: MetalContext) throws -> Classification {
+                          context: MetalContext,
+                          speculative: Bool = false) throws -> Classification {
         func buffer<T>(_ values: [T]) -> MTLBuffer {
             values.withUnsafeBytes { bytes in
                 context.device.makeBuffer(
@@ -75,6 +121,10 @@ import Testing
         let slots = buffer([UInt32](repeating: 0, count: experts.count))
         let generations = buffer([UInt64](repeating: 0, count: experts.count))
         let resources = streamer.expertResidencyResources()
+        let specArgsBuffer = speculative
+            ? context.device.makeBuffer(length: MoE.specDispatchArgsLength,
+                                        options: .storageModeShared)!
+            : nil
         let commandBuffer = context.queue.makeCommandBuffer()!
         try moe.encodeResidencyClassification(
             commandBuffer: commandBuffer,
@@ -88,7 +138,13 @@ import Testing
             resolvedSlots: slots,
             resolvedGenerations: generations,
             topK: UInt32(experts.count),
-            numExperts: UInt32(resources.expertCount))
+            numExperts: UInt32(resources.expertCount),
+            speculative: specArgsBuffer.map {
+                MoE.SpeculativeDispatchArguments(
+                    arguments: $0,
+                    phase1Threadgroups: Self.phase1FullGrid,
+                    phase2Threadgroups: Self.phase2FullGrid)
+            })
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         if let error = commandBuffer.error { throw error }
@@ -105,6 +161,9 @@ import Testing
             misses: values(missPositions, count: missN, as: UInt32.self),
             missExperts: values(missExperts, count: missN, as: UInt32.self),
             slots: values(slots, count: experts.count, as: UInt32.self),
-            generations: values(generations, count: experts.count, as: UInt64.self))
+            generations: values(generations, count: experts.count, as: UInt64.self),
+            specArgs: specArgsBuffer.map {
+                values($0, count: 6, as: UInt32.self)
+            } ?? [])
     }
 }

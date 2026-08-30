@@ -110,23 +110,28 @@ struct ExpertResidencyGPU {
     ulong generation;
 };
 
+/// Indirect threadgroup counts for the speculative phase-1/phase-2 command
+/// buffers, in MTLDispatchThreadgroupsIndirectArguments layout.
+struct MoESpecDispatchArgs {
+    uint phase1_threadgroups[3];
+    uint phase2_threadgroups[3];
+};
+
 /// Classifies the router's exact top-k result against the CPU-published cache
 /// map. Only eight positions are touched; one lane avoids atomics and preserves
-/// router order in both compact lists.
-kernel void moe_classify_expert_residency(
-    device const uint* topk_indices [[buffer(0)]],
-    device const ExpertResidencyGPU* residency [[buffer(1)]],
-    device uint* hit_count [[buffer(2)]],
-    device uint* hit_positions [[buffer(3)]],
-    device uint* miss_count [[buffer(4)]],
-    device uint* miss_positions [[buffer(5)]],
-    device uint* miss_experts [[buffer(6)]],
-    device uint* resolved_slots [[buffer(7)]],
-    device ulong* resolved_generations [[buffer(8)]],
-    constant uint& top_k [[buffer(9)]],
-    constant uint& num_experts [[buffer(10)]],
-    uint lane [[thread_index_in_threadgroup]]) {
-    if (lane != 0) return;
+/// router order in both compact lists. Returns the miss count.
+static inline uint moe_classify_residency_body(
+    device const uint* topk_indices,
+    device const ExpertResidencyGPU* residency,
+    device uint* hit_count,
+    device uint* hit_positions,
+    device uint* miss_count,
+    device uint* miss_positions,
+    device uint* miss_experts,
+    device uint* resolved_slots,
+    device ulong* resolved_generations,
+    uint top_k,
+    uint num_experts) {
     uint hits = 0, misses = 0;
     for (uint position = 0; position < top_k; ++position) {
         const uint expert = min(topk_indices[position], num_experts - 1u);
@@ -145,6 +150,61 @@ kernel void moe_classify_expert_residency(
     }
     hit_count[0] = hits;
     miss_count[0] = misses;
+    return misses;
+}
+
+kernel void moe_classify_expert_residency(
+    device const uint* topk_indices [[buffer(0)]],
+    device const ExpertResidencyGPU* residency [[buffer(1)]],
+    device uint* hit_count [[buffer(2)]],
+    device uint* hit_positions [[buffer(3)]],
+    device uint* miss_count [[buffer(4)]],
+    device uint* miss_positions [[buffer(5)]],
+    device uint* miss_experts [[buffer(6)]],
+    device uint* resolved_slots [[buffer(7)]],
+    device ulong* resolved_generations [[buffer(8)]],
+    constant uint& top_k [[buffer(9)]],
+    constant uint& num_experts [[buffer(10)]],
+    uint lane [[thread_index_in_threadgroup]]) {
+    if (lane != 0) return;
+    moe_classify_residency_body(
+        topk_indices, residency, hit_count, hit_positions,
+        miss_count, miss_positions, miss_experts,
+        resolved_slots, resolved_generations, top_k, num_experts);
+}
+
+/// v9 speculative dispatch: additionally publishes indirect dispatch
+/// arguments — the caller-supplied full grids when every routed expert is
+/// resident, zero-width grids otherwise — so pre-committed speculative
+/// command buffers size themselves without a CPU readback.
+kernel void moe_classify_expert_residency_spec(
+    device const uint* topk_indices [[buffer(0)]],
+    device const ExpertResidencyGPU* residency [[buffer(1)]],
+    device uint* hit_count [[buffer(2)]],
+    device uint* hit_positions [[buffer(3)]],
+    device uint* miss_count [[buffer(4)]],
+    device uint* miss_positions [[buffer(5)]],
+    device uint* miss_experts [[buffer(6)]],
+    device uint* resolved_slots [[buffer(7)]],
+    device ulong* resolved_generations [[buffer(8)]],
+    constant uint& top_k [[buffer(9)]],
+    constant uint& num_experts [[buffer(10)]],
+    constant MoESpecDispatchArgs& spec_full_grids [[buffer(11)]],
+    device MoESpecDispatchArgs* spec_args [[buffer(12)]],
+    uint lane [[thread_index_in_threadgroup]]) {
+    if (lane != 0) return;
+    const uint misses = moe_classify_residency_body(
+        topk_indices, residency, hit_count, hit_positions,
+        miss_count, miss_positions, miss_experts,
+        resolved_slots, resolved_generations, top_k, num_experts);
+    const bool all_hit = (misses == 0u);
+    for (uint i = 0; i < 3; ++i) {
+        const uint zero_grid = (i == 0u) ? 0u : 1u;
+        spec_args->phase1_threadgroups[i] = all_hit
+            ? spec_full_grids.phase1_threadgroups[i] : zero_grid;
+        spec_args->phase2_threadgroups[i] = all_hit
+            ? spec_full_grids.phase2_threadgroups[i] : zero_grid;
+    }
 }
 
 static inline float moe_hidden_activation(float x) {

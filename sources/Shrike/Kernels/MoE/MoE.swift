@@ -58,6 +58,7 @@ final class MoE {
     private let routerSelectK8PSO: MTLComputePipelineState
     private let routerSelectK8SpecializedPSO: MTLComputePipelineState
     private let residencyClassifyPSO: MTLComputePipelineState
+    private let residencyClassifySpecPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
     private let phase1U16PSO: MTLComputePipelineState
     private let phase1U16SpecializedPSO: MTLComputePipelineState
@@ -141,6 +142,8 @@ final class MoE {
             selectName,
             constants: routerConstants)
         self.residencyClassifyPSO = try context.pipeline("moe_classify_expert_residency")
+        self.residencyClassifySpecPSO = try context.pipeline(
+            "moe_classify_expert_residency_spec")
         let phase1Name = routedWeightBits == 4
             ? "moe_phase1_gate_up_act_u16load" : "moe_affine_phase1_gate_up_act"
         let phase1SubsetName = routedWeightBits == 4
@@ -298,6 +301,18 @@ final class MoE {
         return buffer
     }
 
+    /// `arguments` receives two MTLDispatchThreadgroupsIndirectArguments
+    /// (phase-1 at offset 0, phase-2 at `specPhase2ArgsOffset`); the grids are
+    /// what the classifier publishes when every routed expert is resident.
+    struct SpeculativeDispatchArguments {
+        let arguments: MTLBuffer
+        let phase1Threadgroups: MTLSize
+        let phase2Threadgroups: MTLSize
+    }
+
+    static let specDispatchArgsLength = MemoryLayout<UInt32>.stride * 6
+    static let specPhase2ArgsOffset = MemoryLayout<UInt32>.stride * 3
+
     func encodeResidencyClassification(
         commandBuffer: MTLCommandBuffer,
         topKIndices: MTLBuffer,
@@ -310,7 +325,8 @@ final class MoE {
         resolvedSlots: MTLBuffer,
         resolvedGenerations: MTLBuffer,
         topK: UInt32,
-        numExperts: UInt32
+        numExperts: UInt32,
+        speculative: SpeculativeDispatchArguments? = nil
     ) throws {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
@@ -322,7 +338,8 @@ final class MoE {
             missCount: missCount, missPositions: missPositions,
             missExperts: missExperts, resolvedSlots: resolvedSlots,
             resolvedGenerations: resolvedGenerations,
-            topK: topK, numExperts: numExperts)
+            topK: topK, numExperts: numExperts,
+            speculative: speculative)
         encoder.endEncoding()
     }
 
@@ -338,12 +355,17 @@ final class MoE {
         resolvedSlots: MTLBuffer,
         resolvedGenerations: MTLBuffer,
         topK: UInt32,
-        numExperts: UInt32
+        numExperts: UInt32,
+        speculative: SpeculativeDispatchArguments? = nil
     ) {
         precondition(topK <= UInt32(Self.maxStreamedExperts))
+        if let speculative {
+            precondition(speculative.arguments.length >= Self.specDispatchArgsLength)
+        }
         var topKValue = topK
         var expertCount = numExperts
-        encoder.setComputePipelineState(residencyClassifyPSO)
+        encoder.setComputePipelineState(
+            speculative != nil ? residencyClassifySpecPSO : residencyClassifyPSO)
         encoder.setBuffer(topKIndices, offset: 0, index: 0)
         encoder.setBuffer(residencyTable, offset: 0, index: 1)
         encoder.setBuffer(hitCount, offset: 0, index: 2)
@@ -355,6 +377,18 @@ final class MoE {
         encoder.setBuffer(resolvedGenerations, offset: 0, index: 8)
         encoder.setBytes(&topKValue, length: MemoryLayout<UInt32>.stride, index: 9)
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 10)
+        if let speculative {
+            var grids: [UInt32] = [
+                UInt32(speculative.phase1Threadgroups.width),
+                UInt32(speculative.phase1Threadgroups.height),
+                UInt32(speculative.phase1Threadgroups.depth),
+                UInt32(speculative.phase2Threadgroups.width),
+                UInt32(speculative.phase2Threadgroups.height),
+                UInt32(speculative.phase2Threadgroups.depth),
+            ]
+            encoder.setBytes(&grids, length: Self.specDispatchArgsLength, index: 11)
+            encoder.setBuffer(speculative.arguments, offset: 0, index: 12)
+        }
         encoder.dispatchThreadgroups(
             MTLSize(width: 1, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
