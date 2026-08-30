@@ -9,6 +9,7 @@ constant constexpr float kGeluCubicCoeff = 0.044715f;
 // qwen36_35B_A3B's 2048 and gpt-oss-20b's 2880; the cooperative load is
 // guarded for smaller D).
 constant constexpr uint kMoEXMaxD = 2880;
+constant constexpr uint kMoEXSumMax = kMoEXMaxD / 8;
 
 constant uint FC_ROUTER_NUM_EXPERTS [[function_constant(40)]];
 constant uint FC_ROUTER_D [[function_constant(41)]];
@@ -602,6 +603,7 @@ static inline float2 moe_int4_gate_up_rows_simd_dev_vec_u16load(
 // on the M3 with 16 rows/threadgroup (ShrikeBench moe_phase1_xsh16).
 static inline float2 moe_int4_gate_up_rows_simd_tgmem_u16load(
     threadgroup const half* x,
+    threadgroup const half* xsums,
     device const uint8_t* gateW,
     device const bfloat* gateS,
     device const bfloat* gateB,
@@ -640,12 +642,12 @@ static inline float2 moe_int4_gate_up_rows_simd_tgmem_u16load(
         const float e2 = float(x[elem + 2u]), e3 = float(x[elem + 3u]);
         const float e4 = float(x[elem + 4u]), e5 = float(x[elem + 5u]);
         const float e6 = float(x[elem + 6u]), e7 = float(x[elem + 7u]);
-        const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+        const float sum = float(xsums[elem >> 3]);
 
         const uint gb0 = gw4 & 0xFFu;
         const uint gb1 = (gw4 >> 8) & 0xFFu;
         const uint gb2 = (gw4 >> 16) & 0xFFu;
-        const uint gb3 = (gw4 >> 24) & 0xFFu;
+        const uint gb3 = gw4 >> 24;
         float g_dot = 0.0f;
         g_dot = fma(float(gb0 & 0x0Fu), e0, g_dot); g_dot = fma(float(gb0 >> 4), e1, g_dot);
         g_dot = fma(float(gb1 & 0x0Fu), e2, g_dot); g_dot = fma(float(gb1 >> 4), e3, g_dot);
@@ -655,7 +657,7 @@ static inline float2 moe_int4_gate_up_rows_simd_tgmem_u16load(
         const uint ub0 = uw4 & 0xFFu;
         const uint ub1 = (uw4 >> 8) & 0xFFu;
         const uint ub2 = (uw4 >> 16) & 0xFFu;
-        const uint ub3 = (uw4 >> 24) & 0xFFu;
+        const uint ub3 = uw4 >> 24;
         float u_dot = 0.0f;
         u_dot = fma(float(ub0 & 0x0Fu), e0, u_dot); u_dot = fma(float(ub0 >> 4), e1, u_dot);
         u_dot = fma(float(ub1 & 0x0Fu), e2, u_dot); u_dot = fma(float(ub1 >> 4), e3, u_dot);
@@ -776,9 +778,19 @@ kernel void moe_phase1_gate_up_act_u16load(
     // makes it visible to the row loops.
     constexpr uint rows_per_tg = 16;
     threadgroup half xt[kMoEXMaxD];
+    // One 8-element activation sum per (block, lane). The affine-bias term
+    // needs it and it is row-independent, so all 16 rows recomputed it before.
+    threadgroup half xsum[kMoEXSumMax];
     const uint DD = moe_fc_d(D);
-    for (uint i = sg_idx * 32u + lane; i < DD; i += rows_per_tg * 32u) {
+    const uint tid = sg_idx * 32u + lane;
+    for (uint i = tid; i < DD; i += rows_per_tg * 32u) {
         xt[i] = x[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = tid; i < (DD >> 3); i += rows_per_tg * 32u) {
+        const uint b = i << 3;
+        xsum[i] = ((xt[b] + xt[b + 1u]) + (xt[b + 2u] + xt[b + 3u]))
+                + ((xt[b + 4u] + xt[b + 5u]) + (xt[b + 6u] + xt[b + 7u]));
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -790,7 +802,7 @@ kernel void moe_phase1_gate_up_act_u16load(
     device const uint8_t* base = routed.blob[slot];
     const ExpertOffsets re = routed_offsets;
     const float2 gu = moe_int4_gate_up_rows_simd_tgmem_u16load(
-        xt, base + re.gate_W_off,
+        xt, xsum, base + re.gate_W_off,
         (device const bfloat*)(base + re.gate_s_off),
         (device const bfloat*)(base + re.gate_b_off),
         base + re.up_W_off,
@@ -818,9 +830,19 @@ kernel void moe_phase1_gate_up_act_subset_u16load(
     if (!moe_io_ready(io_status)) return;
     constexpr uint rows_per_tg = 16;
     threadgroup half xt[kMoEXMaxD];
+    // One 8-element activation sum per (block, lane). The affine-bias term
+    // needs it and it is row-independent, so all 16 rows recomputed it before.
+    threadgroup half xsum[kMoEXSumMax];
     const uint DD = moe_fc_d(D);
-    for (uint i = sg_idx * 32u + lane; i < DD; i += rows_per_tg * 32u) {
+    const uint tid = sg_idx * 32u + lane;
+    for (uint i = tid; i < DD; i += rows_per_tg * 32u) {
         xt[i] = x[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = tid; i < (DD >> 3); i += rows_per_tg * 32u) {
+        const uint b = i << 3;
+        xsum[i] = ((xt[b] + xt[b + 1u]) + (xt[b + 2u] + xt[b + 3u]))
+                + ((xt[b + 4u] + xt[b + 5u]) + (xt[b + 6u] + xt[b + 7u]));
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -834,7 +856,7 @@ kernel void moe_phase1_gate_up_act_subset_u16load(
     device const uint8_t* base = routed.blob[slot];
     const ExpertOffsets re = routed_offsets;
     const float2 gu = moe_int4_gate_up_rows_simd_tgmem_u16load(
-        xt, base + re.gate_W_off,
+        xt, xsum, base + re.gate_W_off,
         (device const bfloat*)(base + re.gate_s_off),
         (device const bfloat*)(base + re.gate_b_off),
         base + re.up_W_off,
