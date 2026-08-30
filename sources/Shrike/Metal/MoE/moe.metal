@@ -772,12 +772,12 @@ kernel void moe_phase1_gate_up_act_u16load(
 ) {
     if (!moe_io_ready(io_status)) return;
     // 16 rows per threadgroup with the activation staged in threadgroup
-    // memory. Each simdgroup redundantly loads the full x (the shared input),
-    // then a barrier makes it visible to the row loops.
+    // memory. The whole threadgroup cooperates on the load, then a barrier
+    // makes it visible to the row loops.
     constexpr uint rows_per_tg = 16;
     threadgroup half xt[kMoEXMaxD];
     const uint DD = moe_fc_d(D);
-    for (uint i = lane; i < DD; i += 32u) {
+    for (uint i = sg_idx * 32u + lane; i < DD; i += rows_per_tg * 32u) {
         xt[i] = x[i];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -819,7 +819,7 @@ kernel void moe_phase1_gate_up_act_subset_u16load(
     constexpr uint rows_per_tg = 16;
     threadgroup half xt[kMoEXMaxD];
     const uint DD = moe_fc_d(D);
-    for (uint i = lane; i < DD; i += 32u) {
+    for (uint i = sg_idx * 32u + lane; i < DD; i += rows_per_tg * 32u) {
         xt[i] = x[i];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
