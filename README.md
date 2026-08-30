@@ -88,9 +88,10 @@ add, since the parser, repacker, and inference path are shared.
 - **Long context.** Native RoPE to 262K tokens; optional YaRN extends to 512K or 1M.
 - **Compressed KV cache.** 16-, 8-, or 4-bit, independent of model quantization.
 - **Thinking mode.** Off/on/adaptive for the Qwen-family templates. gpt-oss
-  cannot disable thinking; its knob is `--reasoning-effort low|medium|high`
-  (per-request via the OpenAI `reasoning_effort` field), and `--thinking off`
-  on a Harmony model warns and maps to effort `low`.
+  cannot disable thinking; its knob is ShrikeServer's `--reasoning-effort
+  low|medium|high` (per-request via the OpenAI `reasoning_effort` field;
+  ShrikeCLI has no such flag), and `--thinking off` on a Harmony model warns
+  and maps to effort `low`.
 - **MTP is off by default.** Speculative decoding is experimental; measured runs
   showed no benefit, and it requires greedy decoding, native RoPE, and prompt-cache
   reuse disabled.

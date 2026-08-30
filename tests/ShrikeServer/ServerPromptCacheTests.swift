@@ -845,6 +845,32 @@ struct KVRewriteTests {
         #expect(entry.kvBackedTokenIDs == kvBacked)
     }
 
+    /// A boundary rendered at the wrong reasoning effort embeds different
+    /// bytes, so settle only splices cleanly against the KV's own effort.
+    @Test func aSettledRewriteMatchesTheKVsOwnReasoningEffort() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.harmonyFolder())
+        let messages = [GFTokenizer.Message(role: .user, content: "first")]
+        let prompt = tokenizer.encode(
+            try tokenizer.applyChatTemplate(messages, reasoningEffort: .low), addBOS: false)
+        let kvBacked = prompt + tokenizer.encode("answer", addBOS: false)
+
+        let completed = messages
+            + [GFTokenizer.Message(role: .assistant, content: "answer")]
+        #expect(KVRewrite.settledSequence(
+            kvBackedTokenIDs: kvBacked,
+            boundaryTokens: try tokenizer.settledBoundaryTokens(
+                messages: completed, tools: [], reasoningEffort: .low),
+            liveRegionTokens: try tokenizer.settledLiveRegionTokens(
+                messages: completed, tools: [], reasoningEffort: .low)) != nil)
+
+        #expect(KVRewrite.settledSequence(
+            kvBackedTokenIDs: kvBacked,
+            boundaryTokens: try tokenizer.settledBoundaryTokens(
+                messages: completed, tools: [], reasoningEffort: .medium),
+            liveRegionTokens: try tokenizer.settledLiveRegionTokens(
+                messages: completed, tools: [], reasoningEffort: .medium)) == nil)
+    }
+
     /// Harmony stops at `<|return|>`, which the decode loop reports as `.eos`;
     /// nothing about the dialect keeps its turns out of the cache any more.
     @Test func aHarmonyTurnPublishesLikeEveryOtherDialect() async throws {

@@ -97,6 +97,11 @@ Changing effort mid-conversation therefore re-prefills the whole conversation
 gpt-oss keeps its knob, not a defect; benchmark arms hold effort constant per
 conversation, where the cost is zero. Documented, not mitigated.
 
+The v6 KV-settle re-render (`settledBoundaryTokens`/`settledFormRender`) also
+re-renders the system block on every settle, and is effort-aware as of this
+fix — it now renders at the request's own effort rather than unconditionally
+at `medium`, so settle keeps matching a conversation running at `low`/`high`.
+
 ## Phase A — diagnostics
 
 Two knobs, both unit-testable without loading a model:
@@ -123,7 +128,7 @@ Two knobs, both unit-testable without loading a model:
   it through for the Harmony dialect; other dialects ignore it.
 - `--reasoning-effort low|medium|high` flag + `SHRIKE_REASONING_EFFORT` env in
   `ServerArguments`; the `--thinking off` Harmony mapping above; launch line
-  prints the effective default.
+  prints the configured default (`auto` when unset).
 - `reasoning_effort` parsed on Chat Completions requests, validated
   (`low|medium|high` else 400; non-Harmony model else 400), threaded through
   `ValidatedChatRequest` into the per-request render.

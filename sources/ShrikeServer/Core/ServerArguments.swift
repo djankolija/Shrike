@@ -101,8 +101,8 @@ public struct ServerArguments: Equatable, Sendable {
                              expose low/medium/high effort levels.
       --reasoning-effort <low|medium|high>
                              Harmony deliberation level: low, medium or high
-                             (default medium; --thinking off on a Harmony
-                             model implies low).
+                             (default medium, or SHRIKE_REASONING_EFFORT;
+                             --thinking off on a Harmony model implies low).
       --expert-cache-slots <count>
                              Routed-expert cache slots per layer: 8, 16, 24,
                              32, 64, 96, or 128 (default 64). Environment
@@ -151,6 +151,11 @@ public struct ServerArguments: Equatable, Sendable {
         var kvCachePrecision: KVCachePrecision = .int8
         var ropeScalingMode: RuntimeRoPEScalingMode = .none
         var thinkingMode = ModelThinkingMode.resolved(environment: environment)
+        if let raw = environment["SHRIKE_REASONING_EFFORT"],
+           ReasoningEffort(rawValue: raw.lowercased()) == nil {
+            throw ServerArgumentError.invalid(
+                "SHRIKE_REASONING_EFFORT must be low, medium or high")
+        }
         var reasoningEffort = ReasoningEffort.resolved(environment: environment)
         var expertCacheSlots: Int?
         var expertCacheBudgetBytes: Int?

@@ -407,6 +407,14 @@ struct ServerArgumentTests {
             try ServerArguments.parse(
                 ["--model", "m", "--reasoning-effort", "max"], environment: [:])
         }
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse(
+                ["--model", "m"],
+                environment: ["SHRIKE_REASONING_EFFORT": "max"])
+        }
+        #expect(try ServerArguments.parse(
+            ["--model", "m"],
+            environment: ["SHRIKE_REASONING_EFFORT": "low"]).reasoningEffort == .low)
     }
 
     @Test func parsesKVPrecisionAndYaRNContexts() throws {

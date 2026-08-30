@@ -559,12 +559,35 @@ public actor ServerModelSession: ServerInferenceBackend {
         dialect: ChatDialect,
         thinkingMode: ModelThinkingMode
     ) -> (effort: ReasoningEffort, warning: String?) {
-        if let explicit { return (explicit, nil) }
+        if let explicit {
+            guard dialect == .harmony else {
+                return (explicit, "Shrike reasoning_effort: has no effect on "
+                    + "\(dialect.rawValue) models")
+            }
+            return (explicit, nil)
+        }
         guard dialect == .harmony, thinkingMode == .off else {
             return (.medium, nil)
         }
         return (.low, "Shrike reasoning_effort: harmony cannot disable thinking; "
             + "--thinking off maps to reasoning effort low")
+    }
+
+    static func requireDialectSupports(_ effort: ReasoningEffort?,
+                                       dialect: ChatDialect) throws {
+        guard effort == nil || dialect == .harmony else {
+            throw ServerRequestError.invalid(
+                message: "reasoning_effort is not supported by this model",
+                param: "reasoning_effort",
+                code: "unsupported_parameter")
+        }
+    }
+
+    static func effectiveReasoningEffort(
+        request: ReasoningEffort?,
+        default defaultEffort: ReasoningEffort
+    ) -> ReasoningEffort {
+        request ?? defaultEffort
     }
 
     /// lint:allow-long a sequential construction pipeline: tokenizer, Metal
@@ -1015,18 +1038,14 @@ public actor ServerModelSession: ServerInferenceBackend {
         _ request: ValidatedChatRequest,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
+        try Self.requireDialectSupports(request.reasoningEffort, dialect: tokenizer.dialect)
+        let effectiveReasoningEffort = Self.effectiveReasoningEffort(
+            request: request.reasoningEffort, default: defaultReasoningEffort)
         // Rendered before anything is awaited, because a rewrite still running
         // between requests is arbitrated on this render: one that it is not
         // prefilling for must cancel it rather than queue behind it. The reset
         // guard below stays under this, so a request rejected here cannot reset
         // a runner the rewrite is still driving.
-        if request.reasoningEffort != nil, tokenizer.dialect != .harmony {
-            throw ServerRequestError.invalid(
-                message: "reasoning_effort is not supported by this model",
-                param: "reasoning_effort",
-                code: "unsupported_parameter")
-        }
-        let effectiveReasoningEffort = request.reasoningEffort ?? defaultReasoningEffort
         let prepared = try preparePrompt(request, reasoningEffort: effectiveReasoningEffort)
         await arbitratePendingRewrite(renderedPromptIDs: prepared.promptIDs)
         // Stage-split measurement (SHRIKE_RUNNER_STATS): snapshot the runner's
@@ -1250,7 +1269,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             promptTokenCount: effectivePromptIDs.count,
             thoughtChannelClosed: decoder?.thoughtChannelClosed ?? true,
             emittedToolCalls: !calls.isEmpty,
-            stopStringFiltered: stopMatcher.isStopped)
+            stopStringFiltered: stopMatcher.isStopped,
+            reasoningEffort: effectiveReasoningEffort)
         let publishedEntryID = publishCacheEntry(
             cacheRequest: cacheRequest,
             result: result,
@@ -1313,7 +1333,8 @@ public actor ServerModelSession: ServerInferenceBackend {
         promptTokenCount: Int,
         thoughtChannelClosed: Bool,
         emittedToolCalls: Bool,
-        stopStringFiltered: Bool
+        stopStringFiltered: Bool,
+        reasoningEffort: ReasoningEffort
     ) -> KVNormalizationPlan {
         guard promptCacheMode != .off,
               mtpDecoder == nil,
@@ -1349,7 +1370,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + [GFTokenizer.Message(role: .assistant, content: content)]
             return settleLiveRegion(messages: completed,
                                     tools: tools,
-                                    result: result)
+                                    result: result,
+                                    reasoningEffort: reasoningEffort)
         }
     }
 
@@ -1402,12 +1424,15 @@ public actor ServerModelSession: ServerInferenceBackend {
     private func settleLiveRegion(
         messages: [GFTokenizer.Message],
         tools: [GFTokenizer.FunctionDefinition],
-        result: RawDecodeResult
+        result: RawDecodeResult,
+        reasoningEffort: ReasoningEffort
     ) -> KVNormalizationPlan {
         guard let boundary = try? tokenizer.settledBoundaryTokens(messages: messages,
-                                                                 tools: tools),
+                                                                 tools: tools,
+                                                                 reasoningEffort: reasoningEffort),
               let live = try? tokenizer.settledLiveRegionTokens(messages: messages,
-                                                                tools: tools) else {
+                                                                tools: tools,
+                                                                reasoningEffort: reasoningEffort) else {
             declined(.renderFailed)
             return .done(.unchanged)
         }

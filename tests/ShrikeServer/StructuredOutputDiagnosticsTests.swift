@@ -75,6 +75,8 @@ struct StructuredOutputDiagnosticsTests {
     @Test func classifyCoversOversizedAndUnexpectedErrorsWithoutLeakingThem() {
         #expect(StructuredOutputFailureCause.classify(
             ToolCallParserError.oversized) == .oversized)
+        #expect(StructuredOutputFailureCause.classify(
+            ToolCallParserError.malformed) == .malformed)
         let unexpectedError = UnexpectedError()
         #expect(StructuredOutputFailureCause.classify(unexpectedError) == .unexpected)
         #expect(StructuredOutputFailureCause.unknownToolName(unexpectedError) == nil)

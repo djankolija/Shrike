@@ -1227,8 +1227,10 @@ public struct GFTokenizer: @unchecked Sendable {
     /// move, and the live region the in-flight request rewrites. The result is
     /// a token prefix of the full render of the same `messages` and `tools`.
     public func settledBoundaryTokenCount(messages: [Message],
-                                          tools: [FunctionDefinition]) throws -> Int {
-        try settledBoundaryTokens(messages: messages, tools: tools).count
+                                          tools: [FunctionDefinition],
+                                          reasoningEffort: ReasoningEffort = .medium) throws -> Int {
+        try settledBoundaryTokens(messages: messages, tools: tools,
+                                  reasoningEffort: reasoningEffort).count
     }
 
     /// The tokens `settledBoundaryTokenCount(messages:tools:)` counts, for a
@@ -1236,7 +1238,8 @@ public struct GFTokenizer: @unchecked Sendable {
     /// than trust a length: a template that embeds the date renders the same
     /// count and different bytes either side of midnight.
     public func settledBoundaryTokens(messages: [Message],
-                                      tools: [FunctionDefinition]) throws -> [Int32] {
+                                      tools: [FunctionDefinition],
+                                      reasoningEffort: ReasoningEffort = .medium) throws -> [Int32] {
         guard let queryIndex = lastQueryIndex(messages) else {
             throw GFTokenizerError.invalidChatTemplate("no user query found in messages")
         }
@@ -1254,6 +1257,7 @@ public struct GFTokenizer: @unchecked Sendable {
                           addBOS: false)
         case .harmony:
             return encode(try harmonyChatTemplate(settled, tools: tools,
+                                                  reasoningEffort: reasoningEffort,
                                                   addGenerationPrompt: false),
                           addBOS: false)
         case .kimi:
@@ -1299,7 +1303,8 @@ public struct GFTokenizer: @unchecked Sendable {
     /// continued by one, which does not move ChatML's `last_query_index`
     /// (fixture lines 68-77), leaving the region live rather than settled.
     public func settledLiveRegionTokens(messages: [Message],
-                                        tools: [FunctionDefinition]) throws -> [Int32] {
+                                        tools: [FunctionDefinition],
+                                        reasoningEffort: ReasoningEffort = .medium) throws -> [Int32] {
         guard let final = messages.last,
               final.role == .assistant,
               final.toolCalls.isEmpty else {
@@ -1307,8 +1312,10 @@ public struct GFTokenizer: @unchecked Sendable {
                 "settled form requires a completed request: the last message "
                     + "must be an assistant turn with no tool calls")
         }
-        let boundary = try settledBoundaryTokenCount(messages: messages, tools: tools)
-        let settled = try settledFormRender(messages, tools: tools)
+        let boundary = try settledBoundaryTokenCount(messages: messages, tools: tools,
+                                                      reasoningEffort: reasoningEffort)
+        let settled = try settledFormRender(messages, tools: tools,
+                                            reasoningEffort: reasoningEffort)
         guard boundary <= settled.count else {
             throw GFTokenizerError.invalidChatTemplate(
                 "settled boundary falls past the settled render")
@@ -1319,7 +1326,8 @@ public struct GFTokenizer: @unchecked Sendable {
     /// Every turn of `messages` in settled form, no generation prompt, through
     /// the render path the request itself was routed to.
     private func settledFormRender(_ messages: [Message],
-                                   tools: [FunctionDefinition]) throws -> [Int32] {
+                                   tools: [FunctionDefinition],
+                                   reasoningEffort: ReasoningEffort = .medium) throws -> [Int32] {
         switch dialect {
         case .chatml:
             // Routed on the whole list, for the reason
@@ -1337,6 +1345,7 @@ public struct GFTokenizer: @unchecked Sendable {
             // at inference (fixture lines 355-382), so the plain render is
             // already the settled one.
             return encode(try harmonyChatTemplate(messages, tools: tools,
+                                                  reasoningEffort: reasoningEffort,
                                                   addGenerationPrompt: false),
                           addBOS: false)
         case .kimi:
