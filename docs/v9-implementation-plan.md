@@ -37,15 +37,25 @@ Numbers cited as baselines are ornith15, n=12.
 
 ## S2 — pool-addressed spec kernels, still host-waited
 
-- [ ] Phase-1 gate/up variant taking `poolBase` + `poolSlotStride` +
-      `resolvedSlots` instead of a CPU-encoded blob argument buffer; dispatched
-      indirectly from S1's arguments. Same math, same tgmem staging — output
-      must stay byte-identical.
-- [ ] Phase-2 equivalent.
-- [ ] New mode `SHRIKE_DECODE_EXPERT_EXECUTION=speculative` that runs the spec
-      CBs but keeps today's host wait and, in this stage, cross-checks spec
-      output against the classic path (fail closed on divergence).
-- [ ] n=12 acceptance: digest identical; cost of the extra CBs measured.
+- [x] Phase-1 gate/up variant taking `poolBase` + `poolSlotStride` +
+      `resolvedSlots`; dispatched indirectly from S1's arguments. Byte-exact
+      vs the production pipeline through scrambled pool slots, inert under
+      zero grids (`98a8925`, MoEFusedFFNTests).
+- [x] Phase-2 equivalent (same commit).
+- [x] `SHRIKE_DECODE_EXPERT_EXECUTION=speculative` validation mode
+      (`2625f5c`, ping-pong fix `0685249`): spec CB committed before the tail
+      wait; memcmp cross-check vs the classic path on all-hit layers, fail
+      closed. First run caught a validation-harness race (single scratch pair
+      compared one layer late) — fixed with parity ping-pong; the fail-closed
+      design worked as intended.
+- [x] n=12 acceptance 2026-08-30: **body 77.13 → 62.60 (−18.8 %), wall
+      17.19 → 14.33, digest identical, zero divergences (~68 k all-hit
+      cross-checks).** The extra CBs are not a cost but a win: the spec CB
+      fills the former idle gap, the queue never drains, and the
+      idle-restart tax that inflated every CB disappears (attn 22.9 → 17.6,
+      classic routed 11.6 → 8.5, shared 5.7 → 4.5; residual gaps ~5.8 + 3.2;
+      busy_share_of_decode 76.4 %). The standing prediction from `a8168d9`
+      is confirmed — the absorbed savings reappeared once the gap was filled.
 
 ## S3 — event-gated successors, fast path live
 
