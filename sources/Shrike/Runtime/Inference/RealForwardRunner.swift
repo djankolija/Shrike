@@ -206,8 +206,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let prefetchPredictionWeights: MTLBuffer
     // Persistent MoE scratch, allocated once; about 56 KiB at production shape.
     private let moeActs: MTLBuffer       // [topK * FmoE] FP16
-    private let specActsBuf: MTLBuffer?  // v9 S2 cross-check scratch
-    private let specYBuf: MTLBuffer?
+    // v9 S2 cross-check scratch, ping-ponged by layer parity: layer L's pair
+    // is compared only after layer L+1's spec CB has already run, so a single
+    // pair would be overwritten before the comparison reads it.
+    private let specScratch: [(acts: MTLBuffer, y: MTLBuffer)]
     private let specArgsBuf: MTLBuffer?
     private let specDispatchArguments: MoE.SpeculativeDispatchArguments?
     /// Width-2 MTP verify scratch (B2 pair schedule): per-row activation and
@@ -557,8 +559,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.moeActs       = try buf(cfg.topKExperts * cfg.moeIntermediateSize, label: "decode.moeActs")
         let spec = runtimeConfiguration.decodeExpertExecution == .speculative
             ? try Self.makeSpeculativeScratch(cfg: cfg, device: device) : nil
-        self.specActsBuf = spec?.acts
-        self.specYBuf = spec?.y
+        self.specScratch = spec?.scratch ?? []
         self.specArgsBuf = spec?.dispatch.arguments
         self.specDispatchArguments = spec?.dispatch
         self.moeHitActiveSlots = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size, label: "decode.moeHitActiveSlots")
@@ -4648,6 +4649,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let phase1HitCB: MTLCommandBuffer?
         let specCB: MTLCommandBuffer?
         let specAllHit: Bool
+        let specScratch: (acts: MTLBuffer, y: MTLBuffer)?
         let expertLease: RoutedExpertLease?
         let storageOperation: RoutedExpertLoadOperation?
         let overlapCompletionClock: CommandCompletionClock?
@@ -4716,12 +4718,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if let specCB = pending.specCB {
             try waitForCompletion(specCB)
             recordKernelGPU(role: "moe_spec_routed", specCB)
-            if pending.specAllHit, let specActsBuf, let specYBuf {
+            if pending.specAllHit, let scratch = pending.specScratch {
                 let actsBytes = cfg.topKExperts * cfg.moeIntermediateSize
                     * MemoryLayout<Float16>.size
                 let yBytes = cfg.hiddenSize * MemoryLayout<Float16>.size
-                if memcmp(specActsBuf.contents(), moeActs.contents(), actsBytes) != 0
-                    || memcmp(specYBuf.contents(), h2Buf.contents(), yBytes) != 0 {
+                if memcmp(scratch.acts.contents(), moeActs.contents(), actsBytes) != 0
+                    || memcmp(scratch.y.contents(), h2Buf.contents(), yBytes) != 0 {
                     throw ModelError.internalInconsistency(
                         detail: "speculative routed output diverged from the "
                             + "classic path (v9 S2 cross-check)")
@@ -4843,7 +4845,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private static func makeSpeculativeScratch(
         cfg: ArchConfig,
         device: MTLDevice
-    ) throws -> (acts: MTLBuffer, y: MTLBuffer,
+    ) throws -> (scratch: [(acts: MTLBuffer, y: MTLBuffer)],
                  dispatch: MoE.SpeculativeDispatchArguments) {
         func make(_ length: Int, _ label: String) throws -> MTLBuffer {
             guard let buffer = device.makeBuffer(length: length,
@@ -4853,11 +4855,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             buffer.label = label
             return buffer
         }
-        let acts = try make(cfg.topKExperts * cfg.moeIntermediateSize
-                                * MemoryLayout<Float16>.size, "decode.specActs")
-        let y = try make(cfg.hiddenSize * MemoryLayout<Float16>.size, "decode.specY")
+        let scratch = try (0..<2).map { index in
+            (acts: try make(cfg.topKExperts * cfg.moeIntermediateSize
+                                * MemoryLayout<Float16>.size,
+                            "decode.specActs\(index)"),
+             y: try make(cfg.hiddenSize * MemoryLayout<Float16>.size,
+                         "decode.specY\(index)"))
+        }
         let args = try make(MoE.specDispatchArgsLength, "decode.specArgs")
-        return (acts, y, MoE.SpeculativeDispatchArguments(
+        return (scratch, MoE.SpeculativeDispatchArguments(
             arguments: args,
             phase1Threadgroups: MoE.specPhase1FullGrid(
                 f: UInt32(cfg.moeIntermediateSize),
@@ -4879,10 +4885,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             throw ModelError.internalInconsistency(
                 detail: "speculative decode requires SHRIKE_EXPERT_CACHE_LAYOUT=pool")
         }
-        guard let specActsBuf, let specYBuf,
+        guard !specScratch.isEmpty,
               let cb = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
+        let scratch = specScratch[L % specScratch.count]
         let offsets = try model.routedExpertOffsets(layer: L)
         try moe.encodeSpecPhase1U16Load(
             commandBuffer: cb,
@@ -4891,7 +4898,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             resolvedSlots: residencyResolvedSlots,
             routedOffsets: offsets,
             x: routedX,
-            acts: specActsBuf,
+            acts: scratch.acts,
             d: UInt32(cfg.hiddenSize),
             f: UInt32(cfg.moeIntermediateSize),
             topK: UInt32(cfg.topKExperts),
@@ -4902,10 +4909,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             poolSlotStride: residency.poolSlotStride,
             resolvedSlots: residencyResolvedSlots,
             routedOffsets: offsets,
-            acts: specActsBuf,
+            acts: scratch.acts,
             routingWeights: outWeights,
             residual: h1Buf,
-            y: specYBuf,
+            y: scratch.y,
             d: UInt32(cfg.hiddenSize),
             f: UInt32(cfg.moeIntermediateSize),
             topK: UInt32(cfg.topKExperts),
@@ -5299,6 +5306,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             phase1HitCB: phase1HitCB,
             specCB: specCB,
             specAllHit: missCount == 0,
+            specScratch: (specCB != nil && !specScratch.isEmpty)
+                ? specScratch[L % specScratch.count] : nil,
             expertLease: expertLease,
             storageOperation: eventLoad,
             overlapCompletionClock: eventLoad == nil ? nil : overlapCompletionClock,
