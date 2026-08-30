@@ -197,6 +197,169 @@ import ShrikeValidationSupport
             < Tolerance.fp16ChainedReduction)
     }
 
+    @Test func speculativePoolPipelineMatchesRoutedPipeline() throws {
+        var rng = SeedTree(0x2D3).key("speculative-pool-moe")
+        func matrix(rows: Int, columns: Int) -> [[Float]] {
+            (0..<rows).map { _ in
+                (0..<columns).map { _ in rng.uniform(-0.4, 0.4) }
+            }
+        }
+        var gates = [[[Float]]]()
+        var ups = [[[Float]]]()
+        var downs = [[[Float]]]()
+        for _ in 0..<Self.topK {
+            gates.append(matrix(rows: Self.intermediate, columns: Self.dimension))
+            ups.append(matrix(rows: Self.intermediate, columns: Self.dimension))
+            downs.append(matrix(rows: Self.dimension, columns: Self.intermediate))
+        }
+        let x = (0..<Self.dimension).map { _ in
+            Float(Float16(rng.uniform(-0.5, 0.5)))
+        }
+        let residual = (0..<Self.dimension).map { _ in
+            Float(Float16(rng.uniform(-0.5, 0.5)))
+        }
+        let routingWeights = (0..<Self.topK).map {
+            Float(Float16(0.04 + Float($0) * 0.015))
+        }
+        let blobs = (0..<Self.topK).map {
+            Self.makeBlob(gate: gates[$0], up: ups[$0], down: downs[$0])
+        }
+
+        let context = try MetalContext()
+        let kernel = try MoE(context: context)
+        let routedBuffers = blobs.compactMap {
+            context.device.makeBuffer(bytes: $0.bytes,
+                                      length: $0.bytes.count,
+                                      options: .storageModeShared)
+        }
+        let poolSlotStride = ((blobs.map(\.bytes.count).max()! + 63) / 64) * 64
+        let slotCount = 16
+        let slotOfExpert: [UInt32] = [5, 2, 9, 0, 12, 3, 15, 7]
+        guard routedBuffers.count == Self.topK,
+              let xBuffer = Fp16Buffer.make(context.device, values: x),
+              let residualBuffer = Fp16Buffer.make(context.device, values: residual),
+              let routingBuffer = Fp16Buffer.make(context.device, values: routingWeights),
+              let fullActs = Fp16Buffer.make(
+                context.device, count: Self.topK * Self.intermediate),
+              let specActs = Fp16Buffer.make(
+                context.device, count: Self.topK * Self.intermediate),
+              let fullOutput = Fp16Buffer.make(context.device, count: Self.dimension),
+              let specOutput = Fp16Buffer.make(context.device, count: Self.dimension),
+              let pool = context.device.makeBuffer(
+                length: poolSlotStride * slotCount, options: .storageModeShared),
+              let resolvedSlots = context.device.makeBuffer(
+                bytes: slotOfExpert,
+                length: slotOfExpert.count * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared),
+              let indirectArgs = context.device.makeBuffer(
+                length: MoE.specDispatchArgsLength, options: .storageModeShared),
+              let argumentBuffer = kernel.makeRoutedArgumentBuffer(
+                routedBlobs: routedBuffers,
+                topK: UInt32(Self.topK)) else {
+            Issue.record("buffer allocation failed")
+            return
+        }
+        for (expert, blob) in blobs.enumerated() {
+            blob.bytes.withUnsafeBytes { bytes in
+                pool.contents()
+                    .advanced(by: Int(slotOfExpert[expert]) * poolSlotStride)
+                    .copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+            }
+        }
+
+        let fullCommand = context.queue.makeCommandBuffer()!
+        try kernel.encodeRoutedPersistentPhase1U16Load(
+            commandBuffer: fullCommand,
+            routedArgBuffer: argumentBuffer,
+            routedBlobs: routedBuffers,
+            routedOffsets: blobs[0].offsets,
+            x: xBuffer,
+            acts: fullActs,
+            d: UInt32(Self.dimension),
+            f: UInt32(Self.intermediate),
+            topK: UInt32(Self.topK))
+        try kernel.encodeRoutedPersistentPhase2Reduce(
+            commandBuffer: fullCommand,
+            routedArgBuffer: argumentBuffer,
+            routedBlobs: routedBuffers,
+            routedOffsets: blobs[0].offsets,
+            acts: fullActs,
+            routingWeights: routingBuffer,
+            residual: residualBuffer,
+            y: fullOutput,
+            d: UInt32(Self.dimension),
+            f: UInt32(Self.intermediate),
+            topK: UInt32(Self.topK))
+        fullCommand.commit()
+        fullCommand.waitUntilCompleted()
+        #expect(fullCommand.error == nil)
+
+        func writeGrids(phase1: MTLSize, phase2: MTLSize) {
+            let grids: [UInt32] = [
+                UInt32(phase1.width), UInt32(phase1.height), UInt32(phase1.depth),
+                UInt32(phase2.width), UInt32(phase2.height), UInt32(phase2.depth),
+            ]
+            grids.withUnsafeBytes {
+                indirectArgs.contents().copyMemory(
+                    from: $0.baseAddress!, byteCount: $0.count)
+            }
+        }
+        func runSpec() throws {
+            let command = context.queue.makeCommandBuffer()!
+            try kernel.encodeSpecPhase1U16Load(
+                commandBuffer: command,
+                expertPool: pool,
+                poolSlotStride: UInt64(poolSlotStride),
+                resolvedSlots: resolvedSlots,
+                routedOffsets: blobs[0].offsets,
+                x: xBuffer,
+                acts: specActs,
+                d: UInt32(Self.dimension),
+                f: UInt32(Self.intermediate),
+                topK: UInt32(Self.topK),
+                indirectArguments: indirectArgs)
+            try kernel.encodeSpecPhase2Reduce(
+                commandBuffer: command,
+                expertPool: pool,
+                poolSlotStride: UInt64(poolSlotStride),
+                resolvedSlots: resolvedSlots,
+                routedOffsets: blobs[0].offsets,
+                acts: specActs,
+                routingWeights: routingBuffer,
+                residual: residualBuffer,
+                y: specOutput,
+                d: UInt32(Self.dimension),
+                f: UInt32(Self.intermediate),
+                topK: UInt32(Self.topK),
+                indirectArguments: indirectArgs)
+            command.commit()
+            command.waitUntilCompleted()
+            #expect(command.error == nil)
+        }
+
+        writeGrids(
+            phase1: MoE.specPhase1FullGrid(f: UInt32(Self.intermediate),
+                                           topK: UInt32(Self.topK)),
+            phase2: MoE.specPhase2FullGrid(d: UInt32(Self.dimension)))
+        try runSpec()
+        #expect(Fp16Buffer.read(specActs, count: Self.topK * Self.intermediate)
+                == Fp16Buffer.read(fullActs, count: Self.topK * Self.intermediate))
+        #expect(Fp16Buffer.read(specOutput, count: Self.dimension)
+                == Fp16Buffer.read(fullOutput, count: Self.dimension))
+
+        let sentinel: [Float] = (0..<Self.dimension).map { Float($0 % 7) - 3 }
+        sentinel.enumerated().forEach { index, value in
+            specOutput.contents()
+                .bindMemory(to: Float16.self, capacity: Self.dimension)[index]
+                = Float16(value)
+        }
+        writeGrids(phase1: MTLSize(width: 0, height: 1, depth: 1),
+                   phase2: MTLSize(width: 0, height: 1, depth: 1))
+        try runSpec()
+        #expect(Fp16Buffer.read(specOutput, count: Self.dimension)
+                == sentinel.map { Float(Float16($0)) })
+    }
+
     @Test func gptOssRoutedPipelineWithBiasesMatchesReference() throws {
         let topK = 4
         var rng = SeedTree(0x6F55).key("gptoss-routed-moe")

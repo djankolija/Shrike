@@ -1013,6 +1013,104 @@ kernel void moe_phase2_down_reduce_k8(
     }
 }
 
+/// v9 speculative phase-1: identical math to moe_phase1_gate_up_act_u16load,
+/// but expert bases come from `expert_pool + resolved_slots[k] * stride`
+/// (the classifier's output) instead of a CPU-encoded RoutedBlobs table, and
+/// the miss guard is the zero-sized indirect dispatch, not io_status.
+kernel void moe_phase1_gate_up_act_spec_u16load(
+    device const uint8_t* expert_pool [[buffer(0)]],
+    constant ExpertOffsets& routed_offsets [[buffer(1)]],
+    device const half* x [[buffer(2)]],
+    device half* acts [[buffer(3)]],
+    constant uint& D [[buffer(4)]],
+    constant uint& F [[buffer(5)]],
+    constant uint& top_k [[buffer(6)]],
+    device const uint* resolved_slots [[buffer(7)]],
+    constant ulong& pool_slot_stride [[buffer(8)]],
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_tg = 16;
+    threadgroup half xt[kMoEXMaxD];
+    threadgroup half xsum[kMoEXSumMax];
+    const uint DD = moe_fc_d(D);
+    const uint tid = sg_idx * 32u + lane;
+    for (uint i = tid; i < DD; i += rows_per_tg * 32u) {
+        xt[i] = x[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = tid; i < (DD >> 3); i += rows_per_tg * 32u) {
+        const uint b = i << 3;
+        xsum[i] = ((xt[b] + xt[b + 1u]) + (xt[b + 2u] + xt[b + 3u]))
+                + ((xt[b + 4u] + xt[b + 5u]) + (xt[b + 6u] + xt[b + 7u]));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint rowg = tg_idx * rows_per_tg + sg_idx;
+    if (rowg >= moe_fc_top_k(top_k) * moe_fc_f(F)) return;
+    const uint k = rowg / moe_fc_f(F);
+    const uint f = rowg % moe_fc_f(F);
+
+    device const uint8_t* base =
+        expert_pool + ulong(resolved_slots[k]) * pool_slot_stride;
+    const ExpertOffsets re = routed_offsets;
+    const float2 gu = moe_int4_gate_up_rows_simd_tgmem_u16load(
+        xt, xsum, base + re.gate_W_off,
+        (device const bfloat*)(base + re.gate_s_off),
+        (device const bfloat*)(base + re.gate_b_off),
+        base + re.up_W_off,
+        (device const bfloat*)(base + re.up_s_off),
+        (device const bfloat*)(base + re.up_b_off),
+        f, DD, lane);
+    if (lane == 0) acts[k * moe_fc_f(F) + f] = half(moe_glu(moe_gate_up_bias(gu, base, re, f)));
+}
+
+/// v9 speculative phase-2: pool-addressed twin of moe_phase2_down_reduce_k8;
+/// same zero-sized-indirect miss guard as spec phase-1.
+kernel void moe_phase2_down_reduce_spec_k8(
+    device const uint8_t* expert_pool [[buffer(0)]],
+    constant ExpertOffsets& routed_offsets [[buffer(1)]],
+    device const half* acts [[buffer(2)]],
+    device const half* routing_w [[buffer(3)]],
+    device const half* residual [[buffer(4)]],
+    device half* y [[buffer(5)]],
+    constant uint& D [[buffer(6)]],
+    constant uint& F [[buffer(7)]],
+    device const uint* resolved_slots [[buffer(8)]],
+    constant uint& top_k [[buffer(9)]],
+    constant ulong& pool_slot_stride [[buffer(10)]],
+    uint d [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    threadgroup float partial[8];
+    const uint DD = moe_fc_d(D);
+    const uint FF = moe_fc_f(F);
+    const uint TK = min(moe_fc_top_k(top_k), kMaxStreamedExperts);
+    if (d >= DD) return;
+
+    device const uint8_t* base =
+        expert_pool + ulong(resolved_slots[sg_idx]) * pool_slot_stride;
+    const ExpertOffsets re = routed_offsets;
+    device const uint8_t* dW = base + re.down_W_off;
+    device const bfloat* dS = (device const bfloat*)(base + re.down_s_off);
+    device const bfloat* dB = (device const bfloat*)(base + re.down_b_off);
+    device const half* act_slot = acts + sg_idx * FF;
+
+    const float value = moe_down_bias(
+        moe_int4_gemv_row_simd_dev_vec(dW, dS, dB, act_slot, d, FF, lane),
+        base, re, d);
+    if (lane == 0) partial[sg_idx] = float(routing_w[sg_idx]) * value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sg_idx == 0 && lane == 0) {
+        float acc = float(residual[d]);
+        for (uint i = 0; i < TK; ++i) acc += partial[i];
+        y[d] = half(acc);
+    }
+}
+
 kernel void moe_affine_phase1_gate_up_act(
     device const RoutedBlobs& routed [[buffer(0)]],
     constant ExpertOffsets& re [[buffer(1)]],

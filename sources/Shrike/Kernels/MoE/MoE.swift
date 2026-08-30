@@ -61,6 +61,10 @@ final class MoE {
     private let residencyClassifySpecPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
     private let phase1U16PSO: MTLComputePipelineState
+    private let specPhase1PSO: MTLComputePipelineState
+    private let specPhase1SpecializedPSO: MTLComputePipelineState
+    private let specPhase2PSO: MTLComputePipelineState
+    private let specPhase2SpecializedPSO: MTLComputePipelineState
     private let phase1U16SpecializedPSO: MTLComputePipelineState
     private let phase1SubsetU16PSO: MTLComputePipelineState
     private let phase1SubsetU16SpecializedPSO: MTLComputePipelineState
@@ -164,6 +168,18 @@ final class MoE {
             phase2Name, constants: weightConstants + ioConstants)
         self.phase2ReduceK8SpecializedPSO = try context.pipeline(
             phase2Name,
+            constants: moeConstants)
+        self.specPhase1PSO = try context.pipeline(
+            "moe_phase1_gate_up_act_spec_u16load",
+            constants: activationConstants + weightConstants)
+        self.specPhase1SpecializedPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_spec_u16load",
+            constants: moeConstants)
+        self.specPhase2PSO = try context.pipeline(
+            "moe_phase2_down_reduce_spec_k8",
+            constants: weightConstants)
+        self.specPhase2SpecializedPSO = try context.pipeline(
+            "moe_phase2_down_reduce_spec_k8",
             constants: moeConstants)
 
         guard let logits = context.device.makeBuffer(
@@ -569,6 +585,105 @@ final class MoE {
         // One simdgroup per selected expert; the kernel reduces partial[0..<topK].
         encoder.dispatchThreadgroups(
             MTLSize(width: Int(d), height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 32 * Int(topK), height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    static func specPhase1FullGrid(f: UInt32, topK: UInt32) -> MTLSize {
+        MTLSize(width: (Int(topK * f) + 15) / 16, height: 1, depth: 1)
+    }
+
+    static func specPhase2FullGrid(d: UInt32) -> MTLSize {
+        MTLSize(width: Int(d), height: 1, depth: 1)
+    }
+
+    func encodeSpecPhase1U16Load(
+        commandBuffer: MTLCommandBuffer,
+        expertPool: MTLBuffer,
+        poolSlotStride: UInt64,
+        resolvedSlots: MTLBuffer,
+        routedOffsets: MoEExpertOffsets,
+        x: MTLBuffer,
+        acts: MTLBuffer,
+        d: UInt32,
+        f: UInt32,
+        topK: UInt32,
+        indirectArguments: MTLBuffer,
+        indirectOffset: Int = 0
+    ) throws {
+        precondition(d <= Self.maxStagedHiddenD)
+        precondition((1...UInt32(Self.maxStreamedExperts)).contains(topK))
+        var dimension = d
+        var intermediate = f
+        var expertCount = topK
+        var stride = poolSlotStride
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encoder.setComputePipelineState(
+            useRealDecodeConstants(d: d, f: f, topK: topK)
+                ? specPhase1SpecializedPSO
+                : specPhase1PSO)
+        encoder.setBuffer(expertPool, offset: 0, index: 0)
+        var offsets = routedOffsets
+        encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
+        encoder.setBuffer(x, offset: 0, index: 2)
+        encoder.setBuffer(acts, offset: 0, index: 3)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 4)
+        encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 5)
+        encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
+        encoder.setBuffer(resolvedSlots, offset: 0, index: 7)
+        encoder.setBytes(&stride, length: MemoryLayout<UInt64>.stride, index: 8)
+        encoder.dispatchThreadgroups(
+            indirectBuffer: indirectArguments,
+            indirectBufferOffset: indirectOffset,
+            threadsPerThreadgroup: MTLSize(width: 512, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    func encodeSpecPhase2Reduce(
+        commandBuffer: MTLCommandBuffer,
+        expertPool: MTLBuffer,
+        poolSlotStride: UInt64,
+        resolvedSlots: MTLBuffer,
+        routedOffsets: MoEExpertOffsets,
+        acts: MTLBuffer,
+        routingWeights: MTLBuffer,
+        residual: MTLBuffer,
+        y: MTLBuffer,
+        d: UInt32,
+        f: UInt32,
+        topK: UInt32,
+        indirectArguments: MTLBuffer,
+        indirectOffset: Int = MoE.specPhase2ArgsOffset
+    ) throws {
+        precondition((1...UInt32(Self.maxStreamedExperts)).contains(topK))
+        var dimension = d
+        var intermediate = f
+        var topKValue = topK
+        var stride = poolSlotStride
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encoder.setComputePipelineState(
+            useRealDecodeConstants(d: d, f: f, topK: topK)
+                ? specPhase2SpecializedPSO
+                : specPhase2PSO)
+        encoder.setBuffer(expertPool, offset: 0, index: 0)
+        var offsets = routedOffsets
+        encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
+        encoder.setBuffer(acts, offset: 0, index: 2)
+        encoder.setBuffer(routingWeights, offset: 0, index: 3)
+        encoder.setBuffer(residual, offset: 0, index: 4)
+        encoder.setBuffer(y, offset: 0, index: 5)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 6)
+        encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 7)
+        encoder.setBuffer(resolvedSlots, offset: 0, index: 8)
+        encoder.setBytes(&topKValue, length: MemoryLayout<UInt32>.stride, index: 9)
+        encoder.setBytes(&stride, length: MemoryLayout<UInt64>.stride, index: 10)
+        encoder.dispatchThreadgroups(
+            indirectBuffer: indirectArguments,
+            indirectBufferOffset: indirectOffset,
             threadsPerThreadgroup: MTLSize(width: 32 * Int(topK), height: 1, depth: 1))
         encoder.endEncoding()
     }
