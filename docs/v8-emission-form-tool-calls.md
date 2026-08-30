@@ -69,10 +69,21 @@ no settle needed, full prefix reuse across tool hops.
 - **The v6 settle carve-out** for tool turns: still in place, now costless
   for this divergence.
 
-## Acceptance
+## Acceptance — passed 2026-08-30
 
-The exact repro that failed: pi + `harnesses/wikipedia.ts`, gpt-oss-20b,
-two-step tool exchange ("Look up the Wikipedia article on the bancor…").
-Pass = turn 2 completes with an answer, and `SHRIKE_CACHE_DIAG` shows the
-tool-call turn matching (no `s12_diverge` at the call header). Plus the five
-local gates.
+The exact repro that failed (pi + `harnesses/wikipedia.ts`, gpt-oss-20b,
+"Look up the Wikipedia article on the bancor…") ran **three clean tool hops
+plus a final answer** ("proposed by John Maynard Keynes", `finish=stop`)
+where it previously died 500 on hop two. One hop matched the cache at
+`fraction=1.0` with `cached_tokens=1055` — a byte-perfect prefix across a
+tool hop; the final turn reused 1280. All five local gates green (1079
+tests, TSan clean).
+
+**Known residual divergence, benign:** the model's own header emission
+varies under sampling — this run it wrote `to=functions.WebSearch
+code<|message|>` (content-type " code", no `<|constrain|>`) where the
+morning run wrote ` <|constrain|>json` — and it pretty-printed its call
+arguments while clients echo them back compact. Both are outside the
+renderer's control, are absorbed by the salvage path, and — unlike the
+header-order mismatch this change removed — do not teach the model a
+second syntax: subsequent calls stayed clean.
