@@ -57,7 +57,23 @@ Numbers cited as baselines are ornith15, n=12.
       busy_share_of_decode 76.4 %). The standing prediction from `a8168d9`
       is confirmed — the absorbed savings reappeared once the gap was filled.
 
-## S3 — event-gated successors, fast path live
+## S3a — speculation authoritative, host still pacing (landed `317ed7c`)
+
+- [x] Spec CB targets the real buffers (`moeActs`, `h2Buf`, `hidden` via a
+      third indirect-gated dispatch reusing `residual_add_fp16`); on all-hit
+      layers it IS the routed command and the classic path is not encoded.
+      Miss layers: spec CB self-nullifies, classic path unchanged. S2's
+      compare mode preserved as `speculative-validate`.
+- [x] No eviction race by construction in this stage: per-layer host pacing
+      means the next cache plan runs only after the spec CB completed.
+- [x] Acceptance n=12 (2026-08-30): **body 62.60 → 59.46 (−5.0 %), wall
+      13.31 s, digest byte-identical with speculation authoritative.**
+      Classic routed work gone from all-hit layers (GPU busy 55.4 → 48.5
+      ms/token); dominant remaining gap moved to
+      `moe_spec_routed → attn_norm_qkv` (8.2 ms/token) — the host wake that
+      S3b removes.
+
+## S3b — event-gated successors, host off the per-layer critical path
 
 - [ ] Micro-test of the same-queue commit-order + cross-queue event
       assumptions (throwaway target, no model).
