@@ -36,11 +36,22 @@ on hope. Baseline anchor at start of Phase 3: rig 40.0 / card 57.9
       summation tree cannot be replicated exactly, STOP and take the
       a264b22 route only with Davor's per-kernel sign-off + golden
       baseline re-capture. Expected −1–2 ms/token.
-- [ ] **T3: wake A/B (C4)** — env-knobbed host-spin-commit alternative to
-      the encoded I/O event wait on the fixup path. One A/B (rig + card),
-      keep the winner, delete the loser's knob. Expected 0–1.5 ms/token.
-- [ ] **T4: re-measure spec excess (C5)** after T1; open a task only if
-      >0.5 ms remains above floor.
+- [x] **T3: wake A/B (C4)** — RAN 2026-08-31/09-01, **NULL on the M1;
+      winner = the encoded wait, host-spin knob deleted.** Four fresh-server
+      arms on one binary (t3-747a18a): rig wall 9.308/9.307 s, card body
+      57.69/58.45 (wait/host-spin); io_fixup_wake did not improve under
+      host-spin (fresh-commit schedule ≈ parked wake on the M1). Digest
+      exact in both modes. M4 local had shown −0.47 ms/token body — does
+      not transfer; noted in 040bb22's message if M4-class hardware ever
+      becomes a target. ⚠ wait_ms drops under host-spin are COLUMN
+      SHIFTING into cb2_ms — judge any future wake idea on wall/body.
+      Prerequisite paid: encodeDecodeRoutedMoE decomposed (398→~310,
+      buildAndCommitMissFixupCommand extracted).
+- [x] **T4: re-measure spec excess (C5)** — CLOSED with T1's twin as the
+      measurement: reducing the shared half of moe_spec_routed was
+      wall-neutral on both shapes, so the spec-CB excess above floor is
+      shadowed/off the critical path; nothing >0.5 ms recoverable there.
+      No task opened.
 - [ ] **T5: settle** — golden baseline capture (rig + ~2k prompt),
       default flips (pool/speculative/event/immediate → code defaults;
       spin pending thermal verdict), CLAUDE.md env paragraph shrunk,

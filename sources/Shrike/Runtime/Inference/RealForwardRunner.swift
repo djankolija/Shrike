@@ -223,13 +223,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var layerDonePendingWaitValue: UInt64?
     private nonisolated let hostWaitSpin =
         ProcessInfo.processInfo.environment["SHRIKE_HOST_WAIT"] == "spin"
-    /// SHRIKE_FIXUP_COMMIT=host-spin (v10 T3 A/B): commit the miss-fixup CB
-    /// wait-free after the host observes the I/O timeline go terminal,
-    /// instead of encoding a GPU-side event wait — trades the parked-CB wake
-    /// latency for a fresh commit at the cost of host overlap during the
-    /// exposed I/O tail.
-    private nonisolated let fixupHostSpinCommit =
-        ProcessInfo.processInfo.environment["SHRIKE_FIXUP_COMMIT"] == "host-spin"
     /// Width-2 MTP verify scratch (B2 pair schedule): per-row activation and
     /// output buffers plus two persistent routed argument buffers, created on
     /// first verify. Per-row buffers are deliberately *separate allocations*,
@@ -3374,22 +3367,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
-    /// The host-spin fixup commit's poll: the shared event advances on
-    /// terminal (success OR failure — `publish` signals both), so a failed
-    /// read still exits the spin and surfaces at drain time exactly as the
-    /// encoded-wait path does. Falls back to blocking after ~1s.
-    private nonisolated func spinUntilExpertIOTerminal(
-        _ token: ExpertIOCompletionToken,
-        operation: RoutedExpertLoadOperation) throws {
-        let deadline = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 1_000_000_000
-        while clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline {
-            if token.event.signaledValue >= token.value { return }
-        }
-        try operation.storage.wait()
-    }
-
     /// Builds, gates, and commits the classic/miss-fixup routed CB: the I/O
-    /// event wait (or the host-spin late commit), the staging blit, phase 1
+    /// event wait, the staging blit, phase 1
     /// (full or hit-split subset), the phase-2 reduce, the residual tail,
     /// and the S3b layer-done signal wiring.
     private func buildAndCommitMissFixupCommand(
@@ -3420,11 +3399,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         let ioToken = eventLoad?.storage.completionToken
         let ioStatus = ioToken.map { ($0.status, $0.statusOffset) }
-        // host-spin commit applies only on the main queue: the S3b fixup
-        // queue exists to sit behind gated successors, where a late commit
-        // has different ordering stakes.
-        let hostSpinCommit = fixupHostSpinCommit && layerDoneFixupQueue == nil
-        if let token = ioToken, !hostSpinCommit {
+        // A host-spin late commit (spin on the I/O timeline, commit the CB
+        // wait-free) measured null on the M1 — the parked-CB wake is as fast
+        // as a fresh-commit schedule (v10 T3, 2026-08-31); keep the encoded
+        // wait.
+        if let token = ioToken {
             routedCB.encodeWaitForEvent(token.event, value: token.value)
         }
         if let stagingTransfer = eventLoad?.storage.metalStagingTransfer {
@@ -3496,9 +3475,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     layerDoneEvent.signaledValue = layerDoneValue
                 }
             }
-        }
-        if hostSpinCommit, let token = ioToken, let eventLoad {
-            try spinUntilExpertIOTerminal(token, operation: eventLoad)
         }
         routedCB.commit()
         return routedCB
