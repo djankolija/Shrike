@@ -25,13 +25,38 @@ import ShrikeValidationSupport
                                      seed: 0x714D_F211)
     }
 
+    @Test func fusedQKVEpilogue_matchesLegacyChainBitwise_subdimRope() throws {
+        try Self.expectMatchesLegacy(numQHeads: 16,
+                                     numKVHeads: 8,
+                                     headDim: 256,
+                                     position: 31,
+                                     theta: 1_000_000.0,
+                                     rotatedPairs: 32,
+                                     seed: 0x714D_5D11,
+                                     subdimRope: true)
+    }
+
+    @Test func fusedQKVEpilogue_matchesLegacyChainBitwise_subdimRopeNoVNorm() throws {
+        try Self.expectMatchesLegacy(numQHeads: 16,
+                                     numKVHeads: 8,
+                                     headDim: 256,
+                                     position: 47,
+                                     theta: 1_000_000.0,
+                                     rotatedPairs: 32,
+                                     seed: 0x714D_6E22,
+                                     subdimRope: true,
+                                     normalizeV: false)
+    }
+
     private static func expectMatchesLegacy(numQHeads: Int,
                                             numKVHeads: Int,
                                             headDim: Int,
                                             position: Int,
                                             theta: Float,
                                             rotatedPairs: UInt32,
-                                            seed: UInt64) throws {
+                                            seed: UInt64,
+                                            subdimRope: Bool = false,
+                                            normalizeV: Bool = true) throws {
         var rng = SplitMix64(seed: seed)
         let qCount = numQHeads * headDim
         let kvCount = numKVHeads * headDim
@@ -84,13 +109,30 @@ import ShrikeValidationSupport
                                headDim: UInt32(headDim),
                                numHeads: numKVHeads,
                                eps: 1e-6)
-        try rms.encodeNoScalePerHead(commandBuffer: cb,
-                                 x: vLegacy,
-                                 out: vLegacy,
-                                 headDim: UInt32(headDim),
-                                 numHeads: numKVHeads,
-                                 eps: 1e-6)
-        if rotatedPairs * 2 == UInt32(headDim) {
+        if normalizeV {
+            try rms.encodeNoScalePerHead(commandBuffer: cb,
+                                     x: vLegacy,
+                                     out: vLegacy,
+                                     headDim: UInt32(headDim),
+                                     numHeads: numKVHeads,
+                                     eps: 1e-6)
+        }
+        if subdimRope {
+            try rope.encodeNeoxSubdim(commandBuffer: cb,
+                                  data: qLegacy,
+                                  position: UInt32(position),
+                                  headDim: UInt32(headDim),
+                                  numHeads: UInt32(numQHeads),
+                                  rotaryDim: rotatedPairs * 2,
+                                  theta: theta)
+            try rope.encodeNeoxSubdim(commandBuffer: cb,
+                                  data: kLegacy,
+                                  position: UInt32(position),
+                                  headDim: UInt32(headDim),
+                                  numHeads: UInt32(numKVHeads),
+                                  rotaryDim: rotatedPairs * 2,
+                                  theta: theta)
+        } else if rotatedPairs * 2 == UInt32(headDim) {
             try rope.encodeDefaultNeox(commandBuffer: cb,
                                    data: qLegacy,
                                    position: UInt32(position),
@@ -131,7 +173,9 @@ import ShrikeValidationSupport
                      position: UInt32(position),
                      theta: theta,
                      rotatedPairs: rotatedPairs,
-                     eps: 1e-6)
+                     eps: 1e-6,
+                     subdimRope: subdimRope,
+                     normalizeV: normalizeV)
         cb.commit()
         cb.waitUntilCompleted()
         if let err = cb.error {

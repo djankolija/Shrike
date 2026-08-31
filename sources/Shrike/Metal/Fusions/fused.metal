@@ -16,6 +16,15 @@ constant uint FC_FUSED_NUM_Q_HEADS [[function_constant(83)]];
 constant uint FC_FUSED_NUM_KV_HEADS [[function_constant(84)]];
 constant uint FC_FUSED_ROTARY [[function_constant(85)]];
 constant bool FC_FUSED_USE_FC [[function_constant(86)]];
+// Subdim (Qwen-style partial) RoPE: pairs (i, RP + i) confined to the first
+// 2·RP elements with frequency divisor 2·RP, tail passed through — a different
+// element set and different angles than the proportional pairing below, so it
+// must never be approximated by FC_FUSED_ROTARY alone.
+constant bool FC_FUSED_ROPE_SUBDIM [[function_constant(87)]];
+
+static inline bool fused_rope_subdim() {
+    return is_function_constant_defined(FC_FUSED_ROPE_SUBDIM) && FC_FUSED_ROPE_SUBDIM;
+}
 
 static inline bool fused_use_fc() {
     return is_function_constant_defined(FC_FUSED_USE_FC) && FC_FUSED_USE_FC;
@@ -144,6 +153,20 @@ void fused_qkv_epilogue(
 
     if (is_v) {
         for (uint i = lid; i < HD; i += lsize) {
+            dst[i] = head_tg[i];
+        }
+        return;
+    }
+
+    if (fused_rope_subdim()) {
+        for (uint pair = lid; pair < RP; pair += lsize) {
+            float x0 = float(head_tg[pair]);
+            float x1 = float(head_tg[RP + pair]);
+            fused_rope_neox_pair(x0, x1, pair, 2u * RP, float(position), theta_base);
+            dst[pair] = half(x0);
+            dst[RP + pair] = half(x1);
+        }
+        for (uint i = 2u * RP + lid; i < HD; i += lsize) {
             dst[i] = head_tg[i];
         }
         return;
