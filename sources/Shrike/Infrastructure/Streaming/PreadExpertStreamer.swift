@@ -257,6 +257,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         case resident
     }
 
+    private var reservedSlots: [Bool]
+    private var victimSlotsScratch: [Int]
     private var slotExpert: [Int]
     private var slotLastUse: [Int]
     private var slotState: [SlotState]
@@ -289,6 +291,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 metalIOService: MetalExpertIOService? = nil) throws {
         precondition(slotCount > 0, "slotCount must be positive")
         self.layout = layout
+        self.reservedSlots = Array(repeating: false, count: slotCount)
+        self.victimSlotsScratch = Array(repeating: -1, count: slotCount)
         self.slotCount = slotCount
         if let rawPolicy = ProcessInfo.processInfo.environment["SHRIKE_EXPERT_CACHE_POLICY"] {
             guard let experimentalPolicy = ExpertCachePolicy(rawValue: rawPolicy) else {
@@ -589,49 +593,64 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     private func makeExpertCachePlan(layer: Int,
                                      experts: [Int],
-                                     avoidingSlots rawAvoidingSlots: Set<Int>,
+                                     avoidingSlots rawAvoidingSlots: consuming Set<Int>,
                                      prefetched: [Int: UnsafeMutableRawPointer])
         -> ExpertCachePlan? {
         precondition(experts.count <= slotCount,
                      "expert cache needs at least \(experts.count) slots")
-        let avoidingSlots = Set(rawAvoidingSlots.filter { $0 >= 0 && $0 < slotCount })
+
+        var avoidingSlots = Set<Int>(minimumCapacity: slotCount)
+        for slot in rawAvoidingSlots {
+            if slot >= 0 && slot < slotCount {
+                avoidingSlots.insert(slot)
+            }
+        }
 
         cacheLock.lock()
         defer { cacheLock.unlock() }
+
+        for slot in 0..<slotCount {
+            reservedSlots[slot] = false
+        }
 
         let clock = useClock + 1
         if cachePolicy == .agingLFU,
            statisticsPlans > 0,
            statisticsPlans.isMultiple(of: 1_024) {
-            for expert in expertUseCount.indices {
-                expertUseCount[expert] >>= 1
+            for i in 0..<expertUseCount.count {
+                expertUseCount[i] >>= 1
             }
         }
-        var assignedSlots = [Int](repeating: -1, count: experts.count)
-        var reserved = [Bool](repeating: false, count: slotCount)
+
         // Loading slots are not valid hits and cannot be reassigned.
         for slot in 0..<slotCount where slotState[slot] == .loading {
-            reserved[slot] = true
+            reservedSlots[slot] = true
         }
 
-        for index in experts.indices {
-            for slot in 0..<slotCount
-                where !reserved[slot] && slotState[slot] == .resident
-                    && slotExpert[slot] == experts[index] {
+        var assignedSlots = [Int](repeating: -1, count: experts.count)
+
+        for index in 0..<experts.count {
+            for slot in 0..<slotCount where !reservedSlots[slot] && slotState[slot] == .resident && slotExpert[slot] == experts[index] {
                 assignedSlots[index] = slot
-                reserved[slot] = true
+                reservedSlots[slot] = true
                 break
             }
         }
-        for slot in avoidingSlots where !reserved[slot] {
-            reserved[slot] = true
+
+        for slot in avoidingSlots {
+            reservedSlots[slot] = true
         }
 
-        let candidateMisses = experts.indices.filter { assignedSlots[$0] == -1 }
-        let evictable = (0..<slotCount)
-            .filter { !reserved[$0] && slotState[$0] != .loading && slotPinCount[$0] == 0 }
-            .sorted { shouldEvictSlot($0, before: $1) }
-        guard candidateMisses.count <= evictable.count else { return nil }
+        let candidateMisses = Array(capacity: experts.count) { span in
+            for index in 0..<experts.count where assignedSlots[index] == -1 {
+                span.append(index)
+            }
+        }
+
+        let missCount = candidateMisses.count
+        if missCount > 0 {
+            guard selectVictimSlots(missCount: missCount) else { return nil }
+        }
 
         useClock = clock
         for expert in experts where expert >= 0 && expert < expertUseCount.count {
@@ -643,11 +662,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         var misses: [Int] = []
         var adoptedPrefetches: [Int] = []
         for (offset, index) in candidateMisses.enumerated() {
-            let slot = evictable[offset]
+            let slot = victimSlotsScratch[offset]
             if slotState[slot] == .resident { statisticsEvictions &+= 1 }
             let previousExpert = slotExpert[slot]
             assignedSlots[index] = slot
-            reserved[slot] = true
+            reservedSlots[slot] = true
             slotGeneration[slot] &+= 1
             slotExpert[slot] = experts[index]
             slotLastUse[slot] = clock
@@ -1074,6 +1093,39 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             }
         }
         return result
+    }
+
+    /// Fills the first `missCount` entries of `victimSlotsScratch` with the
+    /// best eviction victims in comparator order, without the old
+    /// filter+sort's allocations; an all-hit plan never calls this. Ties
+    /// resolve to the lower slot index, which the unstable sort left
+    /// unspecified. Returns false when fewer than `missCount` slots are
+    /// eligible. Caller must hold `cacheLock`.
+    private func selectVictimSlots(missCount: Int) -> Bool {
+        var victimCount = 0
+        var eligibleCount = 0
+        for slot in 0..<slotCount {
+            guard !reservedSlots[slot], slotState[slot] != .loading,
+                  slotPinCount[slot] == 0 else { continue }
+            eligibleCount &+= 1
+            if victimCount < missCount {
+                var at = victimCount
+                while at > 0, shouldEvictSlot(slot, before: victimSlotsScratch[at - 1]) {
+                    victimSlotsScratch[at] = victimSlotsScratch[at - 1]
+                    at -= 1
+                }
+                victimSlotsScratch[at] = slot
+                victimCount += 1
+            } else if shouldEvictSlot(slot, before: victimSlotsScratch[victimCount - 1]) {
+                var at = victimCount - 1
+                while at > 0, shouldEvictSlot(slot, before: victimSlotsScratch[at - 1]) {
+                    victimSlotsScratch[at] = victimSlotsScratch[at - 1]
+                    at -= 1
+                }
+                victimSlotsScratch[at] = slot
+            }
+        }
+        return missCount <= eligibleCount
     }
 
     private func shouldEvictSlot(_ lhs: Int, before rhs: Int) -> Bool {
