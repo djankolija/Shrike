@@ -1150,6 +1150,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                 }
             }
         }
+        let statsRunner = runner
+        var expertAtDecodeStart: ExpertStreamingStatistics?
         let result = try await runRawCompletion(
             producer: activeProducer,
             tokenizer: tokenizer,
@@ -1160,6 +1162,14 @@ public actor ServerModelSession: ServerInferenceBackend {
             prefillConfig: prefillConfig,
             start: activeStart,
             shouldStop: { shouldStop }) { progress in
+                switch progress {
+                case .prefill(let done, let total):
+                    if done == total, expertAtDecodeStart == nil {
+                        expertAtDecodeStart = statsRunner.expertStreamingStatistics()
+                    }
+                default:
+                    break
+                }
                 guard decodingError == nil else { return }
                 do {
                     switch progress {
@@ -1187,7 +1197,8 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
         emitGenerationDiagnostics(activeProducer: activeProducer,
                                   result: result,
-                                  snapshot: runnerSnapshot)
+                                  snapshot: runnerSnapshot,
+                                  expertAtDecodeStart: expertAtDecodeStart)
         // Harmony ends at a stop token the generation loop never forwards
         // (`<|return|>` or `<|call|>`, both mapped to `.eos`); the decoder
         // needs it to finalize a buffered tool call or close the turn, so
@@ -1825,7 +1836,8 @@ public actor ServerModelSession: ServerInferenceBackend {
     private func emitGenerationDiagnostics(
         activeProducer: any LogitProducer,
         result: RawDecodeResult,
-        snapshot runnerSnapshot: RunnerCounterSnapshot
+        snapshot runnerSnapshot: RunnerCounterSnapshot,
+        expertAtDecodeStart: ExpertStreamingStatistics?
     ) {
         if let activeMTP = activeProducer as? StreamingMTPDecoder {
             let stats = activeMTP.statistics
@@ -1877,7 +1889,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                 decodeRate))
         }
         if ProcessInfo.processInfo.environment["SHRIKE_RUNNER_STATS"] != nil {
-            emitRunnerDiagnostics(result: result, snapshot: runnerSnapshot)
+            emitRunnerDiagnostics(result: result, snapshot: runnerSnapshot,
+                                  expertAtDecodeStart: expertAtDecodeStart)
         }
         if ProcessInfo.processInfo.environment["SHRIKE_KERNEL_STATS"] != nil {
             emitKernelDiagnostics(result: result)
@@ -1886,7 +1899,8 @@ public actor ServerModelSession: ServerInferenceBackend {
 
     private func emitRunnerDiagnostics(
         result: RawDecodeResult,
-        snapshot: RunnerCounterSnapshot
+        snapshot: RunnerCounterSnapshot,
+        expertAtDecodeStart: ExpertStreamingStatistics?
     ) {
         let tokens = max(1, result.newTokens)
         let ms: (UInt64, UInt64) -> Double = { delta, base in
@@ -1898,6 +1912,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             : 100 * (1 - Double(exposedIoNanos) / Double(missIoNanos))
         let expertNow = runner.expertStreamingStatistics()
         let expert = expertNow.subtracting(snapshot.expertStreaming)
+        let expertPrefill = expertAtDecodeStart?.subtracting(snapshot.expertStreaming) ?? .zero
+        let expertDecode = expertNow.subtracting(expertAtDecodeStart ?? snapshot.expertStreaming)
         let gpuHits = runner.totalGPUClassifiedHits - snapshot.gpuClassifiedHits
         let gpuMisses = runner.totalGPUClassifiedMisses - snapshot.gpuClassifiedMisses
         let gpuAllHit = runner.totalGPUResidencyAllHitLayers - snapshot.gpuAllHitLayers
@@ -1913,7 +1929,10 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "io_completion_to_fixup_ms=%.4f io_host_waits=%llu "
                 + "io_host_waits_avoided=%llu gpu_classified_hits=%llu "
                 + "gpu_classified_misses=%llu gpu_all_hit_layers=%llu "
-                + "expert_slots_loading=%d expert_slots_pinned=%d",
+                + "expert_slots_loading=%d expert_slots_pinned=%d "
+                + "expert_hit_rate_prefill=%.4f expert_hits_prefill=%llu "
+                + "expert_misses_prefill=%llu expert_hit_rate_decode=%.4f "
+                + "expert_hits_decode=%llu expert_misses_decode=%llu",
             ms(runner.totalCb1Nanos, snapshot.cb1),
             ms(runner.totalIoNanos, snapshot.io),
             ms(runner.totalCb2Nanos, snapshot.cb2),
@@ -1937,7 +1956,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             runner.totalExpertIOHostWaits - snapshot.ioHostWaits,
             runner.totalExpertIOHostWaitsAvoided - snapshot.ioHostWaitsAvoided,
             gpuHits, gpuMisses, gpuAllHit,
-            expertNow.loadingSlots, expertNow.pinnedSlots))
+            expertNow.loadingSlots, expertNow.pinnedSlots,
+            expertPrefill.hitRate, expertPrefill.hits, expertPrefill.misses,
+            expertDecode.hitRate, expertDecode.hits, expertDecode.misses))
     }
 
     private func emitKernelDiagnostics(result: RawDecodeResult) {
