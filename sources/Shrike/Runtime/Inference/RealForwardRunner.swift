@@ -1283,6 +1283,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         prefetchTraceFD >= 0 || predictivePrefetch != nil
     }
 
+    /// How many layers ahead the router probe predicts (1 = next layer).
+    /// The recall-vs-distance curve gates the two-stage prefetch experiment
+    /// (docs/architecture.md, "Predictive prefetch").
+    private let prefetchProbeDistance = max(1, ProcessInfo.processInfo
+        .environment["SHRIKE_PREFETCH_PROBE_DISTANCE"].flatMap(Int.init) ?? 1)
+
     public func resetKernelGPUTimings() {
         kernelGPUTimings.removeAll(keepingCapacity: true)
     }
@@ -1407,7 +1413,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      resident: [Int],
                                      nextLayerPrediction: [Int]) {
         guard prefetchTraceFD >= 0 else { return }
-        let line = "{\"position\":\(position),\"layer\":\(layer),\"experts\":\(experts),\"misses\":\(misses),\"resident\":\(resident),\"next_layer_prediction\":\(nextLayerPrediction)}\n"
+        let line = "{\"position\":\(position),\"layer\":\(layer),\"probe_distance\":\(prefetchProbeDistance),\"experts\":\(experts),\"misses\":\(misses),\"resident\":\(resident),\"next_layer_prediction\":\(nextLayerPrediction)}\n"
         let bytes = Array(line.utf8)
         var written = 0
         while written < bytes.count {
@@ -2027,9 +2033,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let postAttn = try model.postAttnNorm(layer: L)
         let routerW = try model.router(layer: L)
         let nextRouterW: TensorView?
-        if nextLayerPredictionEnabled, L + 1 < cfg.numLayers,
-           L + 1 >= cfg.numLeadingDenseLayers {
-            nextRouterW = try model.router(layer: L + 1)
+        if nextLayerPredictionEnabled, L + prefetchProbeDistance < cfg.numLayers,
+           L + prefetchProbeDistance >= cfg.numLeadingDenseLayers {
+            nextRouterW = try model.router(layer: L + prefetchProbeDistance)
         } else {
             nextRouterW = nil
         }
@@ -2270,7 +2276,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
             let predictedNextLayer: [Int]
-            if nextLayerPredictionEnabled, L + 1 < cfg.numLayers {
+            if nextLayerPredictionEnabled, L + prefetchProbeDistance < cfg.numLayers {
                 let ptr = prefetchPredictionIndices.contents().bindMemory(
                     to: UInt32.self, capacity: cfg.topKExperts)
                 predictedNextLayer = (0..<cfg.topKExperts).map {
@@ -5384,10 +5390,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
             }
         }
-        if let predictivePrefetch, L + 1 < cfg.numLayers {
-            let resident = Set(try model.routedExpertResidentIDs(layer: L + 1))
+        if let predictivePrefetch, L + prefetchProbeDistance < cfg.numLayers {
+            let target = L + prefetchProbeDistance
+            let resident = Set(try model.routedExpertResidentIDs(layer: target))
             try predictivePrefetch.begin(
-                model: model, layer: L + 1,
+                model: model, layer: target,
                 experts: Array(predictedNextLayer.prefix(predictivePrefetchTopM)),
                 resident: resident)
         }

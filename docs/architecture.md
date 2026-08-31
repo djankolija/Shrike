@@ -105,5 +105,17 @@ demand work begins. The next eligible experiment is two-stage prediction — a s
 earlier set, then refinement — measured with explicit prefetch completion timestamps
 and demand-join telemetry. Do not promote the current path without that evidence.
 
+**2026-08-31 — the distance experiment is measured, and it closes the door.**
+Probe lookahead is configurable (`SHRIKE_PREFETCH_PROBE_DISTANCE`, trace field
+`probe_distance`); paired fresh-server runs on identical deterministic streams
+(ornith15) give miss recall 0.439 / 0.322 / 0.256 / 0.223 at k=1..4 on the rig
+stream (nonresident precision 0.124 → 0.036) and 0.510 (k=1) → 0.305 (k=3) on a
+diverse prompt (precision 0.358 → 0.127). The hidden state drifts ~20–27 % per
+layer of lookahead, so any distance that buys the SSD useful lead time (k≥3)
+catches at most a third of misses while issuing ~8–28 wasted fetches per useful
+one — the k=1 demand-contention failure, amplified. Two-stage prediction cannot
+clear the +10 % bar on this model. The miss-count lever is closed; the surviving
+miss levers are cost-side (event gating, free-running) and policy-side (cache).
+
 Output correctness was verified when it was built: greedy 4-bit output matched the
 disabled run byte-for-byte, and the 4-bit golden baseline passed.
