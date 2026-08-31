@@ -91,14 +91,22 @@ Numbers cited as baselines are ornith15, n=12.
       assumptions — landed as a durable suite instead of a throwaway target
       (`CrossQueueSharedEventTests`, 4 tests, serial + TSan green 2026-08-31)
       so the assumptions stay pinned under both test gates.
-- [ ] `layerDone` shared event; `attn(L+1)` waits; host signals on all-hit,
-      fixup CB signals on miss (second queue).
-- [ ] Eviction epochs: planner defers evictions of slots classified for
-      in-flight layers until completion handlers retire them;
-      generation cross-check retained in validation builds.
-- [ ] TSan suite green (the epoch bookkeeping is the racy part; add targeted
-      tests around retire-vs-plan).
-- [ ] n=12 acceptance: digest identical.
+- [x] `layerDone` shared event; `attn(L+1)` waits and is committed one layer
+      early; host signals on all-hit, fixup CB signals on miss — hit + fixup
+      CBs both on the dedicated queue so they cannot queue behind their own
+      waiter. Abort release to a high-water mark on reset; a failed fixup CB
+      releases its waiter from its completion handler so errors throw instead
+      of hanging. Speculative mode only; every other mode untouched.
+- [x] Eviction epochs: NOT NEEDED at this stage, deferred deliberately — the
+      host still paces planning per layer after each router readback, and
+      every cross-queue read/write pair is ordered by the single `layerDone`
+      gate (traced 2026-08-31: hidden/h2Buf/moeActs/routedX/outWeights).
+      Epochs become real only when spec CBs free-run without host validation.
+- [x] TSan suite green 2026-08-31 (1086/1086, zero reports; the event
+      assumptions are pinned by `CrossQueueSharedEventTests`).
+- [ ] n=12 acceptance: digest identical. Local 2026-08-31: digest
+      `494bab3edb62` byte-identical vs hit-fixup control, ×3 + post-abort
+      (the local digest matches the mini oracle exactly). Mini n=12 pending.
 
 ## S4 — measurement and the standing prediction
 
