@@ -113,6 +113,33 @@ arm; rig n=12 AND the 4-turn card per accepted candidate; digest
 `494bab3edb62` before commit; bytewise test arm per merged kernel against
 the multi-kernel reference (RMSNormTests pattern). Five gates per commit.
 
+## Close-out probes (added 2026-09-01)
+
+Mission reframe (Davor, 2026-09-01): from here the goal is a clean
+close-out — every lever landed or closed with a recorded verdict — not a
+number target. Gains are welcome; a null closes a door and counts the
+same. Non-trivial future speed lives in speculative drafting, which needs
+the prefill quest first. Four doubts surfaced 2026-09-01 must not survive
+the chapter:
+
+- **P1 — machine-roof probe.** Standalone Metal streaming benchmark (blit
+  copy + read-reduce kernel over a cache-exceeding buffer), local M4 Pro
+  AND the mini. Discriminates "62.5 GB/s is the M1's ceiling" from "62.5
+  is our kernels' shared limit". Motivation: on the M4 Pro the head GEMV
+  measured ~167 GB/s (61 % of sticker) while llama.cpp *blends* 71 %
+  there — on that machine our best kernel is provably below the roof.
+- **P2 — attention-chain attribution.** Per-kernel GPU times for decode
+  tokens 8–10 from the already-captured gputrace bundles (local
+  `/tmp/gputrace-local/shrike-decode-1788169514.gputrace`, mini
+  `/tmp/gputrace/shrike-decode-1788169352.gputrace`), reconciled against
+  the honest-floor table above. Closes "where do the chain's 19.5 ms go".
+- **P3 — miss-read QD probe.** Replicate the miss pattern on the mini's
+  SSD: random ~1.77 MB reads at QD1 / QD4 vs sequential, plain pread vs
+  the MTLIO path. Discriminates drive physics from submission overhead in
+  the 2 ms p50. Doubles as the prefill quest's opening measurement.
+- **Q1's first probe** (stats-off A/B, wall-based) — already a checkbox
+  in the plan; pulled into this gate.
+
 ## Definition of "decode settled" (exit criteria)
 
 1. C0–C2 landed or explicitly closed with data; C4 A/B'd once.
@@ -122,4 +149,6 @@ the multi-kernel reference (RMSNormTests pattern). Five gates per commit.
    defaults (spin stays env until the thermal trial concludes), CLAUDE.md
    env paragraph shrunk accordingly.
 4. S3b machinery removed or the opt-in documented as permanent.
-5. Handoff closed with the final ledger; prefill quest opens.
+5. Close-out probes P1–P3 and Q1's first probe each run once with the
+   verdict recorded in the plan; no known-untested doubt left open.
+6. Handoff closed with the final ledger; prefill quest opens.

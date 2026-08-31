@@ -58,6 +58,26 @@ on hope. Baseline anchor at start of Phase 3: rig 40.0 / card 57.9
       S3b machinery removed or opt-in documented permanent, handoff
       closed with the final ledger.
 
+## Close-out probes (added 2026-09-01 — part of the settled gate)
+
+Each is "run once, record the verdict, close either way"; definitions in
+[v10-decode-kernel-mergers.md](v10-decode-kernel-mergers.md).
+
+- [x] **P1: machine-roof probe** — RAN 2026-09-01 (scratchpad `mtlbw`,
+      runtime-compiled kernels, 1–2 GiB private buffers, 6 trials/arm).
+      **M1 mini: machine ceiling ≈ 61 GB/s (blit copy r+w 61.1, best
+      read kernel 60.5) — the big GEMVs' 62.5 role-stat rate is AT the
+      machine roof (≤3 % method spread). Kernel bandwidth is NOT a lever
+      on the mini; the 28.8 ms floor stands.** M4 Pro local: machine
+      253 GB/s read (93 % of sticker) vs the head GEMV's measured 167 →
+      ~⅓ kernel-side headroom exists on M4-class hardware only
+      (occupancy/unpack tuning, not the machine). Out of scope for the
+      mini chapter; recorded for any future M4-class work.
+- [ ] **P2: attention-chain attribution** — per-kernel GPU times from
+      the existing gputrace bundles vs the honest-floor table.
+- [ ] **P3: miss-read QD probe** — mini SSD, random 1.77 MB reads QD1/
+      QD4/sequential, pread vs MTLIO.
+
 ## Queued after T5 (Davor, 2026-08-31 — sequenced behind the original tasks)
 
 - [ ] **Q1: between-token host overhead** (~5–7 ms/token for every request:
