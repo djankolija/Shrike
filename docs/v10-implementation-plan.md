@@ -47,6 +47,17 @@ on hope. Baseline anchor at start of Phase 3: rig 40.0 / card 57.9
       S3b machinery removed or opt-in documented permanent, handoff
       closed with the final ledger.
 
+## Queued after T5 (Davor, 2026-08-31 — sequenced behind the original tasks)
+
+- [ ] **Q1: between-token host overhead** (~5–7 ms/token for every request:
+      decode window vs body_ms; GPU busy 77% of window on real turns vs 93%
+      rig). First probe: stats-off A/B (RUNNER/KERNEL_STATS may tax the
+      observed); then the per-token emit/detokenize/async-hop loop.
+      Compare on WALL, never wait_ms.
+- [ ] **Q2: context-depth tax** (~9 ms/1000 ctx — the dominant term in
+      real-feel speed at Davor's working depths; overlaps the attention
+      redesign tier and the prefill quest).
+
 ## Explicitly out of scope (Davor's line)
 
 Expert substitution on miss; FP16 GDN state; any change that alters

@@ -223,6 +223,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var layerDonePendingWaitValue: UInt64?
     private nonisolated let hostWaitSpin =
         ProcessInfo.processInfo.environment["SHRIKE_HOST_WAIT"] == "spin"
+    /// SHRIKE_FIXUP_COMMIT=host-spin (v10 T3 A/B): commit the miss-fixup CB
+    /// wait-free after the host observes the I/O timeline go terminal,
+    /// instead of encoding a GPU-side event wait — trades the parked-CB wake
+    /// latency for a fresh commit at the cost of host overlap during the
+    /// exposed I/O tail.
+    private nonisolated let fixupHostSpinCommit =
+        ProcessInfo.processInfo.environment["SHRIKE_FIXUP_COMMIT"] == "host-spin"
     /// Width-2 MTP verify scratch (B2 pair schedule): per-row activation and
     /// output buffers plus two persistent routed argument buffers, created on
     /// first verify. Per-row buffers are deliberately *separate allocations*,
@@ -3367,6 +3374,136 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
+    /// The host-spin fixup commit's poll: the shared event advances on
+    /// terminal (success OR failure — `publish` signals both), so a failed
+    /// read still exits the spin and surfaces at drain time exactly as the
+    /// encoded-wait path does. Falls back to blocking after ~1s.
+    private nonisolated func spinUntilExpertIOTerminal(
+        _ token: ExpertIOCompletionToken,
+        operation: RoutedExpertLoadOperation) throws {
+        let deadline = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 1_000_000_000
+        while clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline {
+            if token.event.signaledValue >= token.value { return }
+        }
+        try operation.storage.wait()
+    }
+
+    /// Builds, gates, and commits the classic/miss-fixup routed CB: the I/O
+    /// event wait (or the host-spin late commit), the staging blit, phase 1
+    /// (full or hit-split subset), the phase-2 reduce, the residual tail,
+    /// and the S3b layer-done signal wiring.
+    private func buildAndCommitMissFixupCommand(
+        eventLoad: RoutedExpertLoadOperation?,
+        phase1HitCB: MTLCommandBuffer?,
+        phase1HitSplitArgBuf: MTLBuffer?,
+        phase1MissSlots: [UInt32],
+        routedBufs: [MTLBuffer],
+        routedOffsets: MoEExpertOffsets,
+        topK: UInt32,
+        d D: UInt32,
+        f FmoE: UInt32,
+        layerDoneValue: UInt64
+    ) throws -> MTLCommandBuffer {
+        // The phase-2 reduce already folded the shared branch (h1Buf
+        // as its residual); the tail is a plain residual add.
+        let gTail: (MTLCommandBuffer) throws -> Void = { [self] cb in
+            try elementwise!.encodeResidualAdd(commandBuffer: cb,
+                                           hidden: hidden,
+                                           delta: h2Buf,
+                                           count: cfg.hiddenSize)
+        }
+        // In speculative mode the successor's gated CBs already occupy the
+        // main queue, so layer work committed after them must use the fixup
+        // queue or it would deadlock behind its own waiter.
+        guard let routedCB = (layerDoneFixupQueue ?? ctx.queue).makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        let ioToken = eventLoad?.storage.completionToken
+        let ioStatus = ioToken.map { ($0.status, $0.statusOffset) }
+        // host-spin commit applies only on the main queue: the S3b fixup
+        // queue exists to sit behind gated successors, where a late commit
+        // has different ordering stakes.
+        let hostSpinCommit = fixupHostSpinCommit && layerDoneFixupQueue == nil
+        if let token = ioToken, !hostSpinCommit {
+            routedCB.encodeWaitForEvent(token.event, value: token.value)
+        }
+        if let stagingTransfer = eventLoad?.storage.metalStagingTransfer {
+            // The compute command references cache slots only after it has
+            // waited for the MTLIO staging event. This is deliberately a GPU
+            // blit, not a CPU memcpy or a completion-handler submission.
+            try stagingTransfer.encodeCopy(commandBuffer: routedCB)
+        }
+        let splitArgBuf = phase1HitCB != nil && !phase1MissSlots.isEmpty
+            ? phase1HitSplitArgBuf
+            : nil
+        let argBuf = splitArgBuf ?? moe.makeReusedRoutedArgumentBuffer(
+            routedBlobs: routedBufs,
+            topK: topK,
+            routedBufferOffsets: decodeRoutedOffsetsScratch)
+        if splitArgBuf != nil {
+            totalHitFixupLayers &+= 1
+            writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
+            try moe.encodeRoutedPersistentPhase1SubsetU16Load(
+                commandBuffer: routedCB,
+                routedArgBuffer: argBuf,
+                routedBlobs: routedBufs,
+                routedOffsets: routedOffsets,
+                x: routedX,
+                acts: moeActs,
+                activeSlots: moeMissActiveSlots,
+                activeSlotIndices: phase1MissSlots,
+                activeCount: UInt32(phase1MissSlots.count),
+                d: D,
+                f: FmoE,
+                topK: topK,
+                ioStatus: ioStatus?.0,
+                ioStatusOffset: ioStatus?.1 ?? 0)
+        } else {
+            try moe.encodeRoutedPersistentPhase1U16Load(
+                commandBuffer: routedCB,
+                routedArgBuffer: argBuf,
+                routedBlobs: routedBufs,
+                routedOffsets: routedOffsets,
+                x: routedX,
+                acts: moeActs,
+                d: D,
+                f: FmoE,
+                topK: topK,
+                ioStatus: ioStatus?.0,
+                ioStatusOffset: ioStatus?.1 ?? 0)
+        }
+        try moe.encodeRoutedPersistentPhase2Reduce(commandBuffer: routedCB,
+                                               routedArgBuffer: argBuf,
+                                               routedBlobs: routedBufs,
+                                               routedOffsets: routedOffsets,
+                                               acts: moeActs,
+                                               routingWeights: outWeights,
+                                               residual: h1Buf,
+                                               y: h2Buf,
+                                               d: D,
+                                               f: FmoE,
+                                               topK: topK,
+                                               ioStatus: ioStatus?.0,
+                                               ioStatusOffset: ioStatus?.1 ?? 0)
+        try gTail(routedCB)
+        if let layerDoneEvent, layerDoneValue > 0 {
+            routedCB.encodeSignalEvent(layerDoneEvent, value: layerDoneValue)
+            // A failed CB may never reach its encoded signal; release the
+            // gated successor so the error surfaces as a thrown generation
+            // failure instead of a hung queue.
+            routedCB.addCompletedHandler { cb in
+                if cb.error != nil, layerDoneEvent.signaledValue < layerDoneValue {
+                    layerDoneEvent.signaledValue = layerDoneValue
+                }
+            }
+        }
+        if hostSpinCommit, let token = ioToken, let eventLoad {
+            try spinUntilExpertIOTerminal(token, operation: eventLoad)
+        }
+        routedCB.commit()
+        return routedCB
+    }
+
     /// SHRIKE_HOST_WAIT=spin: poll instead of parking the thread, trading a
     /// busy core for the scheduler-wake latency on the per-layer router wait.
     /// Falls back to blocking after ~1s so a stalled CB cannot wedge a core.
@@ -5644,26 +5781,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // empty value-semantic snapshots and silently disabled hit/fixup.
         let phase1HitSlots = decodeHitSlotsScratch
         let phase1MissSlots = decodeMissSlotsScratch
-        func encodeRoutedPhase1Full(
-            _ cb: MTLCommandBuffer,
-            argBuf: MTLBuffer,
-            routedBufs: [MTLBuffer],
-            ioStatus: MTLBuffer? = nil,
-            ioStatusOffset: Int = 0
-        ) throws {
-            try moe.encodeRoutedPersistentPhase1U16Load(commandBuffer: cb,
-                                                    routedArgBuffer: argBuf,
-                                                    routedBlobs: routedBufs,
-                                                    routedOffsets: routedOffsets,
-                                                    x: routedX,
-                                                    acts: moeActs,
-                                                    d: D,
-                                                    f: FmoE,
-                                                    topK: topK,
-                                                    ioStatus: ioStatus,
-                                                    ioStatusOffset: ioStatusOffset)
-        }
-
         func encodeRoutedPhase1Subset(
             _ cb: MTLCommandBuffer,
             argBuf: MTLBuffer,
@@ -5842,83 +5959,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
             return
         }
-        // The phase-2 reduce already folded the shared branch (h1Buf
-        // as its residual); the tail is a plain residual add.
-        let gTail: (MTLCommandBuffer) throws -> Void = { [self] cb in
-            try elementwise!.encodeResidualAdd(commandBuffer: cb,
-                                           hidden: hidden,
-                                           delta: h2Buf,
-                                           count: cfg.hiddenSize)
-        }
-        // In speculative mode the successor's gated CBs already occupy the
-        // main queue, so layer work committed after them must use the fixup
-        // queue or it would deadlock behind its own waiter.
-        guard let routedCB = (layerDoneFixupQueue ?? ctx.queue).makeCommandBuffer() else {
-            throw ModelError.residentBufferWrapFailed
-        }
-        let ioToken = eventLoad?.storage.completionToken
-        let ioStatus = ioToken.map { ($0.status, $0.statusOffset) }
-        if let token = ioToken {
-            routedCB.encodeWaitForEvent(token.event, value: token.value)
-        }
-        if let stagingTransfer = eventLoad?.storage.metalStagingTransfer {
-            // The compute command references cache slots only after it has
-            // waited for the MTLIO staging event. This is deliberately a GPU
-            // blit, not a CPU memcpy or a completion-handler submission.
-            try stagingTransfer.encodeCopy(commandBuffer: routedCB)
-        }
-        let splitArgBuf = phase1HitCB != nil && !phase1MissSlots.isEmpty
-            ? phase1HitSplitArgBuf
-            : nil
-        let argBuf = splitArgBuf ?? moe.makeReusedRoutedArgumentBuffer(
-            routedBlobs: routedBufs,
-            topK: topK,
-            routedBufferOffsets: decodeRoutedOffsetsScratch)
-        if splitArgBuf != nil {
-            totalHitFixupLayers &+= 1
-            writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
-            try encodeRoutedPhase1Subset(
-                routedCB,
-                argBuf: argBuf,
-                routedBufs: routedBufs,
-                activeSlots: moeMissActiveSlots,
-                activeSlotIndices: phase1MissSlots,
-                activeCount: UInt32(phase1MissSlots.count),
-                ioStatus: ioStatus?.0,
-                ioStatusOffset: ioStatus?.1 ?? 0)
-        } else {
-            try encodeRoutedPhase1Full(routedCB,
-                                       argBuf: argBuf,
-                                       routedBufs: routedBufs,
-                                       ioStatus: ioStatus?.0,
-                                       ioStatusOffset: ioStatus?.1 ?? 0)
-        }
-        try moe.encodeRoutedPersistentPhase2Reduce(commandBuffer: routedCB,
-                                               routedArgBuffer: argBuf,
-                                               routedBlobs: routedBufs,
-                                               routedOffsets: routedOffsets,
-                                               acts: moeActs,
-                                               routingWeights: outWeights,
-                                               residual: h1Buf,
-                                               y: h2Buf,
-                                               d: D,
-                                               f: FmoE,
-                                               topK: topK,
-                                               ioStatus: ioStatus?.0,
-                                               ioStatusOffset: ioStatus?.1 ?? 0)
-        try gTail(routedCB)
-        if let layerDoneEvent, layerDoneValue > 0 {
-            routedCB.encodeSignalEvent(layerDoneEvent, value: layerDoneValue)
-            // A failed CB may never reach its encoded signal; release the
-            // gated successor so the error surfaces as a thrown generation
-            // failure instead of a hung queue.
-            routedCB.addCompletedHandler { cb in
-                if cb.error != nil, layerDoneEvent.signaledValue < layerDoneValue {
-                    layerDoneEvent.signaledValue = layerDoneValue
-                }
-            }
-        }
-        routedCB.commit()
+        let hitSplitFixup = phase1HitCB != nil && !phase1MissSlots.isEmpty
+        let routedCB = try buildAndCommitMissFixupCommand(
+            eventLoad: eventLoad,
+            phase1HitCB: phase1HitCB,
+            phase1HitSplitArgBuf: phase1HitSplitArgBuf,
+            phase1MissSlots: phase1MissSlots,
+            routedBufs: routedBufs,
+            routedOffsets: routedOffsets,
+            topK: topK, d: D, f: FmoE,
+            layerDoneValue: layerDoneValue)
         if missCount > 0, let completed = completedStorageNanos, completed > 0 {
             let submitted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if submitted >= completed {
@@ -5944,9 +5994,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             storageOperation: eventLoad,
             overlapCompletionClock: eventLoad == nil ? nil : overlapCompletionClock,
             expectedOverlapCompletions: expectedOverlapCompletions,
-            kernelRole: splitArgBuf == nil
-                ? "moe_phase1_2_routed"
-                : "moe_phase1_miss_fixup_phase2",
+            kernelRole: hitSplitFixup
+                ? "moe_phase1_miss_fixup_phase2"
+                : "moe_phase1_2_routed",
             encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start,
             signalsLayerDone: layerDoneEvent != nil && layerDoneValue > 0)
         transferredExpertLease = true
