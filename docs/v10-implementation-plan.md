@@ -76,7 +76,10 @@ Each is "run once, record the verdict, close either way"; definitions in
 - [ ] **P2: attention-chain attribution** — per-kernel GPU times from
       the existing gputrace bundles vs the honest-floor table.
 - [ ] **P3: miss-read QD probe** — mini SSD, random 1.77 MB reads QD1/
-      QD4/sequential, pread vs MTLIO.
+      QD4/sequential, pread vs MTLIO. If QD/coalescing wins, a batched/
+      sorted-fetch implementation task follows (Davor's idea, 2026-09-01);
+      decode batches only within the in-flight miss window, prefill
+      batches whole tiles — the bigger prize.
 
 ## Queued after T5 (Davor, 2026-08-31 — sequenced behind the original tasks)
 
@@ -85,12 +88,44 @@ Each is "run once, record the verdict, close either way"; definitions in
       rig). First probe: stats-off A/B (RUNNER/KERNEL_STATS may tax the
       observed); then the per-token emit/detokenize/async-hop loop.
       Compare on WALL, never wait_ms.
-- [ ] **Q2: context-depth tax** (~9 ms/1000 ctx — the dominant term in
-      real-feel speed at Davor's working depths; overlaps the attention
-      redesign tier and the prefill quest).
+- [ ] **Q2: context-depth tax — now sized as a genuine anomaly
+      (2026-09-01).** Roofline for depth growth: only the 10 gated
+      layers grow with context (30 GDN layers are constant-state);
+      10 layers × 2 KV heads × 256 dim × K+V × int8 ≈ 10.2 MB per
+      +1000 ctx ≈ **0.17 ms/1000 at the 61 GB/s roof — measured is
+      7–9 ms/1000, ~40–50× over roofline.** Suspects: decode-attention
+      kernel parallelism over context length (serial walk ⇒ latency-
+      bound O(L)); the deep-prefill expert-cache sweep confound (split
+      never measured); host-side O(L) work per token. Debug: fresh-
+      server deterministic depth sweep (single_turn N ladder) with
+      per-role stats — role growth localizes kernel vs io vs host.
+
+## Quality-trading experiments (lane opened by Davor, 2026-09-01)
+
+His rationale: int4 quantization is already an accepted quality trade,
+and no public data exists for top-N-of-8 sensitivity on this model/
+quant/hardware — so measure it. Everything here alters sampled output:
+per-experiment sign-off stands, and no default flip without a quality-
+battery verdict.
+
+- [ ] **E0: router rank-mass instrumentation** — log mean routing-weight
+      mass per rank (1..8) in runner stats (read-only, digest-neutral).
+      Gates E1: if ranks 7–8 carry a few % of mass, dropping is
+      plausible; if far more, stop here and record that.
+- [ ] **E1: drop-bottom-miss experiment** — env-gated: on a miss whose
+      normalized routing weight is below a threshold, drop the expert
+      and renormalize over the executed set. Reproducible under the
+      fresh-server rig protocol (deterministic cache trajectory), but in
+      live traffic output varies with cache temperature — the model
+      answers slightly differently when cold, exactly when it is also
+      slowest (topic switches); flag this behavior explicitly at
+      sign-off. Quality check: fixed prompt battery, side-by-side.
+      Prize at 0.95 real-shape hit: a slice of the ~7–8 ms/token of
+      exposed miss I/O.
 
 ## Explicitly out of scope (Davor's line)
 
-Expert substitution on miss; FP16 GDN state; any change that alters
-sampled output beyond the a264b22-class reduction-order exception, which
-requires his explicit per-instance sign-off.
+FP16 GDN state; any change that alters sampled output beyond the
+a264b22-class reduction-order exception and the E-lane above, which
+require his explicit per-instance sign-off. (Expert substitution on
+miss moved to the E-lane 2026-09-01 by Davor.)
