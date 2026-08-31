@@ -128,6 +128,13 @@ with or without them; only speed changes. Add
 `SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1` when measuring with
 `tools/decode-measure.sh` and the `tools/parse-*-stats.py` parsers.
 
+Two 2026-08-31-evening additions: **`--ram-budget 8G` is the measured optimum
+on the 16 GB mini** (snaps to 128 expert slots ≈ 9.06 GB actually allocated —
+the nearest-snap overshoots the label; leaves ~11 % free, watch pressure) —
+real-shape decode −13 % vs 6G. And **S3a pacing is now the code default**
+(no env needed); `SHRIKE_LAYER_DONE=on` re-arms the S3b event machinery for
+A/B only — it measured net-negative under spin (rig −0.6, card −2.3 ms/token).
+
 ## Where documents go
 
 `docs/` pairs a design document with its implementation plan, named for the work rather than

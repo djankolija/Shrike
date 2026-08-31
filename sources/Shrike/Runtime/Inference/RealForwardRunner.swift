@@ -575,7 +575,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.specScratch = spec?.scratch ?? []
         self.specArgsBuf = spec?.dispatch.arguments
         self.specDispatchArguments = spec?.dispatch
+        // S3a pacing is the default: under the spin wait the host paces fast
+        // enough that S3b's gated successors measured net-negative (rig −0.6,
+        // card −2.3 ms/token at 128 slots, 2026-08-31) — the event wait plus
+        // the dedicated queue's ~162 µs/miss-layer GPU wake outweigh the
+        // early release. SHRIKE_LAYER_DONE=on re-arms the machinery for A/B.
         let layerDone = specMode == .speculative
+            && ProcessInfo.processInfo.environment["SHRIKE_LAYER_DONE"] == "on"
             ? try Self.makeLayerDoneMachinery(device: device) : nil
         self.layerDoneEvent = layerDone?.event
         self.layerDoneFixupQueue = layerDone?.fixupQueue
