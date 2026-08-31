@@ -60,12 +60,32 @@ final class DequantInt8GEMV {
                        yOffset: Int = 0,
                        m: UInt32,
                        n: UInt32) throws {
-        precondition(n % UInt32(Quantization.groupSize) == 0,
-                     "N must be a multiple of \(Quantization.groupSize)")
-        precondition(xOffset >= 0 && yOffset >= 0, "buffer offsets must be non-negative")
         guard let enc = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
+        defer { enc.endEncoding() }
+        encode(encoder: enc,
+               weights: weights, weightsOffset: weightsOffset,
+               scales: scales, scalesOffset: scalesOffset,
+               biases: biases, biasesOffset: biasesOffset,
+               x: x, xOffset: xOffset,
+               y: y, yOffset: yOffset,
+               m: m, n: n)
+    }
+
+    func encode(encoder enc: MTLComputeCommandEncoder,
+                       weights: MTLBuffer, weightsOffset: Int = 0,
+                       scales:  MTLBuffer, scalesOffset:  Int = 0,
+                       biases:  MTLBuffer, biasesOffset:  Int = 0,
+                       x:       MTLBuffer,
+                       xOffset: Int = 0,
+                       y:       MTLBuffer,
+                       yOffset: Int = 0,
+                       m: UInt32,
+                       n: UInt32) {
+        precondition(n % UInt32(Quantization.groupSize) == 0,
+                     "N must be a multiple of \(Quantization.groupSize)")
+        precondition(xOffset >= 0 && yOffset >= 0, "buffer offsets must be non-negative")
         enc.setComputePipelineState(specializedPSOs[Shape(m: m, n: n)] ?? pso)
         enc.setBuffer(weights, offset: weightsOffset, index: 0)
         enc.setBuffer(scales,  offset: scalesOffset,  index: 1)
@@ -82,6 +102,5 @@ final class DequantInt8GEMV {
         let tgCount = MTLSize(width: (Int(m) + rowsPerTG - 1) / rowsPerTG,
                               height: 1, depth: 1)
         enc.dispatchThreadgroups(tgCount, threadsPerThreadgroup: tgSize)
-        enc.endEncoding()
     }
 }

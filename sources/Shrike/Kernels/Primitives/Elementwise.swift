@@ -93,13 +93,21 @@ final class Elementwise {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
+        defer { encoder.endEncoding() }
+        encodeSigmoidScalarMul(encoder: encoder, y: y, yOffset: yOffset,
+                               gate: gate, gateOffset: gateOffset, count: count)
+    }
+
+    func encodeSigmoidScalarMul(encoder: MTLComputeCommandEncoder,
+                                y: MTLBuffer, yOffset: Int = 0,
+                                gate: MTLBuffer, gateOffset: Int = 0,
+                                count: Int) {
         encoder.setComputePipelineState(sigmoidScalarMulPSO)
         encoder.setBuffer(y, offset: yOffset, index: 0)
         encoder.setBuffer(gate, offset: gateOffset, index: 1)
         var elementCount = UInt32(count)
         encoder.setBytes(&elementCount, length: MemoryLayout<UInt32>.size, index: 2)
         dispatch(encoder, pipeline: sigmoidScalarMulPSO, threads: count)
-        encoder.endEncoding()
     }
 
     /// x[i] += bias[i % rowElems] — a resident BF16 bias row broadcast over

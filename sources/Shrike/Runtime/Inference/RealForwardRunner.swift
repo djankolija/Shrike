@@ -4982,7 +4982,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             return sharedCB
         }
         let sharedProj = sharedExpertProjections[L]
-        try shared.encode(commandBuffer: sharedCB,
+        // B1c stage 1: one encoder for the whole shared-expert chain — the
+        // per-kernel encoders cost more span than the GEMVs they wrapped.
+        guard let sharedEncoder = sharedCB.makeComputeCommandEncoder() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        defer { sharedEncoder.endEncoding() }
+        try shared.encode(encoder: sharedEncoder,
                           x: routedX,
                           gate: sharedProj.gate,
                           up: sharedProj.up,
@@ -4994,7 +5000,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if cfg.sharedExpertGated {
             // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX)
             let gateView = sharedProj.scalarGate!
-            try int8ScalarGate!.encode(commandBuffer: sharedCB,
+            int8ScalarGate!.encode(encoder: sharedEncoder,
                                    weights: gateView.buffer,
                                    weightsOffset: Int(gateView.offset),
                                    scales: gateView.buffer,
@@ -5004,7 +5010,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                    x: routedX,
                                    y: sharedScalarGateBuf!,
                                    m: 1, n: D)
-            try elementwise!.encodeSigmoidScalarMul(commandBuffer: sharedCB,
+            elementwise!.encodeSigmoidScalarMul(encoder: sharedEncoder,
                                                 y: h1Buf,
                                                 gate: sharedScalarGateBuf!,
                                                 count: cfg.hiddenSize)

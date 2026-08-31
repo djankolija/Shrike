@@ -82,6 +82,22 @@ final class SharedExpertInt8 {
                        down: SharedExpertInt8Proj,
                        y: MTLBuffer, yOffset: Int = 0,
                        scratchAct:  MTLBuffer, scratchActOffset:  Int = 0) throws {
+        guard let encoder = cb.makeComputeCommandEncoder() else {
+            throw SharedExpertInt8Error.dimensionMismatch("encoder alloc failed")
+        }
+        defer { encoder.endEncoding() }
+        try encode(encoder: encoder, x: x, xOffset: xOffset,
+                   gate: gate, up: up, down: down, y: y, yOffset: yOffset,
+                   scratchAct: scratchAct, scratchActOffset: scratchActOffset)
+    }
+
+    func encode(encoder: MTLComputeCommandEncoder,
+                       x: MTLBuffer, xOffset: Int = 0,
+                       gate: SharedExpertInt8Proj,
+                       up:   SharedExpertInt8Proj,
+                       down: SharedExpertInt8Proj,
+                       y: MTLBuffer, yOffset: Int = 0,
+                       scratchAct:  MTLBuffer, scratchActOffset:  Int = 0) throws {
         guard gate.rows == up.rows, gate.cols == up.cols else {
             throw SharedExpertInt8Error.dimensionMismatch(
                 "gate/up shapes differ: gate=(\(gate.rows),\(gate.cols)) up=(\(up.rows),\(up.cols))")
@@ -106,7 +122,7 @@ final class SharedExpertInt8 {
                 "y offset \(yOffset) + needed \(outputBytes) exceeds length \(y.length)")
         }
 
-        try encodePhase1(commandBuffer: cb,
+        try encodePhase1(encoder: encoder,
                          x: x,
                          xOffset: xOffset,
                          gate: gate,
@@ -114,7 +130,7 @@ final class SharedExpertInt8 {
                          scratchAct: scratchAct,
                          scratchActOffset: scratchActOffset)
 
-        try encodeDown(commandBuffer: cb,
+        try encodeDown(encoder: encoder,
                        down: down,
                        y: y,
                        yOffset: yOffset,
@@ -122,7 +138,7 @@ final class SharedExpertInt8 {
                        scratchActOffset: scratchActOffset)
     }
 
-    func encodePhase1(commandBuffer cb: MTLCommandBuffer,
+    func encodePhase1(encoder: MTLComputeCommandEncoder,
                              x: MTLBuffer,
                              xOffset: Int = 0,
                              gate: SharedExpertInt8Proj,
@@ -144,16 +160,16 @@ final class SharedExpertInt8 {
                 "x offset \(xOffset) + needed \(inputBytes) exceeds length \(x.length)")
         }
 
-        try encodeFusedGateUpAct(commandBuffer: cb,
-                                 x: x,
-                                 xOffset: xOffset,
-                                 gate: gate,
-                                 up: up,
-                                 scratchAct: scratchAct,
-                                 scratchActOffset: scratchActOffset)
+        encodeFusedGateUpAct(encoder: encoder,
+                             x: x,
+                             xOffset: xOffset,
+                             gate: gate,
+                             up: up,
+                             scratchAct: scratchAct,
+                             scratchActOffset: scratchActOffset)
     }
 
-    func encodeDown(commandBuffer cb: MTLCommandBuffer,
+    func encodeDown(encoder: MTLComputeCommandEncoder,
                            down: SharedExpertInt8Proj,
                            y: MTLBuffer,
                            yOffset: Int = 0,
@@ -169,7 +185,7 @@ final class SharedExpertInt8 {
             throw SharedExpertInt8Error.scratchTooSmall(
                 "y offset \(yOffset) + needed \(outputBytes) exceeds length \(y.length)")
         }
-        try int8.encode(commandBuffer: cb,
+        int8.encode(encoder: encoder,
                     weights: down.weights, weightsOffset: down.weightsOffset,
                     scales:  down.scales,  scalesOffset:  down.scalesOffset,
                     biases:  down.biases,  biasesOffset:  down.biasesOffset,
@@ -178,16 +194,13 @@ final class SharedExpertInt8 {
                     m: down.rows, n: down.cols)
     }
 
-    private func encodeFusedGateUpAct(commandBuffer cb: MTLCommandBuffer,
+    private func encodeFusedGateUpAct(encoder enc: MTLComputeCommandEncoder,
                                       x: MTLBuffer,
                                       xOffset: Int,
                                       gate: SharedExpertInt8Proj,
                                       up: SharedExpertInt8Proj,
                                       scratchAct: MTLBuffer,
-                                      scratchActOffset: Int) throws {
-        guard let enc = cb.makeComputeCommandEncoder() else {
-            throw SharedExpertInt8Error.dimensionMismatch("encoder alloc failed")
-        }
+                                      scratchActOffset: Int) {
         enc.setComputePipelineState(
             (gate.rows == 2112 && gate.cols == 2816 ? specializedFusedGateUpActPSO : nil)
             ?? fusedGateUpActPSO)
@@ -210,6 +223,5 @@ final class SharedExpertInt8 {
                                  threadsPerThreadgroup: MTLSize(width: 32 * rowsPerTG,
                                                                 height: 1,
                                                                 depth: 1))
-        enc.endEncoding()
     }
 }

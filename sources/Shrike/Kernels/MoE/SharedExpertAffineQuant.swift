@@ -22,6 +22,26 @@ final class SharedExpertAffineQuant {
                 scratchGate: MTLBuffer, scratchGateOffset: Int,
                 scratchUp: MTLBuffer, scratchUpOffset: Int,
                 scratchAct: MTLBuffer, scratchActOffset: Int) throws {
+        guard let encoder = cb.makeComputeCommandEncoder() else {
+            throw SharedExpertError.dimensionMismatch("encoder alloc failed")
+        }
+        defer { encoder.endEncoding() }
+        try encode(encoder: encoder, x: x, xOffset: xOffset,
+                   gate: gate, up: up, down: down, y: y, yOffset: yOffset,
+                   scratchGate: scratchGate, scratchGateOffset: scratchGateOffset,
+                   scratchUp: scratchUp, scratchUpOffset: scratchUpOffset,
+                   scratchAct: scratchAct, scratchActOffset: scratchActOffset)
+    }
+
+    func encode(encoder: MTLComputeCommandEncoder,
+                x: MTLBuffer, xOffset: Int,
+                gate: SharedExpertProjection,
+                up: SharedExpertProjection,
+                down: SharedExpertProjection,
+                y: MTLBuffer, yOffset: Int,
+                scratchGate: MTLBuffer, scratchGateOffset: Int,
+                scratchUp: MTLBuffer, scratchUpOffset: Int,
+                scratchAct: MTLBuffer, scratchActOffset: Int) throws {
         guard gate.rows == up.rows, gate.cols == up.cols,
               down.rows == gate.cols, down.cols == gate.rows else {
             throw SharedExpertError.dimensionMismatch("incompatible projection shapes")
@@ -34,8 +54,8 @@ final class SharedExpertAffineQuant {
         }
         func project(_ p: SharedExpertProjection, _ input: MTLBuffer,
                      _ inputOffset: Int, _ output: MTLBuffer,
-                     _ outputOffset: Int) throws {
-            try gemv.encode(commandBuffer: cb,
+                     _ outputOffset: Int) {
+            gemv.encode(encoder: encoder,
                         weights: p.weights, weightsOffset: p.weightsOffset,
                         scales: p.scales, scalesOffset: p.scalesOffset,
                         biases: p.biases, biasesOffset: p.biasesOffset,
@@ -43,11 +63,8 @@ final class SharedExpertAffineQuant {
                         y: output, yOffset: outputOffset,
                         m: p.rows, n: p.cols)
         }
-        try project(gate, x, xOffset, scratchGate, scratchGateOffset)
-        try project(up, x, xOffset, scratchUp, scratchUpOffset)
-        guard let encoder = cb.makeComputeCommandEncoder() else {
-            throw SharedExpertError.dimensionMismatch("encoder alloc failed")
-        }
+        project(gate, x, xOffset, scratchGate, scratchGateOffset)
+        project(up, x, xOffset, scratchUp, scratchUpOffset)
         encoder.setComputePipelineState(activationPSO)
         encoder.setBuffer(scratchGate, offset: scratchGateOffset, index: 0)
         encoder.setBuffer(scratchUp, offset: scratchUpOffset, index: 1)
@@ -56,7 +73,6 @@ final class SharedExpertAffineQuant {
         encoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 3)
         encoder.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: min(256, activationPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-        encoder.endEncoding()
-        try project(down, scratchAct, scratchActOffset, y, yOffset)
+        project(down, scratchAct, scratchActOffset, y, yOffset)
     }
 }

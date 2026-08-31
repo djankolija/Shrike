@@ -63,8 +63,9 @@ import ShrikeValidationSupport
         #expect(refCB.error == nil)
 
         let splitCB = ctx.queue.makeCommandBuffer()!
+        let splitEncoder = splitCB.makeComputeCommandEncoder()!
         for row in 0..<Self.rows {
-            try shared.encodePhase1(commandBuffer: splitCB,
+            try shared.encodePhase1(encoder: splitEncoder,
                                     x: xBuf,
                                     xOffset: row * Self.xStride * halfBytes,
                                     gate: gateProj,
@@ -73,13 +74,14 @@ import ShrikeValidationSupport
                                     scratchActOffset: row * Self.f * halfBytes)
         }
         for row in 0..<Self.rows {
-            try shared.encodeDown(commandBuffer: splitCB,
+            try shared.encodeDown(encoder: splitEncoder,
                                   down: downProj,
                                   y: ySplit,
                                   yOffset: row * Self.d * halfBytes,
                                   scratchAct: scratchAct,
                                   scratchActOffset: row * Self.f * halfBytes)
         }
+        splitEncoder.endEncoding()
         splitCB.commit()
         splitCB.waitUntilCompleted()
         #expect(splitCB.error == nil)

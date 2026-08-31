@@ -37,6 +37,26 @@ public final class SharedExpertInt4 {
                        scratchGate: MTLBuffer, scratchGateOffset: Int = 0,
                        scratchUp: MTLBuffer, scratchUpOffset: Int = 0,
                        scratchAct: MTLBuffer, scratchActOffset: Int = 0) throws {
+        guard let encoder = cb.makeComputeCommandEncoder() else {
+            throw SharedExpertError.dimensionMismatch("encoder alloc failed")
+        }
+        defer { encoder.endEncoding() }
+        try encode(encoder: encoder, x: x, xOffset: xOffset,
+                   gate: gate, up: up, down: down, y: y, yOffset: yOffset,
+                   scratchGate: scratchGate, scratchGateOffset: scratchGateOffset,
+                   scratchUp: scratchUp, scratchUpOffset: scratchUpOffset,
+                   scratchAct: scratchAct, scratchActOffset: scratchActOffset)
+    }
+
+    public func encode(encoder: MTLComputeCommandEncoder,
+                       x: MTLBuffer, xOffset: Int = 0,
+                       gate: SharedExpertProjection,
+                       up: SharedExpertProjection,
+                       down: SharedExpertProjection,
+                       y: MTLBuffer, yOffset: Int = 0,
+                       scratchGate: MTLBuffer, scratchGateOffset: Int = 0,
+                       scratchUp: MTLBuffer, scratchUpOffset: Int = 0,
+                       scratchAct: MTLBuffer, scratchActOffset: Int = 0) throws {
         guard gate.rows == up.rows, gate.cols == up.cols,
               down.rows == gate.cols, down.cols == gate.rows else {
             throw SharedExpertError.dimensionMismatch(
@@ -58,14 +78,14 @@ public final class SharedExpertInt4 {
             throw SharedExpertError.scratchTooSmall("output range exceeds y buffer")
         }
 
-        try int4.encode(commandBuffer: cb,
+        int4.encode(encoder: encoder,
                     weights: gate.weights, weightsOffset: gate.weightsOffset,
                     scales: gate.scales, scalesOffset: gate.scalesOffset,
                     biases: gate.biases, biasesOffset: gate.biasesOffset,
                     x: x, xOffset: xOffset,
                     y: scratchGate, yOffset: scratchGateOffset,
                     m: gate.rows, n: gate.cols)
-        try int4.encode(commandBuffer: cb,
+        int4.encode(encoder: encoder,
                     weights: up.weights, weightsOffset: up.weightsOffset,
                     scales: up.scales, scalesOffset: up.scalesOffset,
                     biases: up.biases, biasesOffset: up.biasesOffset,
@@ -73,9 +93,6 @@ public final class SharedExpertInt4 {
                     y: scratchUp, yOffset: scratchUpOffset,
                     m: up.rows, n: up.cols)
 
-        guard let encoder = cb.makeComputeCommandEncoder() else {
-            throw SharedExpertError.dimensionMismatch("encoder alloc failed")
-        }
         encoder.setComputePipelineState(geluMulPSO)
         encoder.setBuffer(scratchGate, offset: scratchGateOffset, index: 0)
         encoder.setBuffer(scratchUp, offset: scratchUpOffset, index: 1)
@@ -85,9 +102,8 @@ public final class SharedExpertInt4 {
         let width = min(geluMulPSO.maxTotalThreadsPerThreadgroup, 256)
         encoder.dispatchThreads(MTLSize(width: intermediate, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
-        encoder.endEncoding()
 
-        try int4.encode(commandBuffer: cb,
+        int4.encode(encoder: encoder,
                     weights: down.weights, weightsOffset: down.weightsOffset,
                     scales: down.scales, scalesOffset: down.scalesOffset,
                     biases: down.biases, biasesOffset: down.biasesOffset,
@@ -144,6 +160,35 @@ public final class SharedExpertRuntime {
                                scratchAct: scratchAct, scratchActOffset: scratchActOffset)
         case .affine(let runtime):
             try runtime.encode(commandBuffer: commandBuffer, x: x, xOffset: xOffset,
+                               gate: gate, up: up, down: down, y: y, yOffset: yOffset,
+                               scratchGate: scratchGate, scratchGateOffset: scratchGateOffset,
+                               scratchUp: scratchUp, scratchUpOffset: scratchUpOffset,
+                               scratchAct: scratchAct, scratchActOffset: scratchActOffset)
+        }
+    }
+
+    public func encode(encoder: MTLComputeCommandEncoder,
+                       x: MTLBuffer, xOffset: Int = 0,
+                       gate: SharedExpertProjection,
+                       up: SharedExpertProjection,
+                       down: SharedExpertProjection,
+                       y: MTLBuffer, yOffset: Int = 0,
+                       scratchGate: MTLBuffer, scratchGateOffset: Int = 0,
+                       scratchUp: MTLBuffer, scratchUpOffset: Int = 0,
+                       scratchAct: MTLBuffer, scratchActOffset: Int = 0) throws {
+        switch implementation {
+        case .int4(let runtime):
+            try runtime.encode(encoder: encoder, x: x, xOffset: xOffset,
+                               gate: gate, up: up, down: down, y: y, yOffset: yOffset,
+                               scratchGate: scratchGate, scratchGateOffset: scratchGateOffset,
+                               scratchUp: scratchUp, scratchUpOffset: scratchUpOffset,
+                               scratchAct: scratchAct, scratchActOffset: scratchActOffset)
+        case .int8(let runtime):
+            try runtime.encode(encoder: encoder, x: x, xOffset: xOffset,
+                               gate: gate, up: up, down: down, y: y, yOffset: yOffset,
+                               scratchAct: scratchAct, scratchActOffset: scratchActOffset)
+        case .affine(let runtime):
+            try runtime.encode(encoder: encoder, x: x, xOffset: xOffset,
                                gate: gate, up: up, down: down, y: y, yOffset: yOffset,
                                scratchGate: scratchGate, scratchGateOffset: scratchGateOffset,
                                scratchUp: scratchUp, scratchUpOffset: scratchUpOffset,
