@@ -87,8 +87,10 @@ Numbers cited as baselines are ornith15, n=12.
 
 ## S3b — event-gated successors, host off the per-layer critical path
 
-- [ ] Micro-test of the same-queue commit-order + cross-queue event
-      assumptions (throwaway target, no model).
+- [x] Micro-test of the same-queue commit-order + cross-queue event
+      assumptions — landed as a durable suite instead of a throwaway target
+      (`CrossQueueSharedEventTests`, 4 tests, serial + TSan green 2026-08-31)
+      so the assumptions stay pinned under both test gates.
 - [ ] `layerDone` shared event; `attn(L+1)` waits; host signals on all-hit,
       fixup CB signals on miss (second queue).
 - [ ] Eviction epochs: planner defers evictions of slots classified for
