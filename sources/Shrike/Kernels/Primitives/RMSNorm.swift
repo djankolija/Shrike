@@ -13,6 +13,7 @@ import Metal
 final class RMSNorm {
 
     private let psoBF16: MTLComputePipelineState
+    private let psoResidualBF16: MTLComputePipelineState
     private let psoNoScale: MTLComputePipelineState
     private let psoBF16PerHead: MTLComputePipelineState
     private let psoBF16Rows: MTLComputePipelineState
@@ -26,6 +27,7 @@ final class RMSNorm {
 
     init(context: MetalContext) throws {
         self.psoBF16     = try context.pipeline("rmsnorm_bf16w")
+        self.psoResidualBF16 = try context.pipeline("residual_add_rmsnorm_bf16w")
         self.psoNoScale  = try context.pipeline("rmsnorm_no_scale")
         self.psoBF16PerHead    = try context.pipeline("rmsnorm_bf16w_perhead")
         self.psoBF16Rows       = try context.pipeline("rmsnorm_bf16w_rows")
@@ -78,6 +80,27 @@ final class RMSNorm {
                        weight: weight, weightOffset: weightOffset,
                        out: out, outOffset: outOffset,
                        d: d, eps: eps)
+    }
+
+    /// Fused in-place residual add + weighted norm, bitwise identical to
+    /// encodeResidualAdd followed by encodeBF16W.
+    func encodeResidualAddBF16W(encoder enc: MTLComputeCommandEncoder,
+                                hidden: MTLBuffer, hiddenOffset: Int = 0,
+                                delta: MTLBuffer, deltaOffset: Int = 0,
+                                weight: MTLBuffer, weightOffset: Int = 0,
+                                out: MTLBuffer, outOffset: Int = 0,
+                                d: UInt32,
+                                eps: Float) {
+        enc.setComputePipelineState(psoResidualBF16)
+        enc.setBuffer(hidden, offset: hiddenOffset, index: 0)
+        enc.setBuffer(delta,  offset: deltaOffset,  index: 1)
+        enc.setBuffer(weight, offset: weightOffset, index: 2)
+        enc.setBuffer(out,    offset: outOffset,    index: 3)
+        var dVar   = d
+        var epsVar = eps
+        enc.setBytes(&dVar,   length: MemoryLayout<UInt32>.size, index: 4)
+        enc.setBytes(&epsVar, length: MemoryLayout<Float>.size,  index: 5)
+        dispatchOneRow(enc: enc, pso: psoResidualBF16)
     }
 
     /// Encode the no-scale variant (v_norm, router internal norm).

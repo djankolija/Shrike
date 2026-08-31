@@ -92,6 +92,43 @@ void rmsnorm_bf16w(
     }
 }
 
+// Decode-tail fusion: hidden[i] = half(float(hidden[i]) + float(delta[i]))
+// in place, then RMS-norm the updated row into `out` — one dispatch replacing
+// residual_add_fp16 + rmsnorm_bf16w. The add rounds through FP16 storage
+// before the sum-of-squares and the reduction is rms_block_inv itself, so
+// the result is bitwise identical to the two-kernel sequence. Single
+// threadgroup; the mem_device barrier orders the in-place writes ahead of
+// the reduction's reads.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void residual_add_rmsnorm_bf16w(
+    device       half*   hidden     [[buffer(0)]],   // [D] FP16, updated in place
+    device const half*   delta      [[buffer(1)]],   // [D] FP16
+    device const bfloat* weight     [[buffer(2)]],   // [D] BF16
+    device       half*   out        [[buffer(3)]],   // [D] FP16
+    constant     uint&   D          [[buffer(4)]],
+    constant     float&  eps        [[buffer(5)]],
+    uint  lid              [[thread_position_in_threadgroup]],
+    uint  lsize            [[threads_per_threadgroup]],
+    uint  simd_lane_id     [[thread_index_in_simdgroup]],
+    uint  simd_group_id    [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups       [[simdgroups_per_threadgroup]]
+) {
+    const uint DD = rms_fc_d(D);
+    for (uint i = lid; i < DD; i += lsize) {
+        hidden[i] = half(float(hidden[i]) + float(delta[i]));
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    threadgroup float partial[kRmsMaxSimdGroups];
+    const float inv = rms_block_inv(hidden, DD, eps, lid, lsize,
+                                    simd_lane_id, simd_group_id, simdgroups,
+                                    partial);
+    for (uint i = lid; i < DD; i += lsize) {
+        float xv = float(hidden[i]);
+        float wv = float(weight[i]);
+        out[i] = half(xv * inv * wv);
+    }
+}
+
 // q_norm/k_norm
 // (BF16 weight, shared across heads) and v_norm (no-scale) apply to each
 // attention head independently. These kernels process all heads in one

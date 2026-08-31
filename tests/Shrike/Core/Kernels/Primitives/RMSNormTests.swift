@@ -241,6 +241,52 @@ import ShrikeValidationSupport
         #expect(a == b, "batched per-head BF16W must match the per-head loop bytewise")
     }
 
+    // MARK: - Fused residual + norm
+    //
+    // `encodeResidualAddBF16W` must produce bytewise-equal results to
+    // residual_add_fp16 followed by rmsnorm_bf16w — both the in-place
+    // hidden update and the normed output.
+
+    @Test func residualAddRmsNorm_matchesSequentialPair() throws {
+        let d = 2048
+        var rng = SeedTree(0x3D7).key("residual-rmsnorm-fused")
+        let hidden = (0..<d).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        let delta  = (0..<d).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        let wBits  = (0..<d).map { _ in Quantization.bf16Bits(rng.uniform(0.5, 1.5)) }
+
+        let ctx = try MetalContext()
+        let rms = try RMSNorm(context: ctx)
+        let elementwise = try Elementwise(context: ctx)
+        guard let wBuf = ctx.device.makeBuffer(length: d * 2, options: .storageModeShared),
+              let seqHidden = Fp16Buffer.make(ctx.device, halves: hidden),
+              let fusedHidden = Fp16Buffer.make(ctx.device, halves: hidden),
+              let deltaBuf = Fp16Buffer.make(ctx.device, halves: delta),
+              let seqOut = Fp16Buffer.make(ctx.device, count: d),
+              let fusedOut = Fp16Buffer.make(ctx.device, count: d) else {
+            Issue.record("alloc failed"); return
+        }
+        let wPtr = wBuf.contents().bindMemory(to: UInt16.self, capacity: d)
+        for i in 0..<d { wPtr[i] = wBits[i] }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        try elementwise.encodeResidualAdd(commandBuffer: cb, hidden: seqHidden,
+                                          delta: deltaBuf, count: d)
+        try rms.encodeBF16W(commandBuffer: cb, x: seqHidden, weight: wBuf,
+                            out: seqOut, d: UInt32(d), eps: 1e-6)
+        guard let enc = cb.makeComputeCommandEncoder() else {
+            Issue.record("encoder failed"); return
+        }
+        rms.encodeResidualAddBF16W(encoder: enc, hidden: fusedHidden, delta: deltaBuf,
+                                   weight: wBuf, out: fusedOut, d: UInt32(d), eps: 1e-6)
+        enc.endEncoding()
+        cb.commit(); cb.waitUntilCompleted()
+
+        #expect(Fp16Buffer.read(seqHidden, count: d) == Fp16Buffer.read(fusedHidden, count: d),
+                "fused kernel's in-place hidden update must match residual_add_fp16 bytewise")
+        #expect(Fp16Buffer.read(seqOut, count: d) == Fp16Buffer.read(fusedOut, count: d),
+                "fused kernel's normed output must match the sequential pair bytewise")
+    }
+
     @Test func rmsNorm_noScalePerHead_matchesLoop() throws {
         let numKVL = 2, headDim = 256, total = numKVL * headDim
         var rng = SeedTree(0x2C2).key("rmsnorm-perhead-noscale")

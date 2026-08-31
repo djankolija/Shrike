@@ -2674,16 +2674,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard let tailEncoder = layerEncoder ?? tailCB.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
-        elementwise!.encodeResidualAdd(encoder: tailEncoder,
-                                       hidden: hidden,
-                                       delta: oOut,
-                                       count: cfg.hiddenSize)
-        rms.encodeBF16W(encoder: tailEncoder,
-                        x: hidden,
-                        weight: postAttn.buffer,
-                        weightOffset: Int(postAttn.offset),
-                        out: routedX,
-                        d: D, eps: eps)
+        rms.encodeResidualAddBF16W(encoder: tailEncoder,
+                                   hidden: hidden,
+                                   delta: oOut,
+                                   weight: postAttn.buffer,
+                                   weightOffset: Int(postAttn.offset),
+                                   out: routedX,
+                                   d: D, eps: eps)
         moe.encodeRouter(encoder: tailEncoder,
             weights: routerW.buffer, weightsOffset: Int(routerW.offset),
             scales:  routerW.buffer, scalesOffset:  Int(routerW.scaleOffset),
