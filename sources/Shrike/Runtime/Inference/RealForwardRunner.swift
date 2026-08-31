@@ -183,29 +183,30 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let prefillFinalRowHead: PrefillFinalRowHeadInt4
 
     // Scratch — preallocated per spec'd D / F / vocab.
-    private let hidden: MTLBuffer        // [D] FP16
-    private let normed: MTLBuffer        // [D] FP16
-    private let attnOut: MTLBuffer       // [N_HEADS * head_dim] FP16
-    private let qScratch: MTLBuffer      // [N_HEADS * head_dim] FP16
-    private let kStage: MTLBuffer        // [max KV heads * head_dim] FP16, current token
-    private let vStage: MTLBuffer        // [max KV heads * head_dim] FP16, current token
-    private let oOut: MTLBuffer          // [D] FP16
-    private let h1Buf: MTLBuffer         // [D] FP16 (dense MLP output)
-    private let h2Buf: MTLBuffer         // [D] FP16 (routed output)
-    private let routedX: MTLBuffer       // [D] FP16 (pre_feedforward_layernorm_2 output)
-    private let denseX: MTLBuffer        // [D] FP16 (pre_feedforward_layernorm output)
-    private let denseScratchGate: MTLBuffer // [F=2112] FP16
-    private let denseScratchUp: MTLBuffer   // [F=2112] FP16
-    private let denseScratchAct: MTLBuffer  // [F=2112] FP16
-    private let routerInput: MTLBuffer   // [D] FP16 (rmsnorm_no_scale(h))
-    private let zeroResidual: MTLBuffer  // [D] FP16 zeros — for routed branch base
-    private let outIndices: MTLBuffer    // [topK] UInt32
-    private let outWeights: MTLBuffer    // [topK] FP16
+    private let decodeScratch: DecodeScratchBuffers
+    private var hidden: MTLBuffer { decodeScratch.hidden }          // [D] FP16
+    private var normed: MTLBuffer { decodeScratch.normed }          // [D] FP16
+    private var attnOut: MTLBuffer { decodeScratch.attnOut }        // [N_HEADS * head_dim] FP16
+    private var qScratch: MTLBuffer { decodeScratch.qScratch }      // [N_HEADS * head_dim] FP16
+    private var kStage: MTLBuffer { decodeScratch.kStage }          // [max KV heads * head_dim] FP16, current token
+    private var vStage: MTLBuffer { decodeScratch.vStage }          // [max KV heads * head_dim] FP16, current token
+    private var oOut: MTLBuffer { decodeScratch.oOut }              // [D] FP16
+    private var h1Buf: MTLBuffer { decodeScratch.h1Buf }            // [D] FP16 (dense MLP output)
+    private var h2Buf: MTLBuffer { decodeScratch.h2Buf }            // [D] FP16 (routed output)
+    private var routedX: MTLBuffer { decodeScratch.routedX }        // [D] FP16 (pre_feedforward_layernorm_2 output)
+    private var denseX: MTLBuffer { decodeScratch.denseX }          // [D] FP16 (pre_feedforward_layernorm output)
+    private var denseScratchGate: MTLBuffer { decodeScratch.denseScratchGate } // [F=2112] FP16
+    private var denseScratchUp: MTLBuffer { decodeScratch.denseScratchUp }     // [F=2112] FP16
+    private var denseScratchAct: MTLBuffer { decodeScratch.denseScratchAct }   // [F=2112] FP16
+    private var routerInput: MTLBuffer { decodeScratch.routerInput } // [D] FP16 (rmsnorm_no_scale(h))
+    private var zeroResidual: MTLBuffer { decodeScratch.zeroResidual } // [D] FP16 zeros — for routed branch base
+    private var outIndices: MTLBuffer { decodeScratch.outIndices }  // [topK] UInt32
+    private var outWeights: MTLBuffer { decodeScratch.outWeights }  // [topK] FP16
     /// Trace-only next-layer router result. It is never read by inference.
-    private let prefetchPredictionIndices: MTLBuffer
-    private let prefetchPredictionWeights: MTLBuffer
+    private var prefetchPredictionIndices: MTLBuffer { decodeScratch.prefetchPredictionIndices }
+    private var prefetchPredictionWeights: MTLBuffer { decodeScratch.prefetchPredictionWeights }
     // Persistent MoE scratch, allocated once; about 56 KiB at production shape.
-    private let moeActs: MTLBuffer       // [topK * FmoE] FP16
+    private var moeActs: MTLBuffer { decodeScratch.moeActs }        // [topK * FmoE] FP16
     // v9 S2 cross-check scratch, ping-ponged by layer parity: layer L's pair
     // is compared only after layer L+1's spec CB has already run, so a single
     // pair would be overwritten before the comparison reads it.
@@ -233,35 +234,38 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var verifyPairActs: [MTLBuffer] = []
     private var verifyPairY: [MTLBuffer] = []
     private var verifyPairArgBuffers: [MTLBuffer] = []
-    private let moeHitActiveSlots: MTLBuffer // [topK] UInt32
-    private let moeMissActiveSlots: MTLBuffer // [topK] UInt32
-    private let residencyHitCount: MTLBuffer
-    private let residencyHitPositions: MTLBuffer
-    private let residencyMissCount: MTLBuffer
-    private let residencyMissPositions: MTLBuffer
-    private let residencyMissExperts: MTLBuffer
-    private let residencyResolvedSlots: MTLBuffer
-    private let residencyResolvedGenerations: MTLBuffer
-    private let greedyTokenBuf: MTLBuffer // 4 B UInt32 fused-head output
-    private let verificationHidden: MTLBuffer // [2, D] FP16 shared readback
-    private let verificationLogits: MTLBuffer // [2, vocab] FP16 shared readback
+    private let residencyReadback: ResidencyReadbackBuffers
+    private var moeHitActiveSlots: MTLBuffer { residencyReadback.moeHitActiveSlots } // [topK] UInt32
+    private var moeMissActiveSlots: MTLBuffer { residencyReadback.moeMissActiveSlots } // [topK] UInt32
+    private var residencyHitCount: MTLBuffer { residencyReadback.hitCount }
+    private var residencyHitPositions: MTLBuffer { residencyReadback.hitPositions }
+    private var residencyMissCount: MTLBuffer { residencyReadback.missCount }
+    private var residencyMissPositions: MTLBuffer { residencyReadback.missPositions }
+    private var residencyMissExperts: MTLBuffer { residencyReadback.missExperts }
+    private var residencyResolvedSlots: MTLBuffer { residencyReadback.resolvedSlots }
+    private var residencyResolvedGenerations: MTLBuffer { residencyReadback.resolvedGenerations }
+    private var greedyTokenBuf: MTLBuffer { decodeScratch.greedyTokenBuf } // 4 B UInt32 fused-head output
+    private var verificationHidden: MTLBuffer { decodeScratch.verificationHidden } // [2, D] FP16 shared readback
+    private var verificationLogits: MTLBuffer { decodeScratch.verificationLogits } // [2, vocab] FP16 shared readback
     // Qwen 3.6 decode scratch (nil on architectures that never use it).
-    private let qPackedScratch: MTLBuffer?   // [2 * N_HEADS * head_dim] packed [q ; gate]
-    private let attnGateScratch: MTLBuffer?  // [N_HEADS * head_dim]
-    private let gdnQKVRaw: MTLBuffer?        // [qkvDim] raw in_proj_qkv output
-    private let gdnConvOut: MTLBuffer?       // [qkvDim] conv + SiLU output
-    private let gdnZ: MTLBuffer?             // [valueDim]
-    private let gdnA: MTLBuffer?             // [numVHeads]; KDA [Hv * Dk]
-    private let gdnB: MTLBuffer?             // [numVHeads]
-    private let gdnY: MTLBuffer?             // [valueDim] delta-rule output
-    private let gdnOut: MTLBuffer?           // [valueDim] gated-norm output
-    private let gdnLowRank: MTLBuffer?       // [keyHeadDim] KDA f_a/g_a stage
+    private var qPackedScratch: MTLBuffer? { decodeScratch.qPackedScratch } // [2 * N_HEADS * head_dim] packed [q ; gate]
+    private var attnGateScratch: MTLBuffer? { decodeScratch.attnGateScratch } // [N_HEADS * head_dim]
+    private let gdnScratch: GDNScratchBuffers?
+    private var gdnQKVRaw: MTLBuffer? { gdnScratch?.qkvRaw }        // [qkvDim] raw in_proj_qkv output
+    private var gdnConvOut: MTLBuffer? { gdnScratch?.convOut }      // [qkvDim] conv + SiLU output
+    private var gdnZ: MTLBuffer? { gdnScratch?.z }                  // [valueDim]
+    private var gdnA: MTLBuffer? { gdnScratch?.a }                  // [numVHeads]; KDA [Hv * Dk]
+    private var gdnB: MTLBuffer? { gdnScratch?.b }                  // [numVHeads]
+    private var gdnY: MTLBuffer? { gdnScratch?.y }                  // [valueDim] delta-rule output
+    private var gdnOut: MTLBuffer? { gdnScratch?.out }              // [valueDim] gated-norm output
+    private var gdnLowRank: MTLBuffer? { gdnScratch?.lowRank }      // [keyHeadDim] KDA f_a/g_a stage
     // Kimi MLA decode scratch (mask-3 layers only).
-    private let mlaQRaw: MTLBuffer?          // [H * (nope + rope)] q_proj out
-    private let mlaQ: MTLBuffer?             // [H * (latent + rope)] absorbed Q
-    private let mlaAttnOut: MTLBuffer?       // [H * latent] attention out
-    private let mlaUnembedOut: MTLBuffer?    // [H * vHeadDim] o_proj input
-    private let sharedScalarGateBuf: MTLBuffer? // [1] shared-expert gate logit
+    private let mlaScratch: MLAScratchBuffers?
+    private var mlaQRaw: MTLBuffer? { mlaScratch?.qRaw }            // [H * (nope + rope)] q_proj out
+    private var mlaQ: MTLBuffer? { mlaScratch?.q }                  // [H * (latent + rope)] absorbed Q
+    private var mlaAttnOut: MTLBuffer? { mlaScratch?.attnOut }      // [H * latent] attention out
+    private var mlaUnembedOut: MTLBuffer? { mlaScratch?.unembedOut } // [H * vHeadDim] o_proj input
+    private var sharedScalarGateBuf: MTLBuffer? { decodeScratch.sharedScalarGateBuf } // [1] shared-expert gate logit
     /// BF16 ones over [numExperts]; neutral per_expert_scale when the router
     /// has no auxiliary scale tensors.
     private let onesPerExpertScale: MTLBuffer?
@@ -271,13 +275,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var prefillChunkState = PrefillChunkCommitState()
     private var prefillScratch: PrefillChunkScratchBuffers?
     private static let mtpChunkCapacity = 32
-    private let mtpTokenBlock: MTLBuffer?
-    private let mtpEmbeddingBlock: MTLBuffer?
-    private let mtpNormalizedEmbeddingBlock: MTLBuffer?
-    private let mtpNormalizedHiddenBlock: MTLBuffer?
-    private let mtpConcatBlock: MTLBuffer?
-    private let mtpProjectedBlock: MTLBuffer?
-    private let mtpTargetHiddenBlock: MTLBuffer?
+    private let mtpScratch: MTPScratchBuffers?
+    private var mtpTokenBlock: MTLBuffer? { mtpScratch?.tokenBlock }
+    private var mtpEmbeddingBlock: MTLBuffer? { mtpScratch?.embeddingBlock }
+    private var mtpNormalizedEmbeddingBlock: MTLBuffer? { mtpScratch?.normalizedEmbeddingBlock }
+    private var mtpNormalizedHiddenBlock: MTLBuffer? { mtpScratch?.normalizedHiddenBlock }
+    private var mtpConcatBlock: MTLBuffer? { mtpScratch?.concatBlock }
+    private var mtpProjectedBlock: MTLBuffer? { mtpScratch?.projectedBlock }
+    private var mtpTargetHiddenBlock: MTLBuffer? { mtpScratch?.targetHiddenBlock }
     private var mtpPrefillReadback: MTLBuffer?
     /// Reusable UInt32 token-ID buffer for chunked prefill (R23): sized to the
     /// largest chunk seen so far and grown on demand, so the prefill hot path
@@ -340,26 +345,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.cfg = model.config
         self.maxContext = maxContext
         try runtimeConfiguration.validate(maxContext: maxContext)
-        let yarnParameters: YaRNRoPEParameters?
-        if let archYaRN = model.config.archYaRN {
-            // The architecture mandates its own YaRN; the user
-            // context-extension mode would silently fight it.
-            guard runtimeConfiguration.ropeScalingMode != .yarn else {
-                throw RuntimeConfigurationError.yaRNUnsupportedArchitecture
-            }
-            yarnParameters = archYaRN
-        } else if runtimeConfiguration.ropeScalingMode == .yarn {
-            guard model.config.ropeNeoxSubdim else {
-                throw RuntimeConfigurationError.yaRNUnsupportedArchitecture
-            }
-            yarnParameters = YaRNRoPEParameters(
-                headDim: model.config.fullHeadDim,
-                partialRotaryFactor: model.config.partialRotaryFactor,
-                theta: model.config.fullRopeTheta,
-                targetContextTokens: runtimeConfiguration.yarnContextTokens)
-        } else {
-            yarnParameters = nil
-        }
+        let yarnParameters = try Self.resolveYaRNParameters(
+            model: model, runtimeConfiguration: runtimeConfiguration)
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
             && model.lmHeadWeightBits == 4
             && model.attentionWeightBits == 4
@@ -368,37 +355,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.expertIOSynchronization = runtimeConfiguration.expertIOSynchronization
         self.expertIOSubmission = runtimeConfiguration.expertIOSubmission
         self.expertIOBackend = try ExpertIOBackend.environmentValue()
-        let rawPrefetchEnabled = ProcessInfo.processInfo.environment[
-            "SHRIKE_PREDICTIVE_PREFETCH"] == "1"
-        // The built-in default clamps to the architecture's top-k (gpt-oss
-        // routes top-4, toys fewer); only an explicit override is validated.
-        let rawPrefetchTopM = ProcessInfo.processInfo.environment[
-            "SHRIKE_PREFETCH_TOP_M"].flatMap(Int.init) ?? min(4, cfg.topKExperts)
-        guard (1...cfg.topKExperts).contains(rawPrefetchTopM) else {
-            throw ModelError.internalInconsistency(
-                detail: "SHRIKE_PREFETCH_TOP_M must be 1...\(cfg.topKExperts)")
-        }
-        self.predictivePrefetchTopM = rawPrefetchTopM
-        self.predictivePrefetch = rawPrefetchEnabled
-            ? try ExpertPrefetchRing(
-                device: context.device,
-                expertStride: model.routedExpertByteStride(layer: 0),
-                slotCount: rawPrefetchTopM)
-            : nil
-        // Track A: the ANE prefill sidecar, opt-in. Only the qwen36 target
-        // family qualifies (the one-layer MTP draft has no exported sidecar
-        // and must stay silently on the GPU); with the switch on and the
-        // sidecar missing, construction fails closed with the export command.
-        self.anePrefill = try RuntimePrefillANE.environmentValue() == .on
-                && model.config.family == .qwen36
-            ? try ANEPrefillAttention(
-                modelDirectory: model.directoryURL,
-                device: context.device,
-                hiddenSize: model.config.hiddenSize,
-                kvDim: model.config.numFullKVHeads * model.config.fullHeadDim,
-                weightsSha256: model.weightsDigestFromManifest)
-            : nil
-        let useFP16Ring = runtimeConfiguration.fp16RingEnabled
+        let prefetch = try Self.makePredictivePrefetch(
+            model: model, device: context.device)
+        self.predictivePrefetchTopM = prefetch.topM
+        self.predictivePrefetch = prefetch.ring
+        self.anePrefill = try Self.makeANEPrefill(
+            model: model, device: context.device)
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
         self.rdadviseAdaptiveState = RDAdviceAdaptivePolicyState(
             config: RDAdviceAdaptivePolicyConfig(
@@ -409,168 +371,54 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.kv = try KVCacheManager(device: context.device,
                                      config: cfg,
                                      maxContext: maxContext,
-                                     fp16RingEnabled: useFP16Ring,
+                                     fp16RingEnabled: runtimeConfiguration.fp16RingEnabled,
                                      precision: runtimeConfiguration.kvCachePrecision,
                                      slidingWindow: cfg.slidingWindow,
                                      maxPrefillChunkTokens: runtimeConfiguration.prefillChunkTokens)
 
         let silu = cfg.hiddenActivation == "silu"
-        self.embedInt4 = try EmbedLookupInt4(context: context)
-        self.affineEmbed = model.embeddingWeightBits == 4 ? nil
-            : try AffineQuantEmbeddingLookup(context: context,
-                                             weightBits: model.embeddingWeightBits)
-        self.rms       = try RMSNorm(context: context)
-        self.int4      = try DequantInt4GEMV(
-            context: context,
-            additionalShapes: cfg.decodeInt4GEMVShapes)
-        self.affine = model.attentionWeightBits == 4 ? nil
-            : try AffineQuantGEMV(context: context,
-                                  weightBits: model.attentionWeightBits)
-        self.attention = try Attention(context: context,
-                                       maxQHeads: cfg.numHeads,
-                                       maxHeadDim: max(cfg.headDim, cfg.fullHeadDim),
-                                       supportsSinks: cfg.hasAttentionSinks,
-                                       supportsMLA: cfg.hasMLALayers)
-        self.kvQuantizer = runtimeConfiguration.kvCachePrecision.isQuantized
-            ? try KVCacheQuantizer(context: context) : nil
-        self.shared    = try SharedExpertRuntime(context: context,
-                                                  weightBits: model.sharedExpertWeightBits,
-                                                  siluActivation: silu)
-        self.moe       = try MoE(context: context,
-                                 siluActivation: silu,
-                                 routedWeightBits: model.routedExpertWeightBits,
-                                 routerWeightBits: model.routerWeightBits,
-                                 eventGatedIO: expertIOSynchronization == .event,
-                                 specializedD: UInt32(cfg.hiddenSize),
-                                 specializedF: UInt32(cfg.moeIntermediateSize),
-                                 specializedNumExperts: UInt32(cfg.numExperts),
-                                 specializedTopK: UInt32(cfg.topKExperts),
-                                 expertAdditiveBiases: cfg.expertsHaveAdditiveBiases,
-                                 clampedSwiGLU: cfg.usesClampedSwiGLU,
-                                 sigmoidRouterScores: cfg.routerUsesSigmoidScores,
-                                 routedScalingFactor: Float(cfg.routedScalingFactor))
-        self.fusionHead = try LMHeadChainInt4(context: context,
-                                              maxD: cfg.hiddenSize,
-                                              maxVocab: cfg.vocabSize)
-        self.fusedQKVGEMV = try FusedQKVGEMV(context: context)
-        self.fusedQKVEpilogue = try FusedQKVEpilogue(context: context)
-        self.prefillEmbed = try PrefillEmbedLookupInt4(
-            context: context,
-            weightBits: model.embeddingWeightBits)
-        self.prefillRMS = try PrefillRMSNorm(context: context)
-        self.prefillQMM = try PrefillInt4QMM(
-            context: context,
-            weightBits: model.attentionWeightBits)
-        self.prefillMPPAffineInt4 = MPPPrefillInt4QMM(
-            context: context,
-            weightBits: model.attentionWeightBits)
-        self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context,
-                                                         yarn: yarnParameters)
-        self.prefillAttention = try PrefillAttention(context: context,
-                                                     supportsMLA: cfg.hasMLALayers)
-        self.prefillRouter = try PrefillRouter(
-            context: context,
-            weightBits: model.routerWeightBits,
-            sigmoidRouterScores: cfg.routerUsesSigmoidScores,
-            routedScalingFactor: Float(cfg.routedScalingFactor))
-        self.prefillSharedExpert = try PrefillSharedExpert(
-            context: context,
-            weightBits: model.sharedExpertWeightBits,
-            siluActivation: silu)
-        self.prefillGroupedMoE = try PrefillGroupedRoutedMoE(
-            context: context,
-            siluActivation: silu,
-            weightBits: model.routedExpertWeightBits,
-            expertAdditiveBiases: cfg.expertsHaveAdditiveBiases,
-            clampedSwiGLU: cfg.usesClampedSwiGLU)
-        self.prefillMoE = try PrefillMoE(context: context)
-        self.prefillFinalRowHead = try PrefillFinalRowHeadInt4(
-            context: context,
-            maxD: cfg.hiddenSize,
-            weightBits: model.lmHeadWeightBits)
+        let kernels = try Self.makeDecodeKernels(
+            model: model, context: context, silu: silu, yarn: yarnParameters,
+            runtimeConfiguration: runtimeConfiguration,
+            enableSpeculativeGDN: enableSpeculativeGDN)
+        self.embedInt4 = kernels.embedInt4
+        self.affineEmbed = kernels.affineEmbed
+        self.rms = kernels.rms
+        self.int4 = kernels.int4
+        self.affine = kernels.affine
+        self.attention = kernels.attention
+        self.kvQuantizer = kernels.kvQuantizer
+        self.shared = kernels.shared
+        self.moe = kernels.moe
+        self.fusionHead = kernels.fusionHead
+        self.fusedQKVGEMV = kernels.fusedQKVGEMV
+        self.fusedQKVEpilogue = kernels.fusedQKVEpilogue
+        self.elementwise = kernels.elementwise
+        self.gdn = kernels.gdn
+        self.gdnState = kernels.gdnState
+        self.mla = kernels.mla
+        self.rope = kernels.rope
+        self.int8ScalarGate = kernels.int8ScalarGate
+        let prefill = try Self.makePrefillKernels(
+            model: model, context: context, silu: silu, yarn: yarnParameters)
+        self.prefillEmbed = prefill.embed
+        self.prefillRMS = prefill.rms
+        self.prefillQMM = prefill.qmm
+        self.prefillMPPAffineInt4 = prefill.mppAffineInt4
+        self.prefillQKVEpilogue = prefill.qkvEpilogue
+        self.prefillAttention = prefill.attention
+        self.prefillRouter = prefill.router
+        self.prefillSharedExpert = prefill.sharedExpert
+        self.prefillGroupedMoE = prefill.groupedMoE
+        self.prefillMoE = prefill.moe
+        self.prefillFinalRowHead = prefill.finalRowHead
 
-        // Qwen 3.6 kernels, keyed off the data flags so architectures that
-        // never dispatch them pay no PSO compile cost.
-        let needsElementwise = cfg.attnOutputGate
-            || cfg.sharedExpertGated
-            || cfg.hasLinearAttentionLayers
-            || cfg.hasAttentionBiases
-        self.elementwise = needsElementwise ? try Elementwise(context: context) : nil
-        if cfg.hasLinearAttentionLayers {
-            self.gdn = try GDN(context: context, config: cfg.linearAttention,
-                               perChannelDecay: cfg.linearAttentionPerChannelDecay,
-                               sigmoidGatedNormEps: cfg.linearAttentionSigmoidGateNormEps,
-                               specializedHiddenSize: cfg.hiddenSize)
-            self.gdnState = try GDNStateManager(
-                device: context.device,
-                config: cfg,
-                enableSpeculativeCheckpoint: enableSpeculativeGDN)
-        } else {
-            self.gdn = nil
-            self.gdnState = nil
-        }
-        if let mlaCfg = cfg.mla, cfg.hasMLALayers {
-            self.mla = try MLA(context: context, config: mlaCfg,
-                               numHeads: cfg.numHeads)
-        } else {
-            self.mla = nil
-        }
-        self.rope = cfg.ropeNeoxSubdim
-            ? try RoPE(context: context, yarn: yarnParameters) : nil
-        self.int8ScalarGate = cfg.sharedExpertGated
-            ? try DequantInt8GEMV(context: context,
-                                  additionalShapes: cfg.decodeInt8GEMVShapes)
-            : nil
-
-        let device = context.device
-        let D = cfg.hiddenSize
-        let F = cfg.intermediateSize
-        let maxQ = cfg.numHeads * max(cfg.headDim, cfg.fullHeadDim)
-
-        func buf(_ count: Int,
-                 _ stride: Int = MemoryLayout<Float16>.size,
-                 label: String) throws -> MTLBuffer {
-            guard let b = device.makeBuffer(length: max(count, 1) * stride,
-                                            options: .storageModeShared) else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            b.label = label
-            return b
-        }
-        self.hidden        = try buf(D, label: "decode.hidden")
-        self.normed        = try buf(D, label: "decode.normed")
-        self.attnOut       = try buf(maxQ, label: "decode.attnOut")
-        self.qScratch      = try buf(maxQ, label: "decode.qScratch")
-        self.kStage        = try buf(max(cfg.numKVHeads * cfg.headDim,
-                                         cfg.numFullKVHeads * cfg.fullHeadDim), label: "decode.kStage")
-        self.vStage        = try buf(max(cfg.numKVHeads * cfg.headDim,
-                                         cfg.numFullKVHeads * cfg.fullHeadDim), label: "decode.vStage")
-        self.oOut          = try buf(D, label: "decode.oOut")
-        self.h1Buf         = try buf(D, label: "decode.h1")
-        self.h2Buf         = try buf(D, label: "decode.h2")
-        self.routedX       = try buf(D, label: "decode.routedX")
-        self.denseX        = try buf(D, label: "decode.denseX")
-        let sharedScratchF = max(F, cfg.denseIntermediateSize)
-        self.denseScratchGate = try buf(sharedScratchF, label: "decode.denseScratchGate")
-        self.denseScratchUp   = try buf(sharedScratchF, label: "decode.denseScratchUp")
-        self.denseScratchAct  = try buf(sharedScratchF, label: "decode.denseScratchAct")
-        self.routerInput   = try buf(D, label: "decode.routerInput")
-        self.zeroResidual  = try buf(D, label: "decode.zeroResidual")
-        // The routed MoE kernel seeds y[d] = residual[d]; pinning this buffer
-        // to zero once at init makes the routed branch's residual contribution
-        // exactly zero (it's combined with the dense MLP downstream).
-        memset(self.zeroResidual.contents(), 0, self.zeroResidual.length)
-        self.outIndices    = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size, label: "decode.outIndices")
-        self.outWeights    = try buf(cfg.topKExperts, label: "decode.outWeights")
-        self.prefetchPredictionIndices = try buf(
-            cfg.topKExperts, MemoryLayout<UInt32>.size, label: "decode.prefetchPredictionIndices")
-        self.prefetchPredictionWeights = try buf(
-            cfg.topKExperts, label: "decode.prefetchPredictionWeights")
-        self.moeActs       = try buf(cfg.topKExperts * cfg.moeIntermediateSize, label: "decode.moeActs")
+        self.decodeScratch = try Self.makeDecodeScratchBuffers(
+            cfg: cfg, device: context.device)
         let specMode = runtimeConfiguration.decodeExpertExecution
         let spec = (specMode == .speculative || specMode == .speculativeValidate)
             ? try Self.makeSpeculativeScratch(
-                cfg: cfg, device: device,
+                cfg: cfg, device: context.device,
                 validationScratch: specMode == .speculativeValidate) : nil
         self.specScratch = spec?.scratch ?? []
         self.specArgsBuf = spec?.dispatch.arguments
@@ -582,106 +430,488 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // early release. SHRIKE_LAYER_DONE=on re-arms the machinery for A/B.
         let layerDone = specMode == .speculative
             && ProcessInfo.processInfo.environment["SHRIKE_LAYER_DONE"] == "on"
-            ? try Self.makeLayerDoneMachinery(device: device) : nil
+            ? try Self.makeLayerDoneMachinery(device: context.device) : nil
         self.layerDoneEvent = layerDone?.event
         self.layerDoneFixupQueue = layerDone?.fixupQueue
-        self.moeHitActiveSlots = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size, label: "decode.moeHitActiveSlots")
-        self.moeMissActiveSlots = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size, label: "decode.moeMissActiveSlots")
-        self.residencyHitCount = try buf(1, MemoryLayout<UInt32>.size,
-                                         label: "decode.residencyHitCount")
-        self.residencyHitPositions = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size,
-                                             label: "decode.residencyHitPositions")
-        self.residencyMissCount = try buf(1, MemoryLayout<UInt32>.size,
-                                          label: "decode.residencyMissCount")
-        self.residencyMissPositions = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size,
-                                              label: "decode.residencyMissPositions")
-        self.residencyMissExperts = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size,
-                                            label: "decode.residencyMissExperts")
-        self.residencyResolvedSlots = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size,
-                                              label: "decode.residencyResolvedSlots")
-        self.residencyResolvedGenerations = try buf(cfg.topKExperts,
-                                                    MemoryLayout<UInt64>.size,
-                                                    label: "decode.residencyResolvedGenerations")
-        guard let tok = device.makeBuffer(length: MemoryLayout<UInt32>.size,
-                                          options: .storageModeShared) else {
+        self.residencyReadback = try Self.makeResidencyReadbackBuffers(
+            cfg: cfg, device: context.device)
+        self.gdnScratch = try Self.makeGDNScratchBuffers(
+            cfg: cfg, device: context.device)
+        self.mlaScratch = try Self.makeMLAScratchBuffers(
+            cfg: cfg, device: context.device)
+        self.mtpScratch = try Self.makeMTPScratchBuffers(
+            cfg: cfg, device: context.device)
+        self.sharedExpertProjections = try Self.makeSharedExpertProjections(
+            model: model, cfg: cfg)
+        let routerScales = try Self.makeRouterScaleBuffers(
+            cfg: cfg, device: context.device)
+        self.effectiveScaleBuffers = routerScales.effectiveScale
+        self.onesPerExpertScale = routerScales.onesPerExpertScale
+        self.routerLogitBias = try Self.makeRouterLogitBias(
+            model: model, cfg: cfg, device: context.device)
+    }
+
+    // MARK: - Init factories
+
+    private static func resolveYaRNParameters(
+        model: Model, runtimeConfiguration: RuntimeConfiguration
+    ) throws -> YaRNRoPEParameters? {
+        if let archYaRN = model.config.archYaRN {
+            // The architecture mandates its own YaRN; the user
+            // context-extension mode would silently fight it.
+            guard runtimeConfiguration.ropeScalingMode != .yarn else {
+                throw RuntimeConfigurationError.yaRNUnsupportedArchitecture
+            }
+            return archYaRN
+        }
+        guard runtimeConfiguration.ropeScalingMode == .yarn else { return nil }
+        guard model.config.ropeNeoxSubdim else {
+            throw RuntimeConfigurationError.yaRNUnsupportedArchitecture
+        }
+        return YaRNRoPEParameters(
+            headDim: model.config.fullHeadDim,
+            partialRotaryFactor: model.config.partialRotaryFactor,
+            theta: model.config.fullRopeTheta,
+            targetContextTokens: runtimeConfiguration.yarnContextTokens)
+    }
+
+    private static func makePredictivePrefetch(
+        model: Model, device: MTLDevice
+    ) throws -> (topM: Int, ring: ExpertPrefetchRing?) {
+        let cfg = model.config
+        let enabled = ProcessInfo.processInfo.environment[
+            "SHRIKE_PREDICTIVE_PREFETCH"] == "1"
+        // The built-in default clamps to the architecture's top-k (gpt-oss
+        // routes top-4, toys fewer); only an explicit override is validated.
+        let topM = ProcessInfo.processInfo.environment[
+            "SHRIKE_PREFETCH_TOP_M"].flatMap(Int.init) ?? min(4, cfg.topKExperts)
+        guard (1...cfg.topKExperts).contains(topM) else {
+            throw ModelError.internalInconsistency(
+                detail: "SHRIKE_PREFETCH_TOP_M must be 1...\(cfg.topKExperts)")
+        }
+        let ring = enabled
+            ? try ExpertPrefetchRing(
+                device: device,
+                expertStride: model.routedExpertByteStride(layer: 0),
+                slotCount: topM)
+            : nil
+        return (topM, ring)
+    }
+
+    // Track A: the ANE prefill sidecar, opt-in. Only the qwen36 target
+    // family qualifies (the one-layer MTP draft has no exported sidecar
+    // and must stay silently on the GPU); with the switch on and the
+    // sidecar missing, construction fails closed with the export command.
+    private static func makeANEPrefill(
+        model: Model, device: MTLDevice
+    ) throws -> ANEPrefillAttention? {
+        guard try RuntimePrefillANE.environmentValue() == .on,
+              model.config.family == .qwen36 else { return nil }
+        return try ANEPrefillAttention(
+            modelDirectory: model.directoryURL,
+            device: device,
+            hiddenSize: model.config.hiddenSize,
+            kvDim: model.config.numFullKVHeads * model.config.fullHeadDim,
+            weightsSha256: model.weightsDigestFromManifest)
+    }
+
+    private struct DecodeKernels {
+        let embedInt4: EmbedLookupInt4
+        let affineEmbed: AffineQuantEmbeddingLookup?
+        let rms: RMSNorm
+        let int4: DequantInt4GEMV
+        let affine: AffineQuantGEMV?
+        let attention: Attention
+        let kvQuantizer: KVCacheQuantizer?
+        let shared: SharedExpertRuntime
+        let moe: MoE
+        let fusionHead: LMHeadChainInt4
+        let fusedQKVGEMV: FusedQKVGEMV
+        let fusedQKVEpilogue: FusedQKVEpilogue
+        let elementwise: Elementwise?
+        let gdn: GDN?
+        let gdnState: GDNStateManager?
+        let mla: MLA?
+        let rope: RoPE?
+        let int8ScalarGate: DequantInt8GEMV?
+    }
+
+    private static func makeDecodeKernels(
+        model: Model, context: MetalContext, silu: Bool,
+        yarn: YaRNRoPEParameters?,
+        runtimeConfiguration: RuntimeConfiguration,
+        enableSpeculativeGDN: Bool
+    ) throws -> DecodeKernels {
+        let cfg = model.config
+        // Qwen 3.6 kernels, keyed off the data flags so architectures that
+        // never dispatch them pay no PSO compile cost.
+        let needsElementwise = cfg.attnOutputGate
+            || cfg.sharedExpertGated
+            || cfg.hasLinearAttentionLayers
+            || cfg.hasAttentionBiases
+        let gdn: GDN?
+        let gdnState: GDNStateManager?
+        if cfg.hasLinearAttentionLayers {
+            gdn = try GDN(context: context, config: cfg.linearAttention,
+                          perChannelDecay: cfg.linearAttentionPerChannelDecay,
+                          sigmoidGatedNormEps: cfg.linearAttentionSigmoidGateNormEps,
+                          specializedHiddenSize: cfg.hiddenSize)
+            gdnState = try GDNStateManager(
+                device: context.device,
+                config: cfg,
+                enableSpeculativeCheckpoint: enableSpeculativeGDN)
+        } else {
+            gdn = nil
+            gdnState = nil
+        }
+        let mla: MLA?
+        if let mlaCfg = cfg.mla, cfg.hasMLALayers {
+            mla = try MLA(context: context, config: mlaCfg,
+                          numHeads: cfg.numHeads)
+        } else {
+            mla = nil
+        }
+        return DecodeKernels(
+            embedInt4: try EmbedLookupInt4(context: context),
+            affineEmbed: model.embeddingWeightBits == 4 ? nil
+                : try AffineQuantEmbeddingLookup(context: context,
+                                                 weightBits: model.embeddingWeightBits),
+            rms: try RMSNorm(context: context),
+            int4: try DequantInt4GEMV(
+                context: context,
+                additionalShapes: cfg.decodeInt4GEMVShapes),
+            affine: model.attentionWeightBits == 4 ? nil
+                : try AffineQuantGEMV(context: context,
+                                      weightBits: model.attentionWeightBits),
+            attention: try Attention(context: context,
+                                     maxQHeads: cfg.numHeads,
+                                     maxHeadDim: max(cfg.headDim, cfg.fullHeadDim),
+                                     supportsSinks: cfg.hasAttentionSinks,
+                                     supportsMLA: cfg.hasMLALayers),
+            kvQuantizer: runtimeConfiguration.kvCachePrecision.isQuantized
+                ? try KVCacheQuantizer(context: context) : nil,
+            shared: try SharedExpertRuntime(context: context,
+                                            weightBits: model.sharedExpertWeightBits,
+                                            siluActivation: silu),
+            moe: try MoE(context: context,
+                         siluActivation: silu,
+                         routedWeightBits: model.routedExpertWeightBits,
+                         routerWeightBits: model.routerWeightBits,
+                         eventGatedIO: runtimeConfiguration.expertIOSynchronization == .event,
+                         specializedD: UInt32(cfg.hiddenSize),
+                         specializedF: UInt32(cfg.moeIntermediateSize),
+                         specializedNumExperts: UInt32(cfg.numExperts),
+                         specializedTopK: UInt32(cfg.topKExperts),
+                         expertAdditiveBiases: cfg.expertsHaveAdditiveBiases,
+                         clampedSwiGLU: cfg.usesClampedSwiGLU,
+                         sigmoidRouterScores: cfg.routerUsesSigmoidScores,
+                         routedScalingFactor: Float(cfg.routedScalingFactor)),
+            fusionHead: try LMHeadChainInt4(context: context,
+                                            maxD: cfg.hiddenSize,
+                                            maxVocab: cfg.vocabSize),
+            fusedQKVGEMV: try FusedQKVGEMV(context: context),
+            fusedQKVEpilogue: try FusedQKVEpilogue(context: context),
+            elementwise: needsElementwise ? try Elementwise(context: context) : nil,
+            gdn: gdn,
+            gdnState: gdnState,
+            mla: mla,
+            rope: cfg.ropeNeoxSubdim
+                ? try RoPE(context: context, yarn: yarn) : nil,
+            int8ScalarGate: cfg.sharedExpertGated
+                ? try DequantInt8GEMV(context: context,
+                                      additionalShapes: cfg.decodeInt8GEMVShapes)
+                : nil)
+    }
+
+    private struct PrefillKernels {
+        let embed: PrefillEmbedLookupInt4
+        let rms: PrefillRMSNorm
+        let qmm: PrefillInt4QMM
+        let mppAffineInt4: MPPPrefillInt4QMM?
+        let qkvEpilogue: PrefillQKVEpilogue
+        let attention: PrefillAttention
+        let router: PrefillRouter
+        let sharedExpert: PrefillSharedExpert
+        let groupedMoE: PrefillGroupedRoutedMoE
+        let moe: PrefillMoE
+        let finalRowHead: PrefillFinalRowHeadInt4
+    }
+
+    private static func makePrefillKernels(
+        model: Model, context: MetalContext, silu: Bool,
+        yarn: YaRNRoPEParameters?
+    ) throws -> PrefillKernels {
+        let cfg = model.config
+        return PrefillKernels(
+            embed: try PrefillEmbedLookupInt4(
+                context: context,
+                weightBits: model.embeddingWeightBits),
+            rms: try PrefillRMSNorm(context: context),
+            qmm: try PrefillInt4QMM(
+                context: context,
+                weightBits: model.attentionWeightBits),
+            mppAffineInt4: MPPPrefillInt4QMM(
+                context: context,
+                weightBits: model.attentionWeightBits),
+            qkvEpilogue: try PrefillQKVEpilogue(context: context,
+                                                yarn: yarn),
+            attention: try PrefillAttention(context: context,
+                                            supportsMLA: cfg.hasMLALayers),
+            router: try PrefillRouter(
+                context: context,
+                weightBits: model.routerWeightBits,
+                sigmoidRouterScores: cfg.routerUsesSigmoidScores,
+                routedScalingFactor: Float(cfg.routedScalingFactor)),
+            sharedExpert: try PrefillSharedExpert(
+                context: context,
+                weightBits: model.sharedExpertWeightBits,
+                siluActivation: silu),
+            groupedMoE: try PrefillGroupedRoutedMoE(
+                context: context,
+                siluActivation: silu,
+                weightBits: model.routedExpertWeightBits,
+                expertAdditiveBiases: cfg.expertsHaveAdditiveBiases,
+                clampedSwiGLU: cfg.usesClampedSwiGLU),
+            moe: try PrefillMoE(context: context),
+            finalRowHead: try PrefillFinalRowHeadInt4(
+                context: context,
+                maxD: cfg.hiddenSize,
+                weightBits: model.lmHeadWeightBits))
+    }
+
+    private static func scratchBuffer(
+        device: MTLDevice, _ count: Int,
+        _ stride: Int = MemoryLayout<Float16>.size,
+        label: String
+    ) throws -> MTLBuffer {
+        guard let b = device.makeBuffer(length: max(count, 1) * stride,
+                                        options: .storageModeShared) else {
             throw ModelError.residentBufferWrapFailed
         }
-        tok.label = "decode.greedyToken"
-        self.greedyTokenBuf = tok
-        self.verificationHidden = try buf(2 * D, label: "decode.verificationHidden")
-        self.verificationLogits = try buf(2 * cfg.vocabSize, label: "decode.verificationLogits")
+        b.label = label
+        return b
+    }
 
-        // Qwen 3.6 decode scratch — allocated once here, never in the hot path.
-        if cfg.attnOutputGate {
-            self.qPackedScratch = try buf(2 * maxQ, label: "decode.qPackedScratch")
-            self.attnGateScratch = try buf(maxQ, label: "decode.attnGateScratch")
-        } else {
-            self.qPackedScratch = nil
-            self.attnGateScratch = nil
-        }
-        if cfg.hasLinearAttentionLayers {
-            let la = cfg.linearAttention
-            self.gdnQKVRaw = try buf(la.qkvDim, label: "decode.gdnQKVRaw")
-            self.gdnConvOut = try buf(la.qkvDim, label: "decode.gdnConvOut")
-            self.gdnZ = try buf(la.valueDim, label: "decode.gdnZ")
-            self.gdnA = try buf(cfg.linearAttentionPerChannelDecay
-                                ? la.numVHeads * la.keyHeadDim : la.numVHeads,
-                                label: "decode.gdnA")
-            self.gdnB = try buf(la.numVHeads, label: "decode.gdnB")
-            self.gdnY = try buf(la.valueDim, label: "decode.gdnY")
-            self.gdnOut = try buf(la.valueDim, label: "decode.gdnOut")
-            self.gdnLowRank = cfg.linearAttentionPerChannelDecay
-                ? try buf(la.keyHeadDim, label: "decode.gdnLowRank") : nil
-        } else {
-            self.gdnQKVRaw = nil
-            self.gdnConvOut = nil
-            self.gdnZ = nil
-            self.gdnA = nil
-            self.gdnB = nil
-            self.gdnY = nil
-            self.gdnOut = nil
-            self.gdnLowRank = nil
-        }
-        if let mlaCfg = cfg.mla, cfg.hasMLALayers {
-            let H = cfg.numHeads
-            self.mlaQRaw = try buf(H * (mlaCfg.qkNopeDim + mlaCfg.qkRopeDim),
-                                   label: "decode.mlaQRaw")
-            self.mlaQ = try buf(H * (mlaCfg.latentDim + mlaCfg.qkRopeDim),
-                                label: "decode.mlaQ")
-            self.mlaAttnOut = try buf(H * mlaCfg.latentDim, label: "decode.mlaAttnOut")
-            self.mlaUnembedOut = try buf(H * mlaCfg.valueHeadDim,
-                                         label: "decode.mlaUnembedOut")
-        } else {
-            self.mlaQRaw = nil
-            self.mlaQ = nil
-            self.mlaAttnOut = nil
-            self.mlaUnembedOut = nil
-        }
-        self.sharedScalarGateBuf = cfg.sharedExpertGated ? try buf(1, label: "decode.sharedScalarGate") : nil
-        if cfg.family == .qwen36MTP {
-            guard let tokenBlock = ctx.device.makeBuffer(
-                length: Self.mtpChunkCapacity * MemoryLayout<UInt32>.stride,
-                options: .storageModeShared) else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            self.mtpTokenBlock = tokenBlock
-            self.mtpEmbeddingBlock = try buf(Self.mtpChunkCapacity * D, label: "mtp.embedding")
-            self.mtpNormalizedEmbeddingBlock = try buf(Self.mtpChunkCapacity * D, label: "mtp.normalizedEmbedding")
-            self.mtpNormalizedHiddenBlock = try buf(Self.mtpChunkCapacity * D, label: "mtp.normalizedHidden")
-            self.mtpConcatBlock = try buf(Self.mtpChunkCapacity * 2 * D, label: "mtp.concat")
-            self.mtpProjectedBlock = try buf(Self.mtpChunkCapacity * D, label: "mtp.projected")
-            self.mtpTargetHiddenBlock = try buf(Self.mtpChunkCapacity * D, label: "mtp.targetHidden")
-        } else {
-            self.mtpTokenBlock = nil
-            self.mtpEmbeddingBlock = nil
-            self.mtpNormalizedEmbeddingBlock = nil
-            self.mtpNormalizedHiddenBlock = nil
-            self.mtpConcatBlock = nil
-            self.mtpProjectedBlock = nil
-            self.mtpTargetHiddenBlock = nil
-        }
-        self.mtpPrefillReadback = nil
+    private struct DecodeScratchBuffers {
+        let hidden: MTLBuffer
+        let normed: MTLBuffer
+        let attnOut: MTLBuffer
+        let qScratch: MTLBuffer
+        let kStage: MTLBuffer
+        let vStage: MTLBuffer
+        let oOut: MTLBuffer
+        let h1Buf: MTLBuffer
+        let h2Buf: MTLBuffer
+        let routedX: MTLBuffer
+        let denseX: MTLBuffer
+        let denseScratchGate: MTLBuffer
+        let denseScratchUp: MTLBuffer
+        let denseScratchAct: MTLBuffer
+        let routerInput: MTLBuffer
+        let zeroResidual: MTLBuffer
+        let outIndices: MTLBuffer
+        let outWeights: MTLBuffer
+        let prefetchPredictionIndices: MTLBuffer
+        let prefetchPredictionWeights: MTLBuffer
+        let moeActs: MTLBuffer
+        let greedyTokenBuf: MTLBuffer
+        let verificationHidden: MTLBuffer
+        let verificationLogits: MTLBuffer
+        let qPackedScratch: MTLBuffer?
+        let attnGateScratch: MTLBuffer?
+        let sharedScalarGateBuf: MTLBuffer?
+    }
 
+    private static func makeDecodeScratchBuffers(
+        cfg: ArchConfig, device: MTLDevice
+    ) throws -> DecodeScratchBuffers {
+        func buf(_ count: Int,
+                 _ stride: Int = MemoryLayout<Float16>.size,
+                 label: String) throws -> MTLBuffer {
+            try scratchBuffer(device: device, count, stride, label: label)
+        }
+        let D = cfg.hiddenSize
+        let maxQ = cfg.numHeads * max(cfg.headDim, cfg.fullHeadDim)
+        let kvStageCount = max(cfg.numKVHeads * cfg.headDim,
+                               cfg.numFullKVHeads * cfg.fullHeadDim)
+        let sharedScratchF = max(cfg.intermediateSize, cfg.denseIntermediateSize)
+        let zeroResidual = try buf(D, label: "decode.zeroResidual")
+        // The routed MoE kernel seeds y[d] = residual[d]; pinning this buffer
+        // to zero once at init makes the routed branch's residual contribution
+        // exactly zero (it's combined with the dense MLP downstream).
+        memset(zeroResidual.contents(), 0, zeroResidual.length)
+        return DecodeScratchBuffers(
+            hidden: try buf(D, label: "decode.hidden"),
+            normed: try buf(D, label: "decode.normed"),
+            attnOut: try buf(maxQ, label: "decode.attnOut"),
+            qScratch: try buf(maxQ, label: "decode.qScratch"),
+            kStage: try buf(kvStageCount, label: "decode.kStage"),
+            vStage: try buf(kvStageCount, label: "decode.vStage"),
+            oOut: try buf(D, label: "decode.oOut"),
+            h1Buf: try buf(D, label: "decode.h1"),
+            h2Buf: try buf(D, label: "decode.h2"),
+            routedX: try buf(D, label: "decode.routedX"),
+            denseX: try buf(D, label: "decode.denseX"),
+            denseScratchGate: try buf(sharedScratchF, label: "decode.denseScratchGate"),
+            denseScratchUp: try buf(sharedScratchF, label: "decode.denseScratchUp"),
+            denseScratchAct: try buf(sharedScratchF, label: "decode.denseScratchAct"),
+            routerInput: try buf(D, label: "decode.routerInput"),
+            zeroResidual: zeroResidual,
+            outIndices: try buf(cfg.topKExperts, MemoryLayout<UInt32>.size,
+                                label: "decode.outIndices"),
+            outWeights: try buf(cfg.topKExperts, label: "decode.outWeights"),
+            prefetchPredictionIndices: try buf(
+                cfg.topKExperts, MemoryLayout<UInt32>.size,
+                label: "decode.prefetchPredictionIndices"),
+            prefetchPredictionWeights: try buf(
+                cfg.topKExperts, label: "decode.prefetchPredictionWeights"),
+            moeActs: try buf(cfg.topKExperts * cfg.moeIntermediateSize,
+                             label: "decode.moeActs"),
+            greedyTokenBuf: try buf(1, MemoryLayout<UInt32>.size,
+                                    label: "decode.greedyToken"),
+            verificationHidden: try buf(2 * D, label: "decode.verificationHidden"),
+            verificationLogits: try buf(2 * cfg.vocabSize,
+                                        label: "decode.verificationLogits"),
+            // Qwen 3.6 decode scratch — allocated once here, never in the hot path.
+            qPackedScratch: cfg.attnOutputGate
+                ? try buf(2 * maxQ, label: "decode.qPackedScratch") : nil,
+            attnGateScratch: cfg.attnOutputGate
+                ? try buf(maxQ, label: "decode.attnGateScratch") : nil,
+            sharedScalarGateBuf: cfg.sharedExpertGated
+                ? try buf(1, label: "decode.sharedScalarGate") : nil)
+    }
+
+    private struct ResidencyReadbackBuffers {
+        let moeHitActiveSlots: MTLBuffer
+        let moeMissActiveSlots: MTLBuffer
+        let hitCount: MTLBuffer
+        let hitPositions: MTLBuffer
+        let missCount: MTLBuffer
+        let missPositions: MTLBuffer
+        let missExperts: MTLBuffer
+        let resolvedSlots: MTLBuffer
+        let resolvedGenerations: MTLBuffer
+    }
+
+    private static func makeResidencyReadbackBuffers(
+        cfg: ArchConfig, device: MTLDevice
+    ) throws -> ResidencyReadbackBuffers {
+        func buf(_ count: Int, _ stride: Int, label: String) throws -> MTLBuffer {
+            try scratchBuffer(device: device, count, stride, label: label)
+        }
+        let topK = cfg.topKExperts
+        let u32 = MemoryLayout<UInt32>.size
+        return ResidencyReadbackBuffers(
+            moeHitActiveSlots: try buf(topK, u32, label: "decode.moeHitActiveSlots"),
+            moeMissActiveSlots: try buf(topK, u32, label: "decode.moeMissActiveSlots"),
+            hitCount: try buf(1, u32, label: "decode.residencyHitCount"),
+            hitPositions: try buf(topK, u32, label: "decode.residencyHitPositions"),
+            missCount: try buf(1, u32, label: "decode.residencyMissCount"),
+            missPositions: try buf(topK, u32, label: "decode.residencyMissPositions"),
+            missExperts: try buf(topK, u32, label: "decode.residencyMissExperts"),
+            resolvedSlots: try buf(topK, u32, label: "decode.residencyResolvedSlots"),
+            resolvedGenerations: try buf(topK, MemoryLayout<UInt64>.size,
+                                         label: "decode.residencyResolvedGenerations"))
+    }
+
+    private struct GDNScratchBuffers {
+        let qkvRaw: MTLBuffer
+        let convOut: MTLBuffer
+        let z: MTLBuffer
+        let a: MTLBuffer
+        let b: MTLBuffer
+        let y: MTLBuffer
+        let out: MTLBuffer
+        let lowRank: MTLBuffer?
+    }
+
+    private static func makeGDNScratchBuffers(
+        cfg: ArchConfig, device: MTLDevice
+    ) throws -> GDNScratchBuffers? {
+        guard cfg.hasLinearAttentionLayers else { return nil }
+        let la = cfg.linearAttention
+        func buf(_ count: Int, label: String) throws -> MTLBuffer {
+            try scratchBuffer(device: device, count, label: label)
+        }
+        return GDNScratchBuffers(
+            qkvRaw: try buf(la.qkvDim, label: "decode.gdnQKVRaw"),
+            convOut: try buf(la.qkvDim, label: "decode.gdnConvOut"),
+            z: try buf(la.valueDim, label: "decode.gdnZ"),
+            a: try buf(cfg.linearAttentionPerChannelDecay
+                           ? la.numVHeads * la.keyHeadDim : la.numVHeads,
+                       label: "decode.gdnA"),
+            b: try buf(la.numVHeads, label: "decode.gdnB"),
+            y: try buf(la.valueDim, label: "decode.gdnY"),
+            out: try buf(la.valueDim, label: "decode.gdnOut"),
+            lowRank: cfg.linearAttentionPerChannelDecay
+                ? try buf(la.keyHeadDim, label: "decode.gdnLowRank") : nil)
+    }
+
+    private struct MLAScratchBuffers {
+        let qRaw: MTLBuffer
+        let q: MTLBuffer
+        let attnOut: MTLBuffer
+        let unembedOut: MTLBuffer
+    }
+
+    private static func makeMLAScratchBuffers(
+        cfg: ArchConfig, device: MTLDevice
+    ) throws -> MLAScratchBuffers? {
+        guard let mlaCfg = cfg.mla, cfg.hasMLALayers else { return nil }
+        let H = cfg.numHeads
+        func buf(_ count: Int, label: String) throws -> MTLBuffer {
+            try scratchBuffer(device: device, count, label: label)
+        }
+        return MLAScratchBuffers(
+            qRaw: try buf(H * (mlaCfg.qkNopeDim + mlaCfg.qkRopeDim),
+                          label: "decode.mlaQRaw"),
+            q: try buf(H * (mlaCfg.latentDim + mlaCfg.qkRopeDim),
+                       label: "decode.mlaQ"),
+            attnOut: try buf(H * mlaCfg.latentDim, label: "decode.mlaAttnOut"),
+            unembedOut: try buf(H * mlaCfg.valueHeadDim,
+                                label: "decode.mlaUnembedOut"))
+    }
+
+    private struct MTPScratchBuffers {
+        let tokenBlock: MTLBuffer
+        let embeddingBlock: MTLBuffer
+        let normalizedEmbeddingBlock: MTLBuffer
+        let normalizedHiddenBlock: MTLBuffer
+        let concatBlock: MTLBuffer
+        let projectedBlock: MTLBuffer
+        let targetHiddenBlock: MTLBuffer
+    }
+
+    private static func makeMTPScratchBuffers(
+        cfg: ArchConfig, device: MTLDevice
+    ) throws -> MTPScratchBuffers? {
+        guard cfg.family == .qwen36MTP else { return nil }
+        let D = cfg.hiddenSize
+        let capacity = Self.mtpChunkCapacity
+        func buf(_ count: Int,
+                 _ stride: Int = MemoryLayout<Float16>.size,
+                 label: String) throws -> MTLBuffer {
+            try scratchBuffer(device: device, count, stride, label: label)
+        }
+        return MTPScratchBuffers(
+            tokenBlock: try buf(capacity, MemoryLayout<UInt32>.stride,
+                                label: "mtp.tokenBlock"),
+            embeddingBlock: try buf(capacity * D, label: "mtp.embedding"),
+            normalizedEmbeddingBlock: try buf(capacity * D,
+                                              label: "mtp.normalizedEmbedding"),
+            normalizedHiddenBlock: try buf(capacity * D,
+                                           label: "mtp.normalizedHidden"),
+            concatBlock: try buf(capacity * 2 * D, label: "mtp.concat"),
+            projectedBlock: try buf(capacity * D, label: "mtp.projected"),
+            targetHiddenBlock: try buf(capacity * D, label: "mtp.targetHidden"))
+    }
+
+    private static func makeSharedExpertProjections(
+        model: Model, cfg: ArchConfig
+    ) throws -> [LayerSharedExpertProjections] {
+        guard cfg.hasSharedExpert else { return [] }
+        let D = cfg.hiddenSize
+        let F = cfg.intermediateSize
         func sharedProj(_ view: TensorView, rows: UInt32, cols: UInt32) -> SharedExpertProjection {
             SharedExpertProjection(weights: view.buffer,
                                  scales: view.buffer,
@@ -693,29 +923,31 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  cols: cols)
         }
         var sharedViews: [LayerSharedExpertProjections] = []
-        if cfg.hasSharedExpert {
-            sharedViews.reserveCapacity(cfg.numLayers)
-            for L in 0..<cfg.numLayers {
-                // Leading dense layers (Kimi layer 0) carry a plain MLP in
-                // this slot: same SwiGLU kernels, per-layer intermediate.
-                let isDense = L < cfg.numLeadingDenseLayers
-                let FL = isDense ? cfg.denseIntermediateSize : F
-                let gate = isDense ? try model.denseMLPGate(layer: L)
-                                   : try model.sharedExpertGate(layer: L)
-                let up = isDense ? try model.denseMLPUp(layer: L)
-                                 : try model.sharedExpertUp(layer: L)
-                let down = isDense ? try model.denseMLPDown(layer: L)
-                                   : try model.sharedExpertDown(layer: L)
-                sharedViews.append(LayerSharedExpertProjections(
-                    gate: sharedProj(gate, rows: UInt32(FL), cols: UInt32(D)),
-                    up: sharedProj(up, rows: UInt32(FL), cols: UInt32(D)),
-                    down: sharedProj(down, rows: UInt32(D), cols: UInt32(FL)),
-                    scalarGate: (cfg.sharedExpertGated && !isDense)
-                        ? try model.sharedExpertScalarGate(layer: L) : nil))
-            }
+        sharedViews.reserveCapacity(cfg.numLayers)
+        for L in 0..<cfg.numLayers {
+            // Leading dense layers (Kimi layer 0) carry a plain MLP in
+            // this slot: same SwiGLU kernels, per-layer intermediate.
+            let isDense = L < cfg.numLeadingDenseLayers
+            let FL = isDense ? cfg.denseIntermediateSize : F
+            let gate = isDense ? try model.denseMLPGate(layer: L)
+                               : try model.sharedExpertGate(layer: L)
+            let up = isDense ? try model.denseMLPUp(layer: L)
+                             : try model.sharedExpertUp(layer: L)
+            let down = isDense ? try model.denseMLPDown(layer: L)
+                               : try model.sharedExpertDown(layer: L)
+            sharedViews.append(LayerSharedExpertProjections(
+                gate: sharedProj(gate, rows: UInt32(FL), cols: UInt32(D)),
+                up: sharedProj(up, rows: UInt32(FL), cols: UInt32(D)),
+                down: sharedProj(down, rows: UInt32(D), cols: UInt32(FL)),
+                scalarGate: (cfg.sharedExpertGated && !isDense)
+                    ? try model.sharedExpertScalarGate(layer: L) : nil))
         }
-        self.sharedExpertProjections = sharedViews
+        return sharedViews
+    }
 
+    private static func makeRouterScaleBuffers(
+        cfg: ArchConfig, device: MTLDevice
+    ) throws -> (effectiveScale: [MTLBuffer], onesPerExpertScale: MTLBuffer) {
         func bf16OnesBuffer(count: Int, label: String) throws -> MTLBuffer {
             guard let buf = device.makeBuffer(length: count * MemoryLayout<UInt16>.size,
                                               options: .storageModeShared) else {
@@ -726,50 +958,51 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             buf.label = label
             return buf
         }
-
         // Plain linear router (Qwen): one shared BF16 ones buffer keeps
         // the router kernel's effective_scale multiply neutral, and a ones
         // per_expert_scale keeps the top-k weights untouched. (Softmax
         // over top-k then renormalize equals Qwen's softmax over all
         // experts then renormalize the selected top-k.)
-        let ones = try bf16OnesBuffer(count: D, label: "effective_scale.ones")
-        self.effectiveScaleBuffers = [MTLBuffer](repeating: ones,
-                                                 count: cfg.numLayers)
-        self.onesPerExpertScale = try bf16OnesBuffer(count: cfg.numExperts,
-                                                     label: "per_expert_scale.ones")
+        let ones = try bf16OnesBuffer(count: cfg.hiddenSize,
+                                      label: "effective_scale.ones")
+        return ([MTLBuffer](repeating: ones, count: cfg.numLayers),
+                try bf16OnesBuffer(count: cfg.numExperts,
+                                   label: "per_expert_scale.ones"))
+    }
 
+    private static func makeRouterLogitBias(
+        model: Model, cfg: ArchConfig, device: MTLDevice
+    ) throws -> [(buffer: MTLBuffer, offset: Int)] {
         if cfg.family == .gptOss20b {
-            self.routerLogitBias = try (0..<cfg.numLayers).map { layer in
+            return try (0..<cfg.numLayers).map { layer in
                 guard let view = try model.routerBias(layer: layer) else {
                     throw ModelError.tensorNotFound(
                         name: "language_model.model.layers.\(layer).mlp.router.bias")
                 }
                 return (view.buffer, Int(view.offset))
             }
-        } else {
-            guard let zeros = device.makeBuffer(
-                length: cfg.numExperts * MemoryLayout<UInt16>.size,
-                options: .storageModeShared) else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            memset(zeros.contents(), 0, zeros.length)
-            zeros.label = "router_logit_bias.zeros"
-            if cfg.routerHasCorrectionBias {
-                // Kimi: the sigmoid selector reads the correction bias
-                // through the logit-bias slot; dense layers keep the zeros
-                // placeholder (their router never runs).
-                self.routerLogitBias = try (0..<cfg.numLayers).map { layer in
-                    guard layer >= cfg.numLeadingDenseLayers else {
-                        return (zeros, 0)
-                    }
-                    let view = try model.routerCorrectionBias(layer: layer)
-                    return (view.buffer, Int(view.offset))
+        }
+        guard let zeros = device.makeBuffer(
+            length: cfg.numExperts * MemoryLayout<UInt16>.size,
+            options: .storageModeShared) else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        memset(zeros.contents(), 0, zeros.length)
+        zeros.label = "router_logit_bias.zeros"
+        if cfg.routerHasCorrectionBias {
+            // Kimi: the sigmoid selector reads the correction bias
+            // through the logit-bias slot; dense layers keep the zeros
+            // placeholder (their router never runs).
+            return try (0..<cfg.numLayers).map { layer in
+                guard layer >= cfg.numLeadingDenseLayers else {
+                    return (zeros, 0)
                 }
-            } else {
-                self.routerLogitBias = [(buffer: MTLBuffer, offset: Int)](
-                    repeating: (zeros, 0), count: cfg.numLayers)
+                let view = try model.routerCorrectionBias(layer: layer)
+                return (view.buffer, Int(view.offset))
             }
         }
+        return [(buffer: MTLBuffer, offset: Int)](
+            repeating: (zeros, 0), count: cfg.numLayers)
     }
 
     public func reset() {

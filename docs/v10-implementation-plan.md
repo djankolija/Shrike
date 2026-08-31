@@ -11,9 +11,13 @@ on hope. Baseline anchor at start of Phase 3: rig 40.0 / card 57.9
 
 ## Tasks
 
-- [ ] **T0: decompose the runner init** (397/400 lint lines; mechanical,
+- [x] **T0: decompose the runner init** (397/400 lint lines; mechanical,
       own commit, no behavior change; suite green is the only gate that
-      matters here beyond lint).
+      matters here beyond lint). Landed: init 397 → ~100 lint lines via
+      per-cluster static factories (kernels, prefill kernels, decode/
+      residency/GDN/MLA/MTP scratch bundles, shared projections, router
+      buffers); conditional clusters stored as bundles behind computed
+      forwards, so no use site moved. Baseline 21 → 20 entries.
 - [ ] **T1: shared-chain merger (C2)** — gate+up as one 1024-row GEMV,
       tail ops folded into the down epilogue; 5 dispatches → 2 in
       `encodeSharedExpertWork`. Bitwise-safe by construction (per-row dot
