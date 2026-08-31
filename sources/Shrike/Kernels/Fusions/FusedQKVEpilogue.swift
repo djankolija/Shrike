@@ -28,6 +28,8 @@ final class FusedQKVEpilogue {
               subdimRope: false),
         Shape(headDim: 512, numQHeads: 16, numKVHeads: 2, rotatedPairs: 64,
               subdimRope: false),
+        Shape(headDim: 512, numQHeads: 16, numKVHeads: 2, rotatedPairs: 64,
+              subdimRope: true),
     ]
 
     init(context: MetalContext) throws {

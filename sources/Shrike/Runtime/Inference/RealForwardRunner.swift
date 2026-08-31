@@ -2744,7 +2744,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                 layer L: Int,
                                                 position: Int,
                                                 seqLen: UInt32) throws {
-        guard let elementwise, let rope, let qPackedScratch, let attnGateScratch else {
+        guard let elementwise, rope != nil, let qPackedScratch, let attnGateScratch else {
             throw ModelError.internalInconsistency(
                 detail: "attn_output_gate layer \(L) without gate kernels (arch mask misconfiguration)")
         }
@@ -2784,37 +2784,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      gate: attnGateScratch,
                                      heads: cfg.numHeads,
                                      dim: headDim)
-        rms.encodeBF16WPerHead(encoder: encoder,
-                               x: qScratch,
-                               weight: qNormW.buffer,
-                               weightOffset: Int(qNormW.offset),
-                               out: qScratch,
-                               headDim: UInt32(headDim),
-                               numHeads: cfg.numHeads,
-                               eps: eps)
-        rms.encodeBF16WPerHead(encoder: encoder,
-                               x: kWrite.buffer, xOffset: kWrite.offset,
-                               weight: kNormW.buffer,
-                               weightOffset: Int(kNormW.offset),
-                               out: kWrite.buffer, outOffset: kWrite.offset,
-                               headDim: UInt32(headDim),
-                               numHeads: numKV,
-                               eps: eps)
-        rope.encodeNeoxSubdim(encoder: encoder,
-                              data: qScratch,
-                              position: UInt32(position),
-                              headDim: UInt32(headDim),
-                              numHeads: UInt32(cfg.numHeads),
-                              rotaryDim: rotaryDim,
-                              theta: Float(cfg.fullRopeTheta))
-        rope.encodeNeoxSubdim(encoder: encoder,
-                              data: kWrite.buffer,
-                              dataOffset: kWrite.offset,
-                              position: UInt32(position),
-                              headDim: UInt32(headDim),
-                              numHeads: UInt32(numKV),
-                              rotaryDim: rotaryDim,
-                              theta: Float(cfg.fullRopeTheta))
+        try fusedQKVEpilogue.encode(encoder: encoder,
+                                    q: qScratch,
+                                    k: kWrite.buffer,
+                                    kOffset: kWrite.offset,
+                                    v: vWrite.buffer,
+                                    vOffset: vWrite.offset,
+                                    qWeight: qNormW.buffer,
+                                    qWeightOffset: Int(qNormW.offset),
+                                    kWeight: kNormW.buffer,
+                                    kWeightOffset: Int(kNormW.offset),
+                                    headDim: UInt32(headDim),
+                                    numQHeads: UInt32(cfg.numHeads),
+                                    numKVHeads: UInt32(numKV),
+                                    position: UInt32(position),
+                                    theta: Float(cfg.fullRopeTheta),
+                                    rotatedPairs: rotaryDim / 2,
+                                    eps: eps,
+                                    subdimRope: true,
+                                    normalizeV: false)
         if quantizedKV {
             try encodeQuantizedKV(encoder: encoder, kv: kv, layer: L,
                                   position: position, keySource: kStage,
