@@ -2034,7 +2034,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         /// only the gpt-oss and plain paths keep the split, their o_proj must
         /// run after the separately committed softmax CB).
         let tailCB: MTLCommandBuffer?
-        let sharedCB: MTLCommandBuffer
+        /// nil in speculative mode: the shared-expert chain rides at the head
+        /// of `specCB` instead of owning a CB.
+        let sharedCB: MTLCommandBuffer?
         let specCB: MTLCommandBuffer?
         let overlapCompletionClock: CommandCompletionClock?
         let layerDoneValue: UInt64
@@ -2062,7 +2064,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // Queued before the tailCB wait, not after: the GPU runs the shared
         // MLP (and in speculative mode the whole routed layer) while the
         // CPU blocks on tailCB for the routing.
-        cmds.sharedCB.commit()
+        cmds.sharedCB?.commit()
         cmds.specCB?.commit()
     }
 
@@ -2153,15 +2155,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             d: D, eps: eps)
         layerEncoder?.endEncoding()
         let overlapCompletionClock = runnerStatsEnabled ? CommandCompletionClock() : nil
-        let sharedCB = try encodeSharedExpert(
-            layer: L,
-            completionClock: overlapCompletionClock)
+        var sharedCB: MTLCommandBuffer?
         var specCB: MTLCommandBuffer?
         if let specDispatchArguments, let residencyResources {
             specCB = try encodeSpeculativeRouted(
                 layer: L,
                 residency: residencyResources,
-                arguments: specDispatchArguments)
+                arguments: specDispatchArguments,
+                completionClock: overlapCompletionClock)
+        } else {
+            sharedCB = try encodeSharedExpert(
+                layer: L,
+                completionClock: overlapCompletionClock)
         }
         return HeldLayerCommands(
             layer: L, attnCB: attnCB, softmaxCB: softmaxCB, tailCB: tailCB,
@@ -5032,27 +5037,36 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         layer L: Int,
         completionClock: CommandCompletionClock?
     ) throws -> MTLCommandBuffer {
-        let D = UInt32(cfg.hiddenSize)
         guard let sharedCB = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
+        try encodeSharedExpertWork(into: sharedCB, layer: L)
+        completionClock?.track(sharedCB)
+        return sharedCB
+    }
+
+    /// The shared-expert chain (or the h1Buf zero-fill when the arch has
+    /// none), encoded onto whichever CB owns it — its own sharedCB in the
+    /// classic modes, the head of the spec CB in speculative mode.
+    private func encodeSharedExpertWork(into cb: MTLCommandBuffer,
+                                        layer L: Int) throws {
+        let D = UInt32(cfg.hiddenSize)
         guard cfg.hasSharedExpert else {
             // No shared expert (gpt-oss): the phase-2 reduce still seeds from
             // h1Buf, so pin it to zero in place of the dense MLP output.
-            guard let blit = sharedCB.makeBlitCommandEncoder() else {
+            guard let blit = cb.makeBlitCommandEncoder() else {
                 throw ModelError.residentBufferWrapFailed
             }
             blit.fill(buffer: h1Buf,
                       range: 0..<(cfg.hiddenSize * MemoryLayout<Float16>.stride),
                       value: 0)
             blit.endEncoding()
-            completionClock?.track(sharedCB)
-            return sharedCB
+            return
         }
         let sharedProj = sharedExpertProjections[L]
         // B1c stage 1: one encoder for the whole shared-expert chain — the
         // per-kernel encoders cost more span than the GEMVs they wrapped.
-        guard let sharedEncoder = sharedCB.makeComputeCommandEncoder() else {
+        guard let sharedEncoder = cb.makeComputeCommandEncoder() else {
             throw ModelError.residentBufferWrapFailed
         }
         defer { sharedEncoder.endEncoding() }
@@ -5083,8 +5097,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                 gate: sharedScalarGateBuf!,
                                                 count: cfg.hiddenSize)
         }
-        completionClock?.track(sharedCB)
-        return sharedCB
     }
 
     private static func makeSpeculativeScratch(
@@ -5128,7 +5140,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private func encodeSpeculativeRouted(
         layer L: Int,
         residency: ExpertResidencyResources,
-        arguments: MoE.SpeculativeDispatchArguments
+        arguments: MoE.SpeculativeDispatchArguments,
+        completionClock: CommandCompletionClock?
     ) throws -> MTLCommandBuffer {
         guard let pool = residency.expertPool else {
             throw ModelError.internalInconsistency(
@@ -5137,6 +5150,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard let cb = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
+        // Stage C: the shared-expert chain rides at the head of the spec CB —
+        // same main-queue commit position as the old separate sharedCB, so
+        // h1Buf ordering is unchanged, and the spec CB commits on every
+        // layer, so miss layers still produce h1Buf for the fixup reduce.
+        try encodeSharedExpertWork(into: cb, layer: L)
+        completionClock?.track(cb)
         let validate = decodeExpertExecution == .speculativeValidate
         let actsTarget: MTLBuffer
         let yTarget: MTLBuffer
@@ -5202,7 +5221,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         position: Int,
         attnCB: MTLCommandBuffer,
         tailCB: MTLCommandBuffer,
-        sharedCB: MTLCommandBuffer,
+        sharedCB: MTLCommandBuffer?,
         specCB: MTLCommandBuffer?,
         overlapCompletionClock: CommandCompletionClock?,
         layerDoneValue: UInt64,
