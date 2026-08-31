@@ -213,7 +213,7 @@ private final class PrefetchDestinations: @unchecked Sendable {
 /// so concurrent planners never treat partial bytes as resident.
 public final class PreadExpertStreamer: @unchecked Sendable {
     public static let scratchAlignment = 2 * 1024 * 1024
-    public static var cachePolicyDefault: ExpertCachePolicy { .lfu }
+    public static var cachePolicyDefault: ExpertCachePolicy { .agingLFU }
 
     public let layout: StreamLayout
     public let slotCount: Int
@@ -283,7 +283,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public init(layout: StreamLayout,
                 device: MTLDevice,
                 slotCount: Int,
-                cachePolicy: ExpertCachePolicy = .lfu,
+                cachePolicy: ExpertCachePolicy = .agingLFU,
                 eventCoordinator: ExpertIOEventCoordinator? = nil,
                 metalStagingPool: MetalExpertStagingPool? = nil,
                 metalIOService: MetalExpertIOService? = nil) throws {

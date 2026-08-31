@@ -7,7 +7,7 @@ import Shrike
     @Test func defaultsMatchProduction() throws {
         let options = AppRuntimeOptions()
         #expect(options.expertCacheSlots == 64)
-        #expect(options.expertCachePolicy == .lfu)
+        #expect(options.expertCachePolicy == .agingLFU)
         #expect(options.prefillEnabled)
         #expect(options.prefillChunkTokens == 4096)
         #expect(options.rdadvisePolicy == .default)
@@ -23,7 +23,7 @@ import Shrike
         #expect(runtime.rdadvisePolicy == RuntimeConfiguration.production.rdadvisePolicy)
         #expect(runtime.headPath == RuntimeConfiguration.production.headPath)
         #expect(options.resultSummary ==
-            "Cache 64 LFU, prefill 4096, 8-bit KV, native RoPE, thinking off, RDADVISE default, full SHA-256")
+            "Cache 64 AGING-LFU, prefill 4096, 8-bit KV, native RoPE, thinking off, RDADVISE default, full SHA-256")
     }
 
     @Test func everyPublicChoiceMapsToRuntime() throws {

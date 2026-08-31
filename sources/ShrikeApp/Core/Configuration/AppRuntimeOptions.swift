@@ -4,6 +4,7 @@ import Shrike
 public enum AppExpertCachePolicy: String, CaseIterable, Sendable, Identifiable {
     case lfu
     case lru
+    case agingLFU = "aging-lfu"
 
     public var id: String { rawValue }
     public var label: String { rawValue.uppercased() }
@@ -66,7 +67,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var ropeScalingMode: RuntimeRoPEScalingMode
 
     public init(expertCacheSlots: Int = 64,
-                expertCachePolicy: AppExpertCachePolicy = .lfu,
+                expertCachePolicy: AppExpertCachePolicy = .agingLFU,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = RuntimeConfiguration.qwenLongPrefillChunkTokens,
                 rdadvisePolicy: AppRDAdvicePolicy = .default,
@@ -123,7 +124,13 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         try validate()
         return try RuntimeConfiguration(
             expertCacheSlots: expertCacheSlots,
-            expertCachePolicy: expertCachePolicy == .lru ? .lru : .lfu,
+            expertCachePolicy: {
+                switch expertCachePolicy {
+                case .lru: .lru
+                case .lfu: .lfu
+                case .agingLFU: .agingLFU
+                }
+            }(),
             rdadvisePolicy: rdadvisePolicy.runtimeValue,
             prefillEnabled: prefillEnabled,
             prefillChunkTokens: prefillChunkTokens,

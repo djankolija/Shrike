@@ -13,7 +13,7 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     public var ropeScalingMode: String
 
     public init(expertCacheSlots: Int = 32,
-                expertCachePolicy: String = "lfu",
+                expertCachePolicy: String = "aging-lfu",
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
                 rdadvisePolicy: String = "default",

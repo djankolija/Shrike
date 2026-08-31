@@ -19,6 +19,7 @@ public enum RuntimePrefillAttentionPath: String, Codable, Sendable {
 public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
     case lfu
     case lru
+    case agingLFU = "aging-lfu"
 }
 
 /// Decode scheduling for SSD-backed routed experts.
@@ -230,7 +231,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let yarnContextTokens: Int
 
     public init(expertCacheSlots: Int = 64,
-                expertCachePolicy: RuntimeExpertCachePolicy = .lfu,
+                expertCachePolicy: RuntimeExpertCachePolicy = .agingLFU,
                 rdadvisePolicy: RDAdvicePolicyMode = .default,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
@@ -307,6 +308,10 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         }
     }
     public var modelExpertCachePolicy: ExpertCachePolicy {
-        expertCachePolicy == .lru ? .lru : .lfu
+        switch expertCachePolicy {
+        case .lru: .lru
+        case .lfu: .lfu
+        case .agingLFU: .agingLFU
+        }
     }
 }
