@@ -1896,8 +1896,8 @@ public actor ServerModelSession: ServerInferenceBackend {
         let exposedIoNanos = runner.totalExposedIoNanos - snapshot.exposedIo
         let hiddenPercent = missIoNanos == 0 ? 100.0
             : 100 * (1 - Double(exposedIoNanos) / Double(missIoNanos))
-        let expert = runner.expertStreamingStatistics()
-            .subtracting(snapshot.expertStreaming)
+        let expertNow = runner.expertStreamingStatistics()
+        let expert = expertNow.subtracting(snapshot.expertStreaming)
         let gpuHits = runner.totalGPUClassifiedHits - snapshot.gpuClassifiedHits
         let gpuMisses = runner.totalGPUClassifiedMisses - snapshot.gpuClassifiedMisses
         let gpuAllHit = runner.totalGPUResidencyAllHitLayers - snapshot.gpuAllHitLayers
@@ -1912,7 +1912,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "router_readback_ms=%.4f cache_plan_ms=%.4f io_queue_ms=%.4f "
                 + "io_completion_to_fixup_ms=%.4f io_host_waits=%llu "
                 + "io_host_waits_avoided=%llu gpu_classified_hits=%llu "
-                + "gpu_classified_misses=%llu gpu_all_hit_layers=%llu",
+                + "gpu_classified_misses=%llu gpu_all_hit_layers=%llu "
+                + "expert_slots_loading=%d expert_slots_pinned=%d",
             ms(runner.totalCb1Nanos, snapshot.cb1),
             ms(runner.totalIoNanos, snapshot.io),
             ms(runner.totalCb2Nanos, snapshot.cb2),
@@ -1935,7 +1936,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             ms(runner.totalIOCompletionToFixupSubmitNanos, snapshot.ioCompletionToFixup),
             runner.totalExpertIOHostWaits - snapshot.ioHostWaits,
             runner.totalExpertIOHostWaitsAvoided - snapshot.ioHostWaitsAvoided,
-            gpuHits, gpuMisses, gpuAllHit))
+            gpuHits, gpuMisses, gpuAllHit,
+            expertNow.loadingSlots, expertNow.pinnedSlots))
     }
 
     private func emitKernelDiagnostics(result: RawDecodeResult) {

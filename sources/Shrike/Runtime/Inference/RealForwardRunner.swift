@@ -4404,6 +4404,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                 }
                                 plannedFetch = plan
                             case .drainBeforeIssue:
+                                if let plan {
+                                    try model.abandonRoutedExpertPlan(plan)
+                                }
                                 try drainOldestPendingTile()
                             case .issueWithoutPending:
                                 throw ModelError.indexCorrupt(

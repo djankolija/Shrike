@@ -1208,18 +1208,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 elapsedNanos: elapsedNanos)
             return
         }
-        for index in plan.misses {
-            let slot = plan.assignedSlots[index]
-            if slotGeneration[slot] == plan.assignedGenerations[index],
-               slotState[slot] == .loading {
-                slotState[slot] = .empty
-                slotExpert[slot] = -1
-                publishResidencyUnlocked(expert: plan.experts[index],
-                                         slot: slot,
-                                         state: ExpertResidencyEntry.empty,
-                                         generation: plan.assignedGenerations[index])
-            }
-        }
+        resetLoadingMissesUnlocked(plan)
     }
 
     private func markPlanMissesResident(_ plan: ExpertCachePlan) throws {
@@ -1258,6 +1247,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     func failStagedMetalPlan(_ plan: ExpertCachePlan) {
         cacheLock.lock()
         defer { cacheLock.unlock() }
+        resetLoadingMissesUnlocked(plan)
+    }
+
+    /// Planning reserves miss slots as `.loading`, so a plan discarded without
+    /// execution must be abandoned or those slots stay un-loadable and
+    /// un-evictable for the life of the streamer.
+    public func abandonExpertCachePlan(_ plan: ExpertCachePlan) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        resetLoadingMissesUnlocked(plan)
+    }
+
+    private func resetLoadingMissesUnlocked(_ plan: ExpertCachePlan) {
         for index in plan.misses {
             let slot = plan.assignedSlots[index]
             guard slot >= 0, slot < slotCount,

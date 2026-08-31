@@ -320,4 +320,27 @@ extension PreadExpertStreamerTests {
     #expect(streamer.statistics().loadingSlots == 0)
   }
 
+  @Test func abandonedPlanReleasesItsReservedSlots() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 2)
+
+    _ = try streamer.loadExpertsCached(experts: [0, 1])
+    let dropped = try streamer.planExpertsCached(experts: [2, 3])
+    #expect(dropped.misses.count == 2)
+    #expect(streamer.statistics().loadingSlots == 2)
+    #expect(streamer.planExpertsCachedIfPossible(experts: [0]) == nil)
+
+    streamer.abandonExpertCachePlan(dropped)
+
+    #expect(streamer.statistics().loadingSlots == 0)
+    let results = try streamer.loadExpertsCached(experts: [0, 1])
+    for (index, result) in results.enumerated() {
+      let got = Self.bytes(of: result.buffer, offset: result.offset, count: Self.expertStride)
+      #expect(got.allSatisfy { $0 == Self.tagByte([0, 1][index]) })
+    }
+  }
+
 }

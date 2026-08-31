@@ -140,6 +140,12 @@ extension Model {
         return RoutedExpertFetchPlan(layer: layer, cachePlan: cachePlan)
     }
 
+    public func abandonRoutedExpertPlan(_ plan: RoutedExpertFetchPlan) throws {
+        try ensureLayerOpened(plan.layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
+        streamer.abandonExpertCachePlan(plan.cachePlan)
+    }
+
     /// Cache slot count is a per-model streaming property (the same for every
     /// layer), so it deliberately takes no layer argument.
     public func routedExpertCacheSlotCount() -> Int? {
