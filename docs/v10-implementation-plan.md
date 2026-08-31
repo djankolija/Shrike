@@ -75,11 +75,25 @@ Each is "run once, record the verdict, close either way"; definitions in
       mini chapter; recorded for any future M4-class work.
 - [ ] **P2: attention-chain attribution** — per-kernel GPU times from
       the existing gputrace bundles vs the honest-floor table.
-- [ ] **P3: miss-read QD probe** — mini SSD, random 1.77 MB reads QD1/
-      QD4/sequential, pread vs MTLIO. If QD/coalescing wins, a batched/
-      sorted-fetch implementation task follows (Davor's idea, 2026-09-01);
-      decode batches only within the in-flight miss window, prefill
-      batches whole tiles — the bigger prize.
+- [x] **P3: miss-read QD probe** — RAN 2026-09-01, both machines
+      (scratchpad `p3ssd`: F_NOCACHE pread + MTLIO arms, 96 reads/arm,
+      seeded picks over packed_experts). **Mini verdict: drive
+      exonerated. Random ≡ sequential (0.79 ms p50 / 2.2 GB/s per
+      1.77 MB expert read); QD4 lifts aggregate +48 % (3.25 GB/s).
+      Production's 2.0 ms p50 decomposes: 0.79 drive + ~0.54 MTLIO
+      single-load submission (probe 1-load-per-CB: 1.33 ms) + ~0.7
+      in-engine queueing / GPU-contention residual. Batching 8 loads
+      into one IO CB erases the submission overhead (0.81 ms p50).**
+      Local M4 Pro / BuildSSD mirror: 0.55 drive, +0.30 MTLIO single,
+      batch erases; page cache serves neither machine (cached ≈
+      nocache). ⚠ Corrects the prefill-quest premise: the "0.8 GB/s
+      random-read scheduling" gap is NOT drive random-read behavior —
+      offset sorting buys nothing; the lever is batched submission +
+      queue depth (Davor's idea, confirmed at the I/O layer).
+      Follow-on (unscheduled): batch miss loads per discovery point,
+      deepen in-flight QD; prefill batches whole tiles. Est. prize
+      ~3–4 ms/token of real-shape exposed miss I/O + a large slice of
+      prefill's 33 ms/token.
 
 ## Queued after T5 (Davor, 2026-08-31 — sequenced behind the original tasks)
 
