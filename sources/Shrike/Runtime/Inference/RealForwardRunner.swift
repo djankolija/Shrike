@@ -1259,6 +1259,42 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         ProcessInfo.processInfo.environment["SHRIKE_KERNEL_STATS"] != nil
     private let runnerStatsEnabled =
         ProcessInfo.processInfo.environment["SHRIKE_RUNNER_STATS"] != nil
+    private let layerTraceEnabled =
+        ProcessInfo.processInfo.environment["SHRIKE_LAYER_TRACE"] != nil
+    /// SHRIKE_GPU_CAPTURE_DIR: write one programmatic .gputrace of decode
+    /// tokens 8–10 of the process's first generation (requires launching with
+    /// METAL_CAPTURE_ENABLED=1; the bundle opens in Xcode's Metal debugger).
+    private let gpuCaptureDir =
+        ProcessInfo.processInfo.environment["SHRIKE_GPU_CAPTURE_DIR"]
+    private var gpuCaptureProduceCalls = 0
+    private var gpuCaptureActive = false
+    private var gpuCaptureDone = false
+
+    private func updateGPUCaptureWindow() {
+        guard let gpuCaptureDir, !gpuCaptureDone else { return }
+        gpuCaptureProduceCalls += 1
+        let manager = MTLCaptureManager.shared()
+        if !gpuCaptureActive, gpuCaptureProduceCalls == 8 {
+            let descriptor = MTLCaptureDescriptor()
+            descriptor.captureObject = ctx.device
+            descriptor.destination = .gpuTraceDocument
+            descriptor.outputURL = URL(fileURLWithPath: gpuCaptureDir)
+                .appendingPathComponent("shrike-decode-\(Int(Date().timeIntervalSince1970)).gputrace")
+            do {
+                try manager.startCapture(with: descriptor)
+                gpuCaptureActive = true
+                print("Shrike gpu-capture started: \(descriptor.outputURL?.path ?? "?")")
+            } catch {
+                gpuCaptureDone = true
+                print("Shrike gpu-capture failed to start: \(error)")
+            }
+        } else if gpuCaptureActive, gpuCaptureProduceCalls >= 10 {
+            manager.stopCapture()
+            gpuCaptureActive = false
+            gpuCaptureDone = true
+            print("Shrike gpu-capture stopped")
+        }
+    }
 
     /// Open file descriptor for SHRIKE_ROUTE_TRACE, or -1. Opened once and
     /// never closed: the runner lives as long as the process, and a decode
@@ -2108,6 +2144,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // prompts that end exactly on a chunk boundary reach here with the
         // last model still resident. No-op when ANE prefill is off or empty.
         anePrefill?.releaseModels()
+        updateGPUCaptureWindow()
         try kv?.reserve(tokens: position + 1)
         guard position < maxContext else {
             throw PrefillError.prefillCursorMismatch(
@@ -5543,7 +5580,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             signalsLayerDone: layerDoneEvent != nil && layerDoneValue > 0)
         transferredExpertLease = true
         totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
-        if ProcessInfo.processInfo.environment["SHRIKE_LAYER_TRACE"] != nil,
+        if layerTraceEnabled,
            position < 3 || position % 16 == 0 {
             let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let attnUs = (attnCB.gpuEndTime - attnCB.gpuStartTime) * 1_000_000
