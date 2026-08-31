@@ -1463,6 +1463,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalFixupWakeNanos: UInt64 = 0
     public private(set) var totalHitFixupLayers: UInt64 = 0
     public private(set) var totalRouterReadbackNanos: UInt64 = 0
+    /// Mean routing-weight mass per rank (E0): summed normalized top-K weights
+    /// by descending-score position, over `totalRankWeightLayers` layer-steps.
+    public private(set) var totalRankWeightMass: [Double] = []
+    public private(set) var totalRankWeightLayers: UInt64 = 0
     public private(set) var totalCachePlanNanos: UInt64 = 0
     public private(set) var totalIOQueueNanos: UInt64 = 0
     public private(set) var totalIOCompletionToFixupSubmitNanos: UInt64 = 0
@@ -5647,6 +5651,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             decodeExpertsScratch.append(min(Int(idxPtr[i]), cfg.numExperts - 1))
         }
         totalRouterReadbackNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - readbackStarted
+        if runnerStatsEnabled {
+            let wPtr = outWeights.contents().bindMemory(to: Float16.self,
+                                                        capacity: cfg.topKExperts)
+            if totalRankWeightMass.count != cfg.topKExperts {
+                totalRankWeightMass = [Double](repeating: 0, count: cfg.topKExperts)
+            }
+            for i in 0..<cfg.topKExperts {
+                totalRankWeightMass[i] += Double(wPtr[i])
+            }
+            totalRankWeightLayers &+= 1
+        }
         let experts = decodeExpertsScratch
         recordRouteTrace(layer: L, position: position, experts: experts)
 

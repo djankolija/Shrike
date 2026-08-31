@@ -113,6 +113,17 @@ Each is "run once, record the verdict, close either way"; definitions in
       never measured); host-side O(L) work per token. Debug: fresh-
       server deterministic depth sweep (single_turn N ladder) with
       per-role stats — role growth localizes kernel vs io vs host.
+      **MEASURED 2026-09-01 (ladder, warm arms = prompt-cached, hit
+      0.90–0.94): the tax is in the attention-chain GPU role —
+      attn_layer 21.68 → 34.97 ms/token over ctx 48 → 1900 = +7.2 ms/
+      1000 ctx (~40× KV roofline); wait_ms slope only +0.7 because
+      attention growth and declining miss exposure cancel (the
+      confound that hid this). Cache-sweep cost is real but transient
+      (cold arms +5–24 ms, hitD 0.82 vs 0.90 at t1). REMAINING: name
+      the kernel — needs a gputrace captured at depth (~1900 ctx);
+      folds into P2's analysis. Ladder logs:
+      scratchpad ladder-runner.txt / ladder-roles.txt (session
+      6dd4e253), mini /tmp/ornith.log (Server A PID 45374).**
 
 ## Quality-trading experiments (lane opened by Davor, 2026-09-01)
 

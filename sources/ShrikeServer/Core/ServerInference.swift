@@ -438,6 +438,8 @@ private struct RunnerCounterSnapshot {
     let fixupWake: UInt64
     let hitFixupLayers: UInt64
     let routerReadback: UInt64
+    let rankWeightMass: [Double]
+    let rankWeightLayers: UInt64
     let cachePlan: UInt64
     let ioQueue: UInt64
     let ioCompletionToFixup: UInt64
@@ -1067,6 +1069,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             fixupWake: runner.totalFixupWakeNanos,
             hitFixupLayers: runner.totalHitFixupLayers,
             routerReadback: runner.totalRouterReadbackNanos,
+            rankWeightMass: runner.totalRankWeightMass,
+            rankWeightLayers: runner.totalRankWeightLayers,
             cachePlan: runner.totalCachePlanNanos,
             ioQueue: runner.totalIOQueueNanos,
             ioCompletionToFixup: runner.totalIOCompletionToFixupSubmitNanos,
@@ -1919,6 +1923,17 @@ public actor ServerModelSession: ServerInferenceBackend {
         let gpuHits = runner.totalGPUClassifiedHits - snapshot.gpuClassifiedHits
         let gpuMisses = runner.totalGPUClassifiedMisses - snapshot.gpuClassifiedMisses
         let gpuAllHit = runner.totalGPUResidencyAllHitLayers - snapshot.gpuAllHitLayers
+        let rankLayers = runner.totalRankWeightLayers - snapshot.rankWeightLayers
+        let rankMass: String
+        if rankLayers > 0 {
+            let base = snapshot.rankWeightMass
+            rankMass = runner.totalRankWeightMass.enumerated().map { i, v in
+                String(format: "%.4f",
+                       (v - (i < base.count ? base[i] : 0)) / Double(rankLayers))
+            }.joined(separator: "/")
+        } else {
+            rankMass = "n/a"
+        }
         cacheDiag(String(
             format: "Shrike runner cb1_ms=%.3f io_ms=%.3f cb2_ms=%.3f "
                 + "head_ms=%.3f head_fused_ms=%.3f rdadvise_ms=%.3f "
@@ -1935,7 +1950,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "expert_slots_loading=%d expert_slots_pinned=%d "
                 + "expert_hit_rate_prefill=%.4f expert_hits_prefill=%llu "
                 + "expert_misses_prefill=%llu expert_hit_rate_decode=%.4f "
-                + "expert_hits_decode=%llu expert_misses_decode=%llu",
+                + "expert_hits_decode=%llu expert_misses_decode=%llu "
+                + "expert_rank_mass=%@",
             ms(runner.totalCb1Nanos, snapshot.cb1),
             ms(runner.totalIoNanos, snapshot.io),
             ms(runner.totalCb2Nanos, snapshot.cb2),
@@ -1964,7 +1980,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             gpuHits, gpuMisses, gpuAllHit,
             expertNow.loadingSlots, expertNow.pinnedSlots,
             expertPrefill.hitRate, expertPrefill.hits, expertPrefill.misses,
-            expertDecode.hitRate, expertDecode.hits, expertDecode.misses))
+            expertDecode.hitRate, expertDecode.hits, expertDecode.misses,
+            rankMass))
     }
 
     private func emitKernelDiagnostics(result: RawDecodeResult) {
