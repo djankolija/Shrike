@@ -220,6 +220,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var layerDoneCounter: UInt64 = 0
     private var layerDoneHighWater: UInt64 = 0
     private var layerDonePendingWaitValue: UInt64?
+    private nonisolated let hostWaitSpin =
+        ProcessInfo.processInfo.environment["SHRIKE_HOST_WAIT"] == "spin"
     /// Width-2 MTP verify scratch (B2 pair schedule): per-row activation and
     /// output buffers plus two persistent routed argument buffers, created on
     /// first verify. Per-row buffers are deliberately *separate allocations*,
@@ -2213,7 +2215,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     attentionCB.commit()
                 }
                 tailCB.commit()
-                try waitForCompletion(tailCB)
+                try waitForRouterCompletion(tailCB)
                 recordKernelGPU(role: "attn_norm_qkv", attnCB)
                 if let attentionCB = softmaxCB {
                     recordKernelGPU(role: "attn_softmax", attentionCB)
@@ -2252,7 +2254,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
             }
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            try waitForCompletion(cmds.tailCB)
+            try waitForRouterCompletion(cmds.tailCB)
             recordKernelGPU(role: "attn_norm_qkv", cmds.attnCB)
             if let attentionCB = cmds.softmaxCB {
                 recordKernelGPU(role: "attn_softmax", attentionCB)
@@ -3045,6 +3047,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if let err = cb.error {
             throw ModelError.commandBufferFailed(detail: String(describing: err))
         }
+    }
+
+    /// SHRIKE_HOST_WAIT=spin: poll instead of parking the thread, trading a
+    /// busy core for the scheduler-wake latency on the per-layer router wait.
+    /// Falls back to blocking after ~1s so a stalled CB cannot wedge a core.
+    private nonisolated func waitForRouterCompletion(_ cb: MTLCommandBuffer) throws {
+        guard hostWaitSpin else { return try waitForCompletion(cb) }
+        let deadline = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 1_000_000_000
+        while clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline {
+            let status = cb.status
+            if status == .completed { return }
+            if status == .error {
+                throw ModelError.commandBufferFailed(
+                    detail: String(describing: cb.error))
+            }
+        }
+        try waitForCompletion(cb)
     }
 
 

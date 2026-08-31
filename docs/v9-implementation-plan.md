@@ -115,8 +115,13 @@ Numbers cited as baselines are ornith15, n=12.
       cross-queue event overhead eats them: **net +0.6–0.9 ms/token
       (~1.2–1.6%) while the host still paces per layer.** S3b is landed as
       the foundation for free-running (which removes the per-layer host
-      beat) but NOT deployed — the mini runs baee5d6; a HEAD deploy picks
-      up the −1% until free-running (or a spin-wait host poll) pays it back.
+      beat). RESOLVED same day: `SHRIKE_HOST_WAIT=spin` (poll the router
+      wait instead of parking the thread) flips the stack decisively —
+      rig n=12 48.30 sd 0.55 (−11.7 % vs S3a) and fresh card 64.02
+      (−15.9 %), digest exact, no thermal decay over minutes (post-card
+      convergence run settles back to 48.8). The scheduler wake was
+      ~175 µs/layer, not the estimated 50–100. S3b+spin is the mini's
+      standing config as of 2026-08-31; multi-hour real-traffic trial open.
 
 ## S4 — measurement and the standing prediction
 
