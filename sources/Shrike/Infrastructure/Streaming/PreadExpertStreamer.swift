@@ -609,8 +609,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         cacheLock.lock()
         defer { cacheLock.unlock() }
 
-        for slot in 0..<slotCount {
-            reservedSlots[slot] = false
+        reservedSlots.withUnsafeMutableBufferPointer { buffer in
+            buffer.update(repeating: false)
         }
 
         let clock = useClock + 1
@@ -629,25 +629,20 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
         var assignedSlots = [Int](repeating: -1, count: experts.count)
 
+        var missCount = 0
         for index in 0..<experts.count {
             for slot in 0..<slotCount where !reservedSlots[slot] && slotState[slot] == .resident && slotExpert[slot] == experts[index] {
                 assignedSlots[index] = slot
                 reservedSlots[slot] = true
                 break
             }
+            if assignedSlots[index] == -1 { missCount &+= 1 }
         }
 
         for slot in avoidingSlots {
             reservedSlots[slot] = true
         }
 
-        let candidateMisses = Array(capacity: experts.count) { span in
-            for index in 0..<experts.count where assignedSlots[index] == -1 {
-                span.append(index)
-            }
-        }
-
-        let missCount = candidateMisses.count
         if missCount > 0 {
             guard selectVictimSlots(missCount: missCount) else { return nil }
         }
@@ -661,8 +656,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
         var misses: [Int] = []
         var adoptedPrefetches: [Int] = []
-        for (offset, index) in candidateMisses.enumerated() {
-            let slot = victimSlotsScratch[offset]
+        var victimOffset = 0
+        for index in 0..<experts.count where assignedSlots[index] == -1 {
+            let slot = victimSlotsScratch[victimOffset]
+            victimOffset += 1
             if slotState[slot] == .resident { statisticsEvictions &+= 1 }
             let previousExpert = slotExpert[slot]
             assignedSlots[index] = slot
