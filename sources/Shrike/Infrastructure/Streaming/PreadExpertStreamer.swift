@@ -76,6 +76,9 @@ public struct ExpertStreamingStatistics: Sendable, Equatable {
     public let reloads: UInt64
     public let loadBatches: UInt64
     public let totalLoadNanos: UInt64
+    /// The portion of `totalLoadNanos` spent inside the read calls
+    /// themselves; the remainder is scheduler handoff and slot bookkeeping.
+    public let fetchNanos: UInt64
     public let maximumLoadNanos: UInt64
     public let latencyHistogram: [UInt64]
     public let residentSlots: Int
@@ -105,7 +108,7 @@ public struct ExpertStreamingStatistics: Sendable, Equatable {
     public static let zero = ExpertStreamingStatistics(
         plans: 0, requestedExperts: 0, hits: 0, misses: 0,
         bytesRead: 0, readOperations: 0, evictions: 0, reloads: 0,
-        loadBatches: 0, totalLoadNanos: 0, maximumLoadNanos: 0,
+        loadBatches: 0, totalLoadNanos: 0, fetchNanos: 0, maximumLoadNanos: 0,
         latencyHistogram: [UInt64](repeating: 0, count: 17),
         residentSlots: 0, loadingSlots: 0, pinnedSlots: 0, peakLoadingSlots: 0)
 
@@ -121,6 +124,7 @@ public struct ExpertStreamingStatistics: Sendable, Equatable {
             reloads: reloads &+ other.reloads,
             loadBatches: loadBatches &+ other.loadBatches,
             totalLoadNanos: totalLoadNanos &+ other.totalLoadNanos,
+            fetchNanos: fetchNanos &+ other.fetchNanos,
             maximumLoadNanos: max(maximumLoadNanos, other.maximumLoadNanos),
             latencyHistogram: zip(latencyHistogram, other.latencyHistogram)
                 .map { $0 &+ $1 },
@@ -145,6 +149,7 @@ public struct ExpertStreamingStatistics: Sendable, Equatable {
             reloads: delta(reloads, baseline.reloads),
             loadBatches: delta(loadBatches, baseline.loadBatches),
             totalLoadNanos: delta(totalLoadNanos, baseline.totalLoadNanos),
+            fetchNanos: delta(fetchNanos, baseline.fetchNanos),
             maximumLoadNanos: maximumLoadNanos,
             latencyHistogram: zip(latencyHistogram, baseline.latencyHistogram)
                 .map { delta($0, $1) },
@@ -277,6 +282,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private var statisticsReloads: UInt64 = 0
     private var statisticsLoadBatches: UInt64 = 0
     private var statisticsTotalLoadNanos: UInt64 = 0
+    private var statisticsFetchNanos: UInt64 = 0
     private var statisticsMaximumLoadNanos: UInt64 = 0
     private var statisticsLatencyHistogram = [UInt64](repeating: 0, count: 17)
     private var statisticsPeakLoadingSlots = 0
@@ -721,14 +727,17 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
         let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         var succeeded = false
+        var fetchNanos: UInt64 = 0
         defer {
             finishPlanExecution(
                 plan,
                 succeeded: succeeded,
-                elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
+                elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started,
+                fetchNanos: fetchNanos)
         }
 
         if !plan.misses.isEmpty {
+            let fetchStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if let metalReader {
                 try executeMetalReads(plan, reader: metalReader)
             } else if let boundedReader {
@@ -738,6 +747,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                     && plan.misses.count > 1
                 try executeCachedPreads(plan, parallel: parallel)
             }
+            fetchNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - fetchStarted
             try markPlanMissesResident(plan)
         }
 
@@ -1189,6 +1199,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             reloads: statisticsReloads,
             loadBatches: statisticsLoadBatches,
             totalLoadNanos: statisticsTotalLoadNanos,
+            fetchNanos: statisticsFetchNanos,
             maximumLoadNanos: statisticsMaximumLoadNanos,
             latencyHistogram: statisticsLatencyHistogram,
             residentSlots: slotState.count(where: { $0 == .resident }),
@@ -1248,13 +1259,15 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     private func finishPlanExecution(_ plan: ExpertCachePlan,
                                      succeeded: Bool,
-                                     elapsedNanos: UInt64) {
+                                     elapsedNanos: UInt64,
+                                     fetchNanos: UInt64 = 0) {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         if succeeded {
             recordSuccessfulLoadsUnlocked(
                 experts: plan.misses.map { plan.experts[$0] },
-                elapsedNanos: elapsedNanos)
+                elapsedNanos: elapsedNanos,
+                fetchNanos: fetchNanos)
             return
         }
         resetLoadingMissesUnlocked(plan)
@@ -1342,12 +1355,14 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             generation: generation)
     }
 
-    private func recordSuccessfulLoadsUnlocked(experts: [Int], elapsedNanos: UInt64) {
+    private func recordSuccessfulLoadsUnlocked(experts: [Int], elapsedNanos: UInt64,
+                                               fetchNanos: UInt64 = 0) {
         guard !experts.isEmpty else { return }
         statisticsBytesRead &+= UInt64(experts.count) * layout.expertStride
         statisticsReadOperations &+= UInt64(experts.count)
         statisticsLoadBatches &+= 1
         statisticsTotalLoadNanos &+= elapsedNanos
+        statisticsFetchNanos &+= fetchNanos
         statisticsMaximumLoadNanos = max(statisticsMaximumLoadNanos, elapsedNanos)
         let bucket = Self.latencyBucketIndex(nanos: elapsedNanos)
         statisticsLatencyHistogram[bucket] &+= 1

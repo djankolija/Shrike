@@ -1214,6 +1214,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalBodyNanos: UInt64 = 0
     public private(set) var totalMissIoNanos: UInt64 = 0
     public private(set) var totalExposedIoNanos: UInt64 = 0
+    /// I/O-event signal to fixup-CB GPU execution start — the wake latency
+    /// the GPU pays on top of the read itself (both clocks are mach-based).
+    public private(set) var totalFixupWakeNanos: UInt64 = 0
     public private(set) var totalHitFixupLayers: UInt64 = 0
     public private(set) var totalRouterReadbackNanos: UInt64 = 0
     public private(set) var totalCachePlanNanos: UInt64 = 0
@@ -4989,6 +4992,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             totalIOQueueNanos &+= operation.storage.submissionToStartNanos
             totalIoNanos &+= operation.storage.loadNanos
             totalMissIoNanos &+= operation.storage.loadNanos
+            let gpuStartNanos = UInt64(max(0, pending.cb.gpuStartTime) * 1_000_000_000)
+            let ioCompleted = operation.storage.completedNanos
+            if gpuStartNanos > ioCompleted, ioCompleted > 0 {
+                totalFixupWakeNanos &+= gpuStartNanos - ioCompleted
+            }
             if let latest = pending.overlapCompletionClock?.latest(
                 expected: pending.expectedOverlapCompletions) {
                 let completed = operation.storage.completedNanos

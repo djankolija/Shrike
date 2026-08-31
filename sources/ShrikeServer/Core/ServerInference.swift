@@ -435,6 +435,7 @@ private struct RunnerCounterSnapshot {
     let body: UInt64
     let missIo: UInt64
     let exposedIo: UInt64
+    let fixupWake: UInt64
     let hitFixupLayers: UInt64
     let routerReadback: UInt64
     let cachePlan: UInt64
@@ -1063,6 +1064,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             body: runner.totalBodyNanos,
             missIo: runner.totalMissIoNanos,
             exposedIo: runner.totalExposedIoNanos,
+            fixupWake: runner.totalFixupWakeNanos,
             hitFixupLayers: runner.totalHitFixupLayers,
             routerReadback: runner.totalRouterReadbackNanos,
             cachePlan: runner.totalCachePlanNanos,
@@ -1926,6 +1928,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "expert_load_p50_ms=%.3f expert_load_p95_ms=%.3f "
                 + "expert_load_p99_ms=%.3f io_hidden_pct=%.2f hit_fixup_layers=%llu "
                 + "router_readback_ms=%.4f cache_plan_ms=%.4f io_queue_ms=%.4f "
+                + "io_load_ms=%.4f io_fetch_ms=%.4f io_fixup_wake_ms=%.4f "
                 + "io_completion_to_fixup_ms=%.4f io_host_waits=%llu "
                 + "io_host_waits_avoided=%llu gpu_classified_hits=%llu "
                 + "gpu_classified_misses=%llu gpu_all_hit_layers=%llu "
@@ -1952,6 +1955,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             ms(runner.totalRouterReadbackNanos, snapshot.routerReadback),
             ms(runner.totalCachePlanNanos, snapshot.cachePlan),
             ms(runner.totalIOQueueNanos, snapshot.ioQueue),
+            Double(expert.totalLoadNanos) / Double(tokens) / 1_000_000,
+            Double(expert.fetchNanos) / Double(tokens) / 1_000_000,
+            ms(runner.totalFixupWakeNanos, snapshot.fixupWake),
             ms(runner.totalIOCompletionToFixupSubmitNanos, snapshot.ioCompletionToFixup),
             runner.totalExpertIOHostWaits - snapshot.ioHostWaits,
             runner.totalExpertIOHostWaitsAvoided - snapshot.ioHostWaitsAvoided,
