@@ -2030,11 +2030,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let layer: Int
         let attnCB: MTLCommandBuffer
         let softmaxCB: MTLCommandBuffer?
-        let tailCB: MTLCommandBuffer
+        /// nil when the tail stage is folded into `attnCB` (one CB per layer;
+        /// only the gpt-oss and plain paths keep the split, their o_proj must
+        /// run after the separately committed softmax CB).
+        let tailCB: MTLCommandBuffer?
         let sharedCB: MTLCommandBuffer
         let specCB: MTLCommandBuffer?
         let overlapCompletionClock: CommandCompletionClock?
         let layerDoneValue: UInt64
+
+        /// The CB whose completion publishes the router output.
+        var routerCB: MTLCommandBuffer { tailCB ?? attnCB }
     }
 
     private static func makeLayerDoneMachinery(
@@ -2052,7 +2058,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private func commitHeldLayerCommands(_ cmds: HeldLayerCommands) {
         cmds.attnCB.commit()
         cmds.softmaxCB?.commit()
-        cmds.tailCB.commit()
+        cmds.tailCB?.commit()
         // Queued before the tailCB wait, not after: the GPU runs the shared
         // MLP (and in speculative mode the whole routed layer) while the
         // CPU blocks on tailCB for the routing.
@@ -2081,9 +2087,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ? try model.routedExpertResidency(layer: L) : nil
         let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
             (onesPerExpertScale!, 0)
-        guard let attnCB = ctx.queue.makeCommandBuffer(),
-              let tailCB = ctx.queue.makeCommandBuffer() else {
+        guard let attnCB = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
+        }
+        // GDN, MLA, and gated attention encode everything through o_proj on
+        // attnCB, so the tail stage folds into the same CB — one submission
+        // and one boundary per layer. gpt-oss and the plain path keep a
+        // separate tail CB: their o_proj must run after the softmax CB,
+        // which commits between the two.
+        var tailCB: MTLCommandBuffer?
+        if !(isLinear || cfg.layerIsMLA(L) || cfg.attnOutputGate) {
+            guard let split = ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            tailCB = split
         }
         var layerDoneValue: UInt64 = 0
         if let layerDoneEvent, decodeExpertExecution == .speculative {
@@ -2101,12 +2118,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         out: normed,
                         d: D, eps: eps)
         var softmaxCB: MTLCommandBuffer?
-        try encodeDecodeAttention(attnCB: attnCB, tailCB: tailCB,
+        try encodeDecodeAttention(attnCB: attnCB, tailCB: tailCB ?? attnCB,
                                   softmaxCB: &softmaxCB,
                                   layer: L, position: position,
                                   isLinear: isLinear, rmsEps: eps)
         try encodeDecodeTailStage(
-            tailCB: tailCB, layer: L, routerW: routerW,
+            tailCB: tailCB ?? attnCB, layer: L, routerW: routerW,
             nextRouterW: nextRouterW, postAttn: postAttn,
             perExpertScale: perExpertScale,
             residencyTable: residencyResources?.table,
@@ -2203,12 +2220,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let isDense = L < cfg.numLeadingDenseLayers
 
             let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            // Attention+router split into measured sub-command-buffers
-            // (SHRIKE_KERNEL_STATS): attnCB = input norm + QKV + epilogue
-            // (or the linear/gated attention), softmaxCB = the softmax
-            // attention pass on full layers, tailCB = O-proj + residual +
-            // post-norm + router. Same queue, same order, one wait on the
-            // last CB; only the router readback forces the barrier.
+            // GDN/MLA/gated layers run the whole stage — input norm through
+            // router — in one CB (role "attn_layer"). gpt-oss and plain
+            // layers keep the attn/softmax/tail CB split, whose commit order
+            // sequences o_proj after the softmax. Same queue either way, one
+            // wait on the last CB; only the router readback forces the
+            // barrier.
             if isDense {
                 let inNorm = try model.inputNorm(layer: L)
                 let postAttn = try model.postAttnNorm(layer: L)
@@ -2297,12 +2314,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
             }
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            try waitForRouterCompletion(cmds.tailCB)
-            recordKernelGPU(role: "attn_norm_qkv", cmds.attnCB)
-            if let attentionCB = cmds.softmaxCB {
-                recordKernelGPU(role: "attn_softmax", attentionCB)
+            try waitForRouterCompletion(cmds.routerCB)
+            if let tailCB = cmds.tailCB {
+                recordKernelGPU(role: "attn_norm_qkv", cmds.attnCB)
+                if let attentionCB = cmds.softmaxCB {
+                    recordKernelGPU(role: "attn_softmax", attentionCB)
+                }
+                recordKernelGPU(role: "attn_tail_router", tailCB)
+            } else {
+                recordKernelGPU(role: "attn_layer", cmds.attnCB)
             }
-            recordKernelGPU(role: "attn_tail_router", cmds.tailCB)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
             totalWaitNanos &+= waitNanos
             var prevRoutedUs: Double = 0
@@ -2328,7 +2349,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // per generation, so it never aliases concurrent decode work.
             try await encodeDecodeRoutedMoE(
                 layer: L, position: position,
-                attnCB: cmds.attnCB, tailCB: cmds.tailCB,
+                attnCB: cmds.attnCB, tailCB: cmds.routerCB,
                 sharedCB: cmds.sharedCB,
                 specCB: cmds.specCB,
                 overlapCompletionClock: cmds.overlapCompletionClock,
