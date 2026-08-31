@@ -590,9 +590,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      supportsMLA: cfg.hasMLALayers),
             kvQuantizer: runtimeConfiguration.kvCachePrecision.isQuantized
                 ? try KVCacheQuantizer(context: context) : nil,
-            shared: try SharedExpertRuntime(context: context,
-                                            weightBits: model.sharedExpertWeightBits,
-                                            siluActivation: silu),
+            shared: try SharedExpertRuntime(
+                context: context,
+                weightBits: model.sharedExpertWeightBits,
+                siluActivation: silu,
+                decodeShapes: cfg.hasSharedExpert
+                    ? [(m: cfg.intermediateSize, n: cfg.hiddenSize),
+                       (m: cfg.hiddenSize, n: cfg.intermediateSize)]
+                    : []),
             moe: try MoE(context: context,
                          siluActivation: silu,
                          routedWeightBits: model.routedExpertWeightBits,
@@ -5311,6 +5316,44 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             return
         }
         let sharedProj = sharedExpertProjections[L]
+        // Serial encoder on purpose: a .concurrent encoder here — however
+        // barriered — segfaults the AGX driver when a later encoder on this
+        // CB encodes an indirect dispatch (macOS 26 / M4 HAL200,
+        // insertIndirectTGOptKernel null deref).
+        if let fused = shared.int4FusedDecode {
+            guard let sharedEncoder = cb.makeComputeCommandEncoder() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            defer { sharedEncoder.endEncoding() }
+            try fused.encodeGateUp(encoder: sharedEncoder,
+                                   x: routedX,
+                                   gate: sharedProj.gate,
+                                   up: sharedProj.up,
+                                   scratchGate: denseScratchGate,
+                                   scratchUp: denseScratchUp)
+            if cfg.sharedExpertGated {
+                // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX)
+                let gateView = sharedProj.scalarGate!
+                int8ScalarGate!.encode(encoder: sharedEncoder,
+                                       weights: gateView.buffer,
+                                       weightsOffset: Int(gateView.offset),
+                                       scales: gateView.buffer,
+                                       scalesOffset: Int(gateView.scaleOffset),
+                                       biases: gateView.buffer,
+                                       biasesOffset: Int(gateView.biasOffset),
+                                       x: routedX,
+                                       y: sharedScalarGateBuf!,
+                                       m: 1, n: D)
+            }
+            try fused.encodeFusedDown(encoder: sharedEncoder,
+                                      down: sharedProj.down,
+                                      gateIn: denseScratchGate,
+                                      upIn: denseScratchUp,
+                                      y: h1Buf,
+                                      scalarGate: cfg.sharedExpertGated
+                                          ? sharedScalarGateBuf! : nil)
+            return
+        }
         // B1c stage 1: one encoder for the whole shared-expert chain — the
         // per-kernel encoders cost more span than the GEMVs they wrapped.
         guard let sharedEncoder = cb.makeComputeCommandEncoder() else {

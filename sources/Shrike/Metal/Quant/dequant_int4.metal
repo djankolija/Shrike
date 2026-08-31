@@ -198,6 +198,102 @@ kernel void dequant_int4_gemv_simd(
                                 rows_per_tg, tg_idx, sg_idx, lane);
 }
 
+// Fused shared-expert tail (v10 T1): act = silu(gate_in)·up_in is computed
+// cooperatively into threadgroup memory once per threadgroup, then each SIMD
+// runs the down-projection row loop, then lane 0 applies the optional sigmoid
+// scalar gate to the half-rounded row output (FC 27). Every stage rounds
+// through half at the same points as the split silu_mul_fp16 → gemv →
+// sigmoid_scalar_mul_fp16 chain, and the row loop must stay bit-identical to
+// dequant_int4_gemv_simd_body's summation order — outputs are digest-checked
+// against the split chain.
+constant bool FC_INT4_SHARED_GATED [[function_constant(27)]];
+
+kernel void dequant_int4_shared_down_fused(
+    device const uint8_t* W           [[buffer(0)]],
+    device const bfloat*  scales      [[buffer(1)]],
+    device const bfloat*  biases      [[buffer(2)]],
+    device const half*    gate_in     [[buffer(3)]],
+    device const half*    up_in       [[buffer(4)]],
+    device half*          y           [[buffer(5)]],
+    constant uint&        M           [[buffer(6)]],
+    constant uint&        N           [[buffer(7)]],
+    device const half*    scalar_gate [[buffer(8), function_constant(FC_INT4_SHARED_GATED)]],
+    threadgroup half*     act         [[threadgroup(0)]],
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane   [[thread_index_in_simdgroup]],
+    uint tg_tid [[thread_index_in_threadgroup]]
+) {
+    const uint MM = int4_fc_m(M);
+    const uint NN = int4_fc_n(N);
+    constexpr uint rows_per_tg = 8;
+    constexpr uint tg_threads = 32 * rows_per_tg;
+    for (uint i = tg_tid; i < NN; i += tg_threads) {
+        const float g = float(gate_in[i]);
+        const float u = float(up_in[i]);
+        act[i] = half((g / (1.0f + exp(-g))) * u);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint row = tg_idx * rows_per_tg + sg_idx;
+    if (row >= MM) return;
+    const uint n_groups  = NN / kGroupSize;
+    const uint row_bytes = NN / 2;
+    device const uint8_t* W_row = W      + uint(row) * row_bytes;
+    device const bfloat*  s_row = scales + uint(row) * n_groups;
+    device const bfloat*  b_row = biases + uint(row) * n_groups;
+
+    float acc = 0.0f;
+    const uint full_blocks = n_groups / 4;
+    for (uint blk = 0; blk < full_blocks; ++blk) {
+        const uint byte_base = blk * 128u + lane * 4u;
+        device const ushort* wp = (device const ushort*)(W_row + byte_base);
+        const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
+        const uint g  = blk * 4u + (lane >> 3);
+        const float s = float(s_row[g]);
+        const float b = float(b_row[g]);
+        const uint elem = byte_base * 2u;
+        const half4 xa = *((threadgroup const half4*)(act + elem));
+        const half4 xb = *((threadgroup const half4*)(act + elem + 4u));
+        const uint b0 =  w4        & 0xFFu;
+        const uint b1 = (w4 >> 8)  & 0xFFu;
+        const uint b2 = (w4 >> 16) & 0xFFu;
+        const uint b3 = (w4 >> 24) & 0xFFu;
+        const float e0 = float(xa.x), e1 = float(xa.y), e2 = float(xa.z), e3 = float(xa.w);
+        const float e4 = float(xb.x), e5 = float(xb.y), e6 = float(xb.z), e7 = float(xb.w);
+        float dot = 0.0f;
+        dot = fma(float(b0 & 0x0Fu), e0, dot); dot = fma(float(b0 >> 4), e1, dot);
+        dot = fma(float(b1 & 0x0Fu), e2, dot); dot = fma(float(b1 >> 4), e3, dot);
+        dot = fma(float(b2 & 0x0Fu), e4, dot); dot = fma(float(b2 >> 4), e5, dot);
+        dot = fma(float(b3 & 0x0Fu), e6, dot); dot = fma(float(b3 >> 4), e7, dot);
+        const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+        acc = fma(s, dot, acc);
+        acc = fma(b, sum, acc);
+    }
+    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+        const float s = float(s_row[g]);
+        const float b = float(b_row[g]);
+        const uint8_t byte = W_row[g * (kGroupSize / 2) + lane];
+        const float x0 = float(act[g * kGroupSize + lane * 2u]);
+        const float x1 = float(act[g * kGroupSize + lane * 2u + 1u]);
+        float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
+        dot = fma(float(uint(byte >> 4)), x1, dot);
+        const float sum = x0 + x1;
+        acc = fma(s, dot, acc);
+        acc = fma(b, sum, acc);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) {
+        const half yh = half(acc);
+        if (FC_INT4_SHARED_GATED) {
+            const float sg = float(scalar_gate[0]);
+            y[row] = half(float(yh) / (1.0f + exp(-sg)));
+        } else {
+            y[row] = yh;
+        }
+    }
+}
+
 // Two-row variant for native-MTP verification. A SIMD dequantizes each output
 // weight row once and accumulates both activation rows before writing [2, M].
 kernel void dequant_int4_gemv2_simd(

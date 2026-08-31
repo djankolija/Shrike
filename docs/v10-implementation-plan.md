@@ -18,12 +18,18 @@ on hope. Baseline anchor at start of Phase 3: rig 40.0 / card 57.9
       residency/GDN/MLA/MTP scratch bundles, shared projections, router
       buffers); conditional clusters stored as bundles behind computed
       forwards, so no use site moved. Baseline 21 → 20 entries.
-- [ ] **T1: shared-chain merger (C2)** — gate+up as one 1024-row GEMV,
-      tail ops folded into the down epilogue; 5 dispatches → 2 in
-      `encodeSharedExpertWork`. Bitwise-safe by construction (per-row dot
-      order unchanged); bytewise arm anyway. Expected −0.5–0.8 ms/token.
-      Ordered first: smaller blast radius than T2, validates the merger
-      workflow.
+- [x] **T1: shared-chain merger (C2)** — LANDED 132448c, deployed,
+      **wall-NEUTRAL on the twin** (rig 38.55→38.59, card 56.16→56.32,
+      moe_spec_routed 12.83→12.69 ≈1σ; digest exact everywhere; kept as a
+      simplification per the diet-1/Stage-C precedent). What shipped:
+      silu·mul + down + sigmoid fused into `dequant_int4_shared_down_fused`
+      (bitwise arms: gated/ungated/remainder), shape-specialized PSOs for
+      the chain's GEMVs. Two design amendments: the gate+up 1024-row
+      concatenation was replaced by two dispatches (no file-layout
+      assumption), and the concurrent-encoder overlap is VETOED by an AGX
+      driver segfault (see the code comment in `encodeSharedExpertWork`).
+      Law refinement: the expected −0.5–0.8 was shadow — the shared chain's
+      dispatch walls sit off the GPU-critical path on both shapes.
 - [ ] **T2: GDN mega-merge (C1)** — conv compute + qk_norm + delta in one
       kernel; tail shift stays separate. The bytewise arm against the
       three-kernel reference is the acceptance gate; if the qk_norm
