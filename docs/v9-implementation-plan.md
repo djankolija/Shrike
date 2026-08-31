@@ -104,9 +104,19 @@ Numbers cited as baselines are ornith15, n=12.
       Epochs become real only when spec CBs free-run without host validation.
 - [x] TSan suite green 2026-08-31 (1086/1086, zero reports; the event
       assumptions are pinned by `CrossQueueSharedEventTests`).
-- [ ] n=12 acceptance: digest identical. Local 2026-08-31: digest
-      `494bab3edb62` byte-identical vs hit-fixup control, ×3 + post-abort
-      (the local digest matches the mini oracle exactly). Mini n=12 pending.
+- [x] n=12 acceptance: digest identical — PASSED everywhere (local ×3 +
+      post-abort vs hit-fixup control; mini rig n=12 ×2 and fresh cards; the
+      local digest matches the mini oracle exactly, so local digest checks
+      are authoritative). Perf verdict (mini, fresh-server protocol): S3a
+      54.68 sd 0.67 → S3b 55.54 → S3b+early-all-hit-signal 55.29; fresh
+      cards 76.10/77.15/78.18 within single-run noise at identical
+      deterministic hit rates (0.8698/0.9167). Targeted gaps genuinely
+      shrank (spec→attn 3.6→2.9, hit→fixup 8.4→6.4 ms/token) but
+      cross-queue event overhead eats them: **net +0.6–0.9 ms/token
+      (~1.2–1.6%) while the host still paces per layer.** S3b is landed as
+      the foundation for free-running (which removes the per-layer host
+      beat) but NOT deployed — the mini runs baee5d6; a HEAD deploy picks
+      up the −1% until free-running (or a spin-wait host poll) pays it back.
 
 ## S4 — measurement and the standing prediction
 

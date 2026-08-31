@@ -5116,6 +5116,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 layer: L, experts: experts, prefetched: readyPrefetches)
             : nil
         totalCachePlanNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cachePlanStarted
+        // All-hit release at the earliest safe point: the spec CB is already
+        // ordered ahead of the gated successor, and this condition exactly
+        // mirrors the spec early-return below, so the classic path (which
+        // writes `hidden` later) can never reach here having signaled.
+        if let layerDoneEvent, layerDoneValue > 0,
+           decodeExpertExecution == .speculative, specCB != nil,
+           plannedFetch?.misses.isEmpty == true {
+            layerDoneEvent.signaledValue = layerDoneValue
+        }
         if !readyPrefetches.isEmpty {
             predictivePrefetch?.consume(layer: L, experts: Set(readyPrefetches.keys))
         }
@@ -5380,11 +5389,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             guard pendingRoutedCommand == nil else {
                 throw ModelError.internalInconsistency(
                     detail: "routed command-buffer pipeline not drained before queuing the next layer")
-            }
-            // All-hit: queue order already serializes the spec CB before the
-            // gated successor, so the host signal releases it immediately.
-            if let layerDoneEvent, layerDoneValue > 0 {
-                layerDoneEvent.signaledValue = layerDoneValue
             }
             pendingRoutedCommand = PendingRoutedCommand(
                 cb: specCB,
