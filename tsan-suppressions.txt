@@ -1,0 +1,15 @@
+# ThreadSanitizer suppressions for gate 5 (see CLAUDE.md).
+#
+# swift-nio's EventLoopFuture.get() bridges futures to Swift concurrency via
+# UnsafeContinuation. The resume handoff synchronizes through atomics inside
+# libswift_Concurrency, which is NOT TSan-instrumented, so TSan cannot see the
+# happens-before edge and reports the awaiting coroutine's frame write racing
+# the event-loop thread's continuation read (observed 2026-08-31 on
+# ChildChannelRegistry.closeAll and SSEOutbox.next; both call sites inspected
+# and correctly synchronized — NSLock / Mutex / structured await throughout).
+#
+# Scope caution: any race whose stack crosses this bridge is suppressed, so a
+# genuine race that reaches user state exclusively through EventLoopFuture.get()
+# would be hidden too. Races entirely within Shrike code still report.
+race:AsyncAwaitSupport.swift
+race:EventLoopFuture.get

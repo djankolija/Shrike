@@ -54,7 +54,13 @@ before calling work done. All of them constrain how code gets written here:
 3. **Markdown link check** — globs every `*.md` in the repo, so it binds on any document
    you add. Relative links must resolve.
 4. **`swift test --no-parallel`** — serial, always. Pass `--filter` through as needed.
-5. **The same suite under ThreadSanitizer.**
+5. **The same suite under ThreadSanitizer**, run as
+   `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test --no-parallel --sanitize=thread`
+   from the repo root. The suppressions file silences only the known
+   false-positive family from swift-nio's `EventLoopFuture.get()` continuation
+   bridge (the happens-before edge lives in uninstrumented
+   `libswift_Concurrency`); the file's header carries the analysis. A report
+   that does not match that shape is real — fix it, never widen the file.
 
 ## Verifying a change that touches inference
 
