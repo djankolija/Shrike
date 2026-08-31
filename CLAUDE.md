@@ -47,7 +47,7 @@ before calling work done. All of them constrain how code gets written here:
 2. **`swiftlint lint --strict --baseline .swiftlint-baseline.json`** — three rules:
    `force_cast`, `force_try`, and `function_body_length` (warn 120, error 400). A
    force cast or force try needs `// swiftlint:disable:next force_cast` (or
-   `force_try`) on the line above it, with the reason stated in a comment. The 22
+   `force_try`) on the line above it, with the reason stated in a comment. The 21
    functions already over 120 lines are recorded in the baseline; anything new fails.
    Regenerate with `swiftlint lint --write-baseline .swiftlint-baseline.json` when you
    legitimately fix one, or the gate fails on a stale entry. Decompose as you write.

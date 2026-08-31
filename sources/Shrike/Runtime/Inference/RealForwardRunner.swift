@@ -2112,23 +2112,46 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             layerDonePendingWaitValue = layerDoneValue
             layerDoneHighWater = layerDoneValue
         }
-        try rms.encodeBF16W(commandBuffer: attnCB,
-                        x: hidden,
-                        weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
-                        out: normed,
-                        d: D, eps: eps)
+        // GDN and gated layers run input norm → attention → tail on one
+        // serial encoder: on the M1 an encoder boundary costs more span than
+        // the small dispatches around it. KDA and MLA keep their CB-internal
+        // encoders, so their span cannot share one.
+        var layerEncoder: MTLComputeCommandEncoder?
+        if (isLinear && !cfg.linearAttentionPerChannelDecay)
+            || (!isLinear && !cfg.layerIsMLA(L) && cfg.attnOutputGate) {
+            guard let enc = attnCB.makeComputeCommandEncoder() else {
+                throw MetalError.commandEncoderFailed
+            }
+            layerEncoder = enc
+        }
+        if let layerEncoder {
+            rms.encodeBF16W(encoder: layerEncoder,
+                            x: hidden,
+                            weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
+                            out: normed,
+                            d: D, eps: eps)
+        } else {
+            try rms.encodeBF16W(commandBuffer: attnCB,
+                            x: hidden,
+                            weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
+                            out: normed,
+                            d: D, eps: eps)
+        }
         var softmaxCB: MTLCommandBuffer?
         try encodeDecodeAttention(attnCB: attnCB, tailCB: tailCB ?? attnCB,
                                   softmaxCB: &softmaxCB,
+                                  layerEncoder: layerEncoder,
                                   layer: L, position: position,
                                   isLinear: isLinear, rmsEps: eps)
         try encodeDecodeTailStage(
-            tailCB: tailCB ?? attnCB, layer: L, routerW: routerW,
+            tailCB: tailCB ?? attnCB, layerEncoder: layerEncoder,
+            layer: L, routerW: routerW,
             nextRouterW: nextRouterW, postAttn: postAttn,
             perExpertScale: perExpertScale,
             residencyTable: residencyResources?.table,
             speculative: residencyResources != nil ? specDispatchArguments : nil,
             d: D, eps: eps)
+        layerEncoder?.endEncoding()
         let overlapCompletionClock = runnerStatsEnabled ? CommandCompletionClock() : nil
         let sharedCB = try encodeSharedExpert(
             layer: L,
@@ -2241,6 +2264,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 var softmaxCB: MTLCommandBuffer?
                 try encodeDecodeAttention(attnCB: attnCB, tailCB: tailCB,
                                           softmaxCB: &softmaxCB,
+                                          layerEncoder: nil,
                                           layer: L, position: position,
                                           isLinear: isLinear, rmsEps: eps)
                 try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
@@ -2420,11 +2444,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Gated-DeltaNet linear attention (layer mask 2), one decode step.
     /// Reads `normed`, updates the layer's recurrent state + conv tail in
     /// place, and leaves the attention-branch output in `oOut`.
-    private func encodeLinearAttentionDecode(_ cb: MTLCommandBuffer, layer L: Int) throws {
-        if cfg.linearAttentionPerChannelDecay {
-            try encodeKDADecode(cb, layer: L)
-            return
-        }
+    private func encodeLinearAttentionDecode(encoder: MTLComputeCommandEncoder,
+                                             layer L: Int) throws {
         guard let gdn, let gdnState, let gdnQKVRaw, let gdnConvOut,
               let gdnZ, let gdnA, let gdnB, let gdnY, let gdnOut else {
             throw ModelError.internalInconsistency(
@@ -2443,10 +2464,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let gatedNormW = try model.linearNorm(layer: L)
 
         // Safe to share one encoder: a serial compute encoder guarantees each
-        // dispatch sees the previous dispatch's writes.
-        guard let encoder = cb.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
+        // dispatch sees the previous dispatch's writes. The encoder is the
+        // caller's layer encoder — Stage B runs the whole layer span on it.
         if model.attentionWeightBits == 4 {
             gdn.encodeInputProjections(encoder: encoder,
                                    x: normed,
@@ -2496,7 +2515,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     scales: outW.buffer, scalesOffset: Int(outW.scaleOffset),
                     biases: outW.buffer, biasesOffset: Int(outW.biasOffset),
                     x: gdnOut, y: oOut, m: D, n: UInt32(la.valueDim))
-        encoder.endEncoding()
     }
 
     /// Kimi MLA, one decode step: q_proj GEMV, per-head absorbed embed
@@ -2641,6 +2659,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// one serial encoder.
     private func encodeDecodeTailStage(
         tailCB: MTLCommandBuffer,
+        layerEncoder: MTLComputeCommandEncoder? = nil,
         layer L: Int,
         routerW: TensorView,
         nextRouterW: TensorView?,
@@ -2651,7 +2670,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         d D: UInt32,
         eps: Float
     ) throws {
-        guard let tailEncoder = tailCB.makeComputeCommandEncoder() else {
+        let ownsEncoder = layerEncoder == nil
+        guard let tailEncoder = layerEncoder ?? tailCB.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
         elementwise!.encodeResidualAdd(encoder: tailEncoder,
@@ -2712,7 +2732,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 numExperts: UInt32(cfg.numExperts),
                 speculative: speculative)
         }
-        tailEncoder.endEncoding()
+        if ownsEncoder { tailEncoder.endEncoding() }
     }
 
     private func encodeGatedFullQKVProjection(
@@ -2761,7 +2781,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
-    private func encodeGatedFullAttentionDecode(_ cb: MTLCommandBuffer,
+    private func encodeGatedFullAttentionDecode(encoder: MTLComputeCommandEncoder,
                                                 layer L: Int,
                                                 position: Int,
                                                 seqLen: UInt32) throws {
@@ -2790,11 +2810,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
 
         // Safe to share one encoder: a serial compute encoder guarantees each
-        // dispatch sees the previous dispatch's writes.
-        guard let encoder = cb.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
-        defer { encoder.endEncoding() }
+        // dispatch sees the previous dispatch's writes. The encoder is the
+        // caller's layer encoder — Stage B runs the whole layer span on it.
         try encodeGatedFullQKVProjection(
             encoder: encoder, layer: L, qOutput: qPackedScratch,
             kOutput: kWrite, vOutput: vWrite,
@@ -4683,22 +4700,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         attnCB: MTLCommandBuffer,
         tailCB: MTLCommandBuffer,
         softmaxCB: inout MTLCommandBuffer?,
+        layerEncoder: MTLComputeCommandEncoder?,
         layer L: Int,
         position: Int,
         isLinear: Bool,
         rmsEps eps: Float
     ) throws {
-        let D = UInt32(cfg.hiddenSize)
-        let isFull = cfg.fullAttentionLayerMask[L] == 1
-        let headDimL = isFull ? cfg.fullHeadDim : cfg.headDim
-        let numKVL   = isFull ? cfg.numFullKVHeads : cfg.numKVHeads
-        let qDim     = UInt32(cfg.numHeads * headDimL)
-        let kvDim    = UInt32(numKVL * headDimL)
-        let seqLen   = UInt32(position + 1)
-        if isLinear {
+        let seqLen = UInt32(position + 1)
+        if isLinear, cfg.linearAttentionPerChannelDecay {
+            // Kimi KDA keeps its own CB-internal encoders (the low-rank
+            // scratch is reused across its projection chains).
+            try encodeKDADecode(attnCB, layer: L)
+        } else if isLinear {
             // Gated-DeltaNet linear attention: no KV slots, no RoPE — a
             // fixed-size recurrent state updated in place.
-            try encodeLinearAttentionDecode(attnCB, layer: L)
+            guard let layerEncoder else {
+                throw ModelError.internalInconsistency(
+                    detail: "GDN decode layer \(L) without a layer encoder")
+            }
+            try encodeLinearAttentionDecode(encoder: layerEncoder, layer: L)
         } else if cfg.layerIsMLA(L) {
             // Kimi MLA: absorbed MQA over one fused [latent | k_pe] FP16
             // row per token, NoPE.
@@ -4707,7 +4727,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         } else if cfg.attnOutputGate {
             // Qwen full attention: packed [query ; gate] q_proj, real
             // v_proj, no V norm, NeoX sub-dim RoPE, sigmoid output gate.
-            try encodeGatedFullAttentionDecode(attnCB, layer: L,
+            guard let layerEncoder else {
+                throw ModelError.internalInconsistency(
+                    detail: "gated attention layer \(L) without a layer encoder")
+            }
+            try encodeGatedFullAttentionDecode(encoder: layerEncoder, layer: L,
                                                position: position,
                                                seqLen: seqLen)
         } else if cfg.hasAttentionBiases {
@@ -4717,6 +4741,36 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                             softmaxCB: &softmaxCB, layer: L,
                                             position: position, seqLen: seqLen)
         } else {
+            try encodePlainAttentionDecode(attnCB: attnCB, tailCB: tailCB,
+                                           softmaxCB: &softmaxCB, layer: L,
+                                           position: position, seqLen: seqLen,
+                                           rmsEps: eps)
+        }
+
+        // Plain pre-norm residual block: hidden += attention branch,
+        // then one post-attention norm feeds router, shared expert,
+        // and routed phase 1 (routedX doubles as moeX).
+    }
+
+    /// Plain (non-gated, unbiased) full/SWA attention, one decode step:
+    /// fused QKV + rope/norm epilogue on `attnCB`, the softmax pass on its
+    /// own CB, o_proj on `tailCB`.
+    private func encodePlainAttentionDecode(
+        attnCB: MTLCommandBuffer,
+        tailCB: MTLCommandBuffer,
+        softmaxCB: inout MTLCommandBuffer?,
+        layer L: Int,
+        position: Int,
+        seqLen: UInt32,
+        rmsEps eps: Float
+    ) throws {
+        let D = UInt32(cfg.hiddenSize)
+        let isFull = cfg.fullAttentionLayerMask[L] == 1
+        let headDimL = isFull ? cfg.fullHeadDim : cfg.headDim
+        let numKVL   = isFull ? cfg.numFullKVHeads : cfg.numKVHeads
+        let qDim     = UInt32(cfg.numHeads * headDimL)
+        let kvDim    = UInt32(numKVL * headDimL)
+        do {
             let kSlot = kv?.kSlot(layer: L, position: position) ?? (buffer: kStage, offset: 0)
             let vSlot = kv?.vSlot(layer: L, position: position) ?? (buffer: vStage, offset: 0)
             let quantizedKV = kv?.precision.isQuantized == true
@@ -4822,10 +4876,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         biases:  o.buffer, biasesOffset:  Int(o.biasOffset),
                         x: attnOut, y: oOut, m: D, n: qDim)
         }
-
-        // Plain pre-norm residual block: hidden += attention branch,
-        // then one post-attention norm feeds router, shared expert,
-        // and routed phase 1 (routedX doubles as moeX).
     }
 
     // MARK: - Decode routed-expert helpers
