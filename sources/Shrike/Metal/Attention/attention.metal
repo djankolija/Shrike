@@ -130,6 +130,58 @@ static inline uint attn_fc_kv_group_size(constant uint& kv_group_size) {
         : kv_group_size;
 }
 
+// v11 V5: the shared partial's staging loop loads 4 elements per transaction
+// where the format allows — the ledger bench priced its byte-granular loads
+// as the residual depth cost (layout, barriers, and softmax all measured
+// null). Compile-time-only gate: the generic pipeline keeps the scalar loop
+// verbatim, so the specialized-vs-generic bitwise arms compare vec4 against
+// scalar directly.
+static inline bool attn_kv_staging_vec4() {
+    return is_function_constant_defined(FC_ATTN_USE_FC) && FC_ATTN_USE_FC
+        && is_function_constant_defined(FC_ATTN_KV_BITS)
+        && (FC_ATTN_KV_BITS == 8u || FC_ATTN_KV_BITS == 16u)
+        && is_function_constant_defined(FC_ATTN_KV_GROUP_SIZE)
+        && (FC_ATTN_KV_GROUP_SIZE % 4u == 0u)
+        && is_function_constant_defined(FC_ATTN_HEAD_DIM)
+        && (FC_ATTN_HEAD_DIM % 4u == 0u);
+}
+
+// Four consecutive elements of one row, one load transaction. flat4 is
+// 4-aligned and group_size % 4 == 0, so all four share one scale/bias group;
+// the per-element dequant expression matches attn_load_kv's exactly.
+static inline void attn_stage_kv4(
+    device const uchar* cache,
+    uint physical_position,
+    uint flat4,
+    uint elements_per_row,
+    uint bits,
+    uint row_stride,
+    uint values_bytes,
+    uint group_size,
+    threadgroup float* dst
+) {
+    if (bits == 16u) {
+        device const half* fp16 = reinterpret_cast<device const half*>(cache);
+        const half4 raw = *reinterpret_cast<device const half4*>(
+            fp16 + physical_position * elements_per_row + flat4);
+        dst[0] = float(raw.x);
+        dst[1] = float(raw.y);
+        dst[2] = float(raw.z);
+        dst[3] = float(raw.w);
+        return;
+    }
+    device const uchar* row = cache + physical_position * row_stride;
+    const uint groups = (elements_per_row + group_size - 1u) / group_size;
+    device const half* scales = reinterpret_cast<device const half*>(row + values_bytes);
+    device const half* biases = scales + groups;
+    const uint group = flat4 / group_size;
+    const uchar4 raw = *reinterpret_cast<device const uchar4*>(row + flat4);
+    dst[0] = float(uint(raw.x)) * float(scales[group]) + float(biases[group]);
+    dst[1] = float(uint(raw.y)) * float(scales[group]) + float(biases[group]);
+    dst[2] = float(uint(raw.z)) * float(scales[group]) + float(biases[group]);
+    dst[3] = float(uint(raw.w)) * float(scales[group]) + float(biases[group]);
+}
+
 static inline float attn_softmax_exp(float x) {
     return fast::exp(x);
 }
@@ -514,17 +566,32 @@ void attention_decode_partial_shared(
 
     for (uint pb = p_start; pb < p_end; pb += kAttnSharedPosBlock) {
         const uint blockCount = min(uint(kAttnSharedPosBlock), p_end - pb);
-        for (uint e = lid; e < blockCount * HD; e += lsize) {
-            const uint j = e / HD;
-            const uint i = e - j * HD;
-            const uint phys_p = attn_ring_slot(pb + j);
-            const uint flat = kv_head * HD + i;
-            k_smem[e] = attn_load_kv(K, phys_p, flat, NKV * HD,
-                                      kvBits, kvStride, kvValueBytes,
-                                      kvGroupSize);
-            v_smem[e] = attn_load_kv(V, phys_p, flat, NKV * HD,
-                                      kvBits, kvStride, kvValueBytes,
-                                      kvGroupSize);
+        if (attn_kv_staging_vec4()) {
+            for (uint e4 = lid; e4 < blockCount * (HD / 4u); e4 += lsize) {
+                const uint j = e4 / (HD / 4u);
+                const uint i4 = (e4 - j * (HD / 4u)) * 4u;
+                const uint phys_p = attn_ring_slot(pb + j);
+                const uint flat4 = kv_head * HD + i4;
+                attn_stage_kv4(K, phys_p, flat4, NKV * HD,
+                               kvBits, kvStride, kvValueBytes, kvGroupSize,
+                               k_smem + j * HD + i4);
+                attn_stage_kv4(V, phys_p, flat4, NKV * HD,
+                               kvBits, kvStride, kvValueBytes, kvGroupSize,
+                               v_smem + j * HD + i4);
+            }
+        } else {
+            for (uint e = lid; e < blockCount * HD; e += lsize) {
+                const uint j = e / HD;
+                const uint i = e - j * HD;
+                const uint phys_p = attn_ring_slot(pb + j);
+                const uint flat = kv_head * HD + i;
+                k_smem[e] = attn_load_kv(K, phys_p, flat, NKV * HD,
+                                          kvBits, kvStride, kvValueBytes,
+                                          kvGroupSize);
+                v_smem[e] = attn_load_kv(V, phys_p, flat, NKV * HD,
+                                          kvBits, kvStride, kvValueBytes,
+                                          kvGroupSize);
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
