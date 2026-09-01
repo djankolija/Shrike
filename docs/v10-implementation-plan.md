@@ -102,6 +102,15 @@ Each is "run once, record the verdict, close either way"; definitions in
       rig). First probe: stats-off A/B (RUNNER/KERNEL_STATS may tax the
       observed); then the per-token emit/detokenize/async-hop loop.
       Compare on WALL, never wait_ms.
+      **FIRST PROBE RAN 2026-09-01: stats exonerated** — same-night
+      fresh-server twins, wall 9.367 sd 0.141 (stats on) vs 9.292
+      sd 0.122 (off), Δ 0.44 ms/token ≈ noise, digest exact both.
+      Same arms re-bound the prize: with the prompt cache warm,
+      wall − body − head ≈ **~10 ms/token of between-token host time
+      on the rig** (54.8 wall vs 39.9 body + ~4.9 head). Narrowed
+      suspects: host greedy/sampling over the 248,320 vocab (the fused
+      greedy head the server never uses — head_fused_ms=0.000 for all
+      server traffic), detokenize/emit, per-token async hops.
 - [ ] **Q2: context-depth tax — now sized as a genuine anomaly
       (2026-09-01).** Roofline for depth growth: only the 10 gated
       layers grow with context (30 GDN layers are constant-state);
@@ -133,11 +142,18 @@ quant/hardware — so measure it. Everything here alters sampled output:
 per-experiment sign-off stands, and no default flip without a quality-
 battery verdict.
 
-- [ ] **E0: router rank-mass instrumentation** — log mean routing-weight
-      mass per rank (1..8) in runner stats (read-only, digest-neutral).
-      Gates E1: if ranks 7–8 carry a few % of mass, dropping is
-      plausible; if far more, stop here and record that.
-- [ ] **E1: drop-bottom-miss experiment** — env-gated: on a miss whose
+- [x] **E0: router rank-mass instrumentation** — LANDED 04ea4ad,
+      deployed 2026-09-01 (digest exact, wait 38.54 ≡ pre-E0 38.65 —
+      free). **Measured decode rank mass: rig
+      0.183/0.146/0.130/0.119/0.112/0.107/0.103/0.100 (deterministic
+      to 4 decimals across requests); fresh card turn-4 (1900 ctx)
+      0.224/0.166/0.136/0.117/0.103/0.092/0.084/0.078. GATE VERDICT:
+      NEGATIVE for E1 as premised — ranks 7–8 carry 8–10 % each
+      (16 % together on real shape), not the hypothesized 2–3 %.**
+      This router spreads mass unusually evenly (rank 1 only 18–22 %).
+- [ ] **E1: drop-bottom-miss experiment — GATED NEGATIVE by E0's
+      measurement (see above); do not build without Davor explicitly
+      overriding the gate.** Original design: env-gated: on a miss whose
       normalized routing weight is below a threshold, drop the expert
       and renormalize over the executed set. Reproducible under the
       fresh-server rig protocol (deterministic cache trajectory), but in
