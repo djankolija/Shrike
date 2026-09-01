@@ -111,6 +111,26 @@ Each is "run once, record the verdict, close either way"; definitions in
       suspects: host greedy/sampling over the 248,320 vocab (the fused
       greedy head the server never uses — head_fused_ms=0.000 for all
       server traffic), detokenize/emit, per-token async hops.
+      **LOOP EXONERATED, MECHANISM FOUND (loop timers b0f775b,
+      deployed): measured loop_sample 0.43 / loop_detok 0.002 /
+      loop_progress 0.001 / loop_produce 45.18 (= body 39.75 + head
+      4.85 + 0.58 async entry) — the token loop accounts for 45.6 of
+      54.7 ms/token. The ~9 ms/token is PER-REQUEST work outside the
+      loop: the v6 dialect-normalized-cache settle. Post-completion KV
+      normalization (KVRewrite settle/dropEmission) re-prefills the
+      conversation when no prefix snapshot exists (log: settle_reset
+      reason=no_prefix_snapshot), and the NEXT request joins the
+      pending rewrite (arbitrate decision=join). Measured: warm card
+      with a 7-token suffix prefill took 67 s wall (~44 s = absorbed
+      join of the prior settle); rig ~1 s/request. Later settles of
+      the same prefix restore snapshots cheaply (settle_restore).
+      FIX CANDIDATES — design question for Davor, spec is
+      [v6-dialect-normalized-cache.md](v6-dialect-normalized-cache.md):
+      (a) capture the boundary snapshot at decode START (≈ one ~85 MB
+      state copy/request) so first-settle restores instead of
+      resetting; (b) decouple the join so the next request does not
+      stall behind normalization. Not touched overnight — spec'd,
+      correctness-adjacent (dialect re-render strips reasoning).**
 - [ ] **Q2: context-depth tax — now sized as a genuine anomaly
       (2026-09-01).** Roofline for depth growth: only the 10 gated
       layers grow with context (30 GDN layers are constant-state);
