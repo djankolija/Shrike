@@ -161,6 +161,23 @@ Each is "run once, record the verdict, close either way"; definitions in
       resetting; (b) decouple the join so the next request does not
       stall behind normalization. Not touched overnight — spec'd,
       correctness-adjacent (dialect re-render strips reasoning).**
+      **ROOT CAUSE PINNED 2026-09-01 morning (kv_tail diagnostic
+      3bff0d4, ids decoded against the tokenizer): the live-vs-settled
+      divergence on ornith/thinking-off is the EMPTY THINK BLOCK —
+      the generation prompt prefills `<think>\\n\\n</think>\\n\\n`
+      (ids 248068,271,248069,271; that block IS the template's
+      thinking-suppression mechanism), and the settled history render
+      strips it. Divergence sits at the START of the answer region,
+      so every later position shifts and the re-prefill of that
+      region is genuinely required — v6 is behaving as designed.
+      Cost structure: steady state = restore prior snapshot + rebuild
+      the new turn only (O(answer), a few s, background); the cliff
+      is FIRST-settle on a server with no snapshot (full rebuild,
+      44 s at 1900 ctx) and any join landing before a settle
+      finishes. The boundary-snapshot amendment therefore targets
+      first-settle; a dialect-level alternative (render thinking-off
+      without the prefilled block) would zero the whole cost but
+      changes what the model sees at generation time — Davor's call.**
 - [ ] **Q2: context-depth tax — now sized as a genuine anomaly
       (2026-09-01).** Roofline for depth growth: only the 10 gated
       layers grow with context (30 GDN layers are constant-state);
@@ -198,6 +215,18 @@ Each is "run once, record the verdict, close either way"; definitions in
       fresh server whose FIRST traffic is card-shaped runs card hitD
       0.94–0.97 (vs 0.82–0.94 after rig warmup) — cache trajectories
       are workload-seeded.**
+      **CHUNK-COUNT PROBE NULL (SHRIKE_ATTN_FULL_CHUNKS knob 6e783ea,
+      A/B 16 vs 64 chunks with full ladders, Davor's digest sign-off):
+      per-token attn_layer_kv identical-to-slightly-worse at every
+      depth (warm t4 20.10 vs 20.63; slope unchanged; rig digest
+      incidentally byte-identical — argmax robust to the combine-order
+      shift on this prompt). 4× sequence parallelism bought ZERO →
+      the geometry is acquitted and the INNER LOOP convicted: the
+      per-position work inside the split-KV partial kernel (~0.4 µs/
+      position/layer — dequant/barrier/softmax-chain) is the redesign
+      target. Knob KEPT deliberately as the tuning surface for that
+      redesign (delete at settle if unused — deviation from the T3
+      delete-null-knobs precedent, stated reason).**
 
 ## Quality-trading experiments (lane opened by Davor, 2026-09-01)
 
