@@ -23,6 +23,7 @@ public struct ServerArguments: Equatable, Sendable {
     public let ropeScalingMode: RuntimeRoPEScalingMode
     public let thinkingMode: ModelThinkingMode
     public let reasoningEffort: ReasoningEffort?
+    public let reasoningRetention: ReasoningRetention?
     public let expertCacheSlots: Int?
     /// Bytes the routed-expert cache may use. Slots are derived from it and the
     /// model's own expert stride, so this is the knob and the slot count is the
@@ -103,6 +104,12 @@ public struct ServerArguments: Equatable, Sendable {
                              Harmony deliberation level: low, medium or high
                              (default medium, or SHRIKE_REASONING_EFFORT;
                              --thinking off on a Harmony model implies low).
+      --reasoning-retention <as-generated|stripped>
+                             History-turn render form (default as-generated,
+                             or SHRIKE_REASONING_RETENTION). as-generated
+                             renders turns as the model produced them (no
+                             settle rewrites); stripped keeps the v6
+                             canonical re-render. Harmony always strips.
       --expert-cache-slots <count>
                              Routed-expert cache slots per layer: 8, 16, 24,
                              32, 64, 96, or 128 (default 64). Environment
@@ -157,6 +164,12 @@ public struct ServerArguments: Equatable, Sendable {
                 "SHRIKE_REASONING_EFFORT must be low, medium or high")
         }
         var reasoningEffort = ReasoningEffort.resolved(environment: environment)
+        if let raw = environment["SHRIKE_REASONING_RETENTION"],
+           ReasoningRetention(rawValue: raw.lowercased()) == nil {
+            throw ServerArgumentError.invalid(
+                "SHRIKE_REASONING_RETENTION must be as-generated or stripped")
+        }
+        var reasoningRetention = ReasoningRetention.resolved(environment: environment)
         var expertCacheSlots: Int?
         var expertCacheBudgetBytes: Int?
         var lazyLoad = false
@@ -283,6 +296,12 @@ public struct ServerArguments: Equatable, Sendable {
                         "--reasoning-effort must be low, medium or high")
                 }
                 reasoningEffort = parsed
+            case "--reasoning-retention":
+                guard let parsed = ReasoningRetention(rawValue: value.lowercased()) else {
+                    throw ServerArgumentError.invalid(
+                        "--reasoning-retention must be as-generated or stripped")
+                }
+                reasoningRetention = parsed
             case "--expert-cache-slots":
                 guard let parsed = Int(value),
                       RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) else {
@@ -356,6 +375,7 @@ public struct ServerArguments: Equatable, Sendable {
                                ropeScalingMode: ropeScalingMode,
                                thinkingMode: thinkingMode,
                                reasoningEffort: reasoningEffort,
+                               reasoningRetention: reasoningRetention,
                                expertCacheSlots: expertCacheSlots,
                                expertCacheBudgetBytes: expertCacheBudgetBytes,
                                lazyLoad: lazyLoad,
@@ -414,6 +434,7 @@ public struct ServerArguments: Equatable, Sendable {
                                ropeScalingMode: ropeScalingMode,
                                thinkingMode: thinkingMode,
                                reasoningEffort: reasoningEffort,
+                               reasoningRetention: reasoningRetention,
                                expertCacheSlots: expertCacheSlots,
                                expertCacheBudgetBytes: expertCacheBudgetBytes,
                                lazyLoad: lazyLoad,

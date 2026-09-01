@@ -584,6 +584,77 @@ struct ChatMLTemplateTests {
                 tools: [])
         }
     }
+
+    // MARK: - v6.1 reasoning retention
+
+    @Test("As-generated history turns carry the empty think block")
+    func asGeneratedHistoryCarriesEmptyBlock() throws {
+        let messages = [
+            Message(role: .user, content: "Hi"),
+            Message(role: .assistant, content: "Hello"),
+            Message(role: .user, content: "More"),
+        ]
+        let retained = try tok.applyChatTemplate(messages, reasoningRetention: .asGenerated)
+        #expect(retained == "<|im_start|>user\nHi<|im_end|>\n"
+            + "<|im_start|>assistant\n<think>\n\n</think>\n\nHello<|im_end|>\n"
+            + "<|im_start|>user\nMore<|im_end|>\n"
+            + "<|im_start|>assistant\n<think>\n\n</think>\n\n")
+        let stripped = try tok.applyChatTemplate(messages)
+        #expect(stripped == "<|im_start|>user\nHi<|im_end|>\n"
+            + "<|im_start|>assistant\nHello<|im_end|>\n"
+            + "<|im_start|>user\nMore<|im_end|>\n"
+            + "<|im_start|>assistant\n<think>\n\n</think>\n\n")
+    }
+
+    @Test("As-generated does not double-compose an already blocked turn")
+    func asGeneratedIsIdempotent() throws {
+        let messages = [
+            Message(role: .user, content: "Hi"),
+            Message(role: .assistant, content: "<think>\n\n</think>\n\nHello"),
+        ]
+        let once = try tok.applyChatTemplate(messages, reasoningRetention: .asGenerated)
+        #expect(!once.contains("<think>\n\n</think>\n\n<think>"))
+    }
+
+    @Test("As-generated renders echoed thinking verbatim and clears the field")
+    func asGeneratedRendersEchoedThinking() throws {
+        let messages = [
+            Message(role: .user, content: "Hi"),
+            Message(role: .assistant, content: "Hello",
+                    thinking: "let me think"),
+        ]
+        let retained = try tok.applyChatTemplate(messages, reasoningRetention: .asGenerated)
+        #expect(retained.contains(
+            "<|im_start|>assistant\n<think>\nlet me think\n</think>\n\nHello<|im_end|>\n"))
+    }
+
+    @Test("As-generated with thinking on and no echo leaves the turn alone")
+    func asGeneratedThinkingOnNoEcho() async throws {
+        let thinking = try await GFTokenizer.load(
+            from: Self.fixtureFolder(), thinkingMode: .on)
+        let messages = [
+            Message(role: .user, content: "Hi"),
+            Message(role: .assistant, content: "Hello"),
+            Message(role: .user, content: "More"),
+        ]
+        let retained = try thinking.applyChatTemplate(messages, reasoningRetention: .asGenerated)
+        let stripped = try thinking.applyChatTemplate(messages)
+        #expect(retained == stripped)
+    }
+
+    @Test("As-generated settled live region extends the KV form")
+    func asGeneratedSettledLiveRegion() throws {
+        let messages = [
+            Message(role: .user, content: "Hi"),
+            Message(role: .assistant, content: "Hello"),
+        ]
+        let live = try tok.settledLiveRegionTokens(
+            messages: messages, tools: [], reasoningRetention: .asGenerated)
+        let expected = tok.encode(
+            "<|im_start|>assistant\n<think>\n\n</think>\n\nHello<|im_end|>\n",
+            addBOS: false)
+        #expect(live == expected)
+    }
 }
 
 /// The seam the ChatML tools render path reads its `arguments` mapping from.
@@ -648,4 +719,5 @@ struct VerbatimJinjaArgumentsTests {
             #expect((try? JSONValue.verbatimJinjaObject(text)) == nil, "\(text)")
         }
     }
+
 }

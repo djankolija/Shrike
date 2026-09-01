@@ -71,6 +71,24 @@ public enum ReasoningEffort: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// v6.1: whether history assistant turns render as the model generated them
+/// (`asGenerated`, the default — no settle rewrites for models that tolerate
+/// their own thinking-shape) or in the template's canonical stripped form
+/// (`stripped` — the v6 compensation layer for models trained not to see
+/// prior reasoning). Harmony forces `stripped` structurally regardless.
+public enum ReasoningRetention: String, Codable, CaseIterable, Sendable {
+    case asGenerated = "as-generated"
+    case stripped
+
+    public static func resolved(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> ReasoningRetention? {
+        environment["SHRIKE_REASONING_RETENTION"].flatMap {
+            ReasoningRetention(rawValue: $0.lowercased())
+        }
+    }
+}
+
 /// Tokenizer wrapper for the compatible Qwen3.5-MoE ChatML model family.
 ///
 /// Loads tokenizer sidecars in a completed `.gturbo/tokenizer/` directory.
@@ -622,6 +640,38 @@ public struct GFTokenizer: @unchecked Sendable {
         }
     }
 
+
+    /// v6.1 as-generated retention: ChatML history assistant turns render as
+    /// the model produced them — thinking block ahead of content — so the
+    /// settled render extends the KV instead of rewriting it. Idempotent
+    /// (composed content is detected by its block prefix); Harmony strips
+    /// structurally and Kimi has no thinking channel, so both pass through.
+    static func asGeneratedMessages(_ messages: [Message],
+                                    retention: ReasoningRetention,
+                                    thinkingMode: ModelThinkingMode,
+                                    dialect: ChatDialect) -> [Message] {
+        guard retention == .asGenerated, dialect == .chatml else { return messages }
+        return messages.map { message in
+            guard message.role == .assistant else { return message }
+            let content = message.content ?? ""
+            guard !content.hasPrefix("<think>") else { return message }
+            let block: String
+            if let thinking = message.thinking, !thinking.isEmpty {
+                block = "<think>\n" + thinking + "\n</think>\n\n"
+            } else if thinkingMode == .off {
+                block = "<think>\n\n</think>\n\n"
+            } else {
+                return message
+            }
+            return Message(role: .assistant,
+                           content: block + content,
+                           toolCalls: message.toolCalls,
+                           toolCallID: message.toolCallID,
+                           name: message.name,
+                           thinking: nil)
+        }
+    }
+
     /// Text-only, no-tool rendering of the pinned checkpoint's bundled
     /// `chat_template.jinja`, with thinking disabled. Keeping this narrow makes
     /// unsupported tool/media behavior explicit instead of approximating it.
@@ -708,8 +758,11 @@ public struct GFTokenizer: @unchecked Sendable {
 
     public func applyChatTemplate(
         _ messages: [Message],
-        reasoningEffort: ReasoningEffort = .medium
+        reasoningEffort: ReasoningEffort = .medium,
+        reasoningRetention: ReasoningRetention = .stripped
     ) throws -> String {
+        let messages = Self.asGeneratedMessages(messages, retention: reasoningRetention,
+                                                thinkingMode: thinkingMode, dialect: dialect)
         switch dialect {
         case .chatml: return try chatMLChatTemplate(messages)
         case .harmony:
@@ -1141,7 +1194,10 @@ public struct GFTokenizer: @unchecked Sendable {
 
     public func encodeToolChat(messages: [Message],
                                tools: [FunctionDefinition],
-                               reasoningEffort: ReasoningEffort = .medium) throws -> [Int32] {
+                               reasoningEffort: ReasoningEffort = .medium,
+                               reasoningRetention: ReasoningRetention = .stripped) throws -> [Int32] {
+        let messages = Self.asGeneratedMessages(messages, retention: reasoningRetention,
+                                                thinkingMode: thinkingMode, dialect: dialect)
         if dialect == .harmony {
             return encode(try harmonyChatTemplate(messages, tools: tools,
                                                   reasoningEffort: reasoningEffort),
@@ -1236,9 +1292,11 @@ public struct GFTokenizer: @unchecked Sendable {
     /// a token prefix of the full render of the same `messages` and `tools`.
     public func settledBoundaryTokenCount(messages: [Message],
                                           tools: [FunctionDefinition],
-                                          reasoningEffort: ReasoningEffort = .medium) throws -> Int {
+                                          reasoningEffort: ReasoningEffort = .medium,
+                                          reasoningRetention: ReasoningRetention = .stripped) throws -> Int {
         try settledBoundaryTokens(messages: messages, tools: tools,
-                                  reasoningEffort: reasoningEffort).count
+                                  reasoningEffort: reasoningEffort,
+                                  reasoningRetention: reasoningRetention).count
     }
 
     /// The tokens `settledBoundaryTokenCount(messages:tools:)` counts, for a
@@ -1247,7 +1305,10 @@ public struct GFTokenizer: @unchecked Sendable {
     /// count and different bytes either side of midnight.
     public func settledBoundaryTokens(messages: [Message],
                                       tools: [FunctionDefinition],
-                                      reasoningEffort: ReasoningEffort = .medium) throws -> [Int32] {
+                                      reasoningEffort: ReasoningEffort = .medium,
+                                      reasoningRetention: ReasoningRetention = .stripped) throws -> [Int32] {
+        let messages = Self.asGeneratedMessages(messages, retention: reasoningRetention,
+                                                thinkingMode: thinkingMode, dialect: dialect)
         guard let queryIndex = lastQueryIndex(messages) else {
             throw GFTokenizerError.invalidChatTemplate("no user query found in messages")
         }
@@ -1312,7 +1373,10 @@ public struct GFTokenizer: @unchecked Sendable {
     /// (fixture lines 68-77), leaving the region live rather than settled.
     public func settledLiveRegionTokens(messages: [Message],
                                         tools: [FunctionDefinition],
-                                        reasoningEffort: ReasoningEffort = .medium) throws -> [Int32] {
+                                        reasoningEffort: ReasoningEffort = .medium,
+                                        reasoningRetention: ReasoningRetention = .stripped) throws -> [Int32] {
+        let messages = Self.asGeneratedMessages(messages, retention: reasoningRetention,
+                                                thinkingMode: thinkingMode, dialect: dialect)
         guard let final = messages.last,
               final.role == .assistant,
               final.toolCalls.isEmpty else {

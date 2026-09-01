@@ -390,6 +390,7 @@ public actor ModelRegistry {
                 ropeScalingMode: arguments.ropeScalingMode,
                 thinkingMode: arguments.thinkingMode,
                 reasoningEffort: arguments.reasoningEffort,
+                reasoningRetention: arguments.reasoningRetention,
                 expertCacheSlots: arguments.expertCacheSlots,
                 expertCacheBudgetBytes: arguments.expertCacheBudgetBytes,
                 mtpModelDirectory: arguments.mtpModel.map {

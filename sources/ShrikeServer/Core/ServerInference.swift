@@ -516,6 +516,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     private let model: Model
     private let tokenizer: GFTokenizer
     private let defaultReasoningEffort: ReasoningEffort
+    let reasoningRetention: ReasoningRetention
     private let runner: RealForwardRunner
     private let mtpDecoder: StreamingMTPDecoder?
     private let scratch: RawCompletionScratch
@@ -613,6 +614,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                             ropeScalingMode: RuntimeRoPEScalingMode = .none,
                             thinkingMode: ModelThinkingMode = .off,
                             reasoningEffort: ReasoningEffort? = nil,
+                            reasoningRetention: ReasoningRetention? = nil,
                             expertCacheSlots requestedExpertCacheSlots: Int? = nil,
                             expertCacheBudgetBytes: Int? = nil,
                             mtpModelDirectory: URL? = nil,
@@ -635,6 +637,12 @@ public actor ServerModelSession: ServerInferenceBackend {
             thinkingMode: thinkingMode)
         if let warning = resolvedReasoningEffort.warning {
             FileHandle.standardError.write(Data((warning + "\n").utf8))
+        }
+        let resolvedRetention: ReasoningRetention =
+            tokenizer.dialect == .harmony ? .stripped : (reasoningRetention ?? .asGenerated)
+        if tokenizer.dialect == .harmony, reasoningRetention == .asGenerated {
+            FileHandle.standardError.write(Data(
+                "warning: --reasoning-retention as-generated is structural on Harmony; forcing stripped\n".utf8))
         }
         // A caller managing model residency supplies its own context so one
         // MTLCommandQueue and one compiled shader library survive across
@@ -790,6 +798,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                                   model: model,
                                   tokenizer: tokenizer,
                                   defaultReasoningEffort: resolvedReasoningEffort.effort,
+                                  reasoningRetention: resolvedRetention,
                                   runner: runner,
                                   mtpDecoder: mtpDecoder,
                                   scratch: scratch,
@@ -808,6 +817,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                  model: Model,
                  tokenizer: GFTokenizer,
                  defaultReasoningEffort: ReasoningEffort,
+                 reasoningRetention: ReasoningRetention,
                  runner: RealForwardRunner,
                  mtpDecoder: StreamingMTPDecoder?,
                  scratch: RawCompletionScratch,
@@ -823,6 +833,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.model = model
         self.tokenizer = tokenizer
         self.defaultReasoningEffort = defaultReasoningEffort
+        self.reasoningRetention = reasoningRetention
         self.modelFamily = model.config.family
         self.runner = runner
         self.mtpDecoder = mtpDecoder
@@ -1454,10 +1465,12 @@ public actor ServerModelSession: ServerInferenceBackend {
     ) -> KVNormalizationPlan {
         guard let boundary = try? tokenizer.settledBoundaryTokens(messages: messages,
                                                                  tools: tools,
-                                                                 reasoningEffort: reasoningEffort),
+                                                                 reasoningEffort: reasoningEffort,
+                                                                 reasoningRetention: reasoningRetention),
               let live = try? tokenizer.settledLiveRegionTokens(messages: messages,
                                                                 tools: tools,
-                                                                reasoningEffort: reasoningEffort) else {
+                                                                reasoningEffort: reasoningEffort,
+                                                                reasoningRetention: reasoningRetention) else {
             declined(.renderFailed)
             return .done(.unchanged)
         }
@@ -1841,10 +1854,12 @@ public actor ServerModelSession: ServerInferenceBackend {
     ) throws -> [Int32] {
         if usesToolTemplate {
             return try tokenizer.encodeToolChat(
-                messages: messages, tools: tools, reasoningEffort: reasoningEffort)
+                messages: messages, tools: tools, reasoningEffort: reasoningEffort,
+                reasoningRetention: reasoningRetention)
         }
         let rendered = try tokenizer.applyChatTemplate(
-            messages, reasoningEffort: reasoningEffort)
+            messages, reasoningEffort: reasoningEffort,
+            reasoningRetention: reasoningRetention)
         return tokenizer.encode(rendered, addBOS: false)
     }
 

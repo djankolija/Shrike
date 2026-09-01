@@ -468,4 +468,17 @@ struct HarmonyTemplateTests {
         #expect(liveText.hasSuffix(
             "<|start|>assistant<|channel|>final<|message|>18C.<|end|>"))
     }
+
+    @Test("Retention is structural on Harmony: as-generated changes nothing")
+    func asGeneratedIsANoOpOnHarmony() throws {
+        let messages = [
+            GFTokenizer.Message(role: .user, content: "Hi"),
+            GFTokenizer.Message(role: .assistant, content: "Hello",
+                                thinking: "prior analysis"),
+            GFTokenizer.Message(role: .user, content: "More"),
+        ]
+        let retained = try tok.applyChatTemplate(messages, reasoningRetention: .asGenerated)
+        let stripped = try tok.applyChatTemplate(messages)
+        #expect(retained == stripped)
+    }
 }

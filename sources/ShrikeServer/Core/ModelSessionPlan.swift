@@ -44,6 +44,7 @@ public struct ModelSessionPlan: Sendable {
     public let ropeScalingMode: RuntimeRoPEScalingMode
     public let thinkingMode: ModelThinkingMode
     public let reasoningEffort: ReasoningEffort?
+    public let reasoningRetention: ReasoningRetention?
     public let expertCacheSlots: Int?
     /// Bytes the routed-expert cache may use; slots are derived from it.
     public let expertCacheBudgetBytes: Int?
@@ -62,6 +63,7 @@ public struct ModelSessionPlan: Sendable {
                 ropeScalingMode: RuntimeRoPEScalingMode = .none,
                 thinkingMode: ModelThinkingMode = .off,
                 reasoningEffort: ReasoningEffort? = nil,
+                reasoningRetention: ReasoningRetention? = nil,
                 expertCacheSlots: Int?,
                 expertCacheBudgetBytes: Int? = nil,
                 mtpModelDirectory: URL?,
@@ -78,6 +80,7 @@ public struct ModelSessionPlan: Sendable {
         self.ropeScalingMode = ropeScalingMode
         self.thinkingMode = thinkingMode
         self.reasoningEffort = reasoningEffort
+        self.reasoningRetention = reasoningRetention
         self.expertCacheSlots = expertCacheSlots
         self.expertCacheBudgetBytes = expertCacheBudgetBytes
         self.mtpModelDirectory = mtpModelDirectory
@@ -100,6 +103,7 @@ public struct ModelSessionPlan: Sendable {
             ropeScalingMode: ropeScalingMode,
             thinkingMode: thinkingMode,
             reasoningEffort: reasoningEffort,
+            reasoningRetention: reasoningRetention,
             expertCacheSlots: expertCacheSlots,
             expertCacheBudgetBytes: expertCacheBudgetBytes,
             mtpModelDirectory: mtpModelDirectory,
