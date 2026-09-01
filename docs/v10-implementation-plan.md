@@ -30,12 +30,23 @@ on hope. Baseline anchor at start of Phase 3: rig 40.0 / card 57.9
       driver segfault (see the code comment in `encodeSharedExpertWork`).
       Law refinement: the expected −0.5–0.8 was shadow — the shared chain's
       dispatch walls sit off the GPU-critical path on both shapes.
-- [ ] **T2: GDN mega-merge (C1)** — conv compute + qk_norm + delta in one
-      kernel; tail shift stays separate. The bytewise arm against the
-      three-kernel reference is the acceptance gate; if the qk_norm
-      summation tree cannot be replicated exactly, STOP and take the
-      a264b22 route only with Davor's per-kernel sign-off + golden
-      baseline re-capture. Expected −1–2 ms/token.
+- [x] **T2: GDN mega-merge (C1) — RAN AND REVERTED 2026-09-01 (peer
+      session built d89d172 on perf/t2-gdn-merge; twin verdict by the
+      main session).** The implementation is CORRECT — bitwise arms
+      pass on all four shapes, digest exact everywhere (including a
+      subtle find: Metal fast-math elides half round-trips on
+      register-resident values; the fused kernel needs a volatile
+      thread slot — memorialized in project memory) — but the twin
+      says SLOWER: rig wait 40.75 sd 0.38 vs 38.38/38.59 on the
+      same-session sibling arms (+2.2 ms/token, ~6σ), attn_layer_linear
+      +2 ms on cards. The boundary law extends: the three kernels
+      already pipelined free inside the serial encoder, and the merge
+      paid occupancy/register pressure instead. Reverted from the
+      branch per accept-on-twin protocol; the commit survives on
+      perf/t2-gdn-merge for a future occupancy-tuned attempt (M4-class
+      behavior unmeasured). ⚠ Deploy-trap re-confirmed the hard way:
+      the new .metal kernel 500'd the server until the resource
+      bundles shipped alongside the binary.
 - [x] **T3: wake A/B (C4)** — RAN 2026-08-31/09-01, **NULL on the M1;
       winner = the encoded wait, host-spin knob deleted.** Four fresh-server
       arms on one binary (t3-747a18a): rig wall 9.308/9.307 s, card body
