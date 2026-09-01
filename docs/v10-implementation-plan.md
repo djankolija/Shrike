@@ -128,11 +128,26 @@ Each is "run once, record the verdict, close either way"; definitions in
       1000 ctx (~40× KV roofline); wait_ms slope only +0.7 because
       attention growth and declining miss exposure cancel (the
       confound that hid this). Cache-sweep cost is real but transient
-      (cold arms +5–24 ms, hitD 0.82 vs 0.90 at t1). REMAINING: name
-      the kernel — needs a gputrace captured at depth (~1900 ctx);
-      folds into P2's analysis. Ladder logs:
+      (cold arms +5–24 ms, hitD 0.82 vs 0.90 at t1). Ladder logs:
       scratchpad ladder-runner.txt / ladder-roles.txt (session
       6dd4e253), mini /tmp/ornith.log (Server A PID 45374).**
+      **FAMILY NAMED (role split c1db837, ladder rerun on fresh
+      server): the 30 linear layers are FLAT (+0.09 ms/1k, 14.50 →
+      14.66) — the ENTIRE tax is the 10 KV layers: attn_layer_kv
+      5.24 → 20.07 ms/token over ctx 48 → 1900 = +8.0 ms/1000 ctx ≈
+      65× the per-layer KV-read roofline (2.0 ms vs 0.031 at 1900;
+      ~0.43 µs/position/layer — sequence-serial signature). Target:
+      the gated full-attention decode path
+      (encodeGatedFullAttentionDecode → its kernels). Fix shape:
+      flash-decoding/split-K over context; prize at real depths
+      (2–3k ctx) >10 ms/token — the largest remaining decode lever.
+      Per-kernel confirmation available via Xcode replay of the deep
+      capture: mini /tmp/gputrace/shrike-decode-1788221522.gputrace
+      (17 GB, ctx 1900; a .gputrace stores commands + resources, NOT
+      timings — profiling happens at replay). Side observation: a
+      fresh server whose FIRST traffic is card-shaped runs card hitD
+      0.94–0.97 (vs 0.82–0.94 after rig warmup) — cache trajectories
+      are workload-seeded.**
 
 ## Quality-trading experiments (lane opened by Davor, 2026-09-01)
 
