@@ -223,6 +223,7 @@ public func runRawCompletion(producer: any LogitProducer,
     while true {
         try Task.checkCancellation()
 
+        let tLoopStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let tokenID: Int32
         if generated == 0, let seed = prefillSeed {
             switch seed {
@@ -240,6 +241,7 @@ public func runRawCompletion(producer: any LogitProducer,
                                  history: history, config: config, position: generated,
                                  timing: fusedRunner)
         }
+        let tSampled = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         generated += 1
         uncommittedBoundaryTokenIDs = [tokenID]
 
@@ -258,7 +260,9 @@ public func runRawCompletion(producer: any LogitProducer,
 
         let delta = try detok.push(tokenID)
         let visible = stopMatcher.push(delta)
+        let tDetok = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         onProgress(.token(index: generated - 1, id: tokenID, delta: visible))
+        let tProgress = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
 
         let hitStopString = stopMatcher.isStopped || shouldStop()
         let hitMax = generated >= config.maxNewTokens
@@ -276,7 +280,13 @@ public func runRawCompletion(producer: any LogitProducer,
         }
 
         history.append(tokenID)
+        let tProduceStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         try await producer.produce(token: tokenID, position: position, into: scratch.logits)
+        fusedRunner?.recordDecodeLoopPhases(
+            sample: tSampled - tLoopStart,
+            detok: tDetok - tSampled,
+            progress: tProgress - tDetok,
+            produce: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tProduceStart)
         position += 1
         uncommittedBoundaryTokenIDs.removeAll(keepingCapacity: true)
     }

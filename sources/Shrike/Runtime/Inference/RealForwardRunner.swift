@@ -1467,6 +1467,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// by descending-score position, over `totalRankWeightLayers` layer-steps.
     public private(set) var totalRankWeightMass: [Double] = []
     public private(set) var totalRankWeightLayers: UInt64 = 0
+    public private(set) var totalLoopSampleNanos: UInt64 = 0
+    public private(set) var totalLoopDetokNanos: UInt64 = 0
+    public private(set) var totalLoopProgressNanos: UInt64 = 0
+    public private(set) var totalLoopProduceNanos: UInt64 = 0
     public private(set) var totalCachePlanNanos: UInt64 = 0
     public private(set) var totalIOQueueNanos: UInt64 = 0
     public private(set) var totalIOCompletionToFixupSubmitNanos: UInt64 = 0
@@ -1485,6 +1489,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     public func expertStreamingStatistics() -> ExpertStreamingStatistics {
         model.routedExpertStatistics()
+    }
+
+    /// Decode-loop phase walls (SHRIKE_RUNNER_STATS): accumulated once per
+    /// token by runRawCompletion's scalar loop.
+    func recordDecodeLoopPhases(sample: UInt64, detok: UInt64,
+                                progress: UInt64, produce: UInt64) {
+        guard runnerStatsEnabled else { return }
+        totalLoopSampleNanos &+= sample
+        totalLoopDetokNanos &+= detok
+        totalLoopProgressNanos &+= progress
+        totalLoopProduceNanos &+= produce
     }
 
     private func recordRDAdvice(_ result: ExpertIOAdviceResult, wallNanos: UInt64) {

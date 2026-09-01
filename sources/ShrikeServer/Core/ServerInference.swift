@@ -440,6 +440,10 @@ private struct RunnerCounterSnapshot {
     let routerReadback: UInt64
     let rankWeightMass: [Double]
     let rankWeightLayers: UInt64
+    let loopSample: UInt64
+    let loopDetok: UInt64
+    let loopProgress: UInt64
+    let loopProduce: UInt64
     let cachePlan: UInt64
     let ioQueue: UInt64
     let ioCompletionToFixup: UInt64
@@ -1071,6 +1075,10 @@ public actor ServerModelSession: ServerInferenceBackend {
             routerReadback: runner.totalRouterReadbackNanos,
             rankWeightMass: runner.totalRankWeightMass,
             rankWeightLayers: runner.totalRankWeightLayers,
+            loopSample: runner.totalLoopSampleNanos,
+            loopDetok: runner.totalLoopDetokNanos,
+            loopProgress: runner.totalLoopProgressNanos,
+            loopProduce: runner.totalLoopProduceNanos,
             cachePlan: runner.totalCachePlanNanos,
             ioQueue: runner.totalIOQueueNanos,
             ioCompletionToFixup: runner.totalIOCompletionToFixupSubmitNanos,
@@ -1951,6 +1959,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "expert_hit_rate_prefill=%.4f expert_hits_prefill=%llu "
                 + "expert_misses_prefill=%llu expert_hit_rate_decode=%.4f "
                 + "expert_hits_decode=%llu expert_misses_decode=%llu "
+                + "loop_sample_ms=%.3f loop_detok_ms=%.3f "
+                + "loop_progress_ms=%.3f loop_produce_ms=%.3f "
                 + "expert_rank_mass=%@",
             ms(runner.totalCb1Nanos, snapshot.cb1),
             ms(runner.totalIoNanos, snapshot.io),
@@ -1981,6 +1991,10 @@ public actor ServerModelSession: ServerInferenceBackend {
             expertNow.loadingSlots, expertNow.pinnedSlots,
             expertPrefill.hitRate, expertPrefill.hits, expertPrefill.misses,
             expertDecode.hitRate, expertDecode.hits, expertDecode.misses,
+            ms(runner.totalLoopSampleNanos, snapshot.loopSample),
+            ms(runner.totalLoopDetokNanos, snapshot.loopDetok),
+            ms(runner.totalLoopProgressNanos, snapshot.loopProgress),
+            ms(runner.totalLoopProduceNanos, snapshot.loopProduce),
             rankMass))
     }
 
