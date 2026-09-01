@@ -26,6 +26,8 @@ struct AttentionSplitGeometry: Sendable, Equatable {
 final class Attention {
     private let ctx: MetalContext
     private let psoPartial: MTLComputePipelineState
+    private let psoPartialSG: MTLComputePipelineState
+    private let partialLoopVariant: PartialLoopVariant
     private let psoGQAPartial: MTLComputePipelineState
     private let psoCombine: MTLComputePipelineState
     private let psoPartialSWA: MTLComputePipelineState
@@ -78,11 +80,17 @@ final class Attention {
     private let dPartial: MTLBuffer
     private let oPartial: MTLBuffer
 
+    /// v11: which inner loop the full-attention decode partial runs.
+    /// `.simdgroup` reorders the softmax summation (a264b22-class).
+    enum PartialLoopVariant: Sendable { case blockReduce, simdgroup }
+
     init(context: MetalContext,
          maxQHeads: Int = 16,
          maxHeadDim: Int = 512,
          supportsSinks: Bool = false,
-         supportsMLA: Bool = false) throws {
+         supportsMLA: Bool = false,
+         partialLoopVariant: PartialLoopVariant = .blockReduce) throws {
+        self.partialLoopVariant = partialLoopVariant
         // maxHeadDim may exceed kernelMaxHeadDim (Kimi's 576-wide MLA rows
         // size the o-scratch); the per-encode paths enforce their own kernel
         // ceilings.
@@ -100,6 +108,7 @@ final class Attention {
             ? try context.pipeline("attention_decode_mla_partial")
             : nil
         self.psoPartial = try context.pipeline("attention_decode_partial")
+        self.psoPartialSG = try context.pipeline("attention_decode_partial_sg")
         self.psoGQAPartial = try context.pipeline("attention_decode_gqa_swa_partial")
         self.psoCombine = try context.pipeline("attention_decode_combine")
         self.psoPartialSWA = try Self.specializedPipeline(context,
@@ -567,6 +576,9 @@ final class Attention {
             } catch {
                 preconditionFailure("failed to build KV ring attention pipeline: \(error)")
             }
+        }
+        if partialLoopVariant == .simdgroup, !useGQAPartial {
+            return psoPartialSG
         }
         if useGQAPartial && headDim == 256 && numQHeads == 16 && numKVHeads == 8 {
             if numChunks == 16 {

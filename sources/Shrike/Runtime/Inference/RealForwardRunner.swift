@@ -587,7 +587,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      maxQHeads: cfg.numHeads,
                                      maxHeadDim: max(cfg.headDim, cfg.fullHeadDim),
                                      supportsSinks: cfg.hasAttentionSinks,
-                                     supportsMLA: cfg.hasMLALayers),
+                                     supportsMLA: cfg.hasMLALayers,
+                                     partialLoopVariant: ProcessInfo.processInfo
+                                         .environment["SHRIKE_ATTN_DECODE_LOOP"]
+                                         == "simdgroup" ? .simdgroup : .blockReduce),
             kvQuantizer: runtimeConfiguration.kvCachePrecision.isQuantized
                 ? try KVCacheQuantizer(context: context) : nil,
             shared: try SharedExpertRuntime(

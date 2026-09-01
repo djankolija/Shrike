@@ -267,6 +267,138 @@ void attention_decode_partial(
     }
 }
 
+// v11 inner-loop variant: one SIMD group per position — the 256-dim dot is
+// 32 lanes × 8 strided elements reduced with simd_sum alone, so the position
+// loop runs with NO threadgroup barrier (the default kernel pays a full
+// block_reduce_sum with two barriers per position). Each simdgroup keeps its
+// own online-softmax state over its strided position subset; the chunk-end
+// merge applies the combine's rescale algebra one level down. Reorders the
+// softmax summation relative to attention_decode_partial (a264b22-class).
+[[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
+void attention_decode_partial_sg(
+    device const half*  Q             [[buffer(0)]],
+    device const uchar* K             [[buffer(1)]],
+    device const uchar* V             [[buffer(2)]],
+    device       float* m_out         [[buffer(3)]],
+    device       float* d_out         [[buffer(4)]],
+    device       float* o_out         [[buffer(5)]],
+    constant     uint&  head_dim      [[buffer(6)]],
+    constant     uint&  num_q_heads   [[buffer(7)]],
+    constant     uint&  num_kv_heads  [[buffer(8)]],
+    constant     uint&  seq_len       [[buffer(9)]],
+    constant     uint&  kv_start      [[buffer(10)]],
+    constant     uint&  chunk_len     [[buffer(11)]],
+    constant     uint&  num_chunks    [[buffer(12)]],
+    constant     float& scale         [[buffer(13)]],
+    constant     uint&  kv_bits       [[buffer(14)]],
+    constant     uint&  kv_stride     [[buffer(15)]],
+    constant     uint&  kv_value_bytes [[buffer(16)]],
+    constant     uint&  kv_group_size [[buffer(17)]],
+    uint tg_id           [[threadgroup_position_in_grid]],
+    uint lid             [[thread_position_in_threadgroup]],
+    uint lsize           [[threads_per_threadgroup]],
+    uint simd_lane_id    [[thread_index_in_simdgroup]],
+    uint simd_group_id   [[simdgroup_index_in_threadgroup]],
+    uint simdgroups      [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float q_smem[kAttnMaxHeadDim];
+    threadgroup float m_scratch[kAttnMaxSimdGroups];
+    threadgroup float d_scratch[kAttnMaxSimdGroups];
+    threadgroup float o_scratch[kAttnMaxSimdGroups * kAttnMaxHeadDim];
+    const uint HD = attn_fc_head_dim(head_dim);
+    const uint NQ = attn_fc_num_q_heads(num_q_heads);
+    const uint NKV = attn_fc_num_kv_heads(num_kv_heads);
+    const uint NC = attn_fc_num_chunks(num_chunks);
+
+    const uint q_head = tg_id / NC;
+    const uint chunk  = tg_id % NC;
+    const uint p_start = kv_start + chunk * chunk_len;
+    uint p_end = p_start + chunk_len;
+    if (p_end > seq_len) { p_end = seq_len; }
+
+    const uint kv_head = q_head / (NQ / NKV);
+
+    device const half* Q_row = Q + uint(q_head) * HD;
+    for (uint i = lid; i < HD; i += lsize) {
+        q_smem[i] = float(Q_row[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    constexpr uint kPerLane = (kAttnMaxHeadDim + 31u) / 32u;
+    float o_local[kPerLane];
+    for (uint k = 0; k < kPerLane; ++k) { o_local[k] = 0.0f; }
+
+    float m_run = -INFINITY;
+    float d_run = 0.0f;
+
+    for (uint p = p_start + simd_group_id; p < p_end; p += simdgroups) {
+        const uint phys_p = attn_ring_slot(p);
+        float partial = 0.0f;
+        for (uint i = simd_lane_id; i < HD; i += 32u) {
+            const uint flat = kv_head * HD + i;
+            const float kval = attn_load_kv(K, phys_p, flat, NKV * HD,
+                                             kv_bits, kv_stride, kv_value_bytes,
+                                             kv_group_size);
+            partial = fma(q_smem[i], kval, partial);
+        }
+        const float s = simd_sum(partial) * attn_fc_scale(scale);
+
+        const float m_new = max(m_run, s);
+        const float alpha = attn_softmax_exp(m_run - m_new);
+        const float p_exp = attn_softmax_exp(s     - m_new);
+        d_run = d_run * alpha + p_exp;
+
+        uint slot = 0;
+        for (uint i = simd_lane_id; i < HD; i += 32u) {
+            const uint flat = kv_head * HD + i;
+            const float vval = attn_load_kv(V, phys_p, flat, NKV * HD,
+                                             kv_bits, kv_stride, kv_value_bytes,
+                                             kv_group_size);
+            o_local[slot] = o_local[slot] * alpha + p_exp * vval;
+            slot += 1;
+        }
+        m_run = m_new;
+    }
+
+    if (simd_lane_id == 0) {
+        m_scratch[simd_group_id] = m_run;
+        d_scratch[simd_group_id] = d_run;
+    }
+    uint slot = 0;
+    for (uint i = simd_lane_id; i < HD; i += 32u) {
+        o_scratch[simd_group_id * kAttnMaxHeadDim + i] = o_local[slot];
+        slot += 1;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float m_glob = -INFINITY;
+    for (uint g = 0; g < simdgroups; ++g) { m_glob = max(m_glob, m_scratch[g]); }
+    // An all-empty chunk must publish (-inf, 0, 0) exactly like the default
+    // kernel: with m_glob still -inf, the rescale exponent is (-inf) - (-inf)
+    // = NaN, so the merge below is guarded rather than computed.
+    const bool empty = (m_glob == -INFINITY);
+    float d_glob = 0.0f;
+    if (!empty) {
+        for (uint g = 0; g < simdgroups; ++g) {
+            d_glob += d_scratch[g] * attn_softmax_exp(m_scratch[g] - m_glob);
+        }
+    }
+
+    const uint base = uint(q_head) * NC + chunk;
+    if (lid == 0) { m_out[base] = m_glob; d_out[base] = d_glob; }
+    device float* o_row = o_out + base * HD;
+    for (uint i = lid; i < HD; i += lsize) {
+        float acc = 0.0f;
+        if (!empty) {
+            for (uint g = 0; g < simdgroups; ++g) {
+                acc += o_scratch[g * kAttnMaxHeadDim + i]
+                    * attn_softmax_exp(m_scratch[g] - m_glob);
+            }
+        }
+        o_row[i] = acc;
+    }
+}
+
 [[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
 void attention_decode_gqa_swa_partial(
     device const half*  Q             [[buffer(0)]],

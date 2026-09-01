@@ -124,6 +124,7 @@ import ShrikeValidationSupport
                                  options: .storageModeShared)
     }
 
+    @discardableResult
     private static func runAndCompare(
         headDim: Int,
         numQHeads: Int,
@@ -133,8 +134,9 @@ import ShrikeValidationSupport
         shareKV: Bool = false,
         sinks: [Float]? = nil,
         seed: UInt64,
-        tolerance: Float = Tolerance.fp16ChainedReduction
-    ) throws {
+        tolerance: Float = Tolerance.fp16ChainedReduction,
+        loopVariant: Attention.PartialLoopVariant = .blockReduce
+    ) throws -> [Float] {
         var rng = SeedTree(seed).key(
             "attn-h\(numQHeads)-kv\(numKVHeads)-d\(headDim)-T\(seqLen)-kv=\(shareKV)"
         )
@@ -157,26 +159,27 @@ import ShrikeValidationSupport
         let kernel = try Attention(context: ctx,
                                    maxQHeads: max(16, numQHeads),
                                    maxHeadDim: max(headDim, 512),
-                                   supportsSinks: sinks != nil)
+                                   supportsSinks: sinks != nil,
+                                   partialLoopVariant: loopVariant)
 
         guard let qBuf = Fp16Buffer.make(ctx.device, halves: qFp16),
               let kBuf = Fp16Buffer.make(ctx.device, halves: kFp16),
               let outBuf = Fp16Buffer.make(ctx.device, count: qCount) else {
-            Issue.record("Failed to allocate buffers"); return
+            Issue.record("Failed to allocate buffers"); return []
         }
         let vBuf: MTLBuffer
         if shareKV {
             vBuf = kBuf
         } else {
             guard let b = Fp16Buffer.make(ctx.device, halves: vFp16) else {
-                Issue.record("Failed to allocate V buffer"); return
+                Issue.record("Failed to allocate V buffer"); return []
             }
             vBuf = b
         }
         let sinkBuf: MTLBuffer?
         if let sinkValues {
             guard let b = Self.makeBF16Buffer(ctx.device, values: sinkValues) else {
-                Issue.record("Failed to allocate sinks buffer"); return
+                Issue.record("Failed to allocate sinks buffer"); return []
             }
             sinkBuf = b
         } else {
@@ -184,7 +187,7 @@ import ShrikeValidationSupport
         }
 
         guard let cmd = ctx.queue.makeCommandBuffer() else {
-            Issue.record("Failed to make command buffer"); return
+            Issue.record("Failed to make command buffer"); return []
         }
         switch mode {
         case .swa(let window):
@@ -230,6 +233,43 @@ import ShrikeValidationSupport
                   "Hq=\(numQHeads) Hkv=\(numKVHeads) T=\(seqLen) rel=\(rel)")
         }
         #expect(passed)
+        return actual
+    }
+
+    @Test("v11 simdgroup partial loop tracks the reference")
+    func simdgroupLoopTracksReference() throws {
+        // Ornith's gated shape at several context lengths, incl. a seqLen
+        // smaller than the simdgroup count (empty per-simdgroup subsets)
+        // and one smaller than the chunk count (empty chunks).
+        for seqLen in [3, 17, 96, 500] {
+            _ = try Self.runAndCompare(headDim: 256, numQHeads: 16,
+                                       numKVHeads: 2, seqLen: seqLen,
+                                       mode: .full, seed: 0xA11CE,
+                                       loopVariant: .simdgroup)
+        }
+        _ = try Self.runAndCompare(headDim: 512, numQHeads: 16,
+                                   numKVHeads: 2, seqLen: 96,
+                                   mode: .full, seed: 0xA11CE,
+                                   loopVariant: .simdgroup)
+        _ = try Self.runAndCompare(headDim: 128, numQHeads: 8,
+                                   numKVHeads: 8, seqLen: 40,
+                                   mode: .full, seed: 0xA11CE,
+                                   loopVariant: .simdgroup)
+    }
+
+    @Test("v11 simdgroup and block-reduce loops agree tightly")
+    func simdgroupLoopMatchesBlockReduce() throws {
+        for seqLen in [17, 500] {
+            let base = try Self.runAndCompare(headDim: 256, numQHeads: 16,
+                                              numKVHeads: 2, seqLen: seqLen,
+                                              mode: .full, seed: 0xF00D)
+            let sg = try Self.runAndCompare(headDim: 256, numQHeads: 16,
+                                            numKVHeads: 2, seqLen: seqLen,
+                                            mode: .full, seed: 0xF00D,
+                                            loopVariant: .simdgroup)
+            let rel = RelError.compute(actual: sg, reference: base)
+            #expect(rel < 2e-3, "variant divergence rel=\(rel) at T=\(seqLen)")
+        }
     }
 
     // SWA ---------------------------------------------------------------------
