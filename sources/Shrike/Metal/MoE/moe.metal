@@ -1199,3 +1199,66 @@ kernel void moe_affine_phase2_down_reduce_k8(
         y[d] = half(acc);
     }
 }
+
+// Chunk-wide shared-expert scalar gate (v12 P1). Decode runs one M=1
+// `dequant_int8_gemv_simd` per row; prefill has T rows of one weight row, so
+// each threadgroup owns a row and its simdgroups split that row's groups.
+// The per-group arithmetic is `dequant_int8_gemv_simd`'s, but the partial
+// sums are combined across simdgroups instead of within one, so the result
+// matches the GEMV to fp16 noise rather than bit-exactly.
+constant constexpr uint kSharedGateSimds = 8;
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+kernel void shared_scalar_gate_rows(
+    device const uint8_t* W      [[buffer(0)]],
+    device const bfloat*  scales [[buffer(1)]],
+    device const bfloat*  biases [[buffer(2)]],
+    device const half*    x      [[buffer(3)]],
+    device half*          gate   [[buffer(4)]],
+    constant uint&        D      [[buffer(5)]],
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane   [[thread_index_in_simdgroup]]
+) {
+    threadgroup float partial[kSharedGateSimds];
+    const uint n_groups = D / kMoEGroupSize;
+    device const half* x_row = x + tg_idx * D;
+
+    float acc = 0.0f;
+    for (uint g = sg_idx; g < n_groups; g += kSharedGateSimds) {
+        const float s = float(scales[g]);
+        const float b = float(biases[g]);
+        const uint i0 = g * kMoEGroupSize + lane * 2u;
+        const uint i1 = i0 + 1u;
+        const float x0 = float(x_row[i0]);
+        const float x1 = float(x_row[i1]);
+        const float dot_qx = float(uint(W[i0])) * x0 + float(uint(W[i1])) * x1;
+        const float sum_x = x0 + x1;
+        acc = fma(s, dot_qx, acc);
+        acc = fma(b, sum_x, acc);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) partial[sg_idx] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg_idx == 0 && lane == 0) {
+        float total = 0.0f;
+        for (uint i = 0; i < kSharedGateSimds; ++i) total += partial[i];
+        gate[tg_idx] = half(total);
+    }
+}
+
+// y[row * D + i] *= sigmoid(gate[row]) — the T-row form of
+// `sigmoid_scalar_mul_fp16`, element-for-element the same arithmetic.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+kernel void sigmoid_scalar_mul_rows_fp16(
+    device half*       y    [[buffer(0)]],
+    device const half* gate [[buffer(1)]],
+    constant uint&     D    [[buffer(2)]],
+    constant uint&     rows [[buffer(3)]],
+    uint2              tid  [[thread_position_in_grid]]
+) {
+    if (tid.x >= D || tid.y >= rows) return;
+    const float g = float(gate[tid.y]);
+    const uint index = tid.y * D + tid.x;
+    y[index] = half(float(y[index]) / (1.0f + exp(-g)));
+}

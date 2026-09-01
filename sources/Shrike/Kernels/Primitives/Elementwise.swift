@@ -7,14 +7,22 @@ import Metal
 final class Elementwise {
     private let sigmoidGateMulPSO: MTLComputePipelineState
     private let sigmoidScalarMulPSO: MTLComputePipelineState
+    private let sigmoidScalarMulRowsPSO: MTLComputePipelineState
+    private let scalarGateRowsPSO: MTLComputePipelineState
     private let residualAddPSO: MTLComputePipelineState
     private let splitQGatePSO: MTLComputePipelineState
     private let concatRowsPSO: MTLComputePipelineState
     private let biasAddPSO: MTLComputePipelineState
 
+    /// Eight simdgroups: the count `shared_scalar_gate_rows`' threadgroup
+    /// reduction is written for.
+    private static let scalarGateRowThreads = 256
+
     init(context: MetalContext) throws {
         self.sigmoidGateMulPSO = try context.pipeline("sigmoid_gate_mul_fp16")
         self.sigmoidScalarMulPSO = try context.pipeline("sigmoid_scalar_mul_fp16")
+        self.sigmoidScalarMulRowsPSO = try context.pipeline("sigmoid_scalar_mul_rows_fp16")
+        self.scalarGateRowsPSO = try context.pipeline("shared_scalar_gate_rows")
         self.residualAddPSO = try context.pipeline("residual_add_fp16")
         self.splitQGatePSO = try context.pipeline("split_q_gate_fp16")
         self.concatRowsPSO = try context.pipeline("concat_rows_fp16")
@@ -108,6 +116,54 @@ final class Elementwise {
         var elementCount = UInt32(count)
         encoder.setBytes(&elementCount, length: MemoryLayout<UInt32>.size, index: 2)
         dispatch(encoder, pipeline: sigmoidScalarMulPSO, threads: count)
+    }
+
+    /// y[row * d ..< row * d + d] *= sigmoid(gate[row]) for row in 0..<rows.
+    func encodeSigmoidScalarMulRows(commandBuffer: MTLCommandBuffer,
+                                    y: MTLBuffer, yOffset: Int = 0,
+                                    gate: MTLBuffer, gateOffset: Int = 0,
+                                    rows: Int, d: Int) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        defer { encoder.endEncoding() }
+        encoder.setComputePipelineState(sigmoidScalarMulRowsPSO)
+        encoder.setBuffer(y, offset: yOffset, index: 0)
+        encoder.setBuffer(gate, offset: gateOffset, index: 1)
+        var dim = UInt32(d)
+        var rowCount = UInt32(rows)
+        encoder.setBytes(&dim, length: MemoryLayout<UInt32>.size, index: 2)
+        encoder.setBytes(&rowCount, length: MemoryLayout<UInt32>.size, index: 3)
+        let width = min(sigmoidScalarMulRowsPSO.maxTotalThreadsPerThreadgroup, 256)
+        encoder.dispatchThreads(
+            MTLSize(width: d, height: rows, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+    }
+
+    /// gate[row] = dequant_int8_affine(weights) · x[row] for row in 0..<rows —
+    /// the chunk-wide form of the per-row `DequantInt8GEMV` scalar gate.
+    func encodeScalarGateRows(commandBuffer: MTLCommandBuffer,
+                              weights: TensorView,
+                              x: MTLBuffer, xOffset: Int = 0,
+                              gate: MTLBuffer, gateOffset: Int = 0,
+                              rows: Int, d: Int) throws {
+        precondition(d % 64 == 0, "shared_scalar_gate_rows drops the tail unless d is a multiple of 64")
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        defer { encoder.endEncoding() }
+        encoder.setComputePipelineState(scalarGateRowsPSO)
+        encoder.setBuffer(weights.buffer, offset: Int(weights.offset), index: 0)
+        encoder.setBuffer(weights.buffer, offset: Int(weights.scaleOffset), index: 1)
+        encoder.setBuffer(weights.buffer, offset: Int(weights.biasOffset), index: 2)
+        encoder.setBuffer(x, offset: xOffset, index: 3)
+        encoder.setBuffer(gate, offset: gateOffset, index: 4)
+        var dim = UInt32(d)
+        encoder.setBytes(&dim, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: rows, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: Self.scalarGateRowThreads,
+                                           height: 1, depth: 1))
     }
 
     /// x[i] += bias[i % rowElems] — a resident BF16 bias row broadcast over

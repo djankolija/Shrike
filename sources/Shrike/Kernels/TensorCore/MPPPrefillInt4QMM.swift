@@ -30,8 +30,13 @@ final class MPPPrefillInt4QMM {
     /// MPP request can throw the real cause instead of silently degrading.
     private let unavailableReason: String
 
+    /// The bit width baked into the pipeline (function constant 78); a caller
+    /// reusing this instance for another tensor must match it.
+    let weightBits: Int
+
     init(context: MetalContext, weightBits: Int = 4) {
         precondition([4, 8].contains(weightBits))
+        self.weightBits = weightBits
         do {
             let library = try Self.compileTensorOpsLibrary(device: context.device)
             let constants = MTLFunctionConstantValues()

@@ -101,7 +101,10 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     var routePartialElements: Int { chunkTokens * topK * hiddenSize }
     var routeIDElements: Int { chunkTokens * topK }
     var routeWeightElements: Int { routeIDElements }
-    var sharedExpertScratchElements: Int { sharedIntermediate }
+    /// The matrix path folds its activation back into the gate buffer, so only
+    /// gate and up hold the whole chunk.
+    var sharedExpertScratchElements: Int { chunkTokens * sharedIntermediate }
+    var sharedExpertActScratchElements: Int { sharedIntermediate }
     var routedGateUpActElements: Int { 3 * routedPairMicrobatchRows * routedIntermediate }
     var routedDownOutputElements: Int { routedPairMicrobatchRows * hiddenSize }
 
@@ -118,7 +121,8 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
             + h1Elements
             + h2Elements
             + routePartialElements
-            + 3 * sharedExpertScratchElements
+            + 2 * sharedExpertScratchElements
+            + sharedExpertActScratchElements
             + routedGateUpActElements
             + routedDownOutputElements
             + attnQElements
@@ -224,7 +228,7 @@ struct PrefillChunkScratchBuffers {
                                                  label: "prefill.sharedGateScratch"),
             sharedUpScratch: try privateBuffer(layout.sharedExpertScratchElements,
                                                label: "prefill.sharedUpScratch"),
-            sharedActScratch: try privateBuffer(layout.sharedExpertScratchElements,
+            sharedActScratch: try privateBuffer(layout.sharedExpertActScratchElements,
                                                 label: "prefill.sharedActScratch"),
             routedGateUpActScratch: try privateBuffer(layout.routedGateUpActElements,
                                                       label: "prefill.routedGateUpActScratch"),

@@ -4624,6 +4624,108 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
+    /// The shared (dense) expert branch of one prefill chunk and its scalar
+    /// gate, on whichever of the matrix and per-token paths this chunk earns.
+    private func encodeSharedExpertBlock(commandBuffer sharedCB: MTLCommandBuffer,
+                                         layer L: Int,
+                                         scratch: PrefillChunkScratchBuffers,
+                                         tokenCount t: Int,
+                                         hiddenSize D: Int) throws {
+        let matrixMPP = cfg.hasSharedExpert
+            ? prefillSharedExpert.matrixPath(for: prefillMPPAffineInt4,
+                                             queryCount: t,
+                                             d: D,
+                                             intermediate: cfg.intermediateSize)
+            : nil
+        if cfg.hasSharedExpert {
+            let sharedProj = sharedExpertProjections[L]
+            if let mpp = matrixMPP {
+                try prefillSharedExpert.encodeChunk(
+                    commandBuffer: sharedCB,
+                    mpp: mpp,
+                    x: scratch.routedX,
+                    y: scratch.h1,
+                    gate: sharedProj.gate,
+                    up: sharedProj.up,
+                    down: sharedProj.down,
+                    scratchGate: scratch.sharedGateScratch,
+                    scratchUp: scratch.sharedUpScratch,
+                    queryCount: t,
+                    d: D,
+                    intermediate: cfg.intermediateSize)
+            } else {
+                try prefillSharedExpert.encodeBlock(
+                    commandBuffer: sharedCB,
+                    x: scratch.routedX,
+                    y: scratch.h1,
+                    gate: sharedProj.gate,
+                    up: sharedProj.up,
+                    down: sharedProj.down,
+                    scratchGate: scratch.sharedGateScratch,
+                    scratchUp: scratch.sharedUpScratch,
+                    scratchAct: scratch.sharedActScratch,
+                    queryCount: t,
+                    d: D,
+                    intermediate: cfg.intermediateSize,
+                    xStrideElements: D,
+                    yStrideElements: D)
+            }
+        } else {
+            // No shared expert (gpt-oss): scratch.h1 still holds the
+            // attention branch; zero it so the reduce folds nothing.
+            guard let blit = sharedCB.makeBlitCommandEncoder() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            blit.fill(buffer: scratch.h1,
+                      range: 0..<(t * D * MemoryLayout<Float16>.stride),
+                      value: 0)
+            blit.endEncoding()
+        }
+        guard cfg.sharedExpertGated else { return }
+        // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX),
+        // per chunk row.
+        let gateView = sharedExpertProjections[L].scalarGate!
+        let halfBytes = MemoryLayout<Float16>.stride
+        if matrixMPP != nil {
+            try elementwise!.encodeScalarGateRows(
+                commandBuffer: sharedCB,
+                weights: gateView,
+                x: scratch.routedX,
+                gate: scratch.sharedScalarGate,
+                rows: t, d: D)
+            try elementwise!.encodeSigmoidScalarMulRows(
+                commandBuffer: sharedCB,
+                y: scratch.h1,
+                gate: scratch.sharedScalarGate,
+                rows: t, d: D)
+            return
+        }
+        for row in 0..<t {
+            try int8ScalarGate!.encode(
+                commandBuffer: sharedCB,
+                weights: gateView.buffer,
+                weightsOffset: Int(gateView.offset),
+                scales: gateView.buffer,
+                scalesOffset: Int(gateView.scaleOffset),
+                biases: gateView.buffer,
+                biasesOffset: Int(gateView.biasOffset),
+                x: scratch.routedX,
+                xOffset: row * D * halfBytes,
+                y: scratch.sharedScalarGate,
+                yOffset: row * halfBytes,
+                m: 1, n: UInt32(D))
+        }
+        for row in 0..<t {
+            try elementwise!.encodeSigmoidScalarMul(
+                commandBuffer: sharedCB,
+                y: scratch.h1,
+                yOffset: row * D * halfBytes,
+                gate: scratch.sharedScalarGate,
+                gateOffset: row * halfBytes,
+                count: D)
+        }
+    }
+
     /// Router, routed-expert fetch and the MoE tail for one prefill layer.
     ///
     /// lint:allow-long one layer's MoE stage is a single ordered pipeline:
@@ -4739,64 +4841,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 guard let sharedCB = ctx.queue.makeCommandBuffer() else {
                     throw ModelError.residentBufferWrapFailed
                 }
-                if cfg.hasSharedExpert {
-                    let sharedProj = sharedExpertProjections[L]
-                    try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
-                                                    x: scratch.routedX,
-                                                    y: scratch.h1,
-                                                    gate: sharedProj.gate,
-                                                    up: sharedProj.up,
-                                                    down: sharedProj.down,
-                                                    scratchGate: scratch.sharedGateScratch,
-                                                    scratchUp: scratch.sharedUpScratch,
-                                                    scratchAct: scratch.sharedActScratch,
-                                                    queryCount: t,
-                                                    d: D,
-                                                    intermediate: cfg.intermediateSize,
-                                                    xStrideElements: D,
-                                                    yStrideElements: D)
-                } else {
-                    // No shared expert (gpt-oss): scratch.h1 still holds the
-                    // attention branch; zero it so the reduce folds nothing.
-                    guard let blit = sharedCB.makeBlitCommandEncoder() else {
-                        throw ModelError.residentBufferWrapFailed
-                    }
-                    blit.fill(buffer: scratch.h1,
-                              range: 0..<(t * D * MemoryLayout<Float16>.stride),
-                              value: 0)
-                    blit.endEncoding()
-                }
-                if cfg.sharedExpertGated {
-                    // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX),
-                    // per chunk row.
-                    let sharedProj = sharedExpertProjections[L]
-                    let gateView = sharedProj.scalarGate!
-                    let halfBytes = MemoryLayout<Float16>.stride
-                    for row in 0..<t {
-                        try int8ScalarGate!.encode(
-                            commandBuffer: sharedCB,
-                            weights: gateView.buffer,
-                            weightsOffset: Int(gateView.offset),
-                            scales: gateView.buffer,
-                            scalesOffset: Int(gateView.scaleOffset),
-                            biases: gateView.buffer,
-                            biasesOffset: Int(gateView.biasOffset),
-                            x: scratch.routedX,
-                            xOffset: row * D * halfBytes,
-                            y: scratch.sharedScalarGate,
-                            yOffset: row * halfBytes,
-                            m: 1, n: UInt32(D))
-                    }
-                    for row in 0..<t {
-                        try elementwise!.encodeSigmoidScalarMul(
-                            commandBuffer: sharedCB,
-                            y: scratch.h1,
-                            yOffset: row * D * halfBytes,
-                            gate: scratch.sharedScalarGate,
-                            gateOffset: row * halfBytes,
-                            count: D)
-                    }
-                }
+                try encodeSharedExpertBlock(commandBuffer: sharedCB,
+                                            layer: L,
+                                            scratch: scratch,
+                                            tokenCount: t,
+                                            hiddenSize: D)
                 sharedCB.commit()
                 try waitForCompletion(sharedCB)
                 recordKernelGPU(role: "prefill_shared_expert", sharedCB)
