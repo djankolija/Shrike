@@ -1477,9 +1477,13 @@ public actor ServerModelSession: ServerInferenceBackend {
         let common = (0..<comparable).first {
             result.kvBackedTokenIDs[$0] != settled[$0]
         } ?? comparable
+        let kvTail = Array(result.kvBackedTokenIDs[
+            common..<min(result.kvBackedTokenIDs.count, common + 8)])
+        let settledTail = Array(settled[common..<min(settled.count, common + 8)])
         let line = "Shrike prompt_cache normalize kind=settle "
             + "boundary=\(boundary.count) rewind=\(common) "
-            + "kv=\(result.kvPosition) settled=\(settled.count)"
+            + "kv=\(result.kvPosition) settled=\(settled.count) "
+            + "kv_tail=\(kvTail) settled_tail=\(settledTail)"
         guard common < settled.count else {
             // The settled form is a prefix of what the KV holds, so the rewind
             // alone is the whole rewrite and nothing has to run in the
