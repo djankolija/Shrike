@@ -107,6 +107,23 @@ Each is "run once, record the verdict, close either way"; definitions in
       PREAD path itself — the ~1.2 ms/read gap between the streamer's
       2.0 ms p50 and raw pread's 0.79 (thread-pool dispatch + K12
       critical section + spin-core CPU contention are the suspects).
+      **Follow-ups the same night, ending in a CORRECTION: (a)
+      contention EXONERATED — raw pread under live decode load is
+      unchanged (0.774 vs 0.789 idle); (b) worker-QoS knob (58298d2)
+      A/B'd NULL (rig 38.50/38.43, cards 69.6/69.2, p50 identical)
+      and reverted per the T3 precedent; (c) the histogram behind
+      expert_load percentiles is POWER-OF-TWO UPPER BOUNDS
+      (loadLatencyPercentile, PreadExpertStreamer.swift:93) — tonight's
+      p50=1.000 means (0.5, 1.0] ms, which BRACKETS raw pread's 0.79:
+      the production pread path has ≈ zero per-read software overhead
+      left, and the era-2.0 figure was a coarser bucket on the old
+      config. VERDICT REVISED: the miss path's exposed cost is drive
+      physics + weak overlap (~30 % hidden), NOT submission overhead;
+      the surviving lever is HIDING — deeper effective queue depth
+      across in-flight layers (drive gives +48 % aggregate at QD4) —
+      a scheduling-structure change, smaller and harder than the
+      original ~3–4 ms batching estimate. MTLIO's +0.54 ms single-load
+      overhead stands (probe-measured) but production never pays it.**
 
 ## Queued after T5 (Davor, 2026-08-31 — sequenced behind the original tasks)
 
