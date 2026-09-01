@@ -138,7 +138,8 @@ import ShrikeValidationSupport
             Issue.record("q/out allocation failed"); return
         }
 
-        for numKVHeads in [2, 4, 16] {
+        var buffers: [Int: (k: MTLBuffer, v: MTLBuffer)] = [:]
+        for numKVHeads in [2, 4, 8, 16] {
             let rowElements = numKVHeads * headDim
             let kv = (0..<(maxSeq * rowElements)).map { _ in
                 Float16(rng.uniform(-0.5, 0.5))
@@ -158,25 +159,44 @@ import ShrikeValidationSupport
                       destinationOffset: 0, size: kvShared.length)
             blit.endEncoding()
             copyCB.commit(); copyCB.waitUntilCompleted()
+            buffers[numKVHeads] = (kBuf, vBuf)
+        }
 
-            for seqLen in [1024, 4096] {
-                var best = Double.greatestFiniteMagnitude
-                for _ in 0..<iterations {
-                    guard let cb = context.queue.makeCommandBuffer() else {
-                        Issue.record("bench CB failed"); return
+        func timeOne(_ numKVHeads: Int, _ seqLen: Int) throws -> Double {
+            guard let bufs = buffers[numKVHeads],
+                  let cb = context.queue.makeCommandBuffer() else { return .nan }
+            try attention.encodeFull(commandBuffer: cb,
+                                     q: qBuf, k: bufs.k, v: bufs.v,
+                                     out: outBuf,
+                                     headDim: UInt32(headDim),
+                                     numQHeads: UInt32(numQHeads),
+                                     numKVHeads: UInt32(numKVHeads),
+                                     seqLen: UInt32(seqLen))
+            cb.commit(); cb.waitUntilCompleted()
+            return cb.gpuEndTime - cb.gpuStartTime
+        }
+
+        for numKVHeads in [2, 4, 8, 16] {
+            _ = try timeOne(numKVHeads, maxSeq)
+        }
+
+        var best: [String: Double] = [:]
+        for _ in 0..<3 {
+            for numKVHeads in [2, 4, 8, 16] {
+                for seqLen in [1024, 4096] {
+                    for _ in 0..<iterations {
+                        let t = try timeOne(numKVHeads, seqLen)
+                        let key = "\(numKVHeads)-\(seqLen)"
+                        best[key] = min(best[key] ?? .greatestFiniteMagnitude, t)
                     }
-                    try attention.encodeFull(commandBuffer: cb,
-                                             q: qBuf, k: kBuf, v: vBuf,
-                                             out: outBuf,
-                                             headDim: UInt32(headDim),
-                                             numQHeads: UInt32(numQHeads),
-                                             numKVHeads: UInt32(numKVHeads),
-                                             seqLen: UInt32(seqLen))
-                    cb.commit(); cb.waitUntilCompleted()
-                    best = min(best, cb.gpuEndTime - cb.gpuStartTime)
                 }
+            }
+        }
+        for numKVHeads in [2, 4, 8, 16] {
+            for seqLen in [1024, 4096] {
+                let t = best["\(numKVHeads)-\(seqLen)"] ?? .nan
                 print(String(format: "V3A gqa NKV=%2d T=%4d  best %8.1f us",
-                             numKVHeads, seqLen, best * 1e6))
+                             numKVHeads, seqLen, t * 1e6))
             }
         }
     }

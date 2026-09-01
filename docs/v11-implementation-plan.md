@@ -33,24 +33,26 @@ warm `attn_layer_kv` slope); deploy = binary + bundles (new kernel!).
       structure). Survivors: the int8 attn_load_kv dequant (per-element
       scale/bias loads + integer div/mod) and the 8× GQA re-read.
       Knob kept default-off while iteration continues.
-- [x] **V3a: standalone microbench — MECHANISM NAMED: GQA READ
-      AMPLIFICATION (2026-09-01 ~15:20, AttentionDepthBenchTests,
-      M4 Pro, production encodeFull binding).** Depth slopes
-      (µs/position, best-of-15): fp16-private 0.180, fp16-shared
-      0.186, int8-private 0.205, int8-shared 0.204 — so the int8
-      dequant/runtime-divisor theory (peer's #1) and the
-      storageModeShared theory (mine) are BOTH exonerated; slopes
-      also reproduce production (M1 0.43 ≈ machine ratio). The GQA
-      arm decides it: at NKV=16 (amplification 1×) the slope
-      collapses to 0.025 — 7.4× shallower than NKV=2 (amplification
-      8×) while reading 8× more unique bytes. The 8-Q-heads-per-
-      KV-head re-read IS the depth tax. Anomalies on record: NKV=4
-      measured ≈ NKV=2 (not intermediate); this arm's absolute
-      baselines run hot vs the first ladder (DVFS suspect) — slope
-      comparisons within-run only. Fix direction: KV-head-shared
-      threadgroups (read each KV chunk once, compute all 8 Q heads'
-      dots against it) — changes lane assignment/reduction order,
-      a264b22-class, NEEDS Davor's per-instance sign-off.
+- [x] **V3a: standalone microbench — MECHANISM: TRAFFIC-BOUND AT
+      ~40 % OF ROOF, GQA-AMPLIFIED (corrected 2026-09-01 ~16:00).**
+      Round 1 (clean): depth slopes fp16-private 0.180 / fp16-shared
+      0.186 / int8-private 0.205 / int8-shared 0.204 µs/position —
+      dequant/divides and storage mode both exonerated; production
+      reproduced (M1 0.43 ≈ machine ratio). Round 2 ⚠ RETRACTED: the
+      "7.4× NKV=16 slope collapse" came from a CONTAMINATED run (no
+      pgrep before rerun; inflated T=1024 baselines; the parked NKV=4
+      anomaly was the tell). Round 3 (drift-robust interleaved,
+      pgrep-guarded): slopes 0.155/0.183/0.193/0.205 across NKV
+      2/4/8/16 — flat, which is exactly right because that arm's
+      total traffic (NQ×HD×T) is NKV-invariant: the kernel is
+      DEVICE-TRAFFIC-BOUND, moving ~67 MB at 80–105 GB/s (~35–40 % of
+      the M4 roof; consistent with 50 % line utilization of half-row
+      slices). At ornith's NKV=2, 7/8 of that traffic is redundant
+      GQA re-read. Fix unchanged in direction, sobered in size:
+      KV-head-shared threadgroups cut traffic 8× → expected slope cut
+      ~5–6×; full sharing required (pairing halves traffic only).
+      Bench discipline now baked in: pgrep guard + interleaved
+      3-round grid, global best per point.
 - [ ] **V4: (redefined after V3a) the kernel fix the microbench
       indicates, then twin, then default flip + golden baseline (rig +
       ~2k prompt) per the standing T5 note; v10's Q2 closes with a
