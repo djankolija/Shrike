@@ -27,7 +27,23 @@ final class Attention {
     private let ctx: MetalContext
     private let psoPartial: MTLComputePipelineState
     private let psoPartialSG: MTLComputePipelineState
+    private let psoPartialShared: MTLComputePipelineState
     private let partialLoopVariant: PartialLoopVariant
+
+    /// v11 V4 applicability: full-attention path only, head slice fits the
+    /// kernel's threadgroup staging, and the GQA fan-in fits the simdgroups.
+    private func kvSharedApplicable(headDim: UInt32,
+                                    numQHeads: UInt32,
+                                    numKVHeads: UInt32,
+                                    useGQAPartial: Bool,
+                                    ringCapacity: UInt32) -> Bool {
+        partialLoopVariant == .kvShared
+            && !useGQAPartial
+            && ringCapacity == 0
+            && headDim <= 256
+            && numQHeads % numKVHeads == 0
+            && numQHeads / numKVHeads <= 8
+    }
     var partialPipelineMaxThreadsForBench: Int {
         psoPartial.maxTotalThreadsPerThreadgroup
     }
@@ -85,7 +101,7 @@ final class Attention {
 
     /// v11: which inner loop the full-attention decode partial runs.
     /// `.simdgroup` reorders the softmax summation (a264b22-class).
-    enum PartialLoopVariant: Sendable { case blockReduce, simdgroup }
+    enum PartialLoopVariant: Sendable { case blockReduce, simdgroup, kvShared }
 
     init(context: MetalContext,
          maxQHeads: Int = 16,
@@ -112,6 +128,7 @@ final class Attention {
             : nil
         self.psoPartial = try context.pipeline("attention_decode_partial")
         self.psoPartialSG = try context.pipeline("attention_decode_partial_sg")
+        self.psoPartialShared = try context.pipeline("attention_decode_partial_shared")
         self.psoGQAPartial = try context.pipeline("attention_decode_gqa_swa_partial")
         self.psoCombine = try context.pipeline("attention_decode_combine")
         self.psoPartialSWA = try Self.specializedPipeline(context,
@@ -461,8 +478,20 @@ final class Attention {
                                           kvStart: kvStart,
                                           preferGQASWA: preferGQASWA)
         let useSWAGQAPartial = geometry.useSWAGroupedPartial
-        let nChunks = geometry.numChunks
-        let chunkLen = geometry.chunkLength
+        var nChunks = geometry.numChunks
+        var chunkLen = geometry.chunkLength
+        let usesKVShared = kvSharedApplicable(headDim: headDim,
+                                              numQHeads: numQHeads,
+                                              numKVHeads: numKVHeads,
+                                              useGQAPartial: useSWAGQAPartial,
+                                              ringCapacity: ringCapacity)
+        if usesKVShared {
+            // The shared partial has numKVHeads-fold fewer TGs per chunk, so it
+            // takes the full chunk budget to keep the machine occupied.
+            let effective = max(1, Int(seqLen) - Int(kvStart))
+            nChunks = max(1, min(Self.maxChunks, effective))
+            chunkLen = (effective + nChunks - 1) / nChunks
+        }
         let partialPSO = partialPipeline(headDim: headDim,
                                          numQHeads: numQHeads,
                                          numKVHeads: numKVHeads,
@@ -497,7 +526,9 @@ final class Attention {
         p1.setBytes(&kvStride, length: MemoryLayout<UInt32>.size, index: 15)
         p1.setBytes(&kvValueBytes, length: MemoryLayout<UInt32>.size, index: 16)
         p1.setBytes(&kvGroupSize, length: MemoryLayout<UInt32>.size, index: 17)
-        let partialGroups = geometry.partialThreadgroups
+        let partialGroups = usesKVShared
+            ? Int(numKVHeads) * nChunks
+            : geometry.partialThreadgroups
         p1.dispatchThreadgroups(MTLSize(width: partialGroups, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
 
@@ -582,6 +613,12 @@ final class Attention {
         }
         if partialLoopVariant == .simdgroup, !useGQAPartial {
             return psoPartialSG
+        }
+        if kvSharedApplicable(headDim: headDim, numQHeads: numQHeads,
+                              numKVHeads: numKVHeads,
+                              useGQAPartial: useGQAPartial,
+                              ringCapacity: ringCapacity) {
+            return psoPartialShared
         }
         if useGQAPartial && headDim == 256 && numQHeads == 16 && numKVHeads == 8 {
             if numChunks == 16 {

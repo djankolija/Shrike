@@ -257,6 +257,37 @@ import ShrikeValidationSupport
                                    loopVariant: .simdgroup)
     }
 
+    @Test("v11 kv-shared partial tracks the reference")
+    func kvSharedTracksReference() throws {
+        for seqLen in [3, 17, 96, 500] {
+            _ = try Self.runAndCompare(headDim: 256, numQHeads: 16,
+                                       numKVHeads: 2, seqLen: seqLen,
+                                       mode: .full, seed: 0x5A4ED,
+                                       loopVariant: .kvShared)
+        }
+        _ = try Self.runAndCompare(headDim: 128, numQHeads: 16, numKVHeads: 8,
+                                   seqLen: 40, mode: .full, seed: 0x5A4ED,
+                                   loopVariant: .kvShared)
+        _ = try Self.runAndCompare(headDim: 256, numQHeads: 16, numKVHeads: 16,
+                                   seqLen: 40, mode: .full, seed: 0x5A4ED,
+                                   loopVariant: .kvShared)
+    }
+
+    @Test("v11 kv-shared and block-reduce loops agree tightly")
+    func kvSharedMatchesBlockReduce() throws {
+        for seqLen in [17, 500] {
+            let base = try Self.runAndCompare(headDim: 256, numQHeads: 16,
+                                              numKVHeads: 2, seqLen: seqLen,
+                                              mode: .full, seed: 0xD00D)
+            let shared = try Self.runAndCompare(headDim: 256, numQHeads: 16,
+                                                numKVHeads: 2, seqLen: seqLen,
+                                                mode: .full, seed: 0xD00D,
+                                                loopVariant: .kvShared)
+            let rel = RelError.compute(actual: shared, reference: base)
+            #expect(rel < 2e-3, "kv-shared divergence rel=\(rel) at T=\(seqLen)")
+        }
+    }
+
     @Test("v11 simdgroup and block-reduce loops agree tightly")
     func simdgroupLoopMatchesBlockReduce() throws {
         for seqLen in [17, 500] {

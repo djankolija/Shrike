@@ -200,4 +200,95 @@ import ShrikeValidationSupport
             }
         }
     }
+
+    @Test(.enabled(if: AttentionDepthBenchTests.enabled))
+    func kvSharedSlope() throws {
+        let config = ArchConfig.qwen36_35B_A3B
+        let headDim = config.fullHeadDim
+        let numQHeads = config.numHeads
+        let numKVHeads = config.numFullKVHeads
+        let maxSeq = 4096
+        let rowElements = numKVHeads * headDim
+        let qCount = numQHeads * headDim
+
+        let context = try MetalContext()
+        let base = try Attention(context: context)
+        let shared = try Attention(context: context,
+                                   partialLoopVariant: .kvShared)
+
+        var rng = SeedTree(0x54AF).key("v4")
+        let q = (0..<qCount).map { _ in Float16(rng.uniform(-0.5, 0.5)) }
+        let k = (0..<(maxSeq * rowElements)).map { _ in Float16(rng.uniform(-0.5, 0.5)) }
+        let v = (0..<(maxSeq * rowElements)).map { _ in Float16(rng.uniform(-0.5, 0.5)) }
+        guard let qBuf = Fp16Buffer.make(context.device, halves: q),
+              let kBuf = Fp16Buffer.make(context.device, halves: k),
+              let vBuf = Fp16Buffer.make(context.device, halves: v),
+              let outBuf = Fp16Buffer.make(context.device, count: qCount) else {
+            Issue.record("allocation failed"); return
+        }
+
+        let cache = try KVCacheManager(device: context.device, config: config,
+                                       maxContext: maxSeq, precision: .int8)
+        let quantizer = try KVCacheQuantizer(context: context)
+        let keyView = cache.keyView(layer: 3, validTokenCount: maxSeq)
+        let valueView = cache.valueView(layer: 3, validTokenCount: maxSeq)
+        guard let quantCB = context.queue.makeCommandBuffer() else {
+            Issue.record("quantize CB failed"); return
+        }
+        try quantizer.encode(commandBuffer: quantCB, source: kBuf,
+                             sourceTokenStrideElements: rowElements,
+                             destination: keyView, tokenCount: maxSeq,
+                             elementCount: rowElements)
+        try quantizer.encode(commandBuffer: quantCB, source: vBuf,
+                             sourceTokenStrideElements: rowElements,
+                             destination: valueView, tokenCount: maxSeq,
+                             elementCount: rowElements)
+        quantCB.commit(); quantCB.waitUntilCompleted()
+
+        func timeOne(_ attention: Attention, _ seqLen: Int,
+                     quantized: Bool) throws -> Double {
+            guard let cb = context.queue.makeCommandBuffer() else { return .nan }
+            try attention.encodeFull(commandBuffer: cb,
+                                     q: qBuf,
+                                     k: quantized ? keyView.buffer : kBuf,
+                                     v: quantized ? valueView.buffer : vBuf,
+                                     out: outBuf,
+                                     headDim: UInt32(headDim),
+                                     numQHeads: UInt32(numQHeads),
+                                     numKVHeads: UInt32(numKVHeads),
+                                     seqLen: UInt32(seqLen),
+                                     kvFormat: quantized ? keyView : nil)
+            cb.commit(); cb.waitUntilCompleted()
+            return cb.gpuEndTime - cb.gpuStartTime
+        }
+
+        _ = try timeOne(base, maxSeq, quantized: true)
+        _ = try timeOne(shared, maxSeq, quantized: true)
+
+        var best: [String: Double] = [:]
+        for _ in 0..<3 {
+            for (name, attn) in [("base", base), ("kvsh", shared)] {
+                for quantized in [true, false] {
+                    for seqLen in [1024, 4096] {
+                        for _ in 0..<10 {
+                            let t = try timeOne(attn, seqLen, quantized: quantized)
+                            let key = "\(name)-\(quantized)-\(seqLen)"
+                            best[key] = min(best[key] ?? .greatestFiniteMagnitude, t)
+                        }
+                    }
+                }
+            }
+        }
+        for (name, _) in [("base", base), ("kvsh", shared)] {
+            for quantized in [true, false] {
+                let kind = quantized ? "int8" : "fp16"
+                let a = best["\(name)-\(quantized)-1024"] ?? .nan
+                let b = best["\(name)-\(quantized)-4096"] ?? .nan
+                let slope = (b - a) / 3072 * 1e9
+                print(String(format:
+                    "V4 %@ %@  T=1024 %7.1f us  T=4096 %7.1f us  slope %6.3f us/pos",
+                    name, kind, a * 1e6, b * 1e6, slope / 1000))
+            }
+        }
+    }
 }

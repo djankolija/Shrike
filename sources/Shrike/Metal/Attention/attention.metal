@@ -399,6 +399,127 @@ void attention_decode_partial_sg(
     }
 }
 
+// v11 V4: KV-head-shared partial. One TG owns a (kv_head, chunk) pair and
+// stages each K/V row into threadgroup memory ONCE; the qPerKV simdgroups
+// each dot their own Q head against the staged row — device traffic drops by
+// the sharing degree (8× at ornith's 16/2). Own head-dim cap (256) so the
+// static threadgroup arrays stay at ~10 KB and occupancy survives (the T2
+// lesson). Reduction order differs from attention_decode_partial in the
+// intra-dot tree (lane-strided chain + simd_sum) — a264b22-class, signed off
+// 2026-09-01.
+constant constexpr uint kAttnSharedMaxHeadDim = 256;
+// Positions staged per barrier round: divides the two TG barriers per
+// position by the block size; 4 keeps k+v staging at 8 KB.
+constant constexpr uint kAttnSharedPosBlock = 4;
+
+[[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
+void attention_decode_partial_shared(
+    device const half*  Q             [[buffer(0)]],
+    device const uchar* K             [[buffer(1)]],
+    device const uchar* V             [[buffer(2)]],
+    device       float* m_out         [[buffer(3)]],
+    device       float* d_out         [[buffer(4)]],
+    device       float* o_out         [[buffer(5)]],
+    constant     uint&  head_dim      [[buffer(6)]],
+    constant     uint&  num_q_heads   [[buffer(7)]],
+    constant     uint&  num_kv_heads  [[buffer(8)]],
+    constant     uint&  seq_len       [[buffer(9)]],
+    constant     uint&  kv_start      [[buffer(10)]],
+    constant     uint&  chunk_len     [[buffer(11)]],
+    constant     uint&  num_chunks    [[buffer(12)]],
+    constant     float& scale         [[buffer(13)]],
+    constant     uint&  kv_bits       [[buffer(14)]],
+    constant     uint&  kv_stride     [[buffer(15)]],
+    constant     uint&  kv_value_bytes [[buffer(16)]],
+    constant     uint&  kv_group_size [[buffer(17)]],
+    uint tg_id           [[threadgroup_position_in_grid]],
+    uint lid             [[thread_position_in_threadgroup]],
+    uint lsize           [[threads_per_threadgroup]],
+    uint simd_lane_id    [[thread_index_in_simdgroup]],
+    uint simd_group_id   [[simdgroup_index_in_threadgroup]]
+) {
+    threadgroup float q_smem[kAttnMaxSimdGroups * kAttnSharedMaxHeadDim];
+    threadgroup float k_smem[kAttnSharedPosBlock * kAttnSharedMaxHeadDim];
+    threadgroup float v_smem[kAttnSharedPosBlock * kAttnSharedMaxHeadDim];
+    const uint HD = attn_fc_head_dim(head_dim);
+    const uint NQ = attn_fc_num_q_heads(num_q_heads);
+    const uint NKV = attn_fc_num_kv_heads(num_kv_heads);
+    const uint NC = attn_fc_num_chunks(num_chunks);
+    const uint qPerKV = NQ / NKV;
+
+    const uint kv_head = tg_id / NC;
+    const uint chunk  = tg_id % NC;
+    const uint p_start = kv_start + chunk * chunk_len;
+    uint p_end = p_start + chunk_len;
+    if (p_end > seq_len) { p_end = seq_len; }
+
+    for (uint i = lid; i < qPerKV * HD; i += lsize) {
+        const uint head = i / HD;
+        q_smem[i] = float(Q[(kv_head * qPerKV + head) * HD + (i - head * HD)]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    constexpr uint kPerLane = (kAttnSharedMaxHeadDim + 31u) / 32u;
+    float o_local[kPerLane];
+    for (uint s = 0; s < kPerLane; ++s) { o_local[s] = 0.0f; }
+    float m_run = -INFINITY;
+    float d_run = 0.0f;
+    const bool liveHead = simd_group_id < qPerKV;
+    threadgroup const float* q_mine = q_smem + simd_group_id * HD;
+
+    for (uint pb = p_start; pb < p_end; pb += kAttnSharedPosBlock) {
+        const uint blockCount = min(uint(kAttnSharedPosBlock), p_end - pb);
+        for (uint e = lid; e < blockCount * HD; e += lsize) {
+            const uint j = e / HD;
+            const uint i = e - j * HD;
+            const uint phys_p = attn_ring_slot(pb + j);
+            const uint flat = kv_head * HD + i;
+            k_smem[e] = attn_load_kv(K, phys_p, flat, NKV * HD,
+                                      kv_bits, kv_stride, kv_value_bytes,
+                                      kv_group_size);
+            v_smem[e] = attn_load_kv(V, phys_p, flat, NKV * HD,
+                                      kv_bits, kv_stride, kv_value_bytes,
+                                      kv_group_size);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (liveHead) {
+            for (uint j = 0; j < blockCount; ++j) {
+                threadgroup const float* k_row = k_smem + j * HD;
+                threadgroup const float* v_row = v_smem + j * HD;
+                float partial = 0.0f;
+                for (uint i = simd_lane_id; i < HD; i += 32u) {
+                    partial = fma(q_mine[i], k_row[i], partial);
+                }
+                const float s = simd_sum(partial) * attn_fc_scale(scale);
+                const float m_new = max(m_run, s);
+                const float alpha = attn_softmax_exp(m_run - m_new);
+                const float p_exp = attn_softmax_exp(s     - m_new);
+                d_run = d_run * alpha + p_exp;
+                uint slot = 0;
+                for (uint i = simd_lane_id; i < HD; i += 32u) {
+                    o_local[slot] = o_local[slot] * alpha + p_exp * v_row[i];
+                    slot += 1;
+                }
+                m_run = m_new;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (liveHead) {
+        const uint q_head = kv_head * qPerKV + simd_group_id;
+        const uint base = q_head * NC + chunk;
+        if (simd_lane_id == 0) { m_out[base] = m_run; d_out[base] = d_run; }
+        device float* o_row = o_out + base * HD;
+        uint slot = 0;
+        for (uint i = simd_lane_id; i < HD; i += 32u) {
+            o_row[i] = o_local[slot];
+            slot += 1;
+        }
+    }
+}
+
 [[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
 void attention_decode_gqa_swa_partial(
     device const half*  Q             [[buffer(0)]],
