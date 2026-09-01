@@ -1,0 +1,240 @@
+# v12 — Prefill on the matrix path
+
+Status of record: [v12-implementation-plan.md](v12-implementation-plan.md).
+
+## The problem
+
+Decode closed at 38.1 ms/token on the mini ([v10](v10-implementation-plan.md),
+[v11](v11-implementation-plan.md)). Prefill was never touched, and it is now the
+slower phase per token at any prompt that fills more than one chunk:
+
+| box | prompt tokens | prefill wall | per prompt token | vs its own decode |
+| --- | ---: | ---: | ---: | ---: |
+| M1 mini, 8-core GPU, 16 GB | 3,756 | 110.7 s | 29.5 ms | 0.8× |
+| M1 mini | 12,285 | 725.2 s | 59.0 ms | **1.5× slower** |
+| M4 Pro, 20-core GPU, 48 GB | 4,305 | 37.6 s | 8.7 ms | |
+| M4 Pro | 25,245 | 666.8 s | 26.4 ms | |
+
+Prefill is the compute-bound phase: 4,096 tokens share every weight read, so the
+cost is arithmetic, not bandwidth. Against each box's *measured* matmul ceiling
+(below), both sit at the same tenfold distance. The M1/M4 Pro wall ratio is
+3.9×; the ceiling ratio is 3.95×. It is the code, not the machine.
+
+## Method: the target from the measured ceiling
+
+Same derivation that settled decode's target: hardware ceiling, discounted for
+what a real kernel achieves, then per-term work from the model's actual shape.
+
+**Work per token** (from `manifest.json`: hidden 2048, 10 full-attention + 30
+GDN layers, 256 experts top-8 with intermediate 512, gated shared expert 512,
+16 query heads × 256 over 2 KV heads):
+
+| term | GFLOP per token |
+| --- | ---: |
+| attention projections, 10 layers (gated Q 8192, K/V 512, O) | 0.55 |
+| GDN projections + recurrence, 30 layers | 2.15 |
+| routed experts, 40 layers × 8 × 3 × (2048×512) | 2.01 |
+| shared expert + router, 40 layers | 0.29 |
+| **length-independent total** | **5.0** |
+| attention scores + values, extra per token at prompt length N | 0.082 × N/1000 |
+
+**Ceiling, measured** with `ShrikeBench gemm` (Apple's MPS fp16 GEMM, the
+best-known kernel, at the prefill shapes; `gpuEndTime − gpuStartTime`):
+
+| shape | M4 Pro TFLOPS | M1 TFLOPS |
+| --- | ---: | ---: |
+| 4096³ | 7.46 | 1.86 |
+| gated Q projection, 4096×2048×8192 | 7.58 | 1.67 |
+| GDN in-projection, 4096×2048×12288 | 7.57 | 1.62 |
+| one expert's gate/up at 128 routed rows, 128×2048×1024 | 5.74 | 1.84 |
+| one expert's down at 128 rows, 128×512×2048 | 5.88 | 1.78 |
+| same at 32 rows | 3.62 | 0.97 |
+
+Sticker (core count × ALUs × clock) is ~9.2 and 2.6 TFLOPS, so the real
+ceiling is 80 % and 72 % of sticker. 128 routed rows per expert, which is what
+a 4,096-token chunk yields on average, still gets three quarters of the big-shape
+rate; the matrix path pays off at the expert shape too.
+
+**Target**: 50 % of the measured ceiling for our kernels (int4 dequant inside the
+loop, per-expert row gathers, attention tiles), the analogue of decode's 65 %.
+
+| | M4 Pro | M1 mini |
+| --- | ---: | ---: |
+| effective rate at 50 % | 3.7 TFLOPS | 0.95 TFLOPS |
+| per token at 4k | 1.4 ms | 5.6 ms |
+| per token at 12k | 1.6 ms | 6.3 ms |
+| per token at 25k | 1.9 ms | 7.4 ms |
+| SSD term per 4,096-token chunk (mini: 128 uncached experts × 40 layers × 1.77 MB at 2.8 GB/s) | none, experts resident | 3.2 s = 0.8 ms/token, hidden only if pipelined |
+| **tok/s at 4k** | **~700** | **~180** |
+
+Today is 5× above this target on both boxes at 4k and 10× at 12k.
+
+## The ledger
+
+Measured 2026-09-01 at commit 3c326d9, `SHRIKE_KERNEL_STATS=1`, 4,096-token
+chunks, 8-bit KV cache, greedy, 8 new tokens, one request per prompt, prompts
+from `tools/prefill-prompts.py` (the golden-baseline ledger text at 60/180/360
+entries; it tokenizes at 2.6 bytes/token). The mini's rows came through its
+production server; the M4 Pro's through a fresh server with `--ram-budget 20G`
+(all experts resident). GPU ms per **prompt** token, from the role sums:
+
+| role | M4 Pro 3.7k | M4 Pro 4.3k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `prefill_attn_router` (10 layers) | 3.39 | 3.87 | 11.85 | 22.19 | 13.80 | 43.43 |
+| `prefill_routed_tile` | 2.03 | 2.03 | 2.04 | 2.03 | 5.82 | 5.82 |
+| `prefill_gdn_router` (30 layers) | 0.99 | 1.00 | 1.01 | 1.01 | 4.37 | 4.39 |
+| `prefill_shared_expert` (40 layers) | 0.83 | 0.83 | 0.85 | 0.84 | 3.92 | 3.97 |
+| `prefill_moe_reduce` | 0.01 | 0.01 | 0.01 | 0.01 | 0.04 | 0.04 |
+| **GPU busy** (prefill roles + the 8 decode tokens) | 7.34 | 7.77 | 15.77 | 26.09 | 28.13 | 57.82 |
+| gaps (span − busy) | 0.87 | 0.95 | 0.22 | 0.32 | 1.30 | 1.19 |
+| outside the span | 0.43 | 0.01 | 0.01 | 0.01 | 0.03 | 0.01 |
+| **wall** | 8.64 | 8.74 | 16.00 | 26.41 | 29.46 | 59.03 |
+
+The ledger closes: wall = busy + gaps + a per-request remainder (the first
+column's remainder is the fresh server's first request).
+
+- **Attention time is proportional to query–key pairs, not tokens.** Across
+  chunks the pairs grow as 4096 × (2048 + 6144 + 10240 + …); 12k has 10.7× the
+  pairs of 3.7k and took 11.4× the time. The projections inside the role are
+  invisible at this scale (intercept ≈ 0 on the M4 Pro, ~0.8 ms/token on the
+  M1). At 25k tokens the attention core is 85 % of prefill.
+- **The other three roles are flat per token** on both boxes, at 3.9–4.7× the
+  M4 Pro's cost on the M1.
+- **Gaps are a fixed tax per tile.** `prefill_routed_tile→prefill_routed_tile`
+  is ~1.3 ms per tile boundary (its own command buffer, commit and wait): 2.8 s
+  of the 37.6 s at 4.3k. Small today, but it does not shrink when kernels do.
+- **I/O is hidden under the kernels** on both boxes (occupancy 89–99 %,
+  runner `io_ms` under 50 ms per request). That corrects the v10 P3 entry's
+  "a large slice of prefill's 33 ms/token": the 28–33 ms/token is kernel time.
+  The SSD term surfaces only once the kernels are ~5× faster.
+- The runner's `expert_hit_rate_prefill` reads 8–14 % even with every expert
+  resident on the M4 Pro; warm and cold runs cost the same, so the counter,
+  not the cache, is what is off. Parked.
+
+## Where the time goes
+
+Every dense projection in prefill (attention Q/K/V/O, GDN in/out) already runs
+through `mpp_prefill_affine_threadgroup_f16`, the one SIMD-group matrix kernel in
+the codebase, which is why they cost nothing measurable. The three slow roles are
+all scalar kernels:
+
+| role | kernel | structure | roofline gap (M4 Pro) |
+| --- | --- | --- | ---: |
+| attention core | `attention_prefill_causal_tiled` | one threadgroup per (query, head), 256 threads over head-dim, a serial walk over every key with a two-barrier threadgroup reduction per key. The decode kernel's shape, run once per prompt token: no K/V reuse across queries, none across the 8 query heads that share a KV head. | 30× at 3.7k, 60× at 25k |
+| routed experts | `prefill_grouped_routed_moe_batched_phase1` / `_down` | each thread computes one or two 2048-long scalar dot products; 32-pair microbatches; a command buffer per 8-expert tile | 7× |
+| shared expert | `PrefillSharedExpert.encodeBlock` | a `for row in 0..<queryCount` loop over the decode runtime: 4–6 M=1 GEMV dispatches per token | 25× |
+| GDN | `gdn_delta_step_prefill` | the delta-rule scan is a serial loop over the chunk inside one dispatch of 32×32 threadgroups; projections, conv and norms are fine | 3.6× (scan ≈ 0.6 of the 1.0 ms) |
+
+A matrix-path attention kernel exists in `prefill.metal`
+(`attention_prefill_full_tensorops_2d_validity_v2`, `matmul2d` over 64-key
+tiles with online softmax) but is gated to head-dim 512, fp16 KV, scale 1.0,
+so this model never selects it and silently gets the scalar kernel. Its tile is
+also thin: one query × 8 heads per threadgroup.
+
+## Design
+
+Kernel replacement in ledger order, smallest risk first. Each step is gated by
+the same four checks before the next starts:
+
+1. `ShrikeBench` microbench of the new kernel against the `gemm` ceiling.
+2. fp32 reference test in `ShrikeValidation` (references exist for attention,
+   GDN, MoE and the dequant GEMVs), at single-chunk and multi-chunk shapes.
+3. The five repo gates, then `tools/golden-baseline.sh --check` — expected to
+   differ (see numerics policy), recaptured on sign-off.
+4. The ledger re-measured on both boxes at 3.7k and 12k; the table above gains
+   a row.
+
+### Step 0 — harness (done except the log line)
+
+`ShrikeBench gemm`, `tools/prefill-prompts.py`, `tools/prefill-ledger.py`,
+`tools/prefill-measure.sh` (the `decode-measure.sh` twin: sends the prompt set
+to a running server and prints the ledger). Plus a one-line log at runner init
+naming the projection path (`affine-threadgroup-f16` or the fallback), because
+nothing today records whether the matrix kernel compiled on a given box.
+
+### Step 1 — shared expert on the matrix path (−11 %)
+
+Replace the per-row loop with, per layer per chunk: gate GEMM (T×2048 →
+T×512), up GEMM, one `silu_mul` over T×512, down GEMM (T×512 → T×2048), one
+T-row scalar-gate kernel, one `sigmoid_scalar_mul` over T rows — through the
+existing `MPPPrefillInt4QMM.encode` (the shared expert is affine int4 group-64
+like the projections). Below 32 tokens the row loop stays, mirroring the
+projection helper's threshold. Decode is untouched (M=1 there is right).
+Expected: 0.83 → ~0.06 ms/token on the M4 Pro.
+
+### Step 2 — attention core on the matrix path (−45 % at 4k, −85 % at 25k)
+
+A blocked causal kernel: a threadgroup owns a block of queries for one KV head
+group (the 8 query heads sharing that head, so each K/V tile serves 8× the
+rows), streams 32–64-key tiles of K and V through threadgroup memory, computes
+QKᵀ and PV with `matmul2d` (the same Metal 4 primitive the projection kernel
+uses), keeps the running max/sum per row (online softmax) in registers, and
+applies the causal mask only on the diagonal tile. Keys and values load from the
+8-bit cache with the same dequant the scalar kernel uses (`prefill_load_kv`), so
+the numerical basis is unchanged: same quantized keys, different reduction order.
+Tile geometry (rows per threadgroup, key tile, head-dim split against the 32 KB
+threadgroup budget at head-dim 256) is decided by a measured spike in
+`ShrikeBench`, acceptance ≥ 40 % of the `gemm` ceiling at the 3.7k and 12k
+shapes. Gate: this model's shape (head-dim 256, 16/2 heads, no sinks, no sliding
+window, 8- or 16-bit KV); every other shape, the MLA twin, and the MTP verify
+chunk keep the scalar kernel, exactly as today's tensor-ops gate does.
+Expected: 3.39 → ~0.2 ms/token at 3.7k; 22.2 → ~0.8 at 25k.
+
+### Step 3 — routed experts as per-expert GEMMs (−20 %)
+
+The tile scheduler already groups token–expert pairs by expert. Per expert in a
+tile: gather that expert's rows (~128 at a 4k chunk) into a staging block, gate
+and up GEMMs through the MPP kernel against the expert's packed int4 weights,
+`silu_mul`, down GEMM, written per pair so `prefill_moe_reduce_token_major` and
+the router-weight reduce stay as they are. Below a row threshold per expert
+(short prompts, the 32-token verify chunk) the existing scalar kernels stay.
+Expected: 2.03 → ~0.6 ms/token (128-row GEMMs at 60 % of their ceiling).
+
+After steps 1–3 the M4 Pro ledger models to ~1.9 ms/token at 4k (3.9×) and
+~2.5 at 25k (10×); step 4 is what closes the last 0.5 to the 1.4 target.
+
+### Step 4 — GDN chunked scan (−7 %, conditional)
+
+The only step with new math: the chunked gated delta rule (64-token chunks,
+intra-chunk in matmul form via the WY representation, inter-chunk state
+handoff), the form flash-linear-attention uses for prefill. Scheduled only if
+steps 1–3 land short of the target; `GDNReference` is the oracle.
+
+### Follow-ons, not scheduled
+
+- **Tile command-buffer batching.** The ~1.3 ms per tile boundary becomes a
+  quarter of the remaining time at 4k once the kernels shrink. Encode several
+  tiles per command buffer; the expert-load discovery point is the constraint.
+- **The mini's SSD term** (0.8 ms/token per chunk) surfaces after step 2; the
+  v10 P3 follow-on (batched miss loads, deeper queue depth) is the lever then.
+
+## Numerics policy
+
+Every step changes the order of floating-point additions, so outputs differ in
+the low bits from the scalar kernels. Each step is qualified against the fp32
+reference first; then `tools/golden-baseline.sh --check` is expected to
+differ, and the baselines are recaptured on both boxes, one recapture per
+step, as the deliberate numerics change the gate allows. Never recapture to
+make an unexplained mismatch go away. The greedy digests before and after each
+step are recorded in the plan.
+
+## Out of scope
+
+- ANE prefill ([ane-prefill.md](ane-prefill.md)) stays opt-in and untouched;
+  its layer breakdown was the prior record and is superseded by the ledger here.
+- Decode kernels, the KV cache layout, chunk size (4,096 stays), the `.gturbo`
+  format, and the expert streamer.
+- Other model shapes (MLA/Kimi, gpt-oss sinks, sliding windows) keep the scalar
+  kernels behind the same gates that select them today.
+- Speculative decoding's verify step. It is an 8-token forward, bandwidth-bound
+  like decode; on the mini its cost is expert-miss I/O, not these kernels.
+
+## Risks
+
+- Threadgroup memory at head-dim 256 caps the attention tile; if 40 % of the
+  ceiling is not reachable with `matmul2d`, the fallback is hand-written
+  `simdgroup_matrix` fragments (more code, same math). The spike decides.
+- Whether the matrix kernel compiles on the M1 is inferred from the ledger's
+  ratios, not observed; the step-0 log line settles it before step 1 ships.
+- Per-expert GEMMs at short prompts fall below the efficient row count; the
+  threshold keeps the scalar path there, so short prompts do not regress.
