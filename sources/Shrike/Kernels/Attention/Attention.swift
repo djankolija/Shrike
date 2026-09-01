@@ -59,7 +59,16 @@ final class Attention {
     let maxQHeads: Int
     let maxHeadDim: Int
     /// Full attention uses 16 base chunks by default.
-    private static let defaultFullChunks = 16
+    /// SHRIKE_ATTN_FULL_CHUNKS (1...maxChunks): A/B override for the decode
+    /// split-KV chunk count — the v10 depth-tax probe. Changes the pass-2
+    /// combine order (a264b22-class; Davor's per-instance sign-off 2026-09-01).
+    private static let defaultFullChunks: Int = {
+        if let raw = ProcessInfo.processInfo.environment["SHRIKE_ATTN_FULL_CHUNKS"],
+           let value = Int(raw) {
+            return min(maxChunks, max(1, value))
+        }
+        return 16
+    }()
     private static let defaultGQASWAChunks = 8
 
     // Partial state written by pass 1, read by pass 2. One shared allocation:
