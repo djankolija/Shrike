@@ -45,6 +45,11 @@ struct ShrikeBench {
         let device = context.device
         print("device: \(device.name)")
 
+        if kernelName.hasPrefix("gemm") {
+            try runGEMM(kernelName: kernelName, iterations: iterations, context: context)
+            return
+        }
+
         if kernelName.hasPrefix("gdn") {
             try runGDN(kernelName: kernelName, iterations: iterations, context: context)
             return

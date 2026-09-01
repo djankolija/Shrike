@@ -524,6 +524,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     // Long prompts are prefilled chunk by chunk — small enough to keep expert
     // reads tight.
     public nonisolated let prefillChunkTokens: Int
+    public nonisolated let prefillProjectionPath: String
     /// Routed-expert slots per layer actually in force, so the ready banner can
     /// report the streaming budget rather than leaving the user to infer it.
     public nonisolated let expertCacheSlots: Int
@@ -794,23 +795,25 @@ public actor ServerModelSession: ServerInferenceBackend {
                 maximumEntries: 1,
                 allowsPartialSalvage: runner.supportsPartialRewind)
         }
-        return ServerModelSession(context: context,
-                                  model: model,
-                                  tokenizer: tokenizer,
-                                  defaultReasoningEffort: resolvedReasoningEffort.effort,
-                                  reasoningRetention: resolvedRetention,
-                                  runner: runner,
-                                  mtpDecoder: mtpDecoder,
-                                  scratch: scratch,
-                                  prefillConfig: runtime.prefillConfig,
-                                  expertCacheSlots: loadSlots,
-                                  maxContext: maxContext,
-                                  promptCacheMode: effectivePromptCacheMode,
-                                  promptCacheDomain: promptCacheDomain,
-                                  promptCache: promptCache,
-                                  promptStateStore: promptStateStore,
-                                  concisePrompt: conciseModeEnabled()
-                                    ? ConcisePrompt.prompt(for: model) : nil)
+        let session = ServerModelSession(context: context,
+                                         model: model,
+                                         tokenizer: tokenizer,
+                                         defaultReasoningEffort: resolvedReasoningEffort.effort,
+                                         reasoningRetention: resolvedRetention,
+                                         runner: runner,
+                                         mtpDecoder: mtpDecoder,
+                                         scratch: scratch,
+                                         prefillConfig: runtime.prefillConfig,
+                                         expertCacheSlots: loadSlots,
+                                         maxContext: maxContext,
+                                         promptCacheMode: effectivePromptCacheMode,
+                                         promptCacheDomain: promptCacheDomain,
+                                         promptCache: promptCache,
+                                         promptStateStore: promptStateStore,
+                                         concisePrompt: conciseModeEnabled()
+                                           ? ConcisePrompt.prompt(for: model) : nil)
+        ServerLog.residency("prefill_projection_path=" + session.prefillProjectionPath)
+        return session
     }
 
     private init(context: MetalContext,
@@ -840,6 +843,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.scratch = scratch
         self.prefillConfig = prefillConfig
         self.prefillChunkTokens = prefillConfig.chunkTokens
+        self.prefillProjectionPath = runner.prefillProjectionPath
         self.expertCacheSlots = expertCacheSlots
         self.maxContext = maxContext
         self.promptCacheMode = promptCacheMode

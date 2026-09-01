@@ -182,6 +182,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let prefillMoE: PrefillMoE
     private let prefillFinalRowHead: PrefillFinalRowHeadInt4
 
+    public var prefillProjectionPath: String {
+        prefillMPPAffineInt4 == nil ? "unavailable" : "affine-threadgroup-f16"
+    }
+
     // Scratch — preallocated per spec'd D / F / vocab.
     private let decodeScratch: DecodeScratchBuffers
     private var hidden: MTLBuffer { decodeScratch.hidden }          // [D] FP16
