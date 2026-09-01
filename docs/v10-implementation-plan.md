@@ -63,12 +63,24 @@ on hope. Baseline anchor at start of Phase 3: rig 40.0 / card 57.9
       wall-neutral on both shapes, so the spec-CB excess above floor is
       shadowed/off the critical path; nothing >0.5 ms recoverable there.
       No task opened.
-- [ ] **T5: settle** — golden baseline capture DONE 2026-09-01 (short +
-      ~2.3k long, both machines, v11 V4.2); remaining:
-      default flips (pool/speculative/event/immediate → code defaults;
-      spin pending thermal verdict), CLAUDE.md env paragraph shrunk,
-      S3b machinery removed or opt-in documented permanent, handoff
-      closed with the final ledger.
+- [x] **T5: settle — DONE f169f51, 2026-09-02.** All five perf
+      winners are code defaults (pool/speculative/event/immediate/spin;
+      env vars remain as explicit A/B overrides; spin's thermal gate
+      lifted by Davor — the live deployment's bursty duty cycle was
+      the trial). S3b machinery DELETED whole (git history preserves
+      it; CrossQueueSharedEventTests re-chartered to the event IO sync
+      it still pins). CLAUDE.md env paragraph shrunk to stats-only.
+      Golden baselines captured V4.2 and used as gates since. Mini is
+      a clean prod box: current binaries + bundles + models +
+      baselines only — every staged rollback binary, nvmai-retired,
+      the log rotations, and the 29 GB gputrace deleted per Davor's
+      ruling (docs and git carry the history; ~235 GB freed). Bare
+      launch digest 494bab3edb62 exact on both machines; golden
+      --check identical on both; mini prod line is two stats vars.
+      Handoff retired with this entry as the final ledger. FINAL
+      CHAPTER ARITHMETIC: rig 111.6 → 38.1 ms/token (2.9×); depth
+      tax +8.0 → +2.07 ms/1k ctx (3.9×); output byte-identical
+      throughout.
 
 ## Close-out probes (added 2026-09-01 — part of the settled gate)
 
@@ -85,8 +97,13 @@ Each is "run once, record the verdict, close either way"; definitions in
       ~⅓ kernel-side headroom exists on M4-class hardware only
       (occupancy/unpack tuning, not the machine). Out of scope for the
       mini chapter; recorded for any future M4-class work.
-- [ ] **P2: attention-chain attribution** — per-kernel GPU times from
-      the existing gputrace bundles vs the honest-floor table.
+- [x] **P2: CLOSED BY SUPERSESSION 2026-09-02** — the question ("where
+      do the chain's ms go") was answered without the traces: the role
+      split (c1db837) named the family, v11 V3a named the mechanism
+      (traffic-bound GQA re-read), V4/V4.1/V5 fixed it. The parked
+      gputrace bundles were deleted with the mini cleanup; recapture
+      is one env var (SHRIKE_GPU_CAPTURE_DIR) if a per-kernel question
+      ever returns.
 - [x] **P3: miss-read QD probe** — RAN 2026-09-01, both machines
       (scratchpad `p3ssd`: F_NOCACHE pread + MTLIO arms, 96 reads/arm,
       seeded picks over packed_experts). **Mini verdict: drive
