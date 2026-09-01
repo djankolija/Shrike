@@ -94,6 +94,19 @@ Each is "run once, record the verdict, close either way"; definitions in
       deepen in-flight QD; prefill batches whole tiles. Est. prize
       ~3–4 ms/token of real-shape exposed miss I/O + a large slice of
       prefill's 33 ms/token.
+      **BACKEND A/B RAN 2026-09-01 ~04:30 — the dormant
+      SHRIKE_EXPERT_IO_BACKEND=metal path (MetalExpertReader, batches
+      per plan, exactly P3's winning shape) is NOT the vehicle:
+      same-binary twin vs pread (b0f775b): rig wait 43.29 sd 9.2 % vs
+      38.68 sd 2.2 % — slower AND noisy at rig shape (digest exact) —
+      and the server DIED silently mid-1900-token prefill (no crash
+      report, no fatal in log; OOM/jetsam suspected via the staging
+      path; the header's never-run-A/B caution was justified twice
+      over). Log: /tmp/ornith.log.metal-backend-ab. Verdict: pread
+      stays production; the surviving lever is cheapening/batching the
+      PREAD path itself — the ~1.2 ms/read gap between the streamer's
+      2.0 ms p50 and raw pread's 0.79 (thread-pool dispatch + K12
+      critical section + spin-core CPU contention are the suspects).
 
 ## Queued after T5 (Davor, 2026-08-31 — sequenced behind the original tasks)
 
