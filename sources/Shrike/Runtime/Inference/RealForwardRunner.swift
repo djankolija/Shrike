@@ -2602,7 +2602,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
                 recordKernelGPU(role: "attn_tail_router", tailCB)
             } else {
-                recordKernelGPU(role: "attn_layer", cmds.attnCB)
+                recordKernelGPU(role: cfg.layerIsLinear(L)
+                                    ? "attn_layer_linear" : "attn_layer_kv",
+                                cmds.attnCB)
             }
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
             totalWaitNanos &+= waitNanos
