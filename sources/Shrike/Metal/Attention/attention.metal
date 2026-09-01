@@ -89,6 +89,47 @@ static inline uint attn_ring_slot(uint p) {
         : p;
 }
 
+// v11 V4.1: KV storage-format constants for the kv-head-shared partial. With
+// these defined, attn_load_kv's per-element group indexing strength-reduces
+// (group_size 64 -> shifts) and the bits branch folds — the divides were the
+// visible residual once V4 removed the redundant GQA traffic.
+constant uint FC_ATTN_KV_BITS        [[function_constant(96)]];
+constant uint FC_ATTN_KV_STRIDE      [[function_constant(97)]];
+constant uint FC_ATTN_KV_VALUE_BYTES [[function_constant(98)]];
+constant uint FC_ATTN_KV_GROUP_SIZE  [[function_constant(99)]];
+
+static inline uint attn_fc_kv_bits(constant uint& kv_bits) {
+    return (is_function_constant_defined(FC_ATTN_USE_FC) &&
+            FC_ATTN_USE_FC &&
+            is_function_constant_defined(FC_ATTN_KV_BITS))
+        ? FC_ATTN_KV_BITS
+        : kv_bits;
+}
+
+static inline uint attn_fc_kv_stride(constant uint& kv_stride) {
+    return (is_function_constant_defined(FC_ATTN_USE_FC) &&
+            FC_ATTN_USE_FC &&
+            is_function_constant_defined(FC_ATTN_KV_STRIDE))
+        ? FC_ATTN_KV_STRIDE
+        : kv_stride;
+}
+
+static inline uint attn_fc_kv_value_bytes(constant uint& kv_value_bytes) {
+    return (is_function_constant_defined(FC_ATTN_USE_FC) &&
+            FC_ATTN_USE_FC &&
+            is_function_constant_defined(FC_ATTN_KV_VALUE_BYTES))
+        ? FC_ATTN_KV_VALUE_BYTES
+        : kv_value_bytes;
+}
+
+static inline uint attn_fc_kv_group_size(constant uint& kv_group_size) {
+    return (is_function_constant_defined(FC_ATTN_USE_FC) &&
+            FC_ATTN_USE_FC &&
+            is_function_constant_defined(FC_ATTN_KV_GROUP_SIZE))
+        ? FC_ATTN_KV_GROUP_SIZE
+        : kv_group_size;
+}
+
 static inline float attn_softmax_exp(float x) {
     return fast::exp(x);
 }
@@ -445,6 +486,10 @@ void attention_decode_partial_shared(
     const uint NQ = attn_fc_num_q_heads(num_q_heads);
     const uint NKV = attn_fc_num_kv_heads(num_kv_heads);
     const uint NC = attn_fc_num_chunks(num_chunks);
+    const uint kvBits = attn_fc_kv_bits(kv_bits);
+    const uint kvStride = attn_fc_kv_stride(kv_stride);
+    const uint kvValueBytes = attn_fc_kv_value_bytes(kv_value_bytes);
+    const uint kvGroupSize = attn_fc_kv_group_size(kv_group_size);
     const uint qPerKV = NQ / NKV;
 
     const uint kv_head = tg_id / NC;
@@ -475,11 +520,11 @@ void attention_decode_partial_shared(
             const uint phys_p = attn_ring_slot(pb + j);
             const uint flat = kv_head * HD + i;
             k_smem[e] = attn_load_kv(K, phys_p, flat, NKV * HD,
-                                      kv_bits, kv_stride, kv_value_bytes,
-                                      kv_group_size);
+                                      kvBits, kvStride, kvValueBytes,
+                                      kvGroupSize);
             v_smem[e] = attn_load_kv(V, phys_p, flat, NKV * HD,
-                                      kv_bits, kv_stride, kv_value_bytes,
-                                      kv_group_size);
+                                      kvBits, kvStride, kvValueBytes,
+                                      kvGroupSize);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 

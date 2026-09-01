@@ -273,6 +273,126 @@ import ShrikeValidationSupport
                                    loopVariant: .kvShared)
     }
 
+    /// v11 V4.1: the shape/KV-format-specialized shared partial changes only
+    /// integer index math, so its outputs must be byte-identical to the
+    /// unspecialized pipeline's.
+    private static func expectKVSharedSpecializationBitwiseNeutral(
+        precision: KVCachePrecision?, seqLen: Int, seed: UInt64) throws {
+        let config = ArchConfig.qwen36_35B_A3B
+        let headDim = config.fullHeadDim
+        let numQHeads = config.numHeads
+        let numKVHeads = config.numFullKVHeads
+        let qCount = numQHeads * headDim
+        let rowElements = numKVHeads * headDim
+        let kvCount = seqLen * rowElements
+        var rng = SeedTree(seed).key("v41-\(precision?.rawValue ?? 0)-T\(seqLen)")
+        let q = (0..<qCount).map { _ in Float16(rng.uniform(-0.5, 0.5)) }
+        let k = (0..<kvCount).map { _ in Float16(rng.uniform(-0.5, 0.5)) }
+        let v = (0..<kvCount).map { _ in Float16(rng.uniform(-0.5, 0.5)) }
+
+        let ctx = try MetalContext()
+        let specialized = try Attention(context: ctx, partialLoopVariant: .kvShared)
+        let generic = try Attention(context: ctx, partialLoopVariant: .kvShared,
+                                    specializesKVShared: false)
+        guard let qBuf = Fp16Buffer.make(ctx.device, halves: q),
+              let kBuf = Fp16Buffer.make(ctx.device, halves: k),
+              let vBuf = Fp16Buffer.make(ctx.device, halves: v),
+              let outA = Fp16Buffer.make(ctx.device, count: qCount),
+              let outB = Fp16Buffer.make(ctx.device, count: qCount) else {
+            Issue.record("buffer allocation failed"); return
+        }
+
+        var kBind = kBuf
+        var vBind = vBuf
+        var kvFormat: KVView?
+        if let precision {
+            let cache = try KVCacheManager(device: ctx.device, config: config,
+                                           maxContext: seqLen, precision: precision)
+            let quantizer = try KVCacheQuantizer(context: ctx)
+            guard let quantCB = ctx.queue.makeCommandBuffer() else {
+                Issue.record("no command buffer"); return
+            }
+            let keyView = cache.keyView(layer: 3, validTokenCount: seqLen)
+            let valueView = cache.valueView(layer: 3, validTokenCount: seqLen)
+            try quantizer.encode(commandBuffer: quantCB, source: kBuf,
+                                 sourceTokenStrideElements: rowElements,
+                                 destination: keyView,
+                                 tokenCount: seqLen, elementCount: rowElements)
+            try quantizer.encode(commandBuffer: quantCB, source: vBuf,
+                                 sourceTokenStrideElements: rowElements,
+                                 destination: valueView,
+                                 tokenCount: seqLen, elementCount: rowElements)
+            quantCB.commit()
+            quantCB.waitUntilCompleted()
+            kBind = keyView.buffer
+            vBind = valueView.buffer
+            kvFormat = keyView
+        }
+
+        for (kernel, out) in [(specialized, outA), (generic, outB)] {
+            guard let cb = ctx.queue.makeCommandBuffer() else {
+                Issue.record("no command buffer"); return
+            }
+            try kernel.encodeFull(commandBuffer: cb, q: qBuf, k: kBind, v: vBind,
+                                  out: out,
+                                  headDim: UInt32(headDim),
+                                  numQHeads: UInt32(numQHeads),
+                                  numKVHeads: UInt32(numKVHeads),
+                                  seqLen: UInt32(seqLen),
+                                  kvFormat: kvFormat)
+            cb.commit()
+            cb.waitUntilCompleted()
+            #expect(cb.error == nil)
+        }
+
+        let bytesA = Array(UnsafeBufferPointer(
+            start: outA.contents().assumingMemoryBound(to: UInt8.self),
+            count: qCount * 2))
+        let bytesB = Array(UnsafeBufferPointer(
+            start: outB.contents().assumingMemoryBound(to: UInt8.self),
+            count: qCount * 2))
+        #expect(bytesA == bytesB,
+                "specialized shared partial differs (precision=\(String(describing: precision)) T=\(seqLen))")
+    }
+
+    @Test("v11 V4.1 specialized shared partial is bitwise neutral, fp16")
+    func kvSharedSpecializationBitwiseNeutral_fp16() throws {
+        for seqLen in [3, 7, 500] {
+            try Self.expectKVSharedSpecializationBitwiseNeutral(
+                precision: nil, seqLen: seqLen, seed: 0x41F1)
+        }
+    }
+
+    @Test("v11 V4.1 specialized shared partial is bitwise neutral, quantized",
+          arguments: [KVCachePrecision.int8, .int4])
+    func kvSharedSpecializationBitwiseNeutral_quantized(_ precision: KVCachePrecision) throws {
+        for seqLen in [8, 500] {
+            try Self.expectKVSharedSpecializationBitwiseNeutral(
+                precision: precision, seqLen: seqLen, seed: 0x41F2)
+        }
+    }
+
+    @Test("v11 V4.1 specialized pipeline engages and caches for the shared path")
+    func kvSharedSpecializedPipelineEngages() throws {
+        let ctx = try MetalContext()
+        let specialized = try Attention(context: ctx, partialLoopVariant: .kvShared)
+        let first = specialized.partialPipeline(headDim: 256, numQHeads: 16,
+                                                numKVHeads: 2, numChunks: 64,
+                                                useGQAPartial: false)
+        #expect(first !== specialized.psoPartialShared)
+        let second = specialized.partialPipeline(headDim: 256, numQHeads: 16,
+                                                 numKVHeads: 2, numChunks: 64,
+                                                 useGQAPartial: false)
+        #expect(first === second)
+
+        let generic = try Attention(context: ctx, partialLoopVariant: .kvShared,
+                                    specializesKVShared: false)
+        let fallback = generic.partialPipeline(headDim: 256, numQHeads: 16,
+                                               numKVHeads: 2, numChunks: 64,
+                                               useGQAPartial: false)
+        #expect(fallback === generic.psoPartialShared)
+    }
+
     @Test("v11 kv-shared and block-reduce loops agree tightly")
     func kvSharedMatchesBlockReduce() throws {
         for seqLen in [17, 500] {

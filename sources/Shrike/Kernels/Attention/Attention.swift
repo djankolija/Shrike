@@ -27,8 +27,23 @@ final class Attention {
     private let ctx: MetalContext
     private let psoPartial: MTLComputePipelineState
     private let psoPartialSG: MTLComputePipelineState
-    private let psoPartialShared: MTLComputePipelineState
+    let psoPartialShared: MTLComputePipelineState
     private let partialLoopVariant: PartialLoopVariant
+    /// v11 V4.1: bake the shape and KV storage format into the shared
+    /// partial's pipeline so its per-element group indexing strength-reduces.
+    /// Off exists for the bitwise arm only — the outputs must match exactly.
+    private let specializesKVShared: Bool
+
+    private struct KVSharedShapeKey: Hashable {
+        let headDim: UInt32
+        let numQHeads: UInt32
+        let numKVHeads: UInt32
+        let kvBits: UInt32
+        let kvStride: UInt32
+        let kvValueBytes: UInt32
+        let kvGroupSize: UInt32
+    }
+    private var kvSharedSpecializedPSOs: [KVSharedShapeKey: MTLComputePipelineState] = [:]
 
     /// v11 V4 applicability: full-attention path only, head slice fits the
     /// kernel's threadgroup staging, and the GQA fan-in fits the simdgroups.
@@ -108,8 +123,10 @@ final class Attention {
          maxHeadDim: Int = 512,
          supportsSinks: Bool = false,
          supportsMLA: Bool = false,
-         partialLoopVariant: PartialLoopVariant = .blockReduce) throws {
+         partialLoopVariant: PartialLoopVariant = .blockReduce,
+         specializesKVShared: Bool = true) throws {
         self.partialLoopVariant = partialLoopVariant
+        self.specializesKVShared = specializesKVShared
         // maxHeadDim may exceed kernelMaxHeadDim (Kimi's 576-wide MLA rows
         // size the o-scratch); the per-encode paths enforce their own kernel
         // ceilings.
@@ -497,7 +514,8 @@ final class Attention {
                                          numKVHeads: numKVHeads,
                                          numChunks: nChunks,
                                          useGQAPartial: useSWAGQAPartial,
-                                         ringCapacity: ringCapacity)
+                                         ringCapacity: ringCapacity,
+                                         kvFormat: kvFormat)
         let tgWidth = min(Self.threadsPerGroup, Int(partialPSO.maxTotalThreadsPerThreadgroup))
 
         let p1 = encoder
@@ -574,7 +592,8 @@ final class Attention {
                                             numQHeads: UInt32,
                                             numKVHeads: UInt32,
                                             numChunks: UInt32? = nil,
-                                            ringCapacity: UInt32? = nil) throws -> MTLComputePipelineState {
+                                            ringCapacity: UInt32? = nil,
+                                            kvShapeKey: KVSharedShapeKey? = nil) throws -> MTLComputePipelineState {
         var constants = [
             MetalFunctionConstant(index: 60, value: .uint32(headDim)),
             MetalFunctionConstant(index: 61, value: .uint32(numQHeads)),
@@ -587,15 +606,51 @@ final class Attention {
         if let ringCapacity {
             constants.append(MetalFunctionConstant(index: 69, value: .uint32(ringCapacity)))
         }
+        if let kvShapeKey {
+            constants.append(contentsOf: [
+                MetalFunctionConstant(index: 96, value: .uint32(kvShapeKey.kvBits)),
+                MetalFunctionConstant(index: 97, value: .uint32(kvShapeKey.kvStride)),
+                MetalFunctionConstant(index: 98, value: .uint32(kvShapeKey.kvValueBytes)),
+                MetalFunctionConstant(index: 99, value: .uint32(kvShapeKey.kvGroupSize)),
+            ])
+        }
         return try context.pipeline(name, constants: constants)
     }
 
-    private func partialPipeline(headDim: UInt32,
-                                 numQHeads: UInt32,
-                                 numKVHeads: UInt32,
-                                 numChunks: Int,
-                                 useGQAPartial: Bool,
-                                 ringCapacity: UInt32 = 0) -> MTLComputePipelineState {
+    private func kvSharedSpecializedPipeline(headDim: UInt32,
+                                             numQHeads: UInt32,
+                                             numKVHeads: UInt32,
+                                             kvFormat: KVView?) -> MTLComputePipelineState {
+        let key = KVSharedShapeKey(
+            headDim: headDim,
+            numQHeads: numQHeads,
+            numKVHeads: numKVHeads,
+            kvBits: UInt32(kvFormat?.precision.rawValue ?? 16),
+            kvStride: UInt32(kvFormat?.stride ?? 0),
+            kvValueBytes: UInt32(kvFormat?.valueBytes ?? 0),
+            kvGroupSize: UInt32(kvFormat?.groupSize ?? KVCacheManager.quantizationGroupSize))
+        if let cached = kvSharedSpecializedPSOs[key] { return cached }
+        do {
+            let pso = try Self.specializedPipeline(ctx,
+                                                   "attention_decode_partial_shared",
+                                                   headDim: headDim,
+                                                   numQHeads: numQHeads,
+                                                   numKVHeads: numKVHeads,
+                                                   kvShapeKey: key)
+            kvSharedSpecializedPSOs[key] = pso
+            return pso
+        } catch {
+            preconditionFailure("failed to build kv-shared attention pipeline: \(error)")
+        }
+    }
+
+    func partialPipeline(headDim: UInt32,
+                         numQHeads: UInt32,
+                         numKVHeads: UInt32,
+                         numChunks: Int,
+                         useGQAPartial: Bool,
+                         ringCapacity: UInt32 = 0,
+                         kvFormat: KVView? = nil) -> MTLComputePipelineState {
         if ringCapacity > 0 {
             let name = useGQAPartial ? "attention_decode_gqa_swa_partial" : "attention_decode_partial"
             let specializedChunks = numChunks == 16 ? Optional(UInt32(numChunks)) : nil
@@ -618,7 +673,11 @@ final class Attention {
                               numKVHeads: numKVHeads,
                               useGQAPartial: useGQAPartial,
                               ringCapacity: ringCapacity) {
-            return psoPartialShared
+            guard specializesKVShared else { return psoPartialShared }
+            return kvSharedSpecializedPipeline(headDim: headDim,
+                                               numQHeads: numQHeads,
+                                               numKVHeads: numKVHeads,
+                                               kvFormat: kvFormat)
         }
         if useGQAPartial && headDim == 256 && numQHeads == 16 && numKVHeads == 8 {
             if numChunks == 16 {
