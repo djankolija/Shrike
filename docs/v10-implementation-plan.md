@@ -178,6 +178,12 @@ Each is "run once, record the verdict, close either way"; definitions in
       first-settle; a dialect-level alternative (render thinking-off
       without the prefilled block) would zero the whole cost but
       changes what the model sees at generation time — Davor's call.**
+      **RESOLVED: Davor ruled the settle a compensation layer for
+      training-distribution mismatch — unnecessary for ornith-class
+      models. Fix spun out as its own work item:
+      [v6.1-reasoning-retention.md](v6.1-reasoning-retention.md)
+      (reasoning-retention policy, as-generated default, Harmony
+      forces stripped). Q1 closes when v6.1's R4 verdict lands.**
 - [ ] **Q2: context-depth tax — now sized as a genuine anomaly
       (2026-09-01).** Roofline for depth growth: only the 10 gated
       layers grow with context (30 GDN layers are constant-state);
