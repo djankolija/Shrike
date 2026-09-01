@@ -81,10 +81,17 @@ warm `attn_layer_kv` slope); deploy = binary + bundles (new kernel!).
       2.71 → 2.19 ms/1k ctx (−19 %), −1.17 ms/token at depth**. Live
       trial now runs ca7881e (PID 48588); rollback .v4 + bundle
       .v4-bak staged.
-- [ ] **V4.2: default flip + golden baseline** — kvShared becomes the
-      code default for applicable shapes, knob deleted, golden
-      baseline captured (rig + ~2k prompt, on the mini) per the
-      standing T5 note; v10's Q2 closes with a pointer here.
+- [x] **V4.2: default flip + golden baseline** — DONE b7aa00b,
+      2026-09-01 evening. SHRIKE_ATTN_DECODE_LOOP deleted; the runner
+      defaults to .kvShared and kvSharedApplicable gates per shape.
+      Digest 494bab3edb62 exact knob-less on both machines; mini
+      relaunched on the default (wait 37.74 ≡ twin terms). FIRST
+      golden baselines captured with the flipped build — short +
+      ~2.3k-token long profiles, per-machine tags (.mini/.Mac167),
+      --check deterministic on both boxes; short profile came out
+      byte-identical across M1/M4, long kept per-machine. v10's Q2
+      (depth tax) closes here: +8.0 → +2.19 ms/1k ctx via V4+V4.1,
+      default as of this commit.
 - [ ] **V5 (unbundled, later, own sign-off): KV row-layout reorder**
       — the clean bench shows ~50 % line utilization (35–40 % of
       roof); a layout so one TG's walk touches full lines may hide a

@@ -63,7 +63,8 @@ on hope. Baseline anchor at start of Phase 3: rig 40.0 / card 57.9
       wall-neutral on both shapes, so the spec-CB excess above floor is
       shadowed/off the critical path; nothing >0.5 ms recoverable there.
       No task opened.
-- [ ] **T5: settle** — golden baseline capture (rig + ~2k prompt),
+- [ ] **T5: settle** — golden baseline capture DONE 2026-09-01 (short +
+      ~2.3k long, both machines, v11 V4.2); remaining:
       default flips (pool/speculative/event/immediate → code defaults;
       spin pending thermal verdict), CLAUDE.md env paragraph shrunk,
       S3b machinery removed or opt-in documented permanent, handoff
@@ -195,7 +196,7 @@ Each is "run once, record the verdict, close either way"; definitions in
       [v6.1-reasoning-retention.md](v6.1-reasoning-retention.md)
       (reasoning-retention policy, as-generated default, Harmony
       forces stripped). Q1 closes when v6.1's R4 verdict lands.**
-- [ ] **Q2: context-depth tax — now sized as a genuine anomaly
+- [x] **Q2 CLOSED 2026-09-01 (v11 V4+V4.1, default via V4.2 b7aa00b): depth tax +8.0 → +2.19 ms/1k ctx; verdict trail in docs/v11-implementation-plan.md.** Original entry: **Q2: context-depth tax — now sized as a genuine anomaly
       (2026-09-01).** Roofline for depth growth: only the 10 gated
       layers grow with context (30 GDN layers are constant-state);
       10 layers × 2 KV heads × 256 dim × K+V × int8 ≈ 10.2 MB per
