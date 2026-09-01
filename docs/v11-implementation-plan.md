@@ -92,8 +92,20 @@ warm `attn_layer_kv` slope); deploy = binary + bundles (new kernel!).
       byte-identical across M1/M4, long kept per-machine. v10's Q2
       (depth tax) closes here: +8.0 → +2.19 ms/1k ctx via V4+V4.1,
       default as of this commit.
-- [ ] **V5 (unbundled, later, own sign-off): KV row-layout reorder**
-      — the clean bench shows ~50 % line utilization (35–40 % of
-      roof); a layout so one TG's walk touches full lines may hide a
-      further ~2× behind V4's 8×. Layout change on top of a reduction
-      change — deliberately NOT bundled with V4.
+- [x] **V5 CLOSED 2026-09-01 night — layout premise dead, vec4
+      staging landed instead (14d43c5, ACCEPTED on twin).** The
+      subtractive cost ledger (bench 573a750: one deleted cost per
+      arm, production PSO as fidelity anchor + untouched control as
+      regime judge) priced the planned layout reorder at NULL — dense
+      per-head planes time identically to the interleaved rows — and
+      barriers and the softmax chain at null too. Convicted instead:
+      the staging loop's byte-granular loads (latency-bound). Fix:
+      uchar4/half4 staging in the specialized pipeline only (generic
+      keeps scalar verbatim, so the V4.1 bitwise arms gate vec4 ≡
+      scalar directly — green, golden --check identical). Local slope
+      int8 0.054→0.050 (−8 %); mini twin: rig 37.88 ≡ 37.88, digest
+      exact, warm kv slope 2.11→2.07 ms/1k (−2 %, all four rungs
+      down, −0.16 ms/token at ctx 1912). No storage migration ever
+      needed. Contamination note: two bench rounds voided by desktop
+      GPU compositing — the control arm caught both; quiet-regime
+      runs only.
