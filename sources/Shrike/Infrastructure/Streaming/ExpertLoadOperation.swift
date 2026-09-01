@@ -174,14 +174,8 @@ final class ExpertIOScheduler: @unchecked Sendable {
 
     init(workerCount: Int) {
         precondition(workerCount > 0)
-        // SHRIKE_EXPERT_IO_QOS=interactive: A/B knob for the ~1.2 ms/read gap
-        // between the streamer's fetch span and raw pread (suspect: worker
-        // E-core placement under decode load at .userInitiated).
-        let qos: DispatchQoS = ProcessInfo.processInfo
-            .environment["SHRIKE_EXPERT_IO_QOS"] == "interactive"
-            ? .userInteractive : .userInitiated
         for index in 0..<workerCount {
-            DispatchQueue(label: "Shrike.expert-io.\(index)", qos: qos)
+            DispatchQueue(label: "Shrike.expert-io.\(index)", qos: .userInitiated)
                 .async { [weak self] in
                     self?.runWorker()
                 }
