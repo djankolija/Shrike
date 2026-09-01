@@ -28,6 +28,9 @@ final class Attention {
     private let psoPartial: MTLComputePipelineState
     private let psoPartialSG: MTLComputePipelineState
     private let partialLoopVariant: PartialLoopVariant
+    var partialPipelineMaxThreadsForBench: Int {
+        psoPartial.maxTotalThreadsPerThreadgroup
+    }
     private let psoGQAPartial: MTLComputePipelineState
     private let psoCombine: MTLComputePipelineState
     private let psoPartialSWA: MTLComputePipelineState
