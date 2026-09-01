@@ -65,11 +65,22 @@ warm `attn_layer_kv` slope); deploy = binary + bundles (new kernel!).
       runs the knob (PID 48356); default flip staged behind the
       golden-baseline ceremony below. Sign-off: Davor, 2026-09-01
       ("Proceed ;)").
-- [ ] **V4.1 (golf, bitwise-safe, no sign-off): fold the dequant
-      index divides via KV function constants** — with the 8× re-read
-      gone the runtime-divisor divides re-emerge at true size (int8
-      0.069 vs fp16 0.059 local ≈ 15 % of remaining slope; the peer's
-      resurrected hypothesis, correctly sized this time).
+- [x] **V4.1 (golf, bitwise-safe, no sign-off): fold the dequant
+      index divides via KV function constants** — LANDED ca7881e,
+      **ACCEPTED on twin 2026-09-01**. The shared partial had run fully
+      generic (shape AND KV format as runtime buffer values); it now
+      builds a shape+format-specialized PSO (FC 60-63 + new 96-99,
+      cached per key; 80-83 were taken by fused.metal). Bitwise arms
+      pin specialized ≡ generic byte-for-byte (fp16/int8/int4) and that
+      the specialized PSO engages. Local: kvsh int8 slope 0.069 →
+      0.054-0.058 µs/pos, int8-vs-fp16 gap closed (drift-guarded,
+      base arms stable control). Mini twin (fresh-server arms, both
+      kvshared): rig 37.83→37.77 sd 0.44 (neutral), digest exact,
+      warm attn_layer_kv ladder 4.985/6.624/9.099/10.045 →
+      4.799/6.147/8.264/8.878 ms/token over ctx 48→1912 — **slope
+      2.71 → 2.19 ms/1k ctx (−19 %), −1.17 ms/token at depth**. Live
+      trial now runs ca7881e (PID 48588); rollback .v4 + bundle
+      .v4-bak staged.
 - [ ] **V4.2: default flip + golden baseline** — kvShared becomes the
       code default for applicable shapes, knob deleted, golden
       baseline captured (rig + ~2k prompt, on the mini) per the
