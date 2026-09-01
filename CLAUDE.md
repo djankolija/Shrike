@@ -100,8 +100,10 @@ The runtime is `~/shrike-runtime/` — `bin/` holds `ShrikeServer`, `ShrikeCLI`,
 `ShrikeRepack` plus their resource bundles (a deploy copies the `*.bundle`
 directories from `.build/release/` alongside the binaries, or resource lookups
 fail at runtime); `models/` holds the six `.gturbo`s, receipts bound to the
-`shrike-runtime` path. Old NVMAI artifacts are parked in `~/nvmai-retired/`,
-kept only as rollback insurance.
+`shrike-runtime` path; `baselines/` holds the mini's golden-baseline files.
+The box carries current state only — no staged rollback binaries, no retired
+artifacts; git history and a fresh deploy are the rollback path (owner's
+ruling, 2026-09-01).
 
 There is **no launchd service** — the server is launched manually
 (`cd ~/shrike-runtime && nohup ./bin/ShrikeServer … > /tmp/shrike-server.log 2>&1 &`),
@@ -114,26 +116,18 @@ reads those vars, the built-in defaults are taken, and tuned configuration
 quietly vanishes. If a launch config ever graduates to a launchd plist, audit
 every env var name against the current `SHRIKE_*` set first.
 
-**The perf env set is load-bearing (2026-08-30, extended 2026-08-31): launching
-ShrikeServer without `SHRIKE_EXPERT_IO_SYNC=event SHRIKE_EXPERT_IO_SUBMISSION=immediate
-SHRIKE_EXPERT_CACHE_LAYOUT=pool SHRIKE_DECODE_EXPERT_EXECUTION=speculative
-SHRIKE_HOST_WAIT=spin` silently costs large decode throughput** — the first four
-roughly halve it; dropping `SHRIKE_HOST_WAIT=spin` costs a further ~11 % (rig) to
-~16 % (real-shaped traffic) by paying a scheduler wake on every per-layer router
-wait. These modes are deliberately not code defaults yet (pool needs an allocation
-fallback; speculative needs an extended real-traffic trial beyond the fixed rig
-prompt; spin busies one P-core during decode and its multi-hour thermal behavior
-is unproven — see `docs/v9-implementation-plan.md`). Output is byte-identical
-with or without them; only speed changes. Add
+**The measured perf winners are code defaults as of T5 (2026-09-01)** — a bare
+launch runs event IO sync, immediate submission, pool cache layout, speculative
+execution, and the spin host wait. The env vars remain as explicit A/B
+overrides only (`SHRIKE_HOST_WAIT=wait` opts back into parked waits; the
+others take their previous values by name). Output is byte-identical across
+all of them; only speed changes. Add
 `SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1` when measuring with
 `tools/decode-measure.sh` and the `tools/parse-*-stats.py` parsers.
-
-Two 2026-08-31-evening additions: **`--ram-budget 8G` is the measured optimum
-on the 16 GB mini** (snaps to 128 expert slots ≈ 9.06 GB actually allocated —
-the nearest-snap overshoots the label; leaves ~11 % free, watch pressure) —
-real-shape decode −13 % vs 6G. And **S3a pacing is now the code default**
-(no env needed); `SHRIKE_LAYER_DONE=on` re-arms the S3b event machinery for
-A/B only — it measured net-negative under spin (rig −0.6, card −2.3 ms/token).
+**`--ram-budget 8G` is the measured optimum on the 16 GB mini** (snaps to 128
+expert slots ≈ 9.06 GB actually allocated; leaves ~11 % free, watch pressure).
+If the pool slab allocation ever fails at startup, the error is loud —
+`SHRIKE_EXPERT_CACHE_LAYOUT=per-slot` is the explicit fallback.
 
 ## Where documents go
 

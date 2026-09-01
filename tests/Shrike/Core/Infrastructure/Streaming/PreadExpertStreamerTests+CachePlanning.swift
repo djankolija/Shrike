@@ -28,7 +28,7 @@ extension PreadExpertStreamerTests {
     let results = try streamer.loadExpertsCached(experts: [3, 1, 2])
     for (index, result) in results.enumerated() {
       let expert = [3, 1, 2][index]
-      let got = Self.bytes(of: result.buffer, offset: 0, count: Self.expertStride)
+      let got = Self.bytes(of: result.buffer, offset: result.offset, count: Self.expertStride)
       #expect(got.allSatisfy { $0 == Self.tagByte(expert) })
     }
   }
@@ -51,7 +51,7 @@ extension PreadExpertStreamerTests {
 
     let results = try streamer.loadExpertsCached(experts: experts)
     for (index, result) in results.enumerated() {
-      let got = Self.bytes(of: result.buffer, offset: 0, count: Self.expertStride)
+      let got = Self.bytes(of: result.buffer, offset: result.offset, count: Self.expertStride)
       #expect(got.allSatisfy { $0 == Self.tagByte(experts[index]) })
     }
   }
@@ -91,7 +91,7 @@ extension PreadExpertStreamerTests {
 
     let results = try streamer.executeExpertCachePlan(plan)
     for (index, result) in results.enumerated() {
-      let got = Self.bytes(of: result.buffer, offset: 0, count: Self.expertStride)
+      let got = Self.bytes(of: result.buffer, offset: result.offset, count: Self.expertStride)
       #expect(got.allSatisfy { $0 == Self.tagByte(experts[index]) })
     }
   }
@@ -173,13 +173,13 @@ extension PreadExpertStreamerTests {
     let plan = try streamer.planExpertsCached(experts: experts)
     let reserved = streamer.expertCachePlanBuffers(plan)
 
-    let hitBytes = Self.bytes(of: reserved[0].buffer, offset: 0, count: Self.expertStride)
+    let hitBytes = Self.bytes(of: reserved[0].buffer, offset: reserved[0].offset, count: Self.expertStride)
     #expect(hitBytes.allSatisfy { $0 == Self.tagByte(0) })
 
     let executed = try streamer.executeExpertCachePlan(plan)
     for i in 0..<experts.count {
       #expect(reserved[i].buffer === executed[i].buffer)
-      let got = Self.bytes(of: executed[i].buffer, offset: 0, count: Self.expertStride)
+      let got = Self.bytes(of: executed[i].buffer, offset: executed[i].offset, count: Self.expertStride)
       #expect(got.allSatisfy { $0 == Self.tagByte(experts[i]) })
     }
   }
@@ -202,11 +202,11 @@ extension PreadExpertStreamerTests {
 
     let executed = try streamer.executeExpertCachePlan(plan)
     for (index, expert) in plan.experts.enumerated() {
-      let got = Self.bytes(of: executed[index].buffer, offset: 0, count: Self.expertStride)
+      let got = Self.bytes(of: executed[index].buffer, offset: executed[index].offset, count: Self.expertStride)
       #expect(got.allSatisfy { $0 == Self.tagByte(expert) })
     }
 
-    let avoidedBytes = Self.bytes(of: warmed[0].buffer, offset: 0, count: Self.expertStride)
+    let avoidedBytes = Self.bytes(of: warmed[0].buffer, offset: warmed[0].offset, count: Self.expertStride)
     #expect(avoidedBytes.allSatisfy { $0 == Self.tagByte(0) })
   }
 

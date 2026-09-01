@@ -181,7 +181,6 @@ extension PrefillGroupedRoutedMoETests {
     #expect(second.plannedMissIndices.isEmpty)
     #expect(second.plannedMissSlots.isEmpty)
     for result in [first, second] {
-      #expect(result.binding.views.allSatisfy { $0.offset == 0 })
       try result.binding.validateCoversPairs(
         routes.sortedPairs,
         pairStart: 0,

@@ -189,7 +189,7 @@ public enum ExpertCacheLayout: String, Sendable {
     static func environmentValue(
         _ environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> ExpertCacheLayout {
-        guard let raw = environment["SHRIKE_EXPERT_CACHE_LAYOUT"] else { return .perSlot }
+        guard let raw = environment["SHRIKE_EXPERT_CACHE_LAYOUT"] else { return .pool }
         guard let layout = ExpertCacheLayout(rawValue: raw) else {
             throw ModelError.internalInconsistency(
                 detail: "unsupported SHRIKE_EXPERT_CACHE_LAYOUT '\(raw)'; allowed: per-slot, pool")

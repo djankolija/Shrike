@@ -3,8 +3,9 @@ import Metal
 import Testing
 @testable import Shrike
 
-/// Pins the ordering assumptions S3b's `layerDone` gating relies on
-/// (docs/v9-speculative-routed-dispatch.md, "Successor gating and the miss path").
+/// Pins the cross-queue shared-event ordering assumptions the expert-IO
+/// event synchronization relies on (SHRIKE_EXPERT_IO_SYNC, default `event`:
+/// the miss-fixup CB waits on the reader queue's completion signal).
 @Suite struct CrossQueueSharedEventTests {
     private static let timeout: DispatchTimeInterval = .seconds(20)
 

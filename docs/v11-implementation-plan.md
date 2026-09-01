@@ -10,17 +10,21 @@ warm `attn_layer_kv` slope); deploy = binary + bundles (new kernel!).
 
 ## Tasks
 
-- [ ] **V0: numeric reference arm** — test comparing
+- [x] **V0: numeric reference arm** — landed with V1 (77af089); lives
+      on as the kvShared reference arms in AttentionTests. Original:
+      test comparing
       `attention_decode_partial` + combine against a scalar reference
       across the four shape classes (full, GQA/SWA, MLA excluded, sinks),
       tolerance-based; this arm then validates V1 unchanged.
-- [ ] **V1: simdgroup-per-position partial kernel** — barrier-free
+- [x] **V1: simdgroup-per-position partial kernel** — landed 77af089,
+      then falsified by V3's twin (kernel retained for the record;
+      knob deleted by V4.2). Original: barrier-free
       position loop, per-simdgroup online softmax, chunk-end merge via
       the combine's rescale algebra. Behind
       `SHRIKE_ATTN_DECODE_LOOP=simdgroup` (default = current kernel)
       until V3 accepts.
-- [ ] **V2: Swift wiring** — PSO selection by the knob; grid unchanged
-      (the chunk geometry stays; the loop inside changes).
+- [x] **V2: Swift wiring** — landed 77af089 with V1; the knob it
+      wired was deleted at V4.2 when kvShared became the default.
 - [x] **V3: twin verdict — NULL, hypothesis falsified (2026-09-01
       ~14:00, twin on 77af089).** Warm attn_layer_kv at ctx 1900:
       20.35 (sg) vs 20.18 (off); slope +8/1k unchanged at every rung;

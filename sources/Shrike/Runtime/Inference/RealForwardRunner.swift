@@ -213,16 +213,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let specScratch: [(acts: MTLBuffer, y: MTLBuffer)]
     private let specArgsBuf: MTLBuffer?
     private let specDispatchArguments: MoE.SpeculativeDispatchArguments?
-    // v9 S3b: successor attention CBs are committed early and gated on this
-    // event; the host signals it on all-hit layers, the fixup CB (on the
-    // dedicated queue, so it cannot queue behind its own waiter) on miss layers.
-    private let layerDoneEvent: MTLSharedEvent?
-    private let layerDoneFixupQueue: MTLCommandQueue?
-    private var layerDoneCounter: UInt64 = 0
-    private var layerDoneHighWater: UInt64 = 0
-    private var layerDonePendingWaitValue: UInt64?
+    // SHRIKE_HOST_WAIT=wait opts back into parked waits for A/B; spin is the
+    // measured default (rig −11 %, real-shape −16 %, thermals proven by the
+    // live deployment's duty cycle).
     private nonisolated let hostWaitSpin =
-        ProcessInfo.processInfo.environment["SHRIKE_HOST_WAIT"] == "spin"
+        ProcessInfo.processInfo.environment["SHRIKE_HOST_WAIT"] != "wait"
     /// Width-2 MTP verify scratch (B2 pair schedule): per-row activation and
     /// output buffers plus two persistent routed argument buffers, created on
     /// first verify. Per-row buffers are deliberately *separate allocations*,
@@ -423,16 +418,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.specScratch = spec?.scratch ?? []
         self.specArgsBuf = spec?.dispatch.arguments
         self.specDispatchArguments = spec?.dispatch
-        // S3a pacing is the default: under the spin wait the host paces fast
-        // enough that S3b's gated successors measured net-negative (rig −0.6,
-        // card −2.3 ms/token at 128 slots, 2026-08-31) — the event wait plus
-        // the dedicated queue's ~162 µs/miss-layer GPU wake outweigh the
-        // early release. SHRIKE_LAYER_DONE=on re-arms the machinery for A/B.
-        let layerDone = specMode == .speculative
-            && ProcessInfo.processInfo.environment["SHRIKE_LAYER_DONE"] == "on"
-            ? try Self.makeLayerDoneMachinery(device: context.device) : nil
-        self.layerDoneEvent = layerDone?.event
-        self.layerDoneFixupQueue = layerDone?.fixupQueue
         self.residencyReadback = try Self.makeResidencyReadbackBuffers(
             cfg: cfg, device: context.device)
         self.gdnScratch = try Self.makeGDNScratchBuffers(
@@ -1434,13 +1419,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     private func resetTransientState() {
-        // An aborted generation may leave successor CBs gated on values that
-        // will never be signaled; releasing to the high-water mark lets them
-        // drain instead of wedging the queue for the next request.
-        if let layerDoneEvent, layerDoneEvent.signaledValue < layerDoneHighWater {
-            layerDoneEvent.signaledValue = layerDoneHighWater
-        }
-        layerDonePendingWaitValue = nil
         prefillChunkState.reset()
         rdadviseSkipUntilPosition = -1
         rdadviseAdaptiveState.reset()
@@ -2308,22 +2286,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let sharedCB: MTLCommandBuffer?
         let specCB: MTLCommandBuffer?
         let overlapCompletionClock: CommandCompletionClock?
-        let layerDoneValue: UInt64
 
         /// The CB whose completion publishes the router output.
         var routerCB: MTLCommandBuffer { tailCB ?? attnCB }
-    }
-
-    private static func makeLayerDoneMachinery(
-        device: MTLDevice
-    ) throws -> (event: MTLSharedEvent, fixupQueue: MTLCommandQueue) {
-        guard let event = device.makeSharedEvent(),
-              let queue = device.makeCommandQueue() else {
-            throw ModelError.residentBufferWrapFailed
-        }
-        event.label = "decode.layerDone"
-        queue.label = "decode.fixupQueue"
-        return (event, queue)
     }
 
     private func commitHeldLayerCommands(_ cmds: HeldLayerCommands) {
@@ -2372,16 +2337,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 throw ModelError.residentBufferWrapFailed
             }
             tailCB = split
-        }
-        var layerDoneValue: UInt64 = 0
-        if let layerDoneEvent, decodeExpertExecution == .speculative {
-            if let waitValue = layerDonePendingWaitValue {
-                attnCB.encodeWaitForEvent(layerDoneEvent, value: waitValue)
-            }
-            layerDoneCounter &+= 1
-            layerDoneValue = layerDoneCounter
-            layerDonePendingWaitValue = layerDoneValue
-            layerDoneHighWater = layerDoneValue
         }
         // GDN and gated layers run input norm → attention → tail on one
         // serial encoder: on the M1 an encoder boundary costs more span than
@@ -2440,8 +2395,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return HeldLayerCommands(
             layer: L, attnCB: attnCB, softmaxCB: softmaxCB, tailCB: tailCB,
             sharedCB: sharedCB, specCB: specCB,
-            overlapCompletionClock: overlapCompletionClock,
-            layerDoneValue: layerDoneValue)
+            overlapCompletionClock: overlapCompletionClock)
     }
 
     private func produceToken(token: Int32,
@@ -2509,8 +2463,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if let embedCB { recordKernelGPU(role: "embed", embedCB) }
 
         var heldNext: HeldLayerCommands?
-        var heldNextCommitted = false
-        layerDonePendingWaitValue = nil
         for L in 0..<cfg.numLayers {
             let tBodyStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let isLinear = cfg.layerIsLinear(L)
@@ -2584,32 +2536,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 continue
             }
             let cmds: HeldLayerCommands
-            let cmdsAlreadyCommitted: Bool
             if let held = heldNext, held.layer == L {
                 cmds = held
-                cmdsAlreadyCommitted = heldNextCommitted
                 heldNext = nil
             } else {
                 heldNext = nil
                 cmds = try encodeLayerCommands(layer: L, position: position)
-                cmdsAlreadyCommitted = false
             }
-            heldNextCommitted = false
-            if !cmdsAlreadyCommitted {
-                commitHeldLayerCommands(cmds)
-            }
+            commitHeldLayerCommands(cmds)
             if decodeExpertExecution == .speculative,
                L + 1 < cfg.numLayers,
                L + 1 >= cfg.numLeadingDenseLayers {
-                let next = try encodeLayerCommands(layer: L + 1, position: position)
-                heldNext = next
-                // S3b: with the successor's attention gated on `layerDone`,
-                // its CBs can enter the queue now — the GPU releases them on
-                // the signal instead of waiting for the next host iteration.
-                if layerDoneEvent != nil {
-                    commitHeldLayerCommands(next)
-                    heldNextCommitted = true
-                }
+                heldNext = try encodeLayerCommands(layer: L + 1, position: position)
             }
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try waitForRouterCompletion(cmds.routerCB)
@@ -2653,7 +2591,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 sharedCB: cmds.sharedCB,
                 specCB: cmds.specCB,
                 overlapCompletionClock: cmds.overlapCompletionClock,
-                layerDoneValue: cmds.layerDoneValue,
                 pending: &pendingRoutedCommand,
                 bodyStart: tBodyStart, cb1Start: tCb1Start,
                 waitMark: tWait, waitNanos: waitNanos,
@@ -3404,8 +3341,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         routedOffsets: MoEExpertOffsets,
         topK: UInt32,
         d D: UInt32,
-        f FmoE: UInt32,
-        layerDoneValue: UInt64
+        f FmoE: UInt32
     ) throws -> MTLCommandBuffer {
         // The phase-2 reduce already folded the shared branch (h1Buf
         // as its residual); the tail is a plain residual add.
@@ -3415,10 +3351,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                            delta: h2Buf,
                                            count: cfg.hiddenSize)
         }
-        // In speculative mode the successor's gated CBs already occupy the
-        // main queue, so layer work committed after them must use the fixup
-        // queue or it would deadlock behind its own waiter.
-        guard let routedCB = (layerDoneFixupQueue ?? ctx.queue).makeCommandBuffer() else {
+        guard let routedCB = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
         let ioToken = eventLoad?.storage.completionToken
@@ -3489,17 +3422,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                ioStatus: ioStatus?.0,
                                                ioStatusOffset: ioStatus?.1 ?? 0)
         try gTail(routedCB)
-        if let layerDoneEvent, layerDoneValue > 0 {
-            routedCB.encodeSignalEvent(layerDoneEvent, value: layerDoneValue)
-            // A failed CB may never reach its encoded signal; release the
-            // gated successor so the error surfaces as a thrown generation
-            // failure instead of a hung queue.
-            routedCB.addCompletedHandler { cb in
-                if cb.error != nil, layerDoneEvent.signaledValue < layerDoneValue {
-                    layerDoneEvent.signaledValue = layerDoneValue
-                }
-            }
-        }
         routedCB.commit()
         return routedCB
     }
@@ -5280,7 +5202,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let expectedOverlapCompletions: Int
         let kernelRole: String
         let encodeAndCommitNanos: UInt64
-        let signalsLayerDone: Bool
     }
 
     /// Diagnostic-only completion clock used to measure the I/O tail left
@@ -5335,11 +5256,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             if let phase1HitCB = pending.phase1HitCB {
                 try waitForCompletion(phase1HitCB)
             }
-            try waitForCompletion(pending.cb)
-        } else if pending.signalsLayerDone {
-            // On the fixup queue the successor's tail completing only proves
-            // the signal fired, not that this CB is terminal; the wait is
-            // near-zero and keeps GPU spans and staging finalization valid.
             try waitForCompletion(pending.cb)
         } else if let err = pending.cb.error {
             throw ModelError.commandBufferFailed(
@@ -5651,7 +5567,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         sharedCB: MTLCommandBuffer?,
         specCB: MTLCommandBuffer?,
         overlapCompletionClock: CommandCompletionClock?,
-        layerDoneValue: UInt64,
         pending pendingRoutedCommand: inout PendingRoutedCommand?,
         bodyStart tBodyStart: UInt64,
         cb1Start tCb1Start: UInt64,
@@ -5697,15 +5612,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 layer: L, experts: experts, prefetched: readyPrefetches)
             : nil
         totalCachePlanNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cachePlanStarted
-        // All-hit release at the earliest safe point: the spec CB is already
-        // ordered ahead of the gated successor, and this condition exactly
-        // mirrors the spec early-return below, so the classic path (which
-        // writes `hidden` later) can never reach here having signaled.
-        if let layerDoneEvent, layerDoneValue > 0,
-           decodeExpertExecution == .speculative, specCB != nil,
-           plannedFetch?.misses.isEmpty == true {
-            layerDoneEvent.signaledValue = layerDoneValue
-        }
         if !readyPrefetches.isEmpty {
             predictivePrefetch?.consume(layer: L, experts: Set(readyPrefetches.keys))
         }
@@ -5833,7 +5739,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 routedBufferOffsets: decodeHitSplitRoutedOffsetsScratch)
             if let argBuf = phase1HitSplitArgBuf, plan.hits > 0, !plan.misses.isEmpty {
                 writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
-                guard let cb = (layerDoneFixupQueue ?? ctx.queue).makeCommandBuffer() else {
+                guard let cb = ctx.queue.makeCommandBuffer() else {
                     throw ModelError.residentBufferWrapFailed
                 }
                 try encodeRoutedPhase1Subset(
@@ -5964,8 +5870,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 overlapCompletionClock: eventLoad == nil ? nil : overlapCompletionClock,
                 expectedOverlapCompletions: expectedOverlapCompletions,
                 kernelRole: "moe_spec_routed",
-                encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start,
-                signalsLayerDone: false)
+                encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
             transferredExpertLease = true
             totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
             return
@@ -5978,8 +5883,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             phase1MissSlots: phase1MissSlots,
             routedBufs: routedBufs,
             routedOffsets: routedOffsets,
-            topK: topK, d: D, f: FmoE,
-            layerDoneValue: layerDoneValue)
+            topK: topK, d: D, f: FmoE)
         if missCount > 0, let completed = completedStorageNanos, completed > 0 {
             let submitted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if submitted >= completed {
@@ -6008,8 +5912,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             kernelRole: hitSplitFixup
                 ? "moe_phase1_miss_fixup_phase2"
                 : "moe_phase1_2_routed",
-            encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start,
-            signalsLayerDone: layerDoneEvent != nil && layerDoneValue > 0)
+            encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
         transferredExpertLease = true
         totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
         if layerTraceEnabled,

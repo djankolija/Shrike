@@ -39,7 +39,7 @@ public enum RuntimeDecodeExpertExecution: String, Codable, Sendable {
         _ environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> RuntimeDecodeExpertExecution {
         guard let raw = environment["SHRIKE_DECODE_EXPERT_EXECUTION"] else {
-            return .hitFixup
+            return .speculative
         }
         guard let value = RuntimeDecodeExpertExecution(rawValue: raw) else {
             throw RuntimeConfigurationError.invalidDecodeExpertExecution(raw)
@@ -55,7 +55,7 @@ public enum RuntimeExpertIOSynchronization: String, Codable, Sendable {
     public static func environmentValue(
         _ environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> RuntimeExpertIOSynchronization {
-        guard let raw = environment["SHRIKE_EXPERT_IO_SYNC"] else { return .host }
+        guard let raw = environment["SHRIKE_EXPERT_IO_SYNC"] else { return .event }
         guard let value = RuntimeExpertIOSynchronization(rawValue: raw) else {
             throw RuntimeConfigurationError.invalidExpertIOSynchronization(raw)
         }
@@ -70,7 +70,7 @@ public enum RuntimeExpertIOSubmission: String, Codable, Sendable {
     public static func environmentValue(
         _ environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> RuntimeExpertIOSubmission {
-        guard let raw = environment["SHRIKE_EXPERT_IO_SUBMISSION"] else { return .deferred }
+        guard let raw = environment["SHRIKE_EXPERT_IO_SUBMISSION"] else { return .immediate }
         guard let value = RuntimeExpertIOSubmission(rawValue: raw) else {
             throw RuntimeConfigurationError.invalidExpertIOSubmission(raw)
         }
@@ -237,9 +237,9 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 prefillChunkTokens: Int = 128,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .fullTensorOps2DPreferred,
                 forceLogitsHead: Bool = false,
-                decodeExpertExecution: RuntimeDecodeExpertExecution = .hitFixup,
-                expertIOSynchronization: RuntimeExpertIOSynchronization = .host,
-                expertIOSubmission: RuntimeExpertIOSubmission = .deferred,
+                decodeExpertExecution: RuntimeDecodeExpertExecution = .speculative,
+                expertIOSynchronization: RuntimeExpertIOSynchronization = .event,
+                expertIOSubmission: RuntimeExpertIOSubmission = .immediate,
                 kvCachePrecision: KVCachePrecision = .int8,
                 ropeScalingMode: RuntimeRoPEScalingMode = .none,
                 yarnContextTokens: Int = RuntimeConfiguration.defaultYaRNContextTokens) throws {

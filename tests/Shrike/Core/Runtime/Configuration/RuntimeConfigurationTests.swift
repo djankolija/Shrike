@@ -28,7 +28,7 @@ import Testing
         #expect(runtime.prefillChunkTokens == 128)
         #expect(runtime.prefillAttentionPath == .fullTensorOps2DPreferred)
         #expect(runtime.headPath == .fusedRows)
-        #expect(runtime.decodeExpertExecution == .hitFixup)
+        #expect(runtime.decodeExpertExecution == .speculative)
         #expect(runtime.kvCachePrecision == .int8)
         #expect(runtime.ropeScalingMode == .none)
     }
@@ -67,7 +67,7 @@ import Testing
     }
 
     @Test func decodeExpertExecutionEnvironmentIsFailClosed() throws {
-        #expect(try RuntimeDecodeExpertExecution.environmentValue([:]) == .hitFixup)
+        #expect(try RuntimeDecodeExpertExecution.environmentValue([:]) == .speculative)
         #expect(try RuntimeDecodeExpertExecution.environmentValue([
             "SHRIKE_DECODE_EXPERT_EXECUTION": "barrier",
         ]) == .barrier)
@@ -82,7 +82,7 @@ import Testing
     }
 
     @Test func expertIOSynchronizationEnvironmentIsFailClosed() throws {
-        #expect(try RuntimeExpertIOSynchronization.environmentValue([:]) == .host)
+        #expect(try RuntimeExpertIOSynchronization.environmentValue([:]) == .event)
         #expect(try RuntimeExpertIOSynchronization.environmentValue([
             "SHRIKE_EXPERT_IO_SYNC": "event",
         ]) == .event)
@@ -94,7 +94,7 @@ import Testing
     }
 
     @Test func expertIOSubmissionEnvironmentIsFailClosed() throws {
-        #expect(try RuntimeExpertIOSubmission.environmentValue([:]) == .deferred)
+        #expect(try RuntimeExpertIOSubmission.environmentValue([:]) == .immediate)
         #expect(try RuntimeExpertIOSubmission.environmentValue([
             "SHRIKE_EXPERT_IO_SUBMISSION": "immediate",
         ]) == .immediate)
