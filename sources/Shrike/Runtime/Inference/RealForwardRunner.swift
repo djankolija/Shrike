@@ -583,19 +583,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             affine: model.attentionWeightBits == 4 ? nil
                 : try AffineQuantGEMV(context: context,
                                       weightBits: model.attentionWeightBits),
+            // kvSharedApplicable gates per shape at encode time, so the
+            // kv-shared default is safe for archs its kernel never serves.
             attention: try Attention(context: context,
                                      maxQHeads: cfg.numHeads,
                                      maxHeadDim: max(cfg.headDim, cfg.fullHeadDim),
                                      supportsSinks: cfg.hasAttentionSinks,
                                      supportsMLA: cfg.hasMLALayers,
-                                     partialLoopVariant: {
-                                         switch ProcessInfo.processInfo
-                                             .environment["SHRIKE_ATTN_DECODE_LOOP"] {
-                                         case "simdgroup": return .simdgroup
-                                         case "kvshared": return .kvShared
-                                         default: return .blockReduce
-                                         }
-                                     }()),
+                                     partialLoopVariant: .kvShared),
             kvQuantizer: runtimeConfiguration.kvCachePrecision.isQuantized
                 ? try KVCacheQuantizer(context: context) : nil,
             shared: try SharedExpertRuntime(

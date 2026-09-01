@@ -68,14 +68,14 @@ before calling work done. All of them constrain how code gets written here:
 model-load path. The only check that exercises real inference is:
 
 ```bash
-tools/golden-baseline.sh --check 4
+tools/golden-baseline.sh --check
 ```
 
 It counts as a model run, so the process rules above apply first. Baselines are stored
-in `baselines/`, which starts empty: the two that shipped with the fork were captured on
-the original author's machine, and `d9b37b9` established that their own scope note rules
-them out for this hardware. So `--check` has nothing to compare against until you capture
-a baseline on the machine you intend to check.
+in `baselines/`, tagged per machine (`short` and `long` ≈2k-token profiles); `--check`
+compares only against files whose machine tag matches the box it runs on — capture on
+the machine you intend to check. On the mini, run the script with its four env
+overrides (header comment) since that box has no checkout.
 
 A baseline is valid for one (machine, build, model) triple; re-capture only for a
 deliberate numerics change, never to make a mismatch go away.

@@ -1,37 +1,68 @@
 #!/usr/bin/env bash
 # Capture a deterministic generation baseline, so a refactor of the runtime
 # can be checked against byte-identical output rather than "the tests still
-# pass". Phase 2 of the production audit needs this before RealForwardRunner
-# is decomposed.
+# pass".
 #
-#   tools/golden-baseline.sh [4|8 ...]       # default: Ornith 8-bit
-#   tools/golden-baseline.sh --check [...]   # compare against the stored file
+#   tools/golden-baseline.sh [short|long ...]     # capture; default: both
+#   tools/golden-baseline.sh --check [short|long ...]
 #
 # Determinism comes from greedy decoding: --temperature 0 with a fixed seed and
 # a fixed prompt. Greedy means the sampler never draws, so the only inputs are
 # the weights and the kernels — exactly what a runtime refactor must not change.
+# The `long` profile pins a ~2k-token context: long-context near-tie picks are
+# where reduction-order drift between binaries shows first (v6 numerics note).
 #
 # SCOPE: a baseline is valid for one (machine, build, model) triple. Metal
 # reduction order is not guaranteed across GPU families, so a file captured on
-# an M3 is not a reference for an M4. Re-capture after a deliberate numerics
-# change; a diff at any other time is a regression.
+# an M1 is not a reference for an M4; files carry a machine tag in their name.
+# Re-capture after a deliberate, signed-off numerics change; a diff at any
+# other time is a regression.
+#
+# Env overrides (the mini has no repo checkout — run with all four):
+#   CLI=~/shrike-runtime/bin/ShrikeCLI
+#   MODEL=~/shrike-runtime/models/ornith15.gturbo
+#   OUT_DIR=~/shrike-runtime/baselines
+#   MACHINE_TAG=mini
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CLI="$ROOT/.build/arm64-apple-macosx/release/ShrikeCLI"
+CLI="${CLI:-$ROOT/.build/arm64-apple-macosx/release/ShrikeCLI}"
 OUT_DIR="${OUT_DIR:-$ROOT/baselines}"
-
-PROMPT="${PROMPT:-Explain what a mutex is and when you would use one.}"
+MACHINE_TAG="${MACHINE_TAG:-$(sysctl -n hw.model | tr -cd '[:alnum:]')}"
 MAX_NEW="${MAX_NEW:-96}"
 SEED="${SEED:-1234}"
 
+if [ -z "${MODEL:-}" ]; then
+  for candidate in /Volumes/BuildSSD/shrike/ornith15.gturbo \
+                   "$HOME/shrike-runtime/models/ornith15.gturbo"; do
+    if [ -f "$candidate/verified-install.json" ]; then MODEL="$candidate"; break; fi
+  done
+fi
+if [ -z "${MODEL:-}" ] || [ ! -f "$MODEL/verified-install.json" ]; then
+  echo "no verified ornith15.gturbo install found; set MODEL=" >&2
+  exit 2
+fi
+
+SHORT_PROMPT="Explain what a mutex is and when you would use one."
+# ~2k tokens of deterministic context: a fixed ledger the model is asked to
+# summarize. Built from literals only — never touch this construction, the
+# stored baselines depend on its exact bytes.
+long_prompt() {
+  printf 'You are auditing a build ledger. Entries follow.\n'
+  for i in $(seq 1 60); do
+    printf 'Entry %d: commit c%04d built target shrike-core in %d ms with 0 warnings, ran 1108 tests in %d ms, linked 3 artifacts, and archived bundle b%03d to shelf s%d.\n' \
+      "$i" $((i * 37)) $((1200 + i * 13)) $((80000 + i * 211)) "$i" $((i % 7))
+  done
+  printf 'Summarize: how many entries, which shelf received the most bundles, and the trend in build times.\n'
+}
+
 mode=capture
 if [ "${1:-}" = "--check" ]; then mode=check; shift; fi
-quants=("$@"); [ ${#quants[@]} -eq 0 ] && quants=(8)
+profiles=("$@"); [ ${#profiles[@]} -eq 0 ] && profiles=(short long)
 
 if [ ! -x "$CLI" ]; then
-  echo "missing $CLI — run: swift build -c release" >&2
+  echo "missing $CLI — run: swift build -c release (or set CLI=)" >&2
   exit 2
 fi
 
@@ -42,28 +73,23 @@ if pgrep -f 'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI|ShrikePackageT
   exit 3
 fi
 
-mkdir -p "$OUT_DIR" "$ROOT/.build"
+mkdir -p "$OUT_DIR"
 status=0
 
-for q in "${quants[@]}"; do
-  case "$q" in
-    4|8) ;;
-    *) echo "unsupported Ornith baseline quantization: $q (expected 4 or 8)" >&2
+for profile in "${profiles[@]}"; do
+  case "$profile" in
+    short) prompt="$SHORT_PROMPT"; max_new="$MAX_NEW" ;;
+    long)  prompt="$(long_prompt)"; max_new=128 ;;
+    *) echo "unknown profile: $profile (expected short or long)" >&2
        status=1; continue ;;
   esac
-  model="$ROOT/models/ornith-1.5_35B_A3B_${q}Bit"
-  if [ ! -f "$model/verified-install.json" ]; then
-    echo "missing ${q}-bit baseline model: no verified install at ${model#$ROOT/}" >&2
-    status=1
-    continue
-  fi
-  file="$OUT_DIR/ornith-1.5-35b-a3b-${q}bit.txt"
-  work="$(mktemp "$ROOT/.build/golden-baseline.XXXXXX")"
+  file="$OUT_DIR/ornith15-int4-${profile}.${MACHINE_TAG}.txt"
+  work="$(mktemp "${TMPDIR:-/tmp}/golden-baseline.XXXXXX")"
 
-  echo "== ${q}-bit =="
+  echo "== $profile =="
   # --quiet keeps the timing footer out of the compared text; only the
   # generated tokens are the contract. Timings vary run to run by design.
-  "$CLI" --model "$model" --prompt "$PROMPT" --max-new "$MAX_NEW" \
+  "$CLI" --model "$MODEL" --prompt "$prompt" --max-new "$max_new" \
          --temperature 0 --seed "$SEED" --quiet > "$work" 2>"$work.err"
   rc=$?
   if [ $rc -ne 0 ]; then
@@ -73,24 +99,24 @@ for q in "${quants[@]}"; do
 
   if [ "$mode" = capture ]; then
     {
-      echo "# prompt:      $PROMPT"
-      echo "# max-new:     $MAX_NEW"
+      echo "# profile:     $profile (prompt $(printf '%s' "$prompt" | wc -c | tr -d ' ') bytes)"
+      echo "# max-new:     $max_new"
       echo "# temperature: 0 (greedy)"
       echo "# seed:        $SEED"
-      echo "# quant:       ${q}-bit"
+      echo "# model:       $(basename "$MODEL")"
       echo "# captured-on: $(sysctl -n hw.model), $(( $(sysctl -n hw.memsize) / 1073741824 )) GB, macOS $(sw_vers -productVersion)"
-      echo "# commit:      $(git -C "$ROOT" rev-parse --short HEAD)"
+      echo "# commit:      $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
       echo "---"
       cat "$work"
     } > "$file"
-    echo "  captured -> ${file#$ROOT/} ($(wc -c < "$work" | tr -d ' ') bytes)"
+    echo "  captured -> $file ($(wc -c < "$work" | tr -d ' ') bytes)"
   else
     if [ ! -f "$file" ]; then
-      echo "  no baseline at ${file#$ROOT/}; run without --check first"; status=1
+      echo "  no baseline at $file; run without --check first"; status=1
     elif diff -q <(sed '1,/^---$/d' "$file") "$work" >/dev/null; then
       echo "  ok — output identical to baseline"
     else
-      echo "  MISMATCH against ${file#$ROOT/}:"
+      echo "  MISMATCH against $file:"
       diff <(sed '1,/^---$/d' "$file") "$work" | head -30 | sed 's/^/    /'
       status=1
     fi
