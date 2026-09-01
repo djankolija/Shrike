@@ -53,7 +53,21 @@ warm `attn_layer_kv` slope); deploy = binary + bundles (new kernel!).
       ~5–6×; full sharing required (pairing halves traffic only).
       Bench discipline now baked in: pgrep guard + interleaved
       3-round grid, global best per point.
-- [ ] **V4: (redefined after V3a) the kernel fix the microbench
-      indicates, then twin, then default flip + golden baseline (rig +
-      ~2k prompt) per the standing T5 note; v10's Q2 closes with a
-      pointer here.
+- [ ] **V4: KV-head-shared partial kernel (a264b22-class — awaiting
+      Davor's per-instance sign-off).** Spec, peer-reviewed: one TG
+      stages a KV chunk once; per-simdgroup-per-head layout (keeps
+      o_local at today's 8 floats/lane — the T2 occupancy lesson);
+      one TG barrier per position re-enters, priced ~zero by the V3
+      null. **Sharing degree is a PARAMETER, not pass/fail**: the
+      traffic-bound verdict makes the win linear in degree (2-way =
+      2×, 4-way = 4×, 8-way = 8× traffic cut), so the register/
+      occupancy budget picks the degree rather than reverting the
+      whole design at the cliff. Expected: ~5–6× cut of the
+      +8 ms/1000-ctx tax at full sharing. Acceptance: numeric arm +
+      mini twin (warm attn_layer_kv slope) + golden baseline at T5;
+      v10's Q2 closes with a pointer here.
+- [ ] **V5 (unbundled, later, own sign-off): KV row-layout reorder**
+      — the clean bench shows ~50 % line utilization (35–40 % of
+      roof); a layout so one TG's walk touches full lines may hide a
+      further ~2× behind V4's 8×. Layout change on top of a reduction
+      change — deliberately NOT bundled with V4.
