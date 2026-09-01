@@ -93,6 +93,22 @@ production server; the M4 Pro's through a fresh server with `--ram-budget 20G`
 The ledger closes: wall = busy + gaps + a per-request remainder (the first
 column's remainder is the fresh server's first request).
 
+**After P1** (commit b7604db, 2026-09-02, same protocol, fresh servers):
+
+| role | M4 Pro 3.7k | M4 Pro 12k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: |
+| `prefill_attn_router` | 3.40 | 13.53 † | 13.82 | 43.58 |
+| `prefill_routed_tile` | 2.02 | 2.10 | 5.82 | 5.81 |
+| `prefill_gdn_router` | 1.00 | 1.03 | 4.38 | 4.38 |
+| `prefill_shared_expert` | **0.058** | **0.061** | **0.29** | **0.29** |
+| **GPU busy** | 6.52 | 16.74 | 24.52 | 54.16 |
+| **wall** | 7.32 | 16.92 | 25.66 | 55.02 |
+
+† The M4 Pro's 12k attention row moved +14 % on an unchanged kernel while the
+M1's stayed within 0.4 %; that laptop had run hours of test suites before
+the measurement. Treat the M1 as the reference for cross-step comparisons of
+untouched roles.
+
 - **Attention time is proportional to query–key pairs, not tokens.** Across
   chunks the pairs grow as 4096 × (2048 + 6144 + 10240 + …); 12k has 10.7× the
   pairs of 3.7k and took 11.4× the time. The projections inside the role are

@@ -39,7 +39,10 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
   in that task's verdict line. Never recapture for an unexplained mismatch.
 - Ledger protocol per step: `tools/prefill-measure.sh` at the 3.7k and 12k
   prompts on both boxes, GPU ms per prompt token by role, appended to the
-  design's ledger table.
+  design's ledger table. One send per prompt per server lifetime: a repeated
+  prompt hits the multi-prefix prompt cache and prefills only a suffix, and
+  its wall time absorbs the previous request's settle. Re-measure on a fresh
+  server (or a fresh-salt prompt), never by resending.
 - Comments: none unless a genuinely non-obvious why (repo rule).
 
 ## Tasks
@@ -97,8 +100,19 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
 
 ### Task 1: P1 — shared expert on the matrix path
 
-- [ ] **P1: shared expert on the matrix path** — target 0.83 → ~0.06 ms/token
-  (M4 Pro), 3.9 → ~0.3 (M1).
+- [x] **P1: shared expert on the matrix path** — target 0.83 → ~0.06 ms/token
+  (M4 Pro), 3.9 → ~0.3 (M1). **LANDED b7604db (2026-09-02): measured 0.83 →
+  0.058 (M4 Pro) and 3.92 → 0.29 (M1) ms/prompt-token, on target. Wall:
+  M4 Pro 3.7k 8.74 → 7.32 ms/tok; M1 3.7k 29.5 → 25.7, 12k 59.0 → 55.0.
+  Chunk-vs-row-loop maxAbs 1.95e-3 (64 rows), 9.8e-4 (33 rows); the T-row
+  scalar gate is bit-identical to the per-row GEMV at D=2048. Golden: M4 Pro
+  identical on both profiles; M1 short identical, long diverged at the
+  thinking block's second sentence (near-tie flip, both continuations
+  coherent) → M1 long baseline recaptured. Two review rounds: doc block
+  moved back onto `encodeRoutedMoEPrefill` (now 276 lines, was 325), gate
+  on `MPPPrefillInt4QMM.isAvailable`, scalar-gate test at D=2048, `weightBits`
+  retained by the type. M1 qualification is by construction (no toolchain
+  there) plus the coherent golden continuation.**
 
   **Files:**
   - Modify: `Sources/Shrike/Kernels/Prefill/MoE/PrefillSharedExpert.swift`
