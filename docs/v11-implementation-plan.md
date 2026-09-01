@@ -21,12 +21,24 @@ warm `attn_layer_kv` slope); deploy = binary + bundles (new kernel!).
       until V3 accepts.
 - [ ] **V2: Swift wiring** — PSO selection by the knob; grid unchanged
       (the chunk geometry stays; the loop inside changes).
-- [ ] **V3: twin verdict** — same-session three-point: current default
-      vs knob-on, rig + full ladder; accept on warm slope ≤ +1.5 ms/1k
-      and wall improvement at depth; revert on anything else. Output
-      sanity read on real prompts (digest is expected to differ — the
-      knob A/B was signed off as a264b22-class).
-- [ ] **V4: default flip + golden baseline** — knob becomes default,
-      knob deleted, CLAUDE.md env notes untouched (no new env), fresh
-      golden baseline captured (rig + ~2k prompt) per the standing T5
-      note; v10's Q2 closes with a pointer here.
+- [x] **V3: twin verdict — NULL, hypothesis falsified (2026-09-01
+      ~14:00, twin on 77af089).** Warm attn_layer_kv at ctx 1900:
+      20.35 (sg) vs 20.18 (off); slope +8/1k unchanged at every rung;
+      rig 39.02 vs 38.73 (noise); rig digest incidentally identical;
+      outputs sane. The cross-variant test proves the sg kernel ran —
+      so the per-position barriers were NOT the cost, and with the
+      chunk-probe null this exonerates chunks, barriers, AND
+      threadgroup concurrency (8× more positions in flight changed
+      nothing → the machine-wide limiter is per-byte work, not
+      structure). Survivors: the int8 attn_load_kv dequant (per-element
+      scale/bias loads + integer div/mod) and the 8× GQA re-read.
+      Knob kept default-off while iteration continues.
+- [ ] **V3a: standalone partial-kernel microbench** — dispatch
+      attention_decode_partial alone on synthetic buffers, seqLen
+      ladder 128→4096, one axis at a time: fp16 vs int8 KV, NKV 2 vs
+      8 (GQA re-read), group_size variants. Names the per-byte
+      limiter in one run; local M4 first, mini to confirm.
+- [ ] **V4: (redefined after V3a) the kernel fix the microbench
+      indicates, then twin, then default flip + golden baseline (rig +
+      ~2k prompt) per the standing T5 note; v10's Q2 closes with a
+      pointer here.
