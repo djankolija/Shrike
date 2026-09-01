@@ -53,19 +53,27 @@ warm `attn_layer_kv` slope); deploy = binary + bundles (new kernel!).
       ~5–6×; full sharing required (pairing halves traffic only).
       Bench discipline now baked in: pgrep guard + interleaved
       3-round grid, global best per point.
-- [ ] **V4: KV-head-shared partial kernel (a264b22-class — awaiting
-      Davor's per-instance sign-off).** Spec, peer-reviewed: one TG
-      stages a KV chunk once; per-simdgroup-per-head layout (keeps
-      o_local at today's 8 floats/lane — the T2 occupancy lesson);
-      one TG barrier per position re-enters, priced ~zero by the V3
-      null. **Sharing degree is a PARAMETER, not pass/fail**: the
-      traffic-bound verdict makes the win linear in degree (2-way =
-      2×, 4-way = 4×, 8-way = 8× traffic cut), so the register/
-      occupancy budget picks the degree rather than reverting the
-      whole design at the cliff. Expected: ~5–6× cut of the
-      +8 ms/1000-ctx tax at full sharing. Acceptance: numeric arm +
-      mini twin (warm attn_layer_kv slope) + golden baseline at T5;
-      v10's Q2 closes with a pointer here.
+- [x] **V4: KV-head-shared partial kernel — ACCEPTED ON THE TWIN
+      (2026-09-01 ~18:30, df74636).** Per-simdgroup-per-head layout
+      (peer-reviewed spec); shared path takes the full 64-chunk budget
+      (first wall: TG count) and stages positions in 4-blocks (second
+      wall: barrier cadence). Local M4 slopes: int8 0.207→0.069, fp16
+      0.155→0.059 µs/pos. **Mini twin: warm attn_layer_kv slope
+      +8.0 → +2.81 ms/1000 ctx (2.84×); deep card turns 35.9 → 33.2 s
+      (~10 ms/token at ctx 1900); rig 38.02 (≤ baseline); outputs
+      sane; rig digest incidentally byte-identical.** Live trial now
+      runs the knob (PID 48356); default flip staged behind the
+      golden-baseline ceremony below. Sign-off: Davor, 2026-09-01
+      ("Proceed ;)").
+- [ ] **V4.1 (golf, bitwise-safe, no sign-off): fold the dequant
+      index divides via KV function constants** — with the 8× re-read
+      gone the runtime-divisor divides re-emerge at true size (int8
+      0.069 vs fp16 0.059 local ≈ 15 % of remaining slope; the peer's
+      resurrected hypothesis, correctly sized this time).
+- [ ] **V4.2: default flip + golden baseline** — kvShared becomes the
+      code default for applicable shapes, knob deleted, golden
+      baseline captured (rig + ~2k prompt, on the mini) per the
+      standing T5 note; v10's Q2 closes with a pointer here.
 - [ ] **V5 (unbundled, later, own sign-off): KV row-layout reorder**
       — the clean bench shows ~50 % line utilization (35–40 % of
       roof); a layout so one TG's walk touches full lines may hide a
