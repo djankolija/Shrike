@@ -55,6 +55,7 @@ struct PrefillAttentionParams: Sendable, Equatable {
 enum PrefillAttentionError: Error, CustomStringConvertible {
     case tensorOpsUnavailable(reason: String)
     case commandEncoderFailed
+    case shadowAllocationFailed(bytes: Int)
 
     public var description: String {
         switch self {
@@ -62,6 +63,8 @@ enum PrefillAttentionError: Error, CustomStringConvertible {
             return "TensorOps 2D prefill attention requested but unavailable: \(reason)"
         case .commandEncoderFailed:
             return "Failed to create Metal compute command encoder"
+        case .shadowAllocationFailed(let bytes):
+            return "Could not allocate \(bytes)-byte KV shadow buffers for matrix prefill attention"
         }
     }
 }
@@ -75,6 +78,20 @@ final class PrefillAttention {
     /// K7: recorded once at init so an explicit TensorOps path request can
     /// throw the real reason instead of a bare `preconditionFailure`.
     private let tensorOpsUnavailableReason: String
+    private let psoKVDequant: MTLComputePipelineState?
+    private let psoCausalMatrix: MTLComputePipelineState?
+    let matrixUnavailableReason: String
+    /// Tile geometry: rows of queries per threadgroup and simdgroups per
+    /// threadgroup. `SHRIKE_ATTN_MATRIX_TILE=r64s8` selects the wider variant
+    /// for A/B measurement; the default is the measured production choice.
+    static let matrixTile: (rows: Int, simdgroups: Int) =
+        ProcessInfo.processInfo.environment["SHRIKE_ATTN_MATRIX_TILE"] == "r64s8"
+            ? (64, 8) : (32, 4)
+    static let matrixHeadDim: UInt32 = 256
+    private var shadowK: MTLBuffer?
+    private var shadowV: MTLBuffer?
+
+    var matrixPathAvailable: Bool { psoCausalMatrix != nil && psoKVDequant != nil }
 
     init(context: MetalContext, supportsMLA: Bool = false) throws {
         self.context = context
@@ -82,6 +99,21 @@ final class PrefillAttention {
         self.psoMLACausal = supportsMLA
             ? try context.pipeline("attention_prefill_mla_causal")
             : nil
+        var kvDequant: MTLComputePipelineState?
+        var causalMatrix: MTLComputePipelineState?
+        var matrixReason = ""
+        do {
+            kvDequant = try context.pipeline("attention_prefill_kv_dequant")
+            causalMatrix = try context.pipeline(
+                "attention_prefill_causal_matrix_r\(Self.matrixTile.rows)s\(Self.matrixTile.simdgroups)")
+        } catch {
+            kvDequant = nil
+            causalMatrix = nil
+            matrixReason = "\(error)"
+        }
+        self.psoKVDequant = kvDequant
+        self.psoCausalMatrix = causalMatrix
+        self.matrixUnavailableReason = matrixReason
         if context.device.supportsFamily(.apple10) {
             do {
                 self.psoFullTensorOps2DValidityV2 = try context.pipeline(
@@ -109,8 +141,20 @@ final class PrefillAttention {
                              path: RuntimePrefillAttentionPath = .causalTiled) throws {
         validate(params)
 
+        if path == .causalMatrix, matrixPathAvailable,
+           Self.matrixPathAccepts(params, kvRingCapacity: kvRingCapacity, hasSinks: sinks != nil) {
+            try encodeMatrix(commandBuffer: commandBuffer,
+                             q: q, qOffset: qOffset,
+                             k: k, kOffset: kOffset,
+                             v: v, vOffset: vOffset,
+                             out: out, outOffset: outOffset,
+                             params: params)
+            return
+        }
+
         let requestsTensorOps = path == .fullTensorOps2DPreferred
             || path == .fullTensorOps2DValidityV2
+            || path == .causalMatrix
         // The pinned model uses 512/16/2 only for full attention; its
         // sliding-window layers use 256/16/8. A future model that reuses this
         // shape for sliding attention must add a full-visibility check here.
@@ -226,6 +270,88 @@ final class PrefillAttention {
                     depth: 1),
             threadsPerThreadgroup: MTLSize(width: threadCount, height: 1, depth: 1))
         enc.endEncoding()
+    }
+
+    /// The matrix kernel is written for the 256-wide, 16/2-head, fully visible
+    /// causal shape; everything else keeps the scalar kernel.
+    static let matrixPathMinimumQueries: UInt32 = 32
+    /// The KV shadow (see `ensureShadow`) grows with `kvValidCount` and is
+    /// never released; this ceiling keeps a very long context off the matrix
+    /// path instead of letting the shadow grow without bound.
+    static let matrixPathMaxContext: UInt32 = 65_536
+
+    static func matrixPathAccepts(_ params: PrefillAttentionParams,
+                                  kvRingCapacity: UInt32,
+                                  hasSinks: Bool) -> Bool {
+        params.headDim == matrixHeadDim
+            && params.numQHeads == 16
+            && params.numKVHeads == 2
+            && kvRingCapacity == 0
+            && !hasSinks
+            && (params.slidingWindow == 0 || params.slidingWindow >= params.kvValidCount)
+            && params.queryCount >= matrixPathMinimumQueries
+            && params.kvValidCount > 0
+            && params.kvValidCount <= matrixPathMaxContext
+    }
+
+    private func encodeMatrix(commandBuffer: MTLCommandBuffer,
+                              q: MTLBuffer, qOffset: Int,
+                              k: MTLBuffer, kOffset: Int,
+                              v: MTLBuffer, vOffset: Int,
+                              out: MTLBuffer, outOffset: Int,
+                              params: PrefillAttentionParams) throws {
+        guard let psoKVDequant, let psoCausalMatrix else {
+            throw PrefillAttentionError.tensorOpsUnavailable(reason: matrixUnavailableReason)
+        }
+        let elements = Int(params.numKVHeads * params.headDim)
+        let shadowBytes = Int(params.kvValidCount) * elements * MemoryLayout<Float16>.stride
+        let (shadowK, shadowV) = try ensureShadow(bytes: shadowBytes)
+
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw PrefillAttentionError.commandEncoderFailed
+        }
+        var p = params
+        enc.setComputePipelineState(psoKVDequant)
+        enc.setBuffer(k, offset: kOffset, index: 0)
+        enc.setBuffer(v, offset: vOffset, index: 1)
+        enc.setBuffer(shadowK, offset: 0, index: 2)
+        enc.setBuffer(shadowV, offset: 0, index: 3)
+        enc.setBytes(&p, length: MemoryLayout<PrefillAttentionParams>.stride, index: 4)
+        enc.dispatchThreads(
+            MTLSize(width: elements, height: Int(params.kvValidCount), depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+
+        enc.setComputePipelineState(psoCausalMatrix)
+        enc.setBuffer(q, offset: qOffset, index: 0)
+        enc.setBuffer(shadowK, offset: 0, index: 1)
+        enc.setBuffer(shadowV, offset: 0, index: 2)
+        enc.setBuffer(out, offset: outOffset, index: 3)
+        enc.setBytes(&p, length: MemoryLayout<PrefillAttentionParams>.stride, index: 4)
+        let rows = Self.matrixTile.rows
+        enc.dispatchThreadgroups(
+            MTLSize(width: (Int(params.queryCount) + rows - 1) / rows,
+                    height: Int(params.numQHeads),
+                    depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 32 * Self.matrixTile.simdgroups,
+                                           height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    private static let shadowQuantumBytes = 8 << 20
+
+    private func ensureShadow(bytes: Int) throws -> (MTLBuffer, MTLBuffer) {
+        if let shadowK, let shadowV, shadowK.length >= bytes, shadowV.length >= bytes {
+            return (shadowK, shadowV)
+        }
+        let quantum = Self.shadowQuantumBytes
+        let rounded = (bytes + quantum - 1) / quantum * quantum
+        guard let newK = context.device.makeBuffer(length: rounded, options: .storageModePrivate),
+              let newV = context.device.makeBuffer(length: rounded, options: .storageModePrivate) else {
+            throw PrefillAttentionError.shadowAllocationFailed(bytes: rounded)
+        }
+        shadowK = newK
+        shadowV = newV
+        return (newK, newV)
     }
 
     private func validate(_ params: PrefillAttentionParams) {

@@ -196,6 +196,26 @@ import ShrikeValidationSupport
         }
     }
 
+    @Test func causalMatrixFallsThroughToTensorOpsShape() throws {
+        let fixture = Self.makeFixture(start: 128,
+                                       chunk: 1,
+                                       window: 0,
+                                       seed: 0xA872,
+                                       headDim: 512,
+                                       qHeads: 16,
+                                       kvHeads: 2)
+        let viaCausalMatrix = try Self.runKernel(fixture, path: .causalMatrix)
+        let preferred = try Self.runKernel(fixture, path: .fullTensorOps2DPreferred)
+        let reference = PrefillAttentionRef.apply(fixture)
+        let maxAbs = RelError.maxAbsDiff(viaCausalMatrix, reference)
+        let rel = RelError.compute(actual: viaCausalMatrix, reference: reference)
+        #expect(maxAbs <= 2e-2,
+                "causalMatrix fallthrough maxAbs=\(maxAbs) rel=\(rel)")
+        #expect(rel <= 2e-2,
+                "causalMatrix fallthrough rel=\(rel) maxAbs=\(maxAbs)")
+        #expect(viaCausalMatrix == preferred)
+    }
+
     private static func makeFixture(start: Int,
                                     chunk: Int,
                                     window: Int,

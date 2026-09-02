@@ -525,6 +525,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     // reads tight.
     public nonisolated let prefillChunkTokens: Int
     public nonisolated let prefillProjectionPath: String
+    public nonisolated let prefillAttentionPathDescription: String
     /// Routed-expert slots per layer actually in force, so the ready banner can
     /// report the streaming budget rather than leaving the user to infer it.
     public nonisolated let expertCacheSlots: Int
@@ -812,7 +813,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                                          promptStateStore: promptStateStore,
                                          concisePrompt: conciseModeEnabled()
                                            ? ConcisePrompt.prompt(for: model) : nil)
-        ServerLog.residency("prefill_projection_path=" + session.prefillProjectionPath)
+        ServerLog.residency("prefill_projection_path=" + session.prefillProjectionPath
+                            + " prefill_attention_path=" + session.prefillAttentionPathDescription)
         return session
     }
 
@@ -844,6 +846,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.prefillConfig = prefillConfig
         self.prefillChunkTokens = prefillConfig.chunkTokens
         self.prefillProjectionPath = runner.prefillProjectionPath
+        self.prefillAttentionPathDescription = runner.prefillAttentionPathDescription
         self.expertCacheSlots = expertCacheSlots
         self.maxContext = maxContext
         self.promptCacheMode = promptCacheMode

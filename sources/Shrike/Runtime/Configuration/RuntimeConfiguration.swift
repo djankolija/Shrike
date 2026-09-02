@@ -14,6 +14,7 @@ public enum RuntimePrefillAttentionPath: String, Codable, Sendable {
     case causalTiled = "causal-tiled"
     case fullTensorOps2DPreferred = "full-tensorops-2d-preferred"
     case fullTensorOps2DValidityV2 = "full-tensorops-2d-validity-v2"
+    case causalMatrix = "causal-matrix"
 }
 
 public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
@@ -235,7 +236,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 rdadvisePolicy: RDAdvicePolicyMode = .default,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
-                prefillAttentionPath: RuntimePrefillAttentionPath = .fullTensorOps2DPreferred,
+                prefillAttentionPath: RuntimePrefillAttentionPath = .causalMatrix,
                 forceLogitsHead: Bool = false,
                 decodeExpertExecution: RuntimeDecodeExpertExecution = .speculative,
                 expertIOSynchronization: RuntimeExpertIOSynchronization = .event,

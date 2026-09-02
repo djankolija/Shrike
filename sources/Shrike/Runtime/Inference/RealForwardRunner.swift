@@ -186,6 +186,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         prefillMPPAffineInt4 == nil ? "unavailable" : "affine-threadgroup-f16"
     }
 
+    public var prefillAttentionPathDescription: String {
+        let available = prefillAttention.matrixPathAvailable
+        var description = "\(prefillAttentionPath.rawValue) matrix_available=\(available)"
+        if !available {
+            description += " reason=\(prefillAttention.matrixUnavailableReason)"
+        }
+        return description
+    }
+
     // Scratch — preallocated per spec'd D / F / vocab.
     private let decodeScratch: DecodeScratchBuffers
     private var hidden: MTLBuffer { decodeScratch.hidden }          // [D] FP16
@@ -349,7 +358,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
             && model.lmHeadWeightBits == 4
             && model.attentionWeightBits == 4
-        self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
+        switch ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ATTENTION"] {
+        case "tiled": self.prefillAttentionPath = .causalTiled
+        case "matrix": self.prefillAttentionPath = .causalMatrix
+        default: self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
+        }
         self.decodeExpertExecution = runtimeConfiguration.decodeExpertExecution
         self.expertIOSynchronization = runtimeConfiguration.expertIOSynchronization
         self.expertIOSubmission = runtimeConfiguration.expertIOSubmission
