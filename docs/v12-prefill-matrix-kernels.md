@@ -200,6 +200,51 @@ scalar kernel on the same binary.
   resident on the M4 Pro; warm and cold runs cost the same, so the counter,
   not the cache, is what is off. Parked.
 
+**After P5** (commits a7c8288 + bf469ad, 2026-09-02; routed tiles batched per
+command buffer behind `SHRIKE_PREFILL_TILE_BATCH`, default 1 — a measured
+null result, rows at the default width; the gap split `host_ms` / `driver_ms`
+/ `queue_ms` lands with it):
+
+| role | M4 Pro 3.7k | M4 Pro 12k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: |
+| `prefill_attn_router` | 0.27 | 0.47 | 1.35 | 2.40 |
+| `prefill_routed_tile` | 1.03 | 1.00 | 3.41 | 3.35 |
+| `prefill_gdn_router` | 0.65 | 0.66 | 3.43 | 3.42 |
+| `prefill_shared_expert` | 0.06 | 0.06 | 0.29 | 0.29 |
+| **GPU busy** | 2.05 | 2.21 | 8.70 | 9.57 |
+| gaps (span − busy) | 0.53 | 0.36 | 0.66 | 0.52 |
+| **wall** | 2.91 | 2.68 | 9.89 | 10.26 |
+| wall, seconds | 10.9 | 32.9 | 37.2 | 126.0 |
+
+Batching lost at every width. Same binary, M4 Pro, 3.7k, two interleaved
+pairs: GPU busy and the routed role did not move, the routed→routed gap went
+from 0.85 / 0.95 s at width 1 (1,170 boundaries, ≈ 0.7 ms each) to 3.1 s at
+width 4 (277 boundaries, 11.4 ms each) and 3.0 s at width 8; the 12k wall
+went 32.9 → 41.4 s, the M1's 3.7k wall 37.2 → 41.4 s. The split says where:
+at width 4 the routed gap is host 3.00 s, driver 0.01, queue 0.16. A per-step
+host probe (uncommitted; the SDD report for Task 5) found every encode-side
+step flat across widths — validate + argument buffer 0.012 ms per tile,
+encode 0.019, commit 0.004 — and the whole penalty in the wait. The reason is
+the fetch. `fetchBindingForTile` costs 3.9 ms per tile on the M4 Pro at
+0 % prefill hit rate, of which the pread (`io_fetch_ms`) is 0.5 ms; the
+GPU tile is 3.2 ms. At width 1 the pending-tile overlap fetches tile i+1
+while tile i runs, so the GPU only waits for the fetch's excess (≈ 0.7 ms per
+boundary, 2.3 s of the 32.9 at 12k) — the loop is fetch-bound, not
+commit-bound. Batching serializes the fetches of tiles 2..W against an idle
+GPU, which is the measured 3.6 ms per non-first tile. The premise that a
+boundary was ≈ 1.3 ms of commit → wait → encode was wrong: driver + queue per
+boundary is ≈ 0.3 ms, so a zero-penalty batch could have saved ≈ 0.8 s of
+32.9. On the M1 the routed tiles abut at width 1 (10.6 ms of GPU per tile
+hides the fetch entirely); its gaps live elsewhere.
+
+Where the gaps are now, at 12k (ms per prompt token): M4 Pro 0.36 = routed→
+routed 0.19 (the fetch excess) + shared→routed 0.10 (≈ 10 ms per layer, of
+which ≈ 11 ms at 3.7k is `driver_ms`, see the follow-ons) + GDN→shared 0.02
+(host routing) + the decode tokens' fixup transitions 0.02 + ≈ 0.03 spread.
+M1 0.52 = shared→routed 0.29 (29 ms per layer, 22 ms of it `driver_ms`) +
+GDN→shared 0.12 (15 ms per layer of host routing) + attention→shared 0.04
+(16 ms per layer, host) + fixup 0.03 + ≈ 0.04 spread.
+
 ## Where the time goes
 
 Every dense projection in prefill (attention Q/K/V/O, GDN in/out) already runs
@@ -326,9 +371,32 @@ residency line. Measured on the ledger: see "After P4" above.
 
 ### Follow-ons, not scheduled
 
-- **Tile command-buffer batching.** The ~1.3 ms per tile boundary becomes a
-  quarter of the remaining time at 4k once the kernels shrink. Encode several
-  tiles per command buffer; the expert-load discovery point is the constraint.
+- **Tile command-buffer batching — landed as a null result (P5, a7c8288 +
+  bf469ad).** The boundary was never ≈ 1.3 ms of commit → wait → encode; it is
+  the routed fetch's excess over the GPU tile, and batching removes the
+  overlap that hides the rest. See "After P5" in the ledger. The knob stays
+  as an A/B override; the default is one tile per buffer.
+- **The routed fetch's latency (M4 Pro).** `fetchBindingForTile` costs
+  ≈ 3.9 ms per tile at 0 % prefill hit rate against 0.5 ms of pread inside
+  it. With one tile of overlap it is the critical path at 3.2 ms of GPU per
+  tile (≈ 0.66 ms per boundary, 2.3 s of 32.9 at 12k) and the first tile of
+  every layer pays it unhidden. Either find the ≈ 3.3 ms in the load
+  operation's completion path — it is not the I/O — or run two fetches in
+  flight. On the M1 the tile is 10.6 ms of GPU and the fetch is already
+  hidden, so this is an M4 Pro lever until P6 shrinks the tile.
+- **The first routed buffer of each layer costs ≈ 11 ms (M4 Pro) / ≈ 22 ms
+  (M1) in the driver** — `prefill_shared_expert->prefill_routed_tile`
+  `driver_ms` 0.45 s / 1.02 s at 3.7k over 40 layers, 2.65 s at M1 12k over
+  120; the later tiles of a layer pay ≈ 0.01 ms. Worth ≈ 4 % of the M4
+  Pro's 12k wall and ≈ 2 % of the M1's. Unexplained. Its shape — once per
+  layer, on the first buffer that touches the expert slab after buffers
+  that do not — suggests residency work proportional to the slab, which an
+  `MTLResidencySet` on the queue would remove; that is a model, not a
+  measurement.
+- **Per-layer host routing on the M1.** ≈ 15 ms per layer between the GDN or
+  attention buffer and the shared expert (`host_ms` 1.38 + 0.48 s at 12k,
+  ≈ 1.5 % of wall); 2.8 ms per layer on the M4 Pro. The router readback,
+  pair building and grouping over 4,096 rows on the CPU.
 - **Attention: stage a KV-head group's tile once.** P2's kernel reads each
   K/V tile eight times (once per query head); staging a dequantized 64-key
   tile in threadgroup memory for all eight heads, with Q streamed per head,

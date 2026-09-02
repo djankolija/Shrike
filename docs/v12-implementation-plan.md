@@ -716,12 +716,43 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
 ### Task 5: P5 — tile command-buffer batching
 
-- [ ] **P5: tile command-buffer batching** — target the inter-tile gap
+- [x] **P5: tile command-buffer batching** — target the inter-tile gap
   0.35 → ≤ 0.12 ms/prompt-token (M4 Pro, 12k), 0.95 → ≤ 0.35 at 3.7k, and
   0.53 → ≤ 0.20 (M1, 12k). Modelled wall: M4 Pro 12k 2.65 → ≈ 2.42 (32.6 →
   ≈ 30 s), 3.7k 3.46 → ≈ 2.90; M1 12k 10.28 → ≈ 9.95 (126.3 → ≈ 122 s).
   Nothing about the kernels changes, so the greedy digests must be **identical**
   on both boxes — a golden diff here is a bug, not a numerics change.
+  **LANDED a7c8288 + bf469ad (2026-09-02) as a measured null result: the code
+  default stays at one tile per command buffer and `SHRIKE_PREFILL_TILE_BATCH`
+  remains an A/B knob.** Same-binary A/B on the M4 Pro at 3.7k (two
+  interleaved pairs, fresh server per run): GPU busy flat (7.6–8.4 s) and the
+  routed role flat (1.03–1.11 ms/token) at every width, but the routed→routed
+  gap grew from 0.85 / 0.95 s (1,170 boundaries, ≈ 0.7 ms each) to 3.1 s at
+  width 4 (277 boundaries, 11.4 ms each) and 3.0 s at widths 8 and 16 (16
+  fitted to 8 by the slot budget); walls 11.4 / 11.7 s → 13.9 / 14.5 (W4) →
+  15.2 / 15.0 (W8). At 12k width 4 took the wall from 32.9 to 41.4 s; M1 3.7k
+  read 37.2 s at width 1 against 41.4 s at width 4. The gap split added in
+  bf469ad (`host_ms` / `driver_ms` / `queue_ms` from `kernelStartTime` /
+  `kernelEndTime`) puts the width-4 routed gap at host 3.00 s, driver 0.01,
+  queue 0.16; an uncommitted per-step host probe (task-5-report.md, "Probe")
+  found no encode step moved (validate + argument buffer 0.012 ms per tile,
+  encode 0.019, commit 0.004 at both widths) and the whole penalty in the
+  wait, 0.43 → 2.64 ms per tile. The cause is the fetch: `fetchBindingForTile`
+  costs 3.9 ms per tile at both widths (its pread, `io_fetch_ms`, is 0.5 ms
+  of that) against 3.2 ms of GPU work per tile on the M4 Pro, so at width 1
+  the pending-tile overlap already hides all but ≈ 0.7 ms of it — the loop is
+  fetch-bound, not commit-bound — and every non-first tile of a batch is
+  fetched against an idle GPU, paying the full 3.6 ms. The design's premise
+  (≈ 1.3 ms of commit → wait → encode per boundary) was wrong: driver + queue
+  per boundary is ≈ 0.3 ms, so even a zero-penalty batch could save ≈ 0.8 s of
+  32.9 at 12k. On the M1 the routed→routed gap is already zero at width 1
+  (10.6 ms of GPU per tile hides the fetch). Golden identical on both profiles
+  on both boxes at the default, and at width 4 on the M4 Pro. Ledger rows at
+  the default width match the P4 rows within noise (M4 Pro 12k 32.9 s, M1 12k
+  126.0 s). Two follow-on candidates fall out of the split and are recorded
+  in the design doc: the fetch's ≈ 3.3 ms of non-I/O latency per tile, and a
+  driver cost of ≈ 11 ms (M4 Pro) / ≈ 22 ms (M1) on the first routed buffer
+  of every layer (`prefill_shared_expert->prefill_routed_tile` `driver_ms`).
 
   **The measured cause.** Each routed tile gets its own command buffer
   (`RealForwardRunner.swift:5037-5048`), and the pending-tile machinery that
