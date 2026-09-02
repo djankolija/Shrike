@@ -213,8 +213,26 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
 
 ### Task 2: P2 — attention core on the matrix path
 
-- [ ] **P2: attention core on the matrix path** — target 3.39 → ~0.2 ms/token
-  at 3.7k, 22.2 → ~0.8 at 25k (M4 Pro).
+- [x] **P2: attention core on the matrix path** — target 3.39 → ~0.2 ms/token
+  at 3.7k, 22.2 → ~0.8 at 25k (M4 Pro). **LANDED 80589aa (2026-09-02):
+  measured 3.40 → 0.27 (3.7k), 13.53 → 0.47 (12k), 22.19 → 0.85 (25k) on
+  the M4 Pro; 13.82 → 1.36 (3.7k), 43.58 → 2.40 (12k) on the M1. Wall: M4 Pro
+  12k 207.8 → 46.1 s, 25k 666.8 → 114.0 s; M1 12k 675.9 → 166.0 s (chapter
+  start 725.2). Design refinement by ruling: a per-layer fp16 shadow of the
+  cache (`attention_prefill_kv_dequant`, `prefill_load_kv`'s formula) feeds
+  `matmul2d` device tensors instead of per-tile threadgroup dequant (a 64×256
+  fp16 tile alone is the 32 KB budget). Spike on the ledger, not a bench:
+  r32s4 serial softmax 6.15 s → lane-parallel 5.39 s → r64s8 5.91 s at 12k;
+  r32s4 shipped, ≈ 36 % of the M4 Pro ceiling (bar was 40 %; accepted, the
+  eightfold GQA tile re-read is the documented follow-on). Tests: 3 fp32
+  reference cases (fp16 cache), 5 matrix-vs-tiled cases on int8/int4
+  `KVCacheManager` views, gate cases, rejected-shape end-to-end. Golden: both
+  boxes flipped the long profile (near-tie), short identical → both long
+  baselines recaptured. Review approved; fix round: shadow grows in 8 MiB
+  quanta, header comment corrected, self-contained includes, tile
+  `static_assert`s, gate threshold pinned at 32, nonzero test offsets.
+  `RuntimeConfiguration` default is now `.causalMatrix`;
+  `SHRIKE_PREFILL_ATTENTION=tiled|matrix` A/B.**
 
   **Files:**
   - Create: `Sources/Shrike/Metal/Prefill/attention_matrix.metal` (new module:

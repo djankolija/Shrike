@@ -109,6 +109,30 @@ M1's stayed within 0.4 %; that laptop had run hours of test suites before
 the measurement. Treat the M1 as the reference for cross-step comparisons of
 untouched roles.
 
+**After P2** (commit 80589aa, 2026-09-02; matrix-path attention, 32 rows ×
+4 simdgroups, lane-parallel softmax):
+
+| role | M4 Pro 3.7k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `prefill_attn_router` | **0.27** | **0.47** | **0.85** | **1.36** | **2.40** |
+| `prefill_routed_tile` | 2.03 | 2.03 | 2.24 † | 5.83 | 5.82 |
+| `prefill_gdn_router` | 1.01 | 1.00 | 1.09 † | 4.38 | 4.36 |
+| `prefill_shared_expert` | 0.06 | 0.06 | 0.07 | 0.29 | 0.29 |
+| **GPU busy** | 3.42 | 3.58 | 4.26 | 12.07 | 12.96 |
+| **wall** | 4.31 | 3.76 | 4.52 | 13.19 | 13.51 |
+| wall, seconds | 16.2 | 46.1 | 114.0 | 49.5 | 166.0 |
+
+Attention-core efficiency on the shipped kernel: ≈ 36 % of the M4 Pro's
+measured ceiling at 12k and 25k (2.6–2.7 TFLOPS on 12.4 / 52.2 TFLOP of
+scores and values), ≈ 26 % on the M1. The remaining cost is the eightfold
+re-read of each K/V tile by the eight query heads of a KV group (each
+threadgroup owns one head, because the eight heads' Q rows are not a single
+uniform-stride matrix) and the 32-row `matmul2d` tile; a kernel that stages a
+KV-head group's K/V tile once for all eight heads is the follow-on. The 64-row
+× 8-simdgroup variant measured 10 % slower and stays selectable
+(`SHRIKE_ATTN_MATRIX_TILE=r64s8`); `SHRIKE_PREFILL_ATTENTION=tiled` A/Bs the
+scalar kernel on the same binary.
+
 - **Attention time is proportional to query–key pairs, not tokens.** Across
   chunks the pairs grow as 4096 × (2048 + 6144 + 10240 + …); 12k has 10.7× the
   pairs of 3.7k and took 11.4× the time. The projections inside the role are
@@ -221,6 +245,11 @@ steps 1–3 land short of the target; `GDNReference` is the oracle.
 - **Tile command-buffer batching.** The ~1.3 ms per tile boundary becomes a
   quarter of the remaining time at 4k once the kernels shrink. Encode several
   tiles per command buffer; the expert-load discovery point is the constraint.
+- **Attention: stage a KV-head group's tile once.** P2's kernel reads each
+  K/V tile eight times (once per query head); staging a dequantized 64-key
+  tile in threadgroup memory for all eight heads, with Q streamed per head,
+  would remove that re-read. Worth roughly the gap between 36 % and the
+  ceiling's practical 50–60 %; measured on the ledger like P2.
 - **The mini's SSD term** (0.8 ms/token per chunk) surfaces after step 2; the
   v10 P3 follow-on (batched miss loads, deeper queue depth) is the lever then.
 
