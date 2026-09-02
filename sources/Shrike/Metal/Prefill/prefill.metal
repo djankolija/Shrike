@@ -684,6 +684,69 @@ kernel void prefill_routed_scatter_rows(
     route_partials[(pair.token * p.top_k + pair.rank) * p.D + d] = staging[row * p.D + d];
 }
 
+/// Mirror of `MPPGroupedBlockMSL` and `kMPPAffineTileM` in tensorops.metal: the
+/// two modules compile separately, and the Swift side hands both the same
+/// inline block table.
+constant constexpr uint kPrefillRoutedGroupedRowTile = 64;
+
+struct PrefillRoutedGroupedBlockMSL {
+    uint slot;
+    uint pair_start;
+    uint rows;
+    uint staging_row;
+    uint row_tile_start;
+};
+
+struct PrefillRoutedGroupedParamsMSL {
+    uint padded_rows;
+    uint D;
+    uint top_k;
+    uint hidden_stride_elements;
+};
+
+kernel void prefill_routed_gather_rows_grouped(
+    device const half*                            hidden         [[buffer(0)]],
+    device const PrefillTokenExpertPairMSL*       sorted_pairs   [[buffer(1)]],
+    device half*                                  staging        [[buffer(2)]],
+    constant PrefillRoutedGroupedParamsMSL&       p              [[buffer(3)]],
+    constant PrefillRoutedGroupedBlockMSL*        blocks         [[buffer(4)]],
+    constant uint*                                row_tile_block [[buffer(5)]],
+    uint2                                         gid            [[thread_position_in_grid]]
+) {
+    const uint d = gid.x;
+    const uint row = gid.y;
+    if (d >= p.D || row >= p.padded_rows) return;
+
+    const PrefillRoutedGroupedBlockMSL b = blocks[row_tile_block[row / kPrefillRoutedGroupedRowTile]];
+    const uint local = row - b.staging_row;
+    if (local >= b.rows) {
+        staging[row * p.D + d] = half(0.0h);
+        return;
+    }
+    const PrefillTokenExpertPairMSL pair = sorted_pairs[b.pair_start + local];
+    staging[row * p.D + d] = hidden[pair.token * p.hidden_stride_elements + d];
+}
+
+kernel void prefill_routed_scatter_rows_grouped(
+    device const half*                            staging        [[buffer(0)]],
+    device const PrefillTokenExpertPairMSL*       sorted_pairs   [[buffer(1)]],
+    device half*                                  route_partials [[buffer(2)]],
+    constant PrefillRoutedGroupedParamsMSL&       p              [[buffer(3)]],
+    constant PrefillRoutedGroupedBlockMSL*        blocks         [[buffer(4)]],
+    constant uint*                                row_tile_block [[buffer(5)]],
+    uint2                                         gid            [[thread_position_in_grid]]
+) {
+    const uint d = gid.x;
+    const uint row = gid.y;
+    if (d >= p.D || row >= p.padded_rows) return;
+
+    const PrefillRoutedGroupedBlockMSL b = blocks[row_tile_block[row / kPrefillRoutedGroupedRowTile]];
+    const uint local = row - b.staging_row;
+    if (local >= b.rows) return;
+    const PrefillTokenExpertPairMSL pair = sorted_pairs[b.pair_start + local];
+    route_partials[(pair.token * p.top_k + pair.rank) * p.D + d] = staging[row * p.D + d];
+}
+
 kernel void prefill_dequant_affine_qmm_f16_block(
     device const uint8_t* W      [[buffer(0)]],
     device const bfloat*  scales [[buffer(1)]],

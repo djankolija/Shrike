@@ -17,11 +17,20 @@ enum PrefillRoutedRowBlockBufferIndex {
     static let sortedPairs = 1
     static let destination = 2
     static let params = 3
+    static let blocks = 4
+    static let rowTileBlock = 5
 }
 
 struct PrefillRoutedRowBlockParams: Equatable, Sendable {
     var pairStart: UInt32
     var rows: UInt32
+    var d: UInt32
+    var topK: UInt32
+    var hiddenStrideElements: UInt32
+}
+
+struct PrefillRoutedGroupedParams: Equatable, Sendable {
+    var paddedRows: UInt32
     var d: UInt32
     var topK: UInt32
     var hiddenStrideElements: UInt32
@@ -60,6 +69,82 @@ public struct PrefillExpertPairRange: Equatable, Sendable {
                                    pairStart: Int(group.pairStart),
                                    pairCount: Int(group.pairCount))
         }
+    }
+}
+
+/// Mirrored field-for-field by `MPPGroupedBlockMSL` and
+/// `PrefillRoutedGroupedBlockMSL`; `rowTileStart` lets a threadgroup find its
+/// row origin from its grid position without a search.
+struct PrefillRoutedExpertBlock: Equatable, Sendable {
+    var slot: UInt32
+    var pairStart: UInt32
+    var rows: UInt32
+    var stagingRow: UInt32
+    var rowTileStart: UInt32
+}
+
+struct PrefillRoutedExpertWave: Equatable, Sendable {
+    var blocks: [PrefillRoutedExpertBlock]
+    var paddedRows: Int
+}
+
+extension PrefillGroupedRoutedMoE {
+    static let groupedRowTile = MPPPrefillInt4QMM.tileM
+
+    /// An expert longer than a wave is split at row-tile boundaries; a 1-pair
+    /// expert takes one 64-row tile with 63 padded rows.
+    static func planExpertWaves(ranges: [PrefillExpertPairRange],
+                                binding: PrefillStreamedTileBinding,
+                                stagingRows: Int) throws -> [PrefillRoutedExpertWave] {
+        let tile = groupedRowTile
+        guard stagingRows >= tile, stagingRows.isMultiple(of: tile) else {
+            throw PrefillGroupedRoutedMoEError.stagingTooSmall(
+                "\(stagingRows) staging rows is not a positive multiple of \(tile)")
+        }
+        var waves: [PrefillRoutedExpertWave] = []
+        var blocks: [PrefillRoutedExpertBlock] = []
+        var cursor = 0
+        func closeWave() {
+            guard !blocks.isEmpty else { return }
+            waves.append(PrefillRoutedExpertWave(blocks: blocks, paddedRows: cursor))
+            blocks.removeAll(keepingCapacity: true)
+            cursor = 0
+        }
+        for range in ranges {
+            guard range.pairCount > 0 else { continue }
+            guard let slot = binding.localSlot(for: range.expert) else {
+                throw PrefillGroupedRoutedMoEError.invalidStreamedTileBinding(
+                    "expert \(range.expert) is not bound in the tile")
+            }
+            var consumed = 0
+            while consumed < range.pairCount {
+                if cursor == stagingRows { closeWave() }
+                let rows = min(range.pairCount - consumed, stagingRows - cursor)
+                blocks.append(PrefillRoutedExpertBlock(
+                    slot: UInt32(slot),
+                    pairStart: UInt32(range.pairStart + consumed),
+                    rows: UInt32(rows),
+                    stagingRow: UInt32(cursor),
+                    rowTileStart: UInt32(cursor / tile)))
+                cursor += (rows + tile - 1) / tile * tile
+                consumed += rows
+            }
+        }
+        closeWave()
+        return waves
+    }
+
+    /// `rowTileBlock[t]` is the index of the block that owns row tile `t`.
+    static func rowTileTable(for wave: PrefillRoutedExpertWave) -> [UInt32] {
+        var table = [UInt32](repeating: 0, count: wave.paddedRows / groupedRowTile)
+        for (index, block) in wave.blocks.enumerated() {
+            let first = Int(block.rowTileStart)
+            let count = (Int(block.rows) + groupedRowTile - 1) / groupedRowTile
+            for tile in first..<(first + count) {
+                table[tile] = UInt32(index)
+            }
+        }
+        return table
     }
 }
 
@@ -437,6 +522,8 @@ final class PrefillGroupedRoutedMoE {
     private let batchedDownPSO: MTLComputePipelineState
     private let gatherRowsPSO: MTLComputePipelineState
     private let scatterRowsPSO: MTLComputePipelineState
+    private let groupedGatherRowsPSO: MTLComputePipelineState
+    private let groupedScatterRowsPSO: MTLComputePipelineState
     private let activationPSO: MTLComputePipelineState
     private let streamedArgEncoder: MTLArgumentEncoder
     private let weightBits: Int
@@ -465,6 +552,13 @@ final class PrefillGroupedRoutedMoE {
               d.isMultiple(of: MPPPrefillInt4QMM.tileK),
               intermediate.isMultiple(of: MPPPrefillInt4QMM.tileK) else { return nil }
         return mpp
+    }
+
+    /// The grouped kernel reads the tile argument buffer this module encodes,
+    /// so the two argument layouts have to agree byte for byte.
+    func groupedPathAvailable(for mpp: MPPPrefillInt4QMM) -> Bool {
+        mpp.groupedAvailable
+            && mpp.groupedArgumentEncodedLength == streamedArgEncoder.encodedLength
     }
 
     func makeStreamedArgumentBuffer(device: MTLDevice,
@@ -517,6 +611,8 @@ final class PrefillGroupedRoutedMoE {
                 + biasConstants)
         self.gatherRowsPSO = try context.pipeline("prefill_routed_gather_rows")
         self.scatterRowsPSO = try context.pipeline("prefill_routed_scatter_rows")
+        self.groupedGatherRowsPSO = try context.pipeline("prefill_routed_gather_rows_grouped")
+        self.groupedScatterRowsPSO = try context.pipeline("prefill_routed_scatter_rows_grouped")
         self.activationPSO = try context.pipeline(
             siluActivation ? "silu_mul_fp16" : "gelu_mul_fp16")
         guard let streamedFn = context.library.makeFunction(name: "prefill_grouped_routed_moe_batched_phase1") else {
@@ -746,6 +842,142 @@ final class PrefillGroupedRoutedMoE {
                                destinationOffset: routePartialsOffset,
                                params: &block,
                                width: d)
+    }
+
+    /// Six dispatches per wave whatever its expert count.
+    func encodeGroupedExpertGEMMs(commandBuffer: MTLCommandBuffer,
+                                  mpp: MPPPrefillInt4QMM,
+                                  hidden: MTLBuffer,
+                                  hiddenOffset: Int = 0,
+                                  sortedPairs: MTLBuffer,
+                                  sortedPairsOffset: Int = 0,
+                                  routePartials: MTLBuffer,
+                                  routePartialsOffset: Int = 0,
+                                  binding: PrefillStreamedTileBinding,
+                                  argumentBuffer: PrefillStreamedTileArgumentBuffer,
+                                  waves: [PrefillRoutedExpertWave],
+                                  staging: PrefillExpertStaging,
+                                  params: PrefillGroupedRoutedMoEStreamedParams) throws {
+        guard groupedPathAvailable(for: mpp) else {
+            throw MPPPrefillInt4QMMError.pipelineUnavailable(
+                reason: "grouped MPP path unavailable or its argument layout differs")
+        }
+        guard staging.rowBlock > 0,
+              staging.hiddenSize >= Int(params.d),
+              staging.intermediate >= Int(params.routedIntermediate) else {
+            throw PrefillGroupedRoutedMoEError.stagingTooSmall(
+                "\(staging.rowBlock) rows of \(staging.hiddenSize)/\(staging.intermediate)"
+                    + " cannot hold \(params.d)/\(params.routedIntermediate)")
+        }
+        let d = Int(params.d)
+        let f = Int(params.routedIntermediate)
+        for wave in waves {
+            guard wave.paddedRows > 0, wave.paddedRows <= staging.rowBlock else {
+                throw PrefillGroupedRoutedMoEError.stagingTooSmall(
+                    "wave of \(wave.paddedRows) padded rows exceeds \(staging.rowBlock) staging rows")
+            }
+            let rowTileBlock = Self.rowTileTable(for: wave)
+            var groupedParams = PrefillRoutedGroupedParams(
+                paddedRows: UInt32(wave.paddedRows),
+                d: UInt32(d),
+                topK: params.topK,
+                hiddenStrideElements: params.hiddenStrideElements)
+            try encodeGroupedRowCopy(pso: groupedGatherRowsPSO,
+                                     commandBuffer: commandBuffer,
+                                     source: hidden,
+                                     sourceOffset: hiddenOffset,
+                                     sortedPairs: sortedPairs,
+                                     sortedPairsOffset: sortedPairsOffset,
+                                     destination: staging.hidden,
+                                     destinationOffset: 0,
+                                     params: &groupedParams,
+                                     blocks: wave.blocks,
+                                     rowTileBlock: rowTileBlock)
+            try mpp.encodeGrouped(commandBuffer: commandBuffer,
+                                  experts: argumentBuffer.buffer,
+                                  expertViews: binding.views,
+                                  blocks: wave.blocks,
+                                  rowTileBlock: rowTileBlock,
+                                  weightsOffset: Int(params.gateWOff),
+                                  scalesOffset: Int(params.gateSOff),
+                                  biasesOffset: Int(params.gateBOff),
+                                  x: staging.hidden, y: staging.gate,
+                                  paddedRows: wave.paddedRows, n: f, k: d)
+            try mpp.encodeGrouped(commandBuffer: commandBuffer,
+                                  experts: argumentBuffer.buffer,
+                                  expertViews: binding.views,
+                                  blocks: wave.blocks,
+                                  rowTileBlock: rowTileBlock,
+                                  weightsOffset: Int(params.upWOff),
+                                  scalesOffset: Int(params.upSOff),
+                                  biasesOffset: Int(params.upBOff),
+                                  x: staging.hidden, y: staging.up,
+                                  paddedRows: wave.paddedRows, n: f, k: d)
+            try encodeActivation(commandBuffer: commandBuffer,
+                                 gate: staging.gate,
+                                 up: staging.up,
+                                 count: wave.paddedRows * f)
+            try mpp.encodeGrouped(commandBuffer: commandBuffer,
+                                  experts: argumentBuffer.buffer,
+                                  expertViews: binding.views,
+                                  blocks: wave.blocks,
+                                  rowTileBlock: rowTileBlock,
+                                  weightsOffset: Int(params.downWOff),
+                                  scalesOffset: Int(params.downSOff),
+                                  biasesOffset: Int(params.downBOff),
+                                  x: staging.gate, y: staging.down,
+                                  paddedRows: wave.paddedRows, n: d, k: f)
+            try encodeGroupedRowCopy(pso: groupedScatterRowsPSO,
+                                     commandBuffer: commandBuffer,
+                                     source: staging.down,
+                                     sourceOffset: 0,
+                                     sortedPairs: sortedPairs,
+                                     sortedPairsOffset: sortedPairsOffset,
+                                     destination: routePartials,
+                                     destinationOffset: routePartialsOffset,
+                                     params: &groupedParams,
+                                     blocks: wave.blocks,
+                                     rowTileBlock: rowTileBlock)
+        }
+    }
+
+    private func encodeGroupedRowCopy(pso: MTLComputePipelineState,
+                                      commandBuffer: MTLCommandBuffer,
+                                      source: MTLBuffer,
+                                      sourceOffset: Int,
+                                      sortedPairs: MTLBuffer,
+                                      sortedPairsOffset: Int,
+                                      destination: MTLBuffer,
+                                      destinationOffset: Int,
+                                      params: inout PrefillRoutedGroupedParams,
+                                      blocks: [PrefillRoutedExpertBlock],
+                                      rowTileBlock: [UInt32]) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encoder.setComputePipelineState(pso)
+        encoder.setBuffer(source, offset: sourceOffset,
+                          index: PrefillRoutedRowBlockBufferIndex.source)
+        encoder.setBuffer(sortedPairs, offset: sortedPairsOffset,
+                          index: PrefillRoutedRowBlockBufferIndex.sortedPairs)
+        encoder.setBuffer(destination, offset: destinationOffset,
+                          index: PrefillRoutedRowBlockBufferIndex.destination)
+        encoder.setBytes(&params,
+                         length: MemoryLayout<PrefillRoutedGroupedParams>.stride,
+                         index: PrefillRoutedRowBlockBufferIndex.params)
+        blocks.withUnsafeBufferPointer { table in
+            encoder.setBytes(table.baseAddress!,
+                             length: table.count * MemoryLayout<PrefillRoutedExpertBlock>.stride,
+                             index: PrefillRoutedRowBlockBufferIndex.blocks)
+        }
+        rowTileBlock.withUnsafeBufferPointer { table in
+            encoder.setBytes(table.baseAddress!,
+                             length: table.count * MemoryLayout<UInt32>.stride,
+                             index: PrefillRoutedRowBlockBufferIndex.rowTileBlock)
+        }
+        encoder.dispatchThreads(MTLSize(width: Int(params.d), height: Int(params.paddedRows), depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 32, height: 8, depth: 1))
+        encoder.endEncoding()
     }
 
     private func project(mpp: MPPPrefillInt4QMM,

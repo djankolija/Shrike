@@ -221,6 +221,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             + " width=\(fitted.tilesPerCommandBuffer) experts=\(fitted.tileExperts)"
     }
 
+    /// Which routed-expert GEMM a prefill chunk on the matrix path takes:
+    /// `grouped`, `per-expert` (P3) or `scalar`; a chunk of
+    /// `matrixPathMinimumRows` tokens or fewer takes the scalar path regardless.
+    public var prefillRoutedGEMMDescription: String {
+        let cfg = model.config
+        guard let mpp = prefillGroupedMoE.matrixPath(
+            for: prefillMPPAffineInt4,
+            d: cfg.hiddenSize,
+            intermediate: cfg.moeIntermediateSize) else {
+            return "scalar"
+        }
+        guard prefillRoutedGEMMGrouped else { return "per-expert" }
+        return prefillGroupedMoE.groupedPathAvailable(for: mpp) ? "grouped" : "per-expert reason=grouped-unavailable"
+    }
+
     // Scratch — preallocated per spec'd D / F / vocab.
     private let decodeScratch: DecodeScratchBuffers
     private var hidden: MTLBuffer { decodeScratch.hidden }          // [D] FP16
@@ -343,6 +358,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private static let rdadviseAdaptiveByteCap: UInt64 = 384 * 1_048_576
     private static let rdadviseAdaptiveSlowCallNanos: UInt64 = 1_000_000
     private let prefillRoutedTileSchedulerConfig: PrefillRoutedTileSchedulerConfig
+    /// `SHRIKE_PREFILL_ROUTED_GEMM=per-expert` keeps the P3 per-expert GEMMs
+    /// for the same-binary A/B; anything else takes the grouped dispatch.
+    private let prefillRoutedGEMMGrouped: Bool
 
     private static func environmentPrefillTileBatch() -> Int {
         guard let raw = ProcessInfo.processInfo.environment["SHRIKE_PREFILL_TILE_BATCH"],
@@ -402,6 +420,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ProcessInfo.processInfo.environment["SHRIKE_GDN_PREFILL_SCAN"] != "serial"
         self.prefillRoutedTileSchedulerConfig = PrefillRoutedTileSchedulerConfig(
             tilesPerCommandBuffer: Self.environmentPrefillTileBatch())
+        self.prefillRoutedGEMMGrouped =
+            ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTED_GEMM"] != "per-expert"
         self.decodeExpertExecution = runtimeConfiguration.decodeExpertExecution
         self.expertIOSynchronization = runtimeConfiguration.expertIOSynchronization
         self.expertIOSubmission = runtimeConfiguration.expertIOSubmission
@@ -5201,10 +5221,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 prefillTailNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - prefillTileEnd
     }
 
-    /// One routed tile's experts: per-expert GEMMs for every expert whose
-    /// pairs fill a matrix tile, the scalar microbatch path for the rest. When
-    /// no expert clears the threshold the tile takes the scalar path whole, as
-    /// it did before the matrix path existed.
+    /// One routed tile's experts: the grouped GEMMs over every expert, else
+    /// the per-expert GEMMs with the scalar microbatch path for the experts
+    /// below the tile threshold, else the scalar path whole.
     private func encodeRoutedTileExperts(
         commandBuffer tileCB: MTLCommandBuffer,
         scratch: PrefillChunkScratchBuffers,
@@ -5241,6 +5260,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 d: Int(params.d),
                 intermediate: Int(params.routedIntermediate)) else {
             try encodeScalar(pairStart: tile.pairStart, pairCount: tile.pairCount)
+            return
+        }
+        if prefillRoutedGEMMGrouped, prefillGroupedMoE.groupedPathAvailable(for: mpp) {
+            let waves = try PrefillGroupedRoutedMoE.planExpertWaves(
+                ranges: ranges,
+                binding: binding,
+                stagingRows: scratch.routedExpertStaging.rowBlock)
+            try prefillGroupedMoE.encodeGroupedExpertGEMMs(
+                commandBuffer: tileCB,
+                mpp: mpp,
+                hidden: scratch.routedX,
+                sortedPairs: sortedPairs,
+                routePartials: scratch.routePartials,
+                binding: binding,
+                argumentBuffer: argumentBuffer,
+                waves: waves,
+                staging: scratch.routedExpertStaging,
+                params: params)
             return
         }
         let leftovers = try prefillGroupedMoE.encodeExpertGEMMs(

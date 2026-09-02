@@ -102,13 +102,14 @@ import Metal
         #expect(atThreshold.routedExpertStagingRows == 0)
 
         let live = PrefillChunkScratchLayout(config: toy, chunkTokens: threshold + 1)
+        let rowTile = PrefillGroupedRoutedMoE.groupedRowTile
         #expect(live.usesRoutedExpertMatrixPath)
-        #expect(live.routedExpertStagingRows == threshold + 1)
-        #expect(live.routedExpertHiddenStagingElements == (threshold + 1) * toy.hiddenSize)
-        #expect(live.routedExpertActStagingElements == (threshold + 1) * toy.moeIntermediateSize)
+        #expect(live.routedExpertStagingRows == rowTile)
+        #expect(live.routedExpertHiddenStagingElements == rowTile * toy.hiddenSize)
+        #expect(live.routedExpertActStagingElements == rowTile * toy.moeIntermediateSize)
 
         let scratch = try PrefillChunkScratchBuffers.allocate(device: ctx.device, layout: live)
-        #expect(scratch.routedExpertStaging.rowBlock == threshold + 1)
+        #expect(scratch.routedExpertStaging.rowBlock == rowTile)
         #expect(scratch.routedExpertStaging.hidden.length
             == live.routedExpertHiddenStagingElements * MemoryLayout<Float16>.stride)
         #expect(scratch.routedExpertStaging.down.length

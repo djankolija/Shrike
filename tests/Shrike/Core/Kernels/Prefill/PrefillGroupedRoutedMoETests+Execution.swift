@@ -225,87 +225,105 @@ extension PrefillGroupedRoutedMoETests {
   /// short two come back as leftovers for the scalar path. Every token below 32
   /// carries a pair in both matrix experts, so the scatter has to keep the two
   /// `(token, rank)` rows apart.
-  static func runExpertGEMMsMatchTheScalarPath(rowBlock: Int,
-                                               siluActivation: Bool) throws {
+  struct FourExpertTile {
     let d = 64
     let f = 64
     let rows = 40
     let topK = 2
-    var pairs: [PrefillTokenExpertPair] = []
-    for token in 0..<40 {
-      pairs.append(Self.pair(token: UInt32(token), expert: 0, rank: 0))
-    }
-    for token in 0..<32 {
-      pairs.append(Self.pair(token: UInt32(token), expert: 1, rank: 1))
-    }
-    for token in 32..<37 {
-      pairs.append(Self.pair(token: UInt32(token), expert: 2, rank: 1))
-    }
-    for token in 37..<40 {
-      pairs.append(Self.pair(token: UInt32(token), expert: 3, rank: 1))
-    }
-    let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
-      pairs,
-      queryCount: rows,
-      topK: topK,
-      numExperts: 8,
-      tileExpertCount: 16)
-    let pool = Self.makeSyntheticExpertPool(numExperts: 8, d: d, f: f)
-    let hidden = (0..<(rows * d)).map { i in Float16(Float((i % 17) - 8)) }
+    let ctx: MetalContext
+    let mpp: MPPPrefillInt4QMM
+    let grouped: PrefillGroupedRoutedMoE
+    let routes: PrefillMoEGroupedRoutes
+    let tile: PrefillMoETile
+    let binding: PrefillStreamedTileBinding
+    let argumentBuffer: PrefillStreamedTileArgumentBuffer
+    let params: PrefillGroupedRoutedMoEStreamedParams
+    let hiddenBuffer: MTLBuffer
+    let pairBuffer: MTLBuffer
+    let activationScratch: MTLBuffer
+    let downScratch: MTLBuffer
 
-    let ctx = try MetalContext()
-    let mpp = MPPPrefillInt4QMM(context: ctx, weightBits: 4)
-    guard mpp.isAvailable else {
-      Issue.record("""
-        MPP prefill QMM pipeline unavailable; the GEMM path would silently \
-        compare the scalar path with itself
-        """)
-      return
+    var partialElements: Int { rows * topK * d }
+
+    init?(siluActivation: Bool) throws {
+      var pairs: [PrefillTokenExpertPair] = []
+      for token in 0..<40 {
+        pairs.append(PrefillGroupedRoutedMoETests.pair(token: UInt32(token), expert: 0, rank: 0))
+      }
+      for token in 0..<32 {
+        pairs.append(PrefillGroupedRoutedMoETests.pair(token: UInt32(token), expert: 1, rank: 1))
+      }
+      for token in 32..<37 {
+        pairs.append(PrefillGroupedRoutedMoETests.pair(token: UInt32(token), expert: 2, rank: 1))
+      }
+      for token in 37..<40 {
+        pairs.append(PrefillGroupedRoutedMoETests.pair(token: UInt32(token), expert: 3, rank: 1))
+      }
+      routes = try PrefillMoEGrouping.groupTokenExpertPairs(
+        pairs,
+        queryCount: rows,
+        topK: topK,
+        numExperts: 8,
+        tileExpertCount: 16)
+      let pool = PrefillGroupedRoutedMoETests.makeSyntheticExpertPool(numExperts: 8, d: d, f: f)
+      let hidden = (0..<(rows * d)).map { i in Float16(Float((i % 17) - 8)) }
+
+      ctx = try MetalContext()
+      mpp = MPPPrefillInt4QMM(context: ctx, weightBits: 4)
+      guard mpp.isAvailable else {
+        Issue.record("""
+          MPP prefill QMM pipeline unavailable; the GEMM path would silently \
+          compare the scalar path with itself
+          """)
+        return nil
+      }
+      grouped = try PrefillGroupedRoutedMoE(context: ctx,
+                                            siluActivation: siluActivation,
+                                            weightBits: 4)
+      let expertIDs = Array(0..<8)
+      guard let hiddenBuffer = Fp16Buffer.make(ctx.device, halves: hidden),
+        let pairBuffer = ctx.device.makeBuffer(
+          bytes: routes.sortedPairs,
+          length: routes.sortedPairs.count * MemoryLayout<PrefillTokenExpertPair>.stride,
+          options: .storageModeShared),
+        let activationScratch = ctx.device.makeBuffer(
+          length: 3 * 32 * f * MemoryLayout<Float16>.stride,
+          options: .storageModePrivate),
+        let downScratch = ctx.device.makeBuffer(
+          length: 32 * d * MemoryLayout<Float16>.stride,
+          options: .storageModePrivate)
+      else {
+        Issue.record("allocation failed")
+        return nil
+      }
+      self.hiddenBuffer = hiddenBuffer
+      self.pairBuffer = pairBuffer
+      self.activationScratch = activationScratch
+      self.downScratch = downScratch
+      binding = try PrefillStreamedTileBinding(
+        expertIDs: expertIDs,
+        views: PrefillGroupedRoutedMoETests.streamedViewsWithNonzeroOffsets(
+          device: ctx.device,
+          pool: pool,
+          expertIDs: expertIDs))
+      argumentBuffer = try grouped.makeStreamedArgumentBuffer(device: ctx.device,
+                                                              binding: binding)
+      tile = routes.tiles[0]
+      params = PrefillGroupedRoutedMoEStreamedParams(
+        pairStart: tile.pairStart,
+        pairCount: tile.pairCount,
+        d: UInt32(d),
+        routedIntermediate: UInt32(f),
+        topK: UInt32(topK),
+        hiddenStrideElements: UInt32(d),
+        binding: binding,
+        offsets: pool.offsets)
     }
-    let grouped = try PrefillGroupedRoutedMoE(context: ctx,
-                                              siluActivation: siluActivation,
-                                              weightBits: 4)
-    let partialElements = rows * topK * d
-    let expertIDs = Array(0..<8)
-    guard let hiddenBuffer = Fp16Buffer.make(ctx.device, halves: hidden),
-      let pairBuffer = ctx.device.makeBuffer(
-        bytes: routes.sortedPairs,
-        length: routes.sortedPairs.count * MemoryLayout<PrefillTokenExpertPair>.stride,
-        options: .storageModeShared),
-      let referenceBuffer = Fp16Buffer.make(
-        ctx.device,
-        halves: [Float16](repeating: -77, count: partialElements)),
-      let matrixBuffer = Fp16Buffer.make(
-        ctx.device,
-        halves: [Float16](repeating: -77, count: partialElements)),
-      let activationScratch = ctx.device.makeBuffer(
-        length: 3 * 32 * f * MemoryLayout<Float16>.stride,
-        options: .storageModePrivate),
-      let downScratch = ctx.device.makeBuffer(
-        length: 32 * d * MemoryLayout<Float16>.stride,
-        options: .storageModePrivate)
-    else {
-      Issue.record("allocation failed")
-      return
+
+    func sentinelPartials() -> MTLBuffer? {
+      Fp16Buffer.make(ctx.device,
+                      halves: [Float16](repeating: -77, count: partialElements))
     }
-    let binding = try PrefillStreamedTileBinding(
-      expertIDs: expertIDs,
-      views: Self.streamedViewsWithNonzeroOffsets(
-        device: ctx.device,
-        pool: pool,
-        expertIDs: expertIDs))
-    let argumentBuffer = try grouped.makeStreamedArgumentBuffer(device: ctx.device,
-                                                                binding: binding)
-    let tile = routes.tiles[0]
-    let params = PrefillGroupedRoutedMoEStreamedParams(
-      pairStart: tile.pairStart,
-      pairCount: tile.pairCount,
-      d: UInt32(d),
-      routedIntermediate: UInt32(f),
-      topK: UInt32(topK),
-      hiddenStrideElements: UInt32(d),
-      binding: binding,
-      offsets: pool.offsets)
 
     func encodeScalar(on commandBuffer: MTLCommandBuffer,
                       into routePartials: MTLBuffer,
@@ -327,46 +345,67 @@ extension PrefillGroupedRoutedMoETests {
         pairMicrobatchRows: 32)
     }
 
-    guard let referenceCB = ctx.queue.makeCommandBuffer() else {
+    func scalarReference() throws -> [Float]? {
+      guard let buffer = sentinelPartials() else { return nil }
+      try run { commandBuffer in
+        try encodeScalar(on: commandBuffer, into: buffer,
+                         pairStart: tile.pairStart, pairCount: tile.pairCount)
+      }
+      return Fp16Buffer.read(buffer, count: partialElements)
+    }
+
+    func run(_ encode: (MTLCommandBuffer) throws -> Void) throws {
+      guard let commandBuffer = ctx.queue.makeCommandBuffer() else {
+        throw PrefillGroupedRoutedMoEError.allocationFailed("command buffer")
+      }
+      try encode(commandBuffer)
+      commandBuffer.commit()
+      commandBuffer.waitUntilCompleted()
+      if let error = commandBuffer.error { throw error }
+    }
+
+    func rowElements(_ values: [Float], experts: Set<UInt32>) -> [Float] {
+      routes.sortedPairs.filter { experts.contains($0.expert) }.flatMap { pair in
+        let base = (Int(pair.token) * topK + Int(pair.rank)) * d
+        return Array(values[base..<(base + d)])
+      }
+    }
+  }
+
+  static func runExpertGEMMsMatchTheScalarPath(rowBlock: Int,
+                                               siluActivation: Bool) throws {
+    guard let fixture = try FourExpertTile(siluActivation: siluActivation) else { return }
+    let d = fixture.d
+    guard let reference = try fixture.scalarReference(),
+          let matrixBuffer = fixture.sentinelPartials() else {
       Issue.record("allocation failed")
       return
     }
-    try encodeScalar(on: referenceCB,
-                     into: referenceBuffer,
-                     pairStart: tile.pairStart,
-                     pairCount: tile.pairCount)
-    referenceCB.commit()
-    referenceCB.waitUntilCompleted()
-    if let error = referenceCB.error { throw error }
 
-    let staging = try PrefillExpertStaging.allocate(device: ctx.device,
+    let staging = try PrefillExpertStaging.allocate(device: fixture.ctx.device,
                                                     rowBlock: rowBlock,
                                                     hiddenSize: d,
-                                                    intermediate: f)
-    guard let matrixCB = ctx.queue.makeCommandBuffer() else {
-      Issue.record("allocation failed")
-      return
+                                                    intermediate: fixture.f)
+    let ranges = try PrefillExpertPairRange.ranges(forTile: fixture.tile, routes: fixture.routes)
+    var leftovers: [PrefillExpertPairRange] = []
+    try fixture.run { commandBuffer in
+      leftovers = try fixture.grouped.encodeExpertGEMMs(
+        commandBuffer: commandBuffer,
+        mpp: fixture.mpp,
+        hidden: fixture.hiddenBuffer,
+        sortedPairs: fixture.pairBuffer,
+        routePartials: matrixBuffer,
+        binding: fixture.binding,
+        ranges: ranges,
+        staging: staging,
+        params: fixture.params)
+      for leftover in leftovers {
+        try fixture.encodeScalar(on: commandBuffer,
+                                 into: matrixBuffer,
+                                 pairStart: UInt32(leftover.pairStart),
+                                 pairCount: UInt32(leftover.pairCount))
+      }
     }
-    let ranges = try PrefillExpertPairRange.ranges(forTile: tile, routes: routes)
-    let leftovers = try grouped.encodeExpertGEMMs(
-      commandBuffer: matrixCB,
-      mpp: mpp,
-      hidden: hiddenBuffer,
-      sortedPairs: pairBuffer,
-      routePartials: matrixBuffer,
-      binding: binding,
-      ranges: ranges,
-      staging: staging,
-      params: params)
-    for leftover in leftovers {
-      try encodeScalar(on: matrixCB,
-                       into: matrixBuffer,
-                       pairStart: UInt32(leftover.pairStart),
-                       pairCount: UInt32(leftover.pairCount))
-    }
-    matrixCB.commit()
-    matrixCB.waitUntilCompleted()
-    if let error = matrixCB.error { throw error }
 
     #expect(ranges == [PrefillExpertPairRange(expert: 0, pairStart: 0, pairCount: 40),
                        PrefillExpertPairRange(expert: 1, pairStart: 40, pairCount: 32),
@@ -375,16 +414,9 @@ extension PrefillGroupedRoutedMoETests {
     #expect(leftovers == [PrefillExpertPairRange(expert: 2, pairStart: 72, pairCount: 5),
                           PrefillExpertPairRange(expert: 3, pairStart: 77, pairCount: 3)])
 
-    let reference = Fp16Buffer.read(referenceBuffer, count: partialElements)
-    let actual = Fp16Buffer.read(matrixBuffer, count: partialElements)
-    func rowElements(_ values: [Float], experts: Set<UInt32>) -> [Float] {
-      routes.sortedPairs.filter { experts.contains($0.expert) }.flatMap { pair in
-        let base = (Int(pair.token) * topK + Int(pair.rank)) * d
-        return Array(values[base..<(base + d)])
-      }
-    }
-    let matrixActual = rowElements(actual, experts: [0, 1])
-    let matrixReference = rowElements(reference, experts: [0, 1])
+    let actual = Fp16Buffer.read(matrixBuffer, count: fixture.partialElements)
+    let matrixActual = fixture.rowElements(actual, experts: [0, 1])
+    let matrixReference = fixture.rowElements(reference, experts: [0, 1])
     let maxAbsDiff = RelError.maxAbsDiff(matrixActual, matrixReference)
     let relError = RelError.compute(actual: matrixActual, reference: matrixReference)
     #expect(matrixActual.count == 72 * d)
@@ -392,13 +424,280 @@ extension PrefillGroupedRoutedMoETests {
             "rowBlock=\(rowBlock) silu=\(siluActivation) maxAbsDiff=\(maxAbsDiff)")
     #expect(relError <= 2e-2,
             "rowBlock=\(rowBlock) silu=\(siluActivation) relError=\(relError)")
-    #expect(rowElements(actual, experts: [2, 3]) == rowElements(reference, experts: [2, 3]),
+    #expect(fixture.rowElements(actual, experts: [2, 3])
+              == fixture.rowElements(reference, experts: [2, 3]),
             "leftover pairs must come out of the untouched scalar path bit for bit")
 
     let rank0 = Array(actual[0..<d])
     let rank1 = Array(actual[d..<(2 * d)])
     #expect(RelError.maxAbsDiff(rank0, rank1) > 1e-3,
             "token 0 rides expert 0 at rank 0 and expert 1 at rank 1: two distinct pair rows")
+  }
+
+  @Test func groupedGEMMsMatchThePerExpertPathAcrossAllExperts() throws {
+    guard let fixture = try FourExpertTile(siluActivation: true) else { return }
+    guard let referenceBuffer = fixture.sentinelPartials(),
+          let groupedBuffer = fixture.sentinelPartials() else {
+      Issue.record("allocation failed")
+      return
+    }
+    let ranges = try PrefillExpertPairRange.ranges(forTile: fixture.tile, routes: fixture.routes)
+    let perExpertStaging = try PrefillExpertStaging.allocate(device: fixture.ctx.device,
+                                                             rowBlock: 512,
+                                                             hiddenSize: fixture.d,
+                                                             intermediate: fixture.f)
+    try fixture.run { commandBuffer in
+      let leftovers = try fixture.grouped.encodeExpertGEMMs(
+        commandBuffer: commandBuffer,
+        mpp: fixture.mpp,
+        hidden: fixture.hiddenBuffer,
+        sortedPairs: fixture.pairBuffer,
+        routePartials: referenceBuffer,
+        binding: fixture.binding,
+        ranges: ranges,
+        staging: perExpertStaging,
+        params: fixture.params)
+      for leftover in leftovers {
+        try fixture.encodeScalar(on: commandBuffer,
+                                 into: referenceBuffer,
+                                 pairStart: UInt32(leftover.pairStart),
+                                 pairCount: UInt32(leftover.pairCount))
+      }
+    }
+
+    let groupedStaging = try PrefillExpertStaging.allocate(device: fixture.ctx.device,
+                                                           rowBlock: 512,
+                                                           hiddenSize: fixture.d,
+                                                           intermediate: fixture.f)
+    let waves = try PrefillGroupedRoutedMoE.planExpertWaves(ranges: ranges,
+                                                            binding: fixture.binding,
+                                                            stagingRows: 512)
+    #expect(waves.count == 1)
+    try fixture.run { commandBuffer in
+      try fixture.grouped.encodeGroupedExpertGEMMs(
+        commandBuffer: commandBuffer,
+        mpp: fixture.mpp,
+        hidden: fixture.hiddenBuffer,
+        sortedPairs: fixture.pairBuffer,
+        routePartials: groupedBuffer,
+        binding: fixture.binding,
+        argumentBuffer: fixture.argumentBuffer,
+        waves: waves,
+        staging: groupedStaging,
+        params: fixture.params)
+    }
+
+    let reference = Fp16Buffer.read(referenceBuffer, count: fixture.partialElements)
+    let actual = Fp16Buffer.read(groupedBuffer, count: fixture.partialElements)
+    let allFinite = actual.allSatisfy { $0.isFinite }
+    #expect(allFinite)
+    let maxAbsDiff = RelError.maxAbsDiff(actual, reference)
+    let relError = RelError.compute(actual: actual, reference: reference)
+    #expect(maxAbsDiff <= 2e-2, "maxAbsDiff=\(maxAbsDiff)")
+    #expect(relError <= 2e-2, "relError=\(relError)")
+    let shortExpertRows = fixture.rowElements(actual, experts: [2, 3])
+    #expect(shortExpertRows.count == 8 * fixture.d)
+    #expect(!shortExpertRows.contains(-77),
+            "the 5- and 3-pair experts must be inside the grouped dispatch, not leftovers")
+  }
+
+  @Test func groupedWavePlannerSplitsAndPadsOnRowTiles() throws {
+    let ctx = try MetalContext()
+    let binding = try PrefillStreamedTileBinding(
+      expertIDs: [0, 1, 2, 3],
+      views: Self.fakeTensorViews(device: ctx.device, count: 4))
+    let ranges = [PrefillExpertPairRange(expert: 0, pairStart: 0, pairCount: 40),
+                  PrefillExpertPairRange(expert: 1, pairStart: 40, pairCount: 32),
+                  PrefillExpertPairRange(expert: 2, pairStart: 72, pairCount: 5),
+                  PrefillExpertPairRange(expert: 3, pairStart: 77, pairCount: 3)]
+    func block(_ slot: UInt32, _ pairStart: UInt32, _ rows: UInt32,
+               _ stagingRow: UInt32) -> PrefillRoutedExpertBlock {
+      PrefillRoutedExpertBlock(slot: slot, pairStart: pairStart, rows: rows,
+                               stagingRow: stagingRow, rowTileStart: stagingRow / 64)
+    }
+
+    let oneWave = try PrefillGroupedRoutedMoE.planExpertWaves(ranges: ranges,
+                                                              binding: binding,
+                                                              stagingRows: 512)
+    #expect(oneWave == [PrefillRoutedExpertWave(
+      blocks: [block(0, 0, 40, 0), block(1, 40, 32, 64),
+               block(2, 72, 5, 128), block(3, 77, 3, 192)],
+      paddedRows: 256)])
+    #expect(PrefillGroupedRoutedMoE.rowTileTable(for: oneWave[0]) == [0, 1, 2, 3])
+
+    let twoWaves = try PrefillGroupedRoutedMoE.planExpertWaves(ranges: ranges,
+                                                               binding: binding,
+                                                               stagingRows: 128)
+    #expect(twoWaves == [
+      PrefillRoutedExpertWave(blocks: [block(0, 0, 40, 0), block(1, 40, 32, 64)],
+                              paddedRows: 128),
+      PrefillRoutedExpertWave(blocks: [block(2, 72, 5, 0), block(3, 77, 3, 64)],
+                              paddedRows: 128),
+    ])
+
+    let longExpert = try PrefillGroupedRoutedMoE.planExpertWaves(
+      ranges: [PrefillExpertPairRange(expert: 2, pairStart: 0, pairCount: 600)],
+      binding: binding,
+      stagingRows: 512)
+    #expect(longExpert == [
+      PrefillRoutedExpertWave(blocks: [block(2, 0, 512, 0)], paddedRows: 512),
+      PrefillRoutedExpertWave(blocks: [block(2, 512, 88, 0)], paddedRows: 128),
+    ])
+    #expect(PrefillGroupedRoutedMoE.rowTileTable(for: longExpert[0]).count == 8)
+    #expect(PrefillGroupedRoutedMoE.rowTileTable(for: longExpert[1]) == [0, 0])
+
+    #expect(throws: PrefillGroupedRoutedMoEError.self) {
+      try PrefillGroupedRoutedMoE.planExpertWaves(ranges: ranges,
+                                                  binding: binding,
+                                                  stagingRows: 96)
+    }
+  }
+
+  @Test func groupedGEMMsMatchTheScalarPathAcrossWaves() throws {
+    guard let fixture = try FourExpertTile(siluActivation: true) else { return }
+    guard let reference = try fixture.scalarReference(),
+          let groupedBuffer = fixture.sentinelPartials() else {
+      Issue.record("allocation failed")
+      return
+    }
+    let ranges = try PrefillExpertPairRange.ranges(forTile: fixture.tile, routes: fixture.routes)
+    let staging = try PrefillExpertStaging.allocate(device: fixture.ctx.device,
+                                                    rowBlock: 64,
+                                                    hiddenSize: fixture.d,
+                                                    intermediate: fixture.f)
+    let waves = try PrefillGroupedRoutedMoE.planExpertWaves(ranges: ranges,
+                                                            binding: fixture.binding,
+                                                            stagingRows: 64)
+    #expect(waves.count == 4)
+    try fixture.run { commandBuffer in
+      try fixture.grouped.encodeGroupedExpertGEMMs(
+        commandBuffer: commandBuffer,
+        mpp: fixture.mpp,
+        hidden: fixture.hiddenBuffer,
+        sortedPairs: fixture.pairBuffer,
+        routePartials: groupedBuffer,
+        binding: fixture.binding,
+        argumentBuffer: fixture.argumentBuffer,
+        waves: waves,
+        staging: staging,
+        params: fixture.params)
+    }
+    let actual = Fp16Buffer.read(groupedBuffer, count: fixture.partialElements)
+    let allFinite = actual.allSatisfy { $0.isFinite }
+    #expect(allFinite)
+    let maxAbsDiff = RelError.maxAbsDiff(actual, reference)
+    let relError = RelError.compute(actual: actual, reference: reference)
+    #expect(maxAbsDiff <= 2e-2, "maxAbsDiff=\(maxAbsDiff)")
+    #expect(relError <= 2e-2, "relError=\(relError)")
+    let untouched = fixture.rowElements(actual, experts: [0, 1, 2, 3]).contains(-77)
+    #expect(!untouched)
+  }
+
+  @Test func groupedGEMMsHandleASingleOnePairExpert() throws {
+    let d = 64
+    let f = 64
+    let sentinelRows = 64
+    let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
+      [Self.pair(token: 0, expert: 5, rank: 0)],
+      queryCount: 1,
+      topK: 1,
+      numExperts: 8,
+      tileExpertCount: 16)
+    let pool = Self.makeSyntheticExpertPool(numExperts: 8, d: d, f: f)
+    let hidden = (0..<d).map { i in Float16(Float((i % 17) - 8)) }
+    let ctx = try MetalContext()
+    let mpp = MPPPrefillInt4QMM(context: ctx, weightBits: 4)
+    guard mpp.isAvailable else {
+      Issue.record("MPP prefill QMM pipeline unavailable")
+      return
+    }
+    let grouped = try PrefillGroupedRoutedMoE(context: ctx, siluActivation: true, weightBits: 4)
+    let partialElements = sentinelRows * d
+    guard let hiddenBuffer = Fp16Buffer.make(ctx.device, halves: hidden),
+      let pairBuffer = ctx.device.makeBuffer(
+        bytes: routes.sortedPairs,
+        length: routes.sortedPairs.count * MemoryLayout<PrefillTokenExpertPair>.stride,
+        options: .storageModeShared),
+      let referenceBuffer = Fp16Buffer.make(
+        ctx.device, halves: [Float16](repeating: -77, count: partialElements)),
+      let groupedBuffer = Fp16Buffer.make(
+        ctx.device, halves: [Float16](repeating: -77, count: partialElements)),
+      let activationScratch = ctx.device.makeBuffer(
+        length: 3 * 32 * f * MemoryLayout<Float16>.stride, options: .storageModePrivate),
+      let downScratch = ctx.device.makeBuffer(
+        length: 32 * d * MemoryLayout<Float16>.stride, options: .storageModePrivate)
+    else {
+      Issue.record("allocation failed")
+      return
+    }
+    let binding = try PrefillStreamedTileBinding(
+      expertIDs: [5],
+      views: Self.streamedViewsWithNonzeroOffsets(device: ctx.device, pool: pool, expertIDs: [5]))
+    let argumentBuffer = try grouped.makeStreamedArgumentBuffer(device: ctx.device, binding: binding)
+    let tile = routes.tiles[0]
+    let params = PrefillGroupedRoutedMoEStreamedParams(
+      pairStart: tile.pairStart,
+      pairCount: tile.pairCount,
+      d: UInt32(d),
+      routedIntermediate: UInt32(f),
+      topK: 1,
+      hiddenStrideElements: UInt32(d),
+      binding: binding,
+      offsets: pool.offsets)
+    func run(_ encode: (MTLCommandBuffer) throws -> Void) throws {
+      guard let commandBuffer = ctx.queue.makeCommandBuffer() else {
+        throw PrefillGroupedRoutedMoEError.allocationFailed("command buffer")
+      }
+      try encode(commandBuffer)
+      commandBuffer.commit()
+      commandBuffer.waitUntilCompleted()
+      if let error = commandBuffer.error { throw error }
+    }
+    try run { commandBuffer in
+      _ = try grouped.encodeStreamedBatched(
+        commandBuffer: commandBuffer,
+        hidden: hiddenBuffer,
+        sortedPairs: pairBuffer,
+        routePartials: referenceBuffer,
+        gateUpActScratch: activationScratch,
+        downScratch: downScratch,
+        argumentBuffer: argumentBuffer,
+        binding: binding,
+        params: params,
+        pairMicrobatchRows: 32)
+    }
+    let ranges = try PrefillExpertPairRange.ranges(forTile: tile, routes: routes)
+    let staging = try PrefillExpertStaging.allocate(device: ctx.device, rowBlock: 64,
+                                                    hiddenSize: d, intermediate: f)
+    let waves = try PrefillGroupedRoutedMoE.planExpertWaves(ranges: ranges,
+                                                            binding: binding,
+                                                            stagingRows: 64)
+    #expect(waves == [PrefillRoutedExpertWave(
+      blocks: [PrefillRoutedExpertBlock(slot: 0, pairStart: 0, rows: 1,
+                                        stagingRow: 0, rowTileStart: 0)],
+      paddedRows: 64)])
+    try run { commandBuffer in
+      try grouped.encodeGroupedExpertGEMMs(
+        commandBuffer: commandBuffer,
+        mpp: mpp,
+        hidden: hiddenBuffer,
+        sortedPairs: pairBuffer,
+        routePartials: groupedBuffer,
+        binding: binding,
+        argumentBuffer: argumentBuffer,
+        waves: waves,
+        staging: staging,
+        params: params)
+    }
+    let reference = Fp16Buffer.read(referenceBuffer, count: partialElements)
+    let actual = Fp16Buffer.read(groupedBuffer, count: partialElements)
+    let row = Array(actual[0..<d])
+    let rowFinite = row.allSatisfy { $0.isFinite }
+    #expect(rowFinite)
+    #expect(RelError.maxAbsDiff(row, Array(reference[0..<d])) <= 2e-2)
+    #expect(RelError.compute(actual: row, reference: Array(reference[0..<d])) <= 2e-2)
+    let paddedRowsUntouched = actual[d...].allSatisfy { $0 == -77 }
+    #expect(paddedRowsUntouched, "the 63 padded rows must not leave the staging block")
   }
 
   /// `leftovers == ranges` with `routePartials` untouched is the seam the

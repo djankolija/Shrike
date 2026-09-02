@@ -128,10 +128,14 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
             && chunkTokens > PrefillGroupedRoutedMoE.matrixPathMinimumRows
     }
     /// The matrix path loops over row blocks of this size, so the staging never
-    /// needs more rows than this however long the chunk is.
-    static let routedExpertGEMMRowBlock = 512
+    /// needs more rows than this however long the chunk is; 1,024 holds a whole
+    /// eight-expert tile of a 4,096-token chunk in one grouped wave.
+    static let routedExpertGEMMRowBlock = 1024
+    /// Rounded up to the 64-row tile the grouped path packs experts on.
     var routedExpertStagingRows: Int {
-        usesRoutedExpertMatrixPath ? min(Self.routedExpertGEMMRowBlock, chunkTokens) : 0
+        guard usesRoutedExpertMatrixPath else { return 0 }
+        let rows = min(Self.routedExpertGEMMRowBlock, chunkTokens)
+        return (rows + 63) / 64 * 64
     }
     var routedExpertHiddenStagingElements: Int { routedExpertStagingRows * hiddenSize }
     var routedExpertActStagingElements: Int { routedExpertStagingRows * routedIntermediate }
