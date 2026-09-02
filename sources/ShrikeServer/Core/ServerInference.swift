@@ -2046,8 +2046,10 @@ public actor ServerModelSession: ServerInferenceBackend {
                 ? totalGPU / (result.decodeSeconds * 1000) * 100 : 0))
         for gap in runner.kernelGPUGaps().prefix(8) {
             cacheDiag(String(
-                format: "Shrike gap %@ total_ms=%.1f per_token_ms=%.3f count=%d",
-                gap.transition, gap.millis, gap.millis / Double(tokens), gap.count))
+                format: "Shrike gap %@ total_ms=%.1f per_token_ms=%.3f count=%d "
+                    + "host_ms=%.1f driver_ms=%.1f queue_ms=%.1f",
+                gap.transition, gap.millis, gap.millis / Double(tokens), gap.count,
+                gap.hostMillis, gap.driverMillis, gap.queueMillis))
         }
         cacheDiag(String(format: "Shrike kernel busy_ms=%.3f span_ms=%.3f "
             + "occupancy=%.1f%% busy_share_of_decode=%.1f%% busy_per_token_ms=%.3f",

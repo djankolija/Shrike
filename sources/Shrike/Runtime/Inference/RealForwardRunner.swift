@@ -1549,6 +1549,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     // MARK: - Per-command-buffer GPU timing (SHRIKE_KERNEL_STATS)
 
+    public struct KernelGPUGap: Sendable, Equatable {
+        public let transition: String
+        public var millis: Double = 0
+        public var count: Int = 0
+        public var hostMillis: Double = 0
+        public var driverMillis: Double = 0
+        public var queueMillis: Double = 0
+    }
+
     /// One command buffer's GPU span for a named kernel role. The decode path
     /// is synchronous (commit + wait), so `gpuStartTime`/`gpuEndTime` are
     /// valid right after completion and cost nothing to read.
@@ -1556,6 +1565,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let role: String
         let start: TimeInterval
         let end: TimeInterval
+        let kernelStart: TimeInterval
+        let kernelEnd: TimeInterval
     }
     private var kernelGPUTimings: [KernelGPUTiming] = []
     private let kernelGPUTimingsEnabled =
@@ -1635,7 +1646,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     func recordKernelGPU(role: String, _ cb: MTLCommandBuffer) {
         guard kernelGPUTimingsEnabled, cb.gpuEndTime > 0 else { return }
         kernelGPUTimings.append(
-            KernelGPUTiming(role: role, start: cb.gpuStartTime, end: cb.gpuEndTime))
+            KernelGPUTiming(role: role,
+                            start: cb.gpuStartTime,
+                            end: cb.gpuEndTime,
+                            kernelStart: cb.kernelStartTime,
+                            kernelEnd: cb.kernelEndTime))
     }
 
     /// Aggregated per-role GPU milliseconds for the current generation,
@@ -1691,10 +1706,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// turnaround. Without this the only way to pick a target is to divide
     /// total idle by a buffer count and assume the quotient means something,
     /// which is exactly the reasoning that produced a failed optimisation.
-    public func kernelGPUGaps() -> [(transition: String, millis: Double, count: Int)] {
+    ///
+    /// The gap is also split three ways: `host` is the previous buffer's GPU
+    /// end to this one's `kernelStartTime` (work the host did before
+    /// submitting), `driver` is `kernelStartTime` to `kernelEndTime` (the
+    /// driver's own scheduling), and `queue` is `kernelEndTime` to the GPU
+    /// start (waiting behind other work).
+    public func kernelGPUGaps() -> [KernelGPUGap] {
         guard kernelGPUTimings.count > 1 else { return [] }
         let sorted = kernelGPUTimings.sorted { $0.start < $1.start }
-        var acc: [String: (millis: Double, count: Int)] = [:]
+        var acc: [String: KernelGPUGap] = [:]
         var previous = sorted[0]
         for current in sorted.dropFirst() {
             // Overlapping buffers contribute no gap; advance the frontier to
@@ -1702,13 +1723,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let gap = current.start - previous.end
             if gap > 0 {
                 let key = "\(previous.role)->\(current.role)"
-                acc[key, default: (0, 0)].millis += gap * 1000
-                acc[key]!.count += 1
+                var entry = acc[key] ?? KernelGPUGap(transition: key)
+                entry.millis += gap * 1000
+                entry.count += 1
+                entry.hostMillis += max(0, current.kernelStart - previous.end) * 1000
+                entry.driverMillis += max(0, current.kernelEnd - current.kernelStart) * 1000
+                entry.queueMillis += max(0, current.start - current.kernelEnd) * 1000
+                acc[key] = entry
             }
             if current.end > previous.end { previous = current }
         }
-        return acc.map { (transition: $0.key, millis: $0.value.millis, count: $0.value.count) }
-            .sorted { $0.millis > $1.millis }
+        return acc.values.sorted { $0.millis > $1.millis }
     }
 
     // MARK: - Routing trace (SHRIKE_ROUTE_TRACE)

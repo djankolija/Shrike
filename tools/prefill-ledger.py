@@ -35,7 +35,9 @@ for line in open(path, errors="ignore"):
         continue
     m = re.search(r"Shrike gap (\S+) total_ms=([\d.]+) per_token_ms=[\d.]+ count=(\d+)", line)
     if m:
-        cur["gaps"].append((m.group(1), float(m.group(2)), int(m.group(3))))
+        split = re.search(r"host_ms=([\d.]+) driver_ms=([\d.]+) queue_ms=([\d.]+)", line)
+        cur["gaps"].append((m.group(1), float(m.group(2)), int(m.group(3)),
+                            tuple(float(g) for g in split.groups()) if split else None))
         continue
     m = re.search(r"Shrike kernel busy_ms=([\d.]+) span_ms=([\d.]+) occupancy=([\d.]+)%", line)
     if m:
@@ -72,5 +74,9 @@ for b in blocks[-last_n:]:
                 "expert_hit_rate_prefill", "io_ms", "wait_ms"):
         if key in b["runner"]:
             print(f"  runner.{key}={b['runner'][key]}")
-    for name, ms, count in b["gaps"][:4]:
-        print(f"  gap {name:28s} total_ms={ms:9.1f} count={count}")
+    for name, ms, count, split in b["gaps"][:4]:
+        line = f"  gap {name:28s} total_ms={ms:9.1f}"
+        if split:
+            line += (f" host_ms={split[0]:8.1f} driver_ms={split[1]:8.1f}"
+                     f" queue_ms={split[2]:8.1f}")
+        print(f"{line} count={count}")
