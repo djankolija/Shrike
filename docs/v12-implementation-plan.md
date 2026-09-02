@@ -3,7 +3,10 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 Status of record for [v12-prefill-matrix-kernels.md](v12-prefill-matrix-kernels.md).
-Checkboxes here are the only status tracking.
+Checkboxes here are the only status tracking. Commit SHAs in the verdicts are
+the branch's current ones; every review fix is folded into its owning commit
+(rebase and amend, never fixup commits), so the SHAs settle only once the
+branch stops being rebased — the subjects are the stable names.
 
 **Goal:** Bring ornith prefill from 7.3 ms/token (M4 Pro, 4k) and 28 ms/token
 (M1 mini, 4k) to the design's target of 1.4 / 5.6 ms/token by moving the three
@@ -26,8 +29,10 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
 ## Global constraints
 
 - macOS 26+, Swift 6.3+; never two model processes (`pgrep` check first);
-  the mini's server on 8081 is production and is never started or stopped
-  without a go-ahead — deploys there are binaries + `*.bundle` directories.
+  the mini's server on 8081 is production. The owner approved restarts and
+  deploy actions on 2026-09-01; `tools/mini-deploy.sh` copies binaries +
+  `*.bundle` directories by default and restarts the server only when passed
+  `--restart`.
 - Five gates per commit: release build with zero warnings; `swiftlint lint
   --strict --baseline .swiftlint-baseline.json`; markdown link check;
   `swift test --no-parallel`; the same under ThreadSanitizer with
@@ -49,7 +54,14 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
 
 ### Task 0: P0 — harness
 
-- [ ] **P0: harness** — the measurement kit the other tasks gate on.
+- [x] **P0: harness** — the measurement kit the other tasks gate on. **LANDED
+  49f57f4 (2026-09-02): both boxes print
+  `prefill_projection_path=affine-threadgroup-f16` (M4 Pro 2026-09-01, M1
+  2026-09-02). The log line is a standalone `ServerLog.residency` call right
+  after session creation, not the runtime-identity array the step text named
+  (that array is the prompt-cache domain digest and was left untouched).
+  `tools/mini-deploy.sh` was added to the harness. The swiftlint baseline was
+  regenerated for the moved file (20 entries before and after).**
 
   **Files:**
   - Modify: `sources/ShrikeBench/GEMMBench.swift` (already written, uncommitted),
@@ -72,7 +84,7 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
         the `gemm` bench mode and the `ShrikeBench.swift` rename (the
         `.swiftlint-baseline.json` was regenerated for the moved path: 20 entries
         before and after).
-  - [ ] Step 2: extend the runtime diag line at `ServerInference.swift:752`
+  - [x] Step 2: extend the runtime diag line at `ServerInference.swift:752`
         (the array that already carries `String(runtime.prefillChunkTokens)`)
         with `"prefill_projection_path=" + runtime.prefillProjectionPath`,
         where `RealForwardRunner` exposes
@@ -86,22 +98,22 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
         (`prefillMPPAffineInt4` is `RealForwardRunner.swift:176`; the plumbing
         from runner to `ServerInference.runtime` follows `prefillChunkTokens`
         at `:526`/`:842`.)
-  - [ ] Step 3: run `swift build -c release --product ShrikeServer` and
+  - [x] Step 3: run `swift build -c release --product ShrikeServer` and
         `--product ShrikeBench`; expect zero warnings. `swiftlint lint --strict
         --baseline .swiftlint-baseline.json`; `python3 tools/check-md-links.py`.
-  - [ ] Step 4: launch a local server (`--port 8082 --ram-budget 20G --thinking
+  - [x] Step 4: launch a local server (`--port 8082 --ram-budget 20G --thinking
         off`, env `SHRIKE_KERNEL_STATS=1 SHRIKE_RUNNER_STATS=1`), confirm the
         runtime line prints `prefill_projection_path=affine-threadgroup-f16`,
         stop it. Deploy `ShrikeServer` + bundles to the mini only at the next
         agreed restart and read the same line there — this settles the design's
         open risk about the M1.
-  - [ ] Step 5: commit — `bench+tools: prefill ledger harness (v12 P0)`.
+  - [x] Step 5: commit — `bench+tools: prefill ledger harness (v12 P0)`.
         Verdict line: the two boxes' projection paths.
 
 ### Task 1: P1 — shared expert on the matrix path
 
 - [x] **P1: shared expert on the matrix path** — target 0.83 → ~0.06 ms/token
-  (M4 Pro), 3.9 → ~0.3 (M1). **LANDED b7604db (2026-09-02): measured 0.83 →
+  (M4 Pro), 3.9 → ~0.3 (M1). **LANDED 1450c1c (2026-09-02): measured 0.83 →
   0.058 (M4 Pro) and 3.92 → 0.29 (M1) ms/prompt-token, on target. Wall:
   M4 Pro 3.7k 8.74 → 7.32 ms/tok; M1 3.7k 29.5 → 25.7, 12k 59.0 → 55.0.
   Chunk-vs-row-loop maxAbs 1.95e-3 (64 rows), 9.8e-4 (33 rows); the T-row
@@ -214,7 +226,7 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
 ### Task 2: P2 — attention core on the matrix path
 
 - [x] **P2: attention core on the matrix path** — target 3.39 → ~0.2 ms/token
-  at 3.7k, 22.2 → ~0.8 at 25k (M4 Pro). **LANDED 80589aa (2026-09-02):
+  at 3.7k, 22.2 → ~0.8 at 25k (M4 Pro). **LANDED 066fe67 (2026-09-02):
   measured 3.40 → 0.27 (3.7k), 13.53 → 0.47 (12k), 22.19 → 0.85 (25k) on
   the M4 Pro; 13.82 → 1.36 (3.7k), 43.58 → 2.40 (12k) on the M1. Wall: M4 Pro
   12k 207.8 → 46.1 s, 25k 666.8 → 114.0 s; M1 12k 675.9 → 166.0 s (chapter
@@ -233,7 +245,14 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
   quanta, header comment corrected, self-contained includes, tile
   `static_assert`s, gate threshold pinned at 32, nonzero test offsets.
   `RuntimeConfiguration` default is now `.causalMatrix`;
-  `SHRIKE_PREFILL_ATTENTION=tiled|matrix` A/B.**
+  `SHRIKE_PREFILL_ATTENTION=tiled|matrix` A/B. Fix wave (2026-09-02):
+  `.causalMatrix` falls through to the tensor-ops shape test when
+  `matrixPathAccepts` rejects it, so the 512/16/2 fp16-KV kernel selection is
+  unchanged under the new default. Memory check on the mini (P3 build, 8G
+  budget, 32k max context, 25,245-token prompt): `memory_pressure -Q` free
+  83 % → 25 % across the request (the expert pool becoming resident dominates;
+  the attention shadow at 25k is ~50 MB), server RSS 10.7 GB, no pressure
+  warning, wall 320 s.**
 
   **Files:**
   - Create: `Sources/Shrike/Metal/Prefill/attention_matrix.metal` (new module:
@@ -256,9 +275,13 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
     sinks 5 unused); function constants `FC_ATTN_ROWS` (queries per
     threadgroup), `FC_ATTN_KEYS` (key tile), `FC_ATTN_KV_BITS`; a new
     `RuntimePrefillAttentionPath.causalMatrix` selected when `headDim == 256 &&
-    numQHeads == 16 && numKVHeads == 2 && slidingWindow == 0 && sinks == nil &&
-    kvRingCapacity == 0 && (kvBits == 8 || kvBits == 16) && queryCount >= 32`;
-    everything else keeps `attention_prefill_causal_tiled`.
+    numQHeads == 16 && numKVHeads == 2 && kvRingCapacity == 0 && !hasSinks &&
+    (slidingWindow == 0 || slidingWindow >= kvValidCount) && queryCount >= 32
+    && kvValidCount <= 65_536` (the runner passes `kvValidCount` as the window
+    for full layers, so that clause is full-visibility, not literally "no
+    sliding window"; kvBits is not gated at all — 4, 8, and 16 all reach the
+    matrix path, since `prefill_load_kv` handles 4-bit and the int4 case is
+    tested); everything else keeps `attention_prefill_causal_tiled`.
 
   - [ ] Step 1 (spike, throwaway numbers, kept harness): add `ShrikeBench attn
         <variant> [iterations]` that builds synthetic Q (T × 4096 fp16), an int8
@@ -333,7 +356,7 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
 ### Task 3: P3 — routed experts as per-expert GEMMs
 
 - [x] **P3: routed experts as per-expert GEMMs** — target 2.03 → ~0.6 ms/token
-  (M4 Pro). **LANDED 78a1043 (2026-09-02): measured 2.03 → 1.00 ms/prompt-token
+  (M4 Pro). **LANDED 9323fa8 (2026-09-02): measured 2.03 → 1.00 ms/prompt-token
   (M4 Pro, 12k; 1.04 at 3.7k, 1.21 at 25k) and 5.82 → 3.35 (M1, 12k) — half
   the target's cut, at ≈ 35 % of the 128-row expert-shape ceiling. Wall: M4 Pro
   12k 46.1 → 34.3 s, 25k 114.0 → 92.1 s; M1 12k 166.0 → 135.6 s. GEMM vs scalar

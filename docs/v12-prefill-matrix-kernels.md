@@ -93,7 +93,7 @@ production server; the M4 Pro's through a fresh server with `--ram-budget 20G`
 The ledger closes: wall = busy + gaps + a per-request remainder (the first
 column's remainder is the fresh server's first request).
 
-**After P1** (commit b7604db, 2026-09-02, same protocol, fresh servers):
+**After P1** (commit 1450c1c, 2026-09-02, same protocol, fresh servers):
 
 | role | M4 Pro 3.7k | M4 Pro 12k | M1 3.7k | M1 12k |
 | --- | ---: | ---: | ---: | ---: |
@@ -109,7 +109,7 @@ M1's stayed within 0.4 %; that laptop had run hours of test suites before
 the measurement. Treat the M1 as the reference for cross-step comparisons of
 untouched roles.
 
-**After P2** (commit 80589aa, 2026-09-02; matrix-path attention, 32 rows ×
+**After P2** (commit 066fe67, 2026-09-02; matrix-path attention, 32 rows ×
 4 simdgroups, lane-parallel softmax):
 
 | role | M4 Pro 3.7k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
@@ -122,7 +122,7 @@ untouched roles.
 | **wall** | 4.31 | 3.76 | 4.52 | 13.19 | 13.51 |
 | wall, seconds | 16.2 | 46.1 | 114.0 | 49.5 | 166.0 |
 
-**After P3** (commit 78a1043, 2026-09-02; per-expert GEMMs for routed
+**After P3** (commit 9323fa8, 2026-09-02; per-expert GEMMs for routed
 experts with ≥ 32 pairs in a tile, scalar path for the rest):
 
 | role | M4 Pro 3.7k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
@@ -204,7 +204,7 @@ the same four checks before the next starts:
 4. The ledger re-measured on both boxes at 3.7k and 12k; the table above gains
    a row.
 
-### Step 0 — harness (done except the log line)
+### Step 0 — harness (landed)
 
 `ShrikeBench gemm`, `tools/prefill-prompts.py`, `tools/prefill-ledger.py`,
 `tools/prefill-measure.sh` (the `decode-measure.sh` twin: sends the prompt set
@@ -235,10 +235,22 @@ the numerical basis is unchanged: same quantized keys, different reduction order
 Tile geometry (rows per threadgroup, key tile, head-dim split against the 32 KB
 threadgroup budget at head-dim 256) is decided by a measured spike in
 `ShrikeBench`, acceptance ≥ 40 % of the `gemm` ceiling at the 3.7k and 12k
-shapes. Gate: this model's shape (head-dim 256, 16/2 heads, no sinks, no sliding
-window, 8- or 16-bit KV); every other shape, the MLA twin, and the MTP verify
-chunk keep the scalar kernel, exactly as today's tensor-ops gate does.
+shapes. Gate: this model's shape (head-dim 256, 16/2 heads, no sinks, full
+visibility — no sliding window, or a window that already covers the whole
+context (the runner passes `kvValidCount` as the window for full layers) —
+and `kvValidCount <= 65,536`); any KV bit width reaches it (4, 8, or 16:
+`prefill_load_kv` handles 4-bit and the int4 case is tested). Every other
+shape, the MLA twin, and the MTP verify chunk keep the scalar kernel, exactly
+as today's tensor-ops gate does.
 Expected: 3.39 → ~0.2 ms/token at 3.7k; 22.2 → ~0.8 at 25k.
+
+Memory: the KV shadow (`PrefillAttention.ensureShadow`) costs 2 KB per
+context token per runner — K and V, fp16, 512 elements each
+(`numKVHeads * headDim = 2 * 256`) — grown in 8 MiB quanta and never
+released. That is 64 MiB at the mini's 32k max context, and up to twice
+that with the MTP draft runner allocating its own shadow; the gate's
+`kvValidCount <= 65,536` ceiling bounds it further. It lives outside the
+chunk-scratch worksheet by design — sized by context length, not chunk size.
 
 ### Step 3 — routed experts as per-expert GEMMs (−20 %)
 
@@ -299,7 +311,7 @@ step are recorded in the plan.
 - Threadgroup memory at head-dim 256 caps the attention tile; if 40 % of the
   ceiling is not reachable with `matmul2d`, the fallback is hand-written
   `simdgroup_matrix` fragments (more code, same math). The spike decides.
-- Whether the matrix kernel compiles on the M1 is inferred from the ledger's
-  ratios, not observed; the step-0 log line settles it before step 1 ships.
+- Settled: the step-0 log line observed the matrix kernel compiling on both
+  boxes — M4 Pro and M1 both log `prefill_projection_path=affine-threadgroup-f16`.
 - Per-expert GEMMs at short prompts fall below the efficient row count; the
   threshold keeps the scalar path there, so short prompts do not regress.
