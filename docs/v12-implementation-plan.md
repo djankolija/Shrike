@@ -227,8 +227,9 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
   eightfold GQA tile re-read is the documented follow-on). Tests: 3 fp32
   reference cases (fp16 cache), 5 matrix-vs-tiled cases on int8/int4
   `KVCacheManager` views, gate cases, rejected-shape end-to-end. Golden: both
-  boxes flipped the long profile (near-tie), short identical → both long
-  baselines recaptured. Review approved; fix round: shadow grows in 8 MiB
+  boxes flipped the long profile (near-tie), short identical → the M1's long
+  baseline recaptured at P2; the M4 Pro's was recaptured once at P3 (covering
+  P2 + P3). Review approved; fix round: shadow grows in 8 MiB
   quanta, header comment corrected, self-contained includes, tile
   `static_assert`s, gate threshold pinned at 32, nonzero test offsets.
   `RuntimeConfiguration` default is now `.causalMatrix`;
@@ -331,8 +332,21 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
 
 ### Task 3: P3 — routed experts as per-expert GEMMs
 
-- [ ] **P3: routed experts as per-expert GEMMs** — target 2.03 → ~0.6 ms/token
-  (M4 Pro).
+- [x] **P3: routed experts as per-expert GEMMs** — target 2.03 → ~0.6 ms/token
+  (M4 Pro). **LANDED 78a1043 (2026-09-02): measured 2.03 → 1.00 ms/prompt-token
+  (M4 Pro, 12k; 1.04 at 3.7k, 1.21 at 25k) and 5.82 → 3.35 (M1, 12k) — half
+  the target's cut, at ≈ 35 % of the 128-row expert-shape ceiling. Wall: M4 Pro
+  12k 46.1 → 34.3 s, 25k 114.0 → 92.1 s; M1 12k 166.0 → 135.6 s. GEMM vs scalar
+  maxAbs 7.6e-6, rel 6e-4. Golden: both boxes' long profiles flipped (near-tie)
+  → M1 long recaptured; M4 Pro long + short(header) recaptured once for P2 + P3.
+  Gates all green incl. TSAN (1121 tests; 1123 after the fix round). Review
+  approved; fix round: staging scratch gated on one layout predicate shared
+  with the runtime branch (dense layers and the 32-token MTP draft chunk no
+  longer allocate it; the T=32 scratch total is back at its pre-P3 bytes),
+  `k % 64` guard, throwing bounds check on tile ranges, below-threshold
+  fallback test. Expert sub-tensor `setBuffer(offset:)` at 2 KiB multiples
+  proven by the golden runs. Decision point: M4 Pro 3.7k GPU busy
+  2.42 ms/tok > 2.0 → P4 scheduled by the rule.**
 
   **Files:**
   - Modify: `Sources/Shrike/Kernels/Prefill/MoE/PrefillGroupedRoutedMoE.swift`

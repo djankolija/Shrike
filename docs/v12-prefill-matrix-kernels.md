@@ -122,6 +122,26 @@ untouched roles.
 | **wall** | 4.31 | 3.76 | 4.52 | 13.19 | 13.51 |
 | wall, seconds | 16.2 | 46.1 | 114.0 | 49.5 | 166.0 |
 
+**After P3** (commit 78a1043, 2026-09-02; per-expert GEMMs for routed
+experts with ≥ 32 pairs in a tile, scalar path for the rest):
+
+| role | M4 Pro 3.7k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `prefill_attn_router` | 0.27 | 0.46 | 0.89 | 1.36 | 2.40 |
+| `prefill_routed_tile` | **1.04** | **1.00** | **1.21** | **3.42** | **3.35** |
+| `prefill_gdn_router` | 1.01 | 0.99 | 1.16 † | 4.39 | 4.37 |
+| `prefill_shared_expert` | 0.06 | 0.06 | 0.07 | 0.29 | 0.29 |
+| **GPU busy** | 2.42 | 2.53 | 3.35 | 9.68 | 10.51 |
+| **wall** | 3.42 | 2.79 | 3.65 | 10.80 | 11.04 |
+| wall, seconds | 12.9 | 34.3 | 92.1 | 40.6 | 135.6 |
+
+Against the chapter's start, the 12k prompt is 6.1× faster on the M4 Pro
+(207.8 → 34.3 s) and 5.3× on the M1 (725.2 → 135.6 s); the M1 now prefills at
+11.0 ms per prompt token against its 38.1 ms decode token. The routed GEMMs run
+at ≈ 2.0 TFLOPS on the M4 Pro, 35 % of the 128-row expert-shape ceiling; the
+tile-boundary gaps grew with the extra host encoding per tile (0.86 s of 12.9
+at 3.7k), which promotes the command-buffer batching follow-on.
+
 Attention-core efficiency on the shipped kernel: ≈ 36 % of the M4 Pro's
 measured ceiling at 12k and 25k (2.6–2.7 TFLOPS on 12.4 / 52.2 TFLOP of
 scores and values), ≈ 26 % on the M1. The remaining cost is the eightfold
