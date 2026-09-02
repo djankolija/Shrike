@@ -1209,13 +1209,49 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
 ### Task 7: P7 — attention KV-tile staging per KV-head group
 
-- [ ] **P7: attention KV-tile staging per KV-head group** — target
+- [x] **P7: attention KV-tile staging per KV-head group** — target
   `prefill_attn_router` 0.45 → ≤ 0.32 ms/prompt-token (M4 Pro, 12k) and
   0.80 → ≤ 0.58 at 25k; 2.41 → ≈ 1.75 (M1, 12k). Bar: **≥ 50 % of the M4 Pro's
   measured attention ceiling**, computed as the design does at
   `docs/v12-prefill-matrix-kernels.md:174-176` — 12.4 TFLOP of scores and
   values at 12k, 52.2 at 25k, against the 7.46 TFLOPS `4096³` figure; the
   shipped kernel sits at ≈ 36 % (2.6–2.7 TFLOPS), the M1 at ≈ 26 %.
+  **LANDED 5ba2b89 (2026-09-02): measured `prefill_attn_router` 0.26 → 0.24
+  ms/prompt-token (M4 Pro 3.7k; 0.45 → 0.36 at 12k, 0.81 → 0.67 at 25k) and
+  1.35 → 1.25 (M1 3.7k; 2.40 → 2.05 at 12k).** The bars are missed on both
+  boxes: the M4 Pro sits at 37 % of the 7.46 TFLOPS ceiling at 12k (12.4 TFLOP
+  over 4.44 s; 30 % before), the M1 at 2.05 against ≈ 1.75. The spike (14
+  geometries under `SHRIKE_ATTN_MATRIX_TILE`, a fresh server per arm, both
+  boxes) falsified the task's premise: every form that staged a KV-head
+  group's K/V tile through threadgroup memory once for all eight heads was
+  slower than P2 — M4 Pro +26–80 %, M1 +5–22 % — because the caches already
+  serve the eightfold re-read, so the modelled 2–4× traffic cut bought
+  nothing. The device-operand forms, which read the shadow exactly as P2 does
+  but from the group-major Q, win by amortising the per-tile fixed work (the
+  score round-trip, the R×256 accumulator rescale, the barriers) over more
+  keys and fewer rows: 32 rows × 64 keys (P2) 0.460, 32 × 128 0.394, 16 × 256
+  0.363, 8 × 512 0.404 ms/tok at 12k on the M4 Pro; eight simdgroups lose to
+  four at every shape once the cooperative-tensor loops are unrolled (the
+  pragma was worth −35 % on the eight-simdgroup body and nothing on P2's
+  four). `g2k256d` — 2 query positions × 8 heads = 16 rows, 256-key tiles,
+  4 simdgroups — is the default; `g4k128d` (tied with it on the M1, 2.08 vs
+  2.05) and the P2 tiles stay selectable. MPP's register-resident left operand
+  (the FlashAttention shape that would drop the score round-trip) is only
+  allowed under a single-simdgroup execution scope and is the recorded
+  follow-on. Wall: M4 Pro 12k 31.6 → 30.5 s, 25k 78.8 → 77.5 s (3.7k
+  10.9 → 11.1 s, inside that prompt's ±2 s swing; routed→routed 1.39 → 1.46 ms
+  per boundary at 12k on the fetch-bound loop); M1 12k 123.4 → 119.2 s, 3.7k
+  36.5 → 37.2 s. Golden: short identical on both boxes; M4 Pro long differs
+  and was recaptured once — sha256 79aa5873bb2a167f → f24c61565618fdab, the
+  first divergence being the thinking block's second sentence flipping back to
+  the pre-P3 wording (a near-tie logit); M1 long IDENTICAL, 39c38734e8f9d22a
+  unchanged. Numerics: all 32 group cases (three fp16-reference and five
+  int8/int4-vs-tiled fixtures × the landed and spike tiles) at 2e-2, finiteness
+  asserted. Memory: `ensureQGroup` is chunk-bounded (32 MiB at the mini's
+  4,096-token chunk); mini at 25k (label 12k, 25,245 tokens): `memory_pressure
+  -Q` free percentage 91 % idle → 25 % floor during the request (31 samples,
+  10 s apart), server RSS 10.27 GB, attention 3.29 ms/tok, wall 276 s. Five
+  gates green (1148 tests, TSAN 0 reports).
 
   **What P2 left.** `attention_prefill_causal_matrix_r32s4`
   (`attention_matrix.metal:42-210`, instantiated at `:232`) gives one

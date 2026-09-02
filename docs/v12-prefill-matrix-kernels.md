@@ -171,16 +171,18 @@ at ≈ 2.0 TFLOPS on the M4 Pro, 35 % of the 128-row expert-shape ceiling; the
 tile-boundary gaps grew with the extra host encoding per tile (0.86 s of 12.9
 at 3.7k), which promotes the command-buffer batching follow-on.
 
-Attention-core efficiency on the shipped kernel: ≈ 36 % of the M4 Pro's
-measured ceiling at 12k and 25k (2.6–2.7 TFLOPS on 12.4 / 52.2 TFLOP of
-scores and values), ≈ 26 % on the M1. The remaining cost is the eightfold
-re-read of each K/V tile by the eight query heads of a KV group (each
-threadgroup owns one head, because the eight heads' Q rows are not a single
-uniform-stride matrix) and the 32-row `matmul2d` tile; a kernel that stages a
-KV-head group's K/V tile once for all eight heads is the follow-on. The 64-row
-× 8-simdgroup variant measured 10 % slower and stays selectable
-(`SHRIKE_ATTN_MATRIX_TILE=r64s8`); `SHRIKE_PREFILL_ATTENTION=tiled` A/Bs the
-scalar kernel on the same binary.
+Attention-core efficiency after P7: ≈ 37 % of the M4 Pro's measured ceiling
+at 12k (2.8 TFLOPS on 12.4 TFLOP of scores and values), ≈ 30 % before; the
+M1 ≈ 29 %. The remaining cost is per key tile, not per byte: the scores go
+through threadgroup memory and back as fp16 weights, the R×256 fp32 output
+accumulator is rescaled once per tile, and the tile loop is barriered — which
+is why 256-key tiles on 16 rows beat P2's 64-key tiles on 32 rows and why
+staging K/V once per KV-head group (the follow-on P7 set out to build) lost
+on both boxes. The FlashAttention shape — Q and the probabilities resident in
+registers, no score round-trip — needs MPP's single-simdgroup execution scope
+and is the follow-on below. `SHRIKE_ATTN_MATRIX_TILE` selects `g4k128d`,
+`r32s4` or `r64s8` on the same binary; `SHRIKE_PREFILL_ATTENTION=tiled` A/Bs
+the scalar kernel.
 
 - **Attention time is proportional to query–key pairs, not tokens.** Across
   chunks the pairs grow as 4096 × (2048 + 6144 + 10240 + …); 12k has 10.7× the
@@ -280,6 +282,44 @@ M1 hides the fetch under its 7.5 ms tile and keeps the saving: 3.7k 36.8 →
 36.5 s, 12k 126.0 → 123.4 s. Golden differs on the long profile on both boxes
 (the short prompt never reaches the matrix path) and was recaptured once per
 box; the digests are in the plan's verdict.
+
+**After P7** (commit 5ba2b89, 2026-09-02; attention on the matrix path as
+2-query × 8-head groups against 256-key tiles read from the shadow, Q packed
+group-major once per layer; `SHRIKE_ATTN_MATRIX_TILE=r32s4` keeps the P2
+geometry):
+
+| role | M4 Pro 3.7k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `prefill_attn_router` | **0.24** | **0.36** | **0.67** | **1.25** | **2.05** |
+| `prefill_routed_tile` | 0.72 | 0.69 | 0.82 | 3.23 | 3.13 |
+| `prefill_gdn_router` | 0.65 | 0.64 | 0.74 | 3.44 | 3.43 |
+| `prefill_shared_expert` | 0.06 | 0.06 | 0.07 | 0.29 | 0.29 |
+| **GPU busy** | 1.71 | 1.78 | 2.32 | 8.42 | 9.01 |
+| gaps (span − busy) | 0.79 | 0.57 | 0.69 | 0.66 | 0.53 |
+| **wall** | 2.95 | 2.48 | 3.07 | 9.90 | 9.70 |
+| wall, seconds | 11.1 | 30.5 | 77.5 | 37.2 | 119.2 |
+
+The attention role fell 21 % on the M4 Pro at 12k and 14 % on the M1, and not
+for the reason the follow-on gave. The spike measured fourteen geometries on
+both boxes; every one that staged a KV-head group's K/V tile through
+threadgroup memory once for all eight heads — the modelled 2–4× traffic cut —
+was slower than P2 (M4 Pro +26–80 %, M1 +5–22 %): the caches serve P2's
+eightfold re-read, and the staging only adds a copy and barriers. The forms
+that read the shadow as P2 does, with only the group-major Q and the tile
+shape changed, order monotonically by keys per tile and inversely by rows:
+32 × 64 (P2) 0.460, 32 × 128 0.394, 16 × 256 0.363, then 8 × 512 back up to
+0.404 ms/token; four simdgroups beat eight at every shape once the
+cooperative-tensor loops carry an unroll pragma (−35 % on the eight-simdgroup
+body, nothing on P2's). The kernel is bound by its per-tile fixed work — the
+score round-trip through threadgroup memory, the rescale of the R×256 fp32
+accumulator, the barriers — not by K/V traffic. Ceiling share at 12k on the
+M4 Pro: 30 % → 37 %; the step's 50 % bar is not reached. Wall on the M4 Pro
+follows the GPU at 12k and 25k (31.6 → 30.5 s, 78.8 → 77.5 s) and hides in the
+3.7k prompt's ±2 s swing (10.9 → 11.1 s); the M1 keeps it at 12k (123.4 →
+119.2 s). Golden: short identical on both boxes; the M4 Pro's long profile
+differs (a near-tie logit at the thinking block's second sentence flips back
+to its pre-P3 wording) and was recaptured once; the M1's long profile is
+byte-identical.
 
 ## Where the time goes
 
@@ -425,6 +465,37 @@ P6" above — 67 % of the 128-row ceiling on both boxes, which is why the M1,
 whose per-expert path was already at 60 %, gains a seventh of what the M4
 Pro does.
 
+### Step 6 — attention tile shape on the matrix path (−21 % on the M4 Pro, −14 % on the M1)
+
+Planned as "stage a KV-head group's K/V tile once for all eight query heads";
+measured as something else. The spike built the staged kernel four ways
+(K then V through one 16 KB threadgroup slab, 32 to 128 rows of a KV-head
+group, 32- or 64-key tiles) and every one of them was slower than P2 on both
+boxes — the M4 Pro by 26–80 %, the M1 by 5–22 %. The eightfold re-read the
+follow-on targeted is served by the caches; copying the tile through
+threadgroup memory only adds barriers and a copy. What the same spike found
+instead, once the K/V operands went back to the device shadow as P2 reads
+them, is that the kernel is bound by its per-tile fixed work — the score
+round-trip through threadgroup memory, the rescale of the R×256 fp32 output
+accumulator, the barriers and the `run` set-up — and that fewer query rows
+with more keys per tile amortise it monotonically: 32 × 64 keys (P2) 0.46
+ms/token at 12k on the M4 Pro, 32 × 128 0.39, 16 × 256 0.36; 8 × 512 turns
+back up (0.40), and eight simdgroups lose to four at every shape once the
+cooperative-tensor loops carry an unroll pragma (worth −35 % on the
+eight-simdgroup body, nothing on P2's four). `attention_prefill_causal_matrix_g2k256d`
+landed as the default: one threadgroup owns 2 query positions × the 8 query
+heads of one KV head (16 matmul rows) against 256-key tiles, the Q block
+packed group-major once per layer by `attention_prefill_q_group_pack`
+(33.5 MB of traffic at a 4,096-token chunk, a chunk-sized buffer that never
+grows with context), scores fp32 in threadgroup memory, the softmax weights
+fp16 in a second region with the row sums taken from the rounded weights.
+`SHRIKE_ATTN_MATRIX_TILE` still selects `r32s4`, `r64s8` or the runner-up
+`g4k128d` (tied with the winner on the M1). MPP's register-resident left
+operand — the FlashAttention shape that would drop the score round-trip
+entirely — is only allowed under a single-simdgroup execution scope, so it
+needs per-simdgroup matmuls; that is the follow-on below. Ceiling share at
+12k on the M4 Pro: 30 % → 37 %; the task's 50 % bar was not reached.
+
 ### Follow-ons, not scheduled
 
 - **Tile command-buffer batching — landed as a null result (P5, a7c8288 +
@@ -463,11 +534,15 @@ Pro does.
   attention buffer and the shared expert (`host_ms` 1.38 + 0.48 s at 12k,
   ≈ 1.5 % of wall); 2.8 ms per layer on the M4 Pro. The router readback,
   pair building and grouping over 4,096 rows on the CPU.
-- **Attention: stage a KV-head group's tile once.** P2's kernel reads each
-  K/V tile eight times (once per query head); staging a dequantized 64-key
-  tile in threadgroup memory for all eight heads, with Q streamed per head,
-  would remove that re-read. Worth roughly the gap between 36 % and the
-  ceiling's practical 50–60 %; measured on the ledger like P2.
+- **Attention: Q and the probabilities in registers (the FlashAttention
+  shape).** After P7 the matrix-path attention is bound by its per-tile fixed
+  work, not by K/V traffic (see "After P7"). MPP's left-input cooperative
+  tensor would keep the Q block resident and let the QKᵀ destination become
+  the PV left operand without touching threadgroup memory, but it is only
+  allowed under `execution_simdgroup`: each simdgroup would own one query's
+  eight heads (M = 8) and the eight-head K/V tile would be shared per
+  threadgroup. Unmeasured; the spike harness (`SHRIKE_ATTN_MATRIX_TILE`, one
+  fresh server per arm) is the gate, and the bar stays the 50 % share.
 - **The mini's SSD term** (0.8 ms/token per chunk) surfaces after step 2; the
   v10 P3 follow-on (batched miss loads, deeper queue depth) is the lever then.
 
