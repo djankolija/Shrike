@@ -138,7 +138,7 @@ experts with ≥ 32 pairs in a tile, scalar path for the rest):
 After P3 the 12k prompt was 6.1× faster than the chapter's start on the M4
 Pro (207.8 → 34.3 s) and 5.3× on the M1 (725.2 → 135.6 s).
 
-**After P4** (commit 7315fb8, 2026-09-02; chunked delta-rule scan for the
+**After P4** (commit 9b9374d, 2026-09-02; chunked delta-rule scan for the
 GDN layers, 64-row chunks):
 
 | role | M4 Pro 3.7k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
@@ -355,8 +355,16 @@ step are recorded in the plan.
   format, and the expert streamer.
 - Other model shapes (MLA/Kimi, gpt-oss sinks, sliding windows) keep the scalar
   kernels behind the same gates that select them today.
-- Speculative decoding's verify step. It is an 8-token forward, bandwidth-bound
-  like decode; on the mini its cost is expert-miss I/O, not these kernels.
+- Speculative decoding's verify step. It is a width-2 forward on the decode
+  kernels (the `pair` schedule), bandwidth-bound like decode; on the mini its
+  cost is expert-miss I/O, not these kernels. Measured at the P4 build on the
+  mini (rig prompt, `--mtp-model ornith15-mtp`, 5 runs): 6.6 tok/s against
+  25.5 plain; per pass 17 ms proposal + 168 ms verify (156 of it the width-2
+  backbone, 4× a 39 ms decode step) at 25.9 % acceptance, 1.26 tokens per
+  pass. Break-even would need a pass under 49 ms at that acceptance, below
+  the two-row union's bandwidth floor, so viability hinges first on the
+  acceptance rate (26 % on a counting prompt is the thing to audit), then on
+  the verify pass's miss I/O — a decode-chapter follow-on, not a prefill one.
 
 ## Risks
 

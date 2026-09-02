@@ -678,10 +678,695 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
         design doc Step 4 + ledger rows + the GDN row of "Where the time
         goes"; task review by a fresh reviewer; fixes folded into the commit.
 
+# v12 implementation plan — Tasks 5–7 (the design's three follow-ons)
+
+Drafted for `docs/v12-implementation-plan.md`, to be appended after Task 4 and
+to replace the "Follow-ons (not scheduled)" list at the end of that file. The
+plan's **Global constraints** section (macOS 26+/Swift 6.3+, never two model
+processes, the mini's 8081 server is production; five gates per commit —
+release build with zero warnings, `swiftlint lint --strict --baseline
+.swiftlint-baseline.json`, markdown link check, `swift test --no-parallel`, the
+same under `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test
+--no-parallel --sanitize=thread`; numerics tolerance `maxAbs ≤ 2e-2`, `rel ≤
+2e-2` against the fp32 reference, `tools/golden-baseline.sh --check` *expected*
+to differ and both boxes recaptured once per step with the before/after greedy
+digests in the verdict, never a recapture for an unexplained mismatch; ledger
+protocol `tools/prefill-measure.sh` at 3.7k and 12k on both boxes, one send per
+prompt per server lifetime, fresh server per prompt set; no comments unless a
+genuinely non-obvious why) applies unchanged to all three tasks.
+
+Measured starting point, post-P4 (`docs/v12-prefill-matrix-kernels.md:141-183`),
+GPU ms per **prompt** token:
+
+| role | M4 Pro 3.7k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `prefill_routed_tile` | 1.04 | 0.99 | 1.12 | 3.42 | 3.35 |
+| `prefill_gdn_router` | 0.65 | 0.64 | 0.70 | 3.44 | 3.43 |
+| `prefill_attn_router` | 0.26 | 0.45 | 0.80 | 1.35 | 2.41 |
+| `prefill_shared_expert` | 0.06 | 0.06 | 0.06 | 0.29 | 0.29 |
+| gaps (span − busy) | 0.5–0.95 | 0.35 | 0.35 | — | 0.53 |
+| **wall** | 3.46 | 2.65 | 3.22 | 10.40 | 10.28 |
+
+Targets from the design's ceiling table (`:61-70`): 1.6 ms/token at 12k on the
+M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
+≈ 8.3; what is left after them is GDN's projection stack and the shared
+`matmul2d` efficiency, not these three taxes.
+
+---
+
+### Task 5: P5 — tile command-buffer batching
+
+- [ ] **P5: tile command-buffer batching** — target the inter-tile gap
+  0.35 → ≤ 0.12 ms/prompt-token (M4 Pro, 12k), 0.95 → ≤ 0.35 at 3.7k, and
+  0.53 → ≤ 0.20 (M1, 12k). Modelled wall: M4 Pro 12k 2.65 → ≈ 2.42 (32.6 →
+  ≈ 30 s), 3.7k 3.46 → ≈ 2.90; M1 12k 10.28 → ≈ 9.95 (126.3 → ≈ 122 s).
+  Nothing about the kernels changes, so the greedy digests must be **identical**
+  on both boxes — a golden diff here is a bug, not a numerics change.
+
+  **The measured cause.** Each routed tile gets its own command buffer
+  (`RealForwardRunner.swift:5037-5048`), and the pending-tile machinery that
+  would overlap it (`:4917-4944`, `:4946-5056`) is disarmed whenever the tile's
+  experts are all resident: `fetchBindingForTile` returns
+  `plannedAssignedSlots == []` (`PrefillGroupedRoutedMoE.swift:361-368`), the
+  scheduler then hits the empty-slot branch at `RealForwardRunner.swift:4982-4996`
+  and `PrefillRoutedTileScheduler.decide` returns
+  `.drainBeforeIssue(reason: .pendingTileHasNoAssignedSlots)`
+  (`PrefillRoutedTileScheduler.swift:71-73`). So on the M4 Pro at
+  `--ram-budget 20G` — and on every full-hit tile on the mini — the loop is
+  strictly commit → `waitUntilCompleted` (`:3354-3359`) → encode the next tile.
+  ≈ 1.3 ms per boundary × 32 tiles per layer × 40 layers per 4,096-token chunk.
+
+  **Files:**
+  - Modify: `sources/Shrike/Kernels/Prefill/MoE/PrefillRoutedTileScheduler.swift:30-55`
+    (`tilesPerCommandBuffer`, the slot-budget arithmetic) and `:57-79`
+    (a batch-aware decision)
+  - Modify: `sources/Shrike/Runtime/Inference/RealForwardRunner.swift:4911-4944`
+    (`PendingPrefillTile` → `PendingPrefillBatch`, `drainOldestPendingTile` →
+    `drainOldestPendingBatch`), `:4946-5056` (the tile loop: one command buffer
+    per batch, `avoidingSlots` widened by the open batch), `:5057-5059` (tail
+    drain), `:329` (`prefillRoutedTileSchedulerConfig`), `:377-378` (the env
+    knob, beside `SHRIKE_GDN_PREFILL_SCAN`), `:200-206` (a
+    `prefillTileBatchDescription` beside `prefillGDNScanPathDescription`)
+  - Modify: `sources/ShrikeServer/Core/ServerInference.swift:527-529, 817-818,
+    849-851` (`prefill_tile_batch=` on the residency line)
+  - Test: `tests/Shrike/Core/Kernels/Prefill/PrefillRoutedTileSchedulerTests.swift`
+    (host-only; no Metal, no model)
+
+  **Interfaces:**
+  - Consumes: `PrefillStreamedTileFetchResult.plannedAssignedSlots` /
+    `.plannedMissSlots` (`PrefillGroupedRoutedMoE.swift:110-133`),
+    `PrefillStreamedTileSlotLifetime.begin/complete` (`:153-189`),
+    `Model.planRoutedExpertsIfPossible` / `abandonRoutedExpertPlan`,
+    `recordKernelGPU(role:_:)` (`RealForwardRunner.swift:1609-1613`).
+  - Produces:
+
+    ```swift
+    struct PrefillRoutedTileSchedulerConfig: Sendable, Equatable {
+        let maxPendingDepth: Int
+        let tileExperts: Int
+        /// Tiles encoded into one command buffer before it is committed. 1 is
+        /// the pre-P5 behaviour: one tile, one commit, one wait.
+        let tilesPerCommandBuffer: Int
+        init(maxPendingDepth: Int = 1, tileExperts: Int = 8,
+             tilesPerCommandBuffer: Int = 1)
+        /// Every tile of the open batch and of each pending batch holds its
+        /// slots until that batch completes, so the cache must hold them all.
+        func fitsSlotBudget(slotCount: Int, reservedHits: Int = 0) -> Bool
+            // (maxPendingDepth + 1) * tilesPerCommandBuffer * tileExperts + reservedHits <= slotCount
+        func fitting(slotCount: Int, reservedHits: Int = 0) -> Self?
+    }
+    enum PrefillRoutedTileBatchAction: Sendable, Equatable {
+        case appendToOpenBatch
+        case commitOpenBatchThenAppend(reason: PrefillRoutedTileBatchFlushReason)
+    }
+    enum PrefillRoutedTileBatchFlushReason: Sendable, Equatable {
+        case batchFull                 // tilesPerCommandBuffer reached
+        case slotCollision             // the next tile's plan needs a slot the open batch holds
+        case lastTile                  // routes.tiles exhausted
+    }
+    extension PrefillRoutedTileScheduler {
+        func batchAction(openBatchTiles: Int,
+                         openBatchSlots: [Int],
+                         nextTileAvoidingSlotPlanAvailable: Bool,
+                         isLastTile: Bool) -> PrefillRoutedTileBatchAction
+    }
+    ```
+
+    Runner: `SHRIKE_PREFILL_TILE_BATCH=<n>` (`1` = today's one-tile buffers,
+    clamped to `1...16`; default `1` until the ledger says otherwise, then the
+    code default moves and the knob keeps the A/B).
+    `RealForwardRunner.prefillTileBatchDescription` = `"tiles=\(n) fitted=\(m)"`,
+    logged as `prefill_tile_batch=` on the residency line.
+
+  **Constraints this must not break.**
+  - *Expert-load discovery.* `fetchBindingForTile` (`:5011-5017`) stays exactly
+    where it is: every tile is fetched, validated (`validateCoversPairs`,
+    `:5018-5020`) and its argument buffer built (`:5025-5027`) **before** it is
+    encoded. Batching only defers `commit()`.
+  - *Slot lifetime.* A slot referenced by an encoded-but-uncommitted tile is
+    live. So `avoidingSlots` at `:5017` and the pending-slot set at `:4953`
+    both gain the open batch's `plannedAssignedSlots`, and
+    `tileLifetime.begin` (`:5021-5024`) still runs per tile while
+    `tileLifetime.complete` (`:4941-4943`) runs for every tile of the drained
+    batch. `PrefillStreamedTileSlotLifetime.begin` already throws
+    `.slotReuseBeforeCompletion` on overlap (`:158-170`) — that throw is the
+    safety net the tests pin.
+  - *Role accounting.* One `recordKernelGPU(role: "prefill_routed_tile", cb)`
+    per batch buffer. The role's millisecond sum is still the true GPU span
+    (`kernelGPUOccupancy`, `:1637-1655`); only `count` drops by the batch
+    factor, and the `prefill_routed_tile->prefill_routed_tile` transition in
+    `kernelGPUGaps` (`:1668-1686`) shrinks by the same factor — which is the
+    measurement.
+  - *`withExtendedLifetime`.* The fetch results and argument buffers of every
+    tile in a batch are held until that batch's wait returns (`:4927-4936`
+    generalized over an array), so a blob cannot be released under a committed
+    encoder.
+
+  Steps (TDD; the host policy first, so the bookkeeping is proven before any
+  command buffer moves):
+
+  - [ ] Step 1: failing tests in `PrefillRoutedTileSchedulerTests.swift`:
+        `batchOfOneReproducesTheSingleTileDecisions` (for each of the five
+        existing `decide` cases, `PrefillRoutedTileSchedulerConfig(
+        tilesPerCommandBuffer: 1)` gives the same decision);
+        `batchFillsToTheConfiguredWidth` (`tilesPerCommandBuffer: 4`,
+        `openBatchTiles: 3` → `.appendToOpenBatch`; `openBatchTiles: 4` →
+        `.commitOpenBatchThenAppend(reason: .batchFull)`);
+        `batchCommitsWhenTheNextTileNeedsAHeldSlot`
+        (`nextTileAvoidingSlotPlanAvailable: false`, `openBatchSlots: [2, 5]`
+        → `.commitOpenBatchThenAppend(reason: .slotCollision)`);
+        `slotBudgetCountsTheWholeOpenBatch`
+        (`PrefillRoutedTileSchedulerConfig(maxPendingDepth: 1, tileExperts: 8,
+        tilesPerCommandBuffer: 4).fitsSlotBudget(slotCount: 64)` true,
+        `slotCount: 32` false; `.fitting(slotCount: 32)` returns
+        `tileExperts: 4`);
+        `lastTileAlwaysCommits`. `swift test --no-parallel --filter
+        PrefillRoutedTileSchedulerTests` → FAIL: `tilesPerCommandBuffer` and
+        `batchAction` undefined.
+  - [ ] Step 2: failing test `slotLifetimeRejectsReuseInsideAnOpenBatch` in the
+        same file: `var lifetime = PrefillStreamedTileSlotLifetime();
+        try lifetime.begin(tileIndex: 0, plannedSlots: [1, 2]);
+        #expect(throws: PrefillStreamedTileLifetimeError.self) {
+            try lifetime.begin(tileIndex: 1, plannedSlots: [2, 3]) }`, then
+        `try lifetime.complete(tileIndex: 0)` and the same `begin` succeeding.
+        This is the invariant the batched drain has to keep; it fails today
+        only because `PrefillStreamedTileSlotLifetime` is not yet exercised
+        from this suite.
+  - [ ] Step 3: implement `tilesPerCommandBuffer`, the widened
+        `fitsSlotBudget`/`fitting`, and `batchAction`. Both tests PASS.
+  - [ ] Step 4: rewrite the tile loop: `PendingPrefillBatch { let tileIndices:
+        [Int]; let commandBuffer: MTLCommandBuffer; let fetches:
+        [PrefillStreamedTileFetchResult]; let argumentBuffers:
+        [PrefillStreamedTileArgumentBuffer] }`; one `ctx.queue.makeCommandBuffer()`
+        per batch instead of per tile; `encodeRoutedTileExperts`
+        (`:5109-5165`) called once per tile onto the open batch's buffer;
+        `commit()` on the batch action; `drainOldestPendingBatch` waits once,
+        records the role once, and completes every tile's lifetime entry.
+        `avoidingSlots` at `:5017` becomes
+        `Set(openBatchSlots + pendingBatches.flatMap { $0.fetches.flatMap(\.plannedAssignedSlots) })`.
+        The `while pendingTiles.count > schedulerConfig.maxPendingDepth` drain
+        (`:5053-5055`) becomes a batch-count drain, and the tail drain
+        (`:5057-5059`) flushes the open batch first.
+  - [ ] Step 5: the env knob, `prefillTileBatchDescription`, the residency line
+        field, and `PrefillRoutedTileSchedulerConfig(tilesPerCommandBuffer:)`
+        from it — clamped, and re-`fitting`ed against
+        `model.routedExpertCacheSlotCount()` at `:4867-4878` so a small
+        streamed cache shrinks the tile instead of throwing. Five gates:
+        release build 0 warnings, lint, links, `swift test --no-parallel`, the
+        same under TSAN.
+  - [ ] Step 6: same-binary A/B on the M4 Pro at 3.7k, two pairs, fresh server
+        per prompt (`--port 8082 --ram-budget 20G --thinking off`,
+        `SHRIKE_KERNEL_STATS=1 SHRIKE_RUNNER_STATS=1`):
+        `SHRIKE_PREFILL_TILE_BATCH=1` against `=4` and `=8`. Read
+        `prefill_routed_tile->prefill_routed_tile` and `busy_ms`/`span_ms` from
+        the `Shrike kernel busy_ms` line with `tools/prefill-ledger.py`. Pick
+        the width whose gap is lowest and whose `prefill_routed_tile` role ms
+        has not moved (batching must not slow the kernels); if two widths tie,
+        take the narrower. **Decision point:** if the best width leaves the
+        12k gap above 0.25 ms/token, the remaining cost is host encoding, not
+        commit+wait — record that in the verdict and stop rather than widening
+        further.
+  - [ ] Step 7: `tools/golden-baseline.sh --check 4` (M4 Pro, server stopped).
+        This step changes no arithmetic, so the expectation is **identical**;
+        a diff is a bug in the batched encode order, not a numerics change —
+        do not recapture, fix it. Commit `prefill: batch routed tiles per
+        command buffer (v12 P5)`; if a baseline did change and the cause is
+        understood and signed off, add it with `git commit --only`.
+  - [ ] Step 8: ledger on both boxes (fresh server, 3.7k + 12k,
+        `tools/prefill-measure.sh <host> <port> <promptdir> <outdir> <tag>
+        2k 6k`); mini `tools/mini-deploy.sh --restart`, mini golden
+        `--check 4` (expect identical), scp any recapture into `baselines/`.
+        Verdict line here with the gap row before → after on both boxes and
+        the `prefill_routed_tile` count; design doc: a "Follow-ons" → landed
+        entry plus ledger rows; task review by a fresh reviewer; fixes folded
+        into the commit (rebase and amend, never a fixup).
+
+---
+
+### Task 6: P6 — routed GEMM grouping
+
+- [ ] **P6: routed GEMM grouping** — target `prefill_routed_tile` 0.99 → ≤ 0.70
+  ms/prompt-token (M4 Pro, 12k; 1.04 → ≤ 0.73 at 3.7k, 1.12 → ≤ 0.79 at 25k)
+  and 3.35 → ≈ 2.35 (M1, 12k). Bar: **≥ 50 % of the 128-row expert-shape
+  ceiling** on the M4 Pro — 5.74 TFLOPS for gate/up (128×2048×1024) and 5.88
+  for down (128×512×2048), `docs/v12-prefill-matrix-kernels.md:49-50`; today
+  the role runs at ≈ 2.0 TFLOPS, 35 % (`:170-171`). The M1's same-shape
+  ceilings are 1.84 and 1.78 TFLOPS.
+
+  **What the P3 path costs.** `encodeExpertGEMMs`
+  (`PrefillGroupedRoutedMoE.swift:639-688`) loops experts and, per expert row
+  block, `encodeExpertRowBlock` (`:690-749`) issues six encoders: gather, gate
+  GEMM, up GEMM, `silu_mul_fp16`, down GEMM, scatter — and each
+  `MPPPrefillInt4QMM.encode` makes its own compute encoder
+  (`MPPPrefillInt4QMM.swift:102-126`). Eight experts per tile is 48 encoders,
+  each a full serialization point, and each GEMM's grid is only
+  `(n/32, ceil(rows/64))` = 32 threadgroups at the 128-row gate shape
+  (`tileM = 64`, `tileN = 32`, `:24-25`) against 20 GPU cores. Experts under
+  `matrixPathMinimumRows = 32` (`:447`) fall out as leftovers (`:660-666`) and
+  are re-run through the scalar microbatch path (`RealForwardRunner.swift:5119-5134`,
+  `PrefillGroupedRoutedMoE.swift:554-631`) at 32 pairs a dispatch.
+
+  **The grouping.** One dispatch per phase over *all* experts' row blocks in a
+  tile: a per-64-row-tile lookup selects the expert's packed-weight pointer
+  from the tile's argument buffer, so the M dimension of a single dispatch
+  becomes the tile's whole padded row count (≈ 1,024 rows at a 4,096-token
+  chunk, 8 experts × ~128 pairs) instead of 128. Six encoders per *wave*, not
+  per expert; no 32-pair threshold and no leftovers.
+
+  **Files:**
+  - Modify: `sources/Shrike/Metal/TensorCore/tensorops.metal:29-121` — add
+    `mpp_prefill_affine_grouped_f16` beside `mpp_prefill_affine_threadgroup_f16`
+    (identical inner loop; only the row origin and the weight pointer are
+    indirected)
+  - Modify: `sources/Shrike/Kernels/TensorCore/MPPPrefillInt4QMM.swift:24-26,
+    68-128` — `encodeGrouped(...)`, sharing the tile constants and the
+    `k.isMultiple(of: tileK)` / offset-alignment guards
+  - Modify: `sources/Shrike/Metal/Prefill/prefill.metal:649-685` — grouped
+    `prefill_routed_gather_rows_grouped` / `prefill_routed_scatter_rows_grouped`
+    (a block table replaces the single `pair_start`/`rows` param)
+  - Modify: `sources/Shrike/Kernels/Prefill/MoE/PrefillGroupedRoutedMoE.swift:30-63`
+    (`PrefillExpertPairRange` gains the block planner), `:66-99`
+    (`PrefillExpertStaging` gains the block table buffers), `:445-468`
+    (`matrixPathMinimumRows` retired for the grouped path), `:633-749`
+    (`encodeGroupedExpertGEMMs` beside the P3 pair, which stays as the
+    fallback)
+  - Modify: `sources/Shrike/Runtime/Prefill/PrefillChunkScratch.swift:121-137`
+    (staging rows sized for a whole tile, block-table bytes)
+  - Modify: `sources/Shrike/Runtime/Inference/RealForwardRunner.swift:5109-5165`
+    (`encodeRoutedTileExperts` selects grouped → per-expert → scalar)
+  - Create: `sources/ShrikeBench/RoutedGEMMBench.swift` (`routed_gemm` mode),
+    registered in `sources/ShrikeBench/ShrikeBench.swift:40-56`
+  - Test: `tests/Shrike/Core/Kernels/Prefill/PrefillGroupedRoutedMoETests+Execution.swift`
+    (the P3 fixtures at `:215-527` are the oracle)
+
+  **Interfaces:**
+  - Consumes: `PrefillStreamedTileBinding.views` / `localSlot(for:)`
+    (`PrefillGroupedRoutedMoE.swift:278-311`), the tile argument buffer
+    (`:470-485`), `PrefillGroupedRoutedMoEStreamedParams`'s
+    `gateWOff/gateSOff/gateBOff/upWOff/…/downBOff` (`:215-226`),
+    `PrefillExpertPairRange.ranges(forTile:routes:)` (`:45-63`),
+    `sortedPairs` (`:529-552`).
+  - Produces:
+
+    ```swift
+    /// One expert's contiguous slice of the staging block. `rowTileStart` is
+    /// its first 64-row tile in the wave's grid, so a threadgroup recovers its
+    /// row origin without a search.
+    struct PrefillRoutedExpertBlock: Equatable, Sendable {
+        var slot: UInt32          // index into the tile binding's views
+        var pairStart: UInt32     // first pair in sortedPairs
+        var rows: UInt32          // real pairs; the tail up to a 64 multiple is padding
+        var stagingRow: UInt32    // 64-aligned staging row
+        var rowTileStart: UInt32  // stagingRow / 64
+    }
+    /// One command-buffer wave: the blocks whose padded rows fit `stagingRows`.
+    struct PrefillRoutedExpertWave: Equatable, Sendable {
+        var blocks: [PrefillRoutedExpertBlock]
+        var paddedRows: Int       // == blocks.last.stagingRow + roundUp(rows, 64)
+    }
+    extension PrefillGroupedRoutedMoE {
+        static let groupedRowTile = MPPPrefillInt4QMM.tileM   // 64
+        /// Splits a tile's experts into waves. An expert longer than
+        /// `stagingRows` is split across waves at 64-row boundaries; an expert
+        /// with 1 pair takes one 64-row tile with 63 padded rows.
+        static func planExpertWaves(ranges: [PrefillExpertPairRange],
+                                    binding: PrefillStreamedTileBinding,
+                                    stagingRows: Int) throws -> [PrefillRoutedExpertWave]
+        /// Six dispatches per wave, whatever the expert count: grouped gather,
+        /// gate, up, silu_mul over `paddedRows × F`, down, grouped scatter.
+        func encodeGroupedExpertGEMMs(commandBuffer: MTLCommandBuffer,
+                                      mpp: MPPPrefillInt4QMM,
+                                      hidden: MTLBuffer, hiddenOffset: Int = 0,
+                                      sortedPairs: MTLBuffer, sortedPairsOffset: Int = 0,
+                                      routePartials: MTLBuffer, routePartialsOffset: Int = 0,
+                                      binding: PrefillStreamedTileBinding,
+                                      argumentBuffer: PrefillStreamedTileArgumentBuffer,
+                                      waves: [PrefillRoutedExpertWave],
+                                      staging: PrefillExpertStaging,
+                                      params: PrefillGroupedRoutedMoEStreamedParams) throws
+    }
+    extension MPPPrefillInt4QMM {
+        /// `weights` come from `experts.blob[block.slot] + weightsOffset`, so the
+        /// caller passes the tile argument buffer and calls `useResource` on every
+        /// bound view. `n`/`k` are uniform across the wave; `m` is `paddedRows`.
+        @discardableResult
+        func encodeGrouped(commandBuffer: MTLCommandBuffer,
+                           experts: MTLBuffer, expertViews: [TensorView],
+                           blocks: MTLBuffer, rowTileBlock: MTLBuffer,
+                           weightsOffset: Int, scalesOffset: Int, biasesOffset: Int,
+                           x: MTLBuffer, xOffset: Int = 0,
+                           y: MTLBuffer, yOffset: Int = 0,
+                           rowTiles: Int, paddedRows: Int, n: Int, k: Int,
+                           required: Bool = true) throws -> Path
+    }
+    ```
+
+    Metal, in `tensorops.metal` (the module is compiled on its own through
+    `MetalContext.moduleLibrary(device:module:"tensorops")`, so the blob struct
+    and the block struct are declared locally there; the argument encoder comes
+    from `mpp_prefill_affine_grouped_f16` itself, and a
+    `precondition(encoder.encodedLength == streamedArgEncoder.encodedLength)`
+    at init pins the two layouts together):
+
+    ```metal
+    struct MPPGroupedExpertBlobsMSL { device const uint8_t* blob[16]; };
+    struct MPPGroupedBlockMSL { uint slot; uint pair_start; uint rows;
+                                uint staging_row; uint row_tile_start; };
+    kernel void mpp_prefill_affine_grouped_f16(
+        device const MPPGroupedExpertBlobsMSL& experts [[buffer(0)]],
+        device const MPPGroupedBlockMSL*       blocks  [[buffer(1)]],
+        device const uint*                     rowTileBlock [[buffer(2)]],
+        device half*                           activations  [[buffer(3)]],
+        device half*                           output       [[buffer(4)]],
+        constant uint& N [[buffer(5)]], constant uint& K [[buffer(6)]],
+        constant uint& wOff [[buffer(7)]], constant uint& sOff [[buffer(8)]],
+        constant uint& bOff [[buffer(9)]], constant uint& M [[buffer(10)]],
+        uint3 tgid, uint3 lid3, uint3 threads3);
+    ```
+
+    Body: `const MPPGroupedBlockMSL b = blocks[rowTileBlock[tgid.y]];` then
+    `packedWeights = experts.blob[b.slot] + wOff`, `scales/biases` likewise;
+    the A-tensor slice origin is `int32_t(b.staging_row + (tgid.y - b.row_tile_start) * 64)`
+    over the same `dextents(K, M)` / stride `{1, K}` tensor as
+    `tensorops.metal:54-60`; the store guard at `:117` becomes
+    `globalM < b.staging_row + b.rows && globalN < N`. Everything else —
+    the `kMPPAffineTileK` group loop, the threadgroup weight tile, the fp32
+    accumulator — is byte-for-byte the existing kernel, which is why the
+    numerics move only by which threadgroup owns a row.
+
+    Grouped gather/scatter in `prefill.metal` take the same `blocks` /
+    `rowTileBlock` buffers and a `uint2 gid` of `(D, paddedRows)`; gather
+    writes `half(0)` into a padded row (`row - b.staging_row >= b.rows`) and
+    scatter skips it, so a 1-pair expert costs a 64-row tile of arithmetic and
+    writes exactly one `routePartials` row.
+
+    Scratch: `PrefillChunkScratchLayout.routedExpertStagingRows` rises from
+    `min(512, chunkTokens)` (`PrefillChunkScratch.swift:132-135`) to
+    `min(1024, chunkTokens)` so a whole 8-expert tile usually fits one wave —
+    at ornith that is 1,024×2048 + 2×1,024×512 + 1,024×2048 fp16 = 10 MB, up
+    from 5 MB. Two new shared buffers sized
+    `(stagingRows/64 + 16) * MemoryLayout<...>.stride`, rewritten in place per
+    wave (no per-tile allocation). `usesRoutedExpertMatrixPath` (`:125-129`)
+    is unchanged, so the 32-token MTP draft chunk and dense architectures
+    allocate none of it.
+
+  Steps (TDD; numerics against the path P3 already proved before any perf work):
+
+  - [ ] Step 1: failing test
+        `groupedGEMMsMatchThePerExpertPathAcrossAllExperts` in
+        `PrefillGroupedRoutedMoETests+Execution.swift`, reusing
+        `runExpertGEMMsMatchTheScalarPath`'s fixture (`:228-253`): four experts
+        with 40 / 32 / 5 / 3 pairs, `d = 64`, `f = 64`, `topK = 2`,
+        `makeSyntheticExpertPool`, `streamedViewsWithNonzeroOffsets`. Run the
+        P3 `encodeExpertGEMMs` + scalar-leftover path into one `routePartials`
+        buffer and `encodeGroupedExpertGEMMs` into another; expect
+        `RelError.maxAbsDiff ≤ 2e-2` and `RelError.compute ≤ 2e-2` over all
+        `rows * topK * d` elements, and — the point of the task —
+        `#expect(leftoverRangesFromGrouped.isEmpty)`: the 5- and 3-pair experts
+        are now inside the grouped dispatch, so their rows must be non-`-77`
+        (the sentinel the existing tests fill with, `:277-280`).
+  - [ ] Step 2: failing test `groupedWavePlannerSplitsAndPadsOnRowTiles`
+        (host-only, no GPU). With 64-row alignment the fixture's four experts
+        (40 / 32 / 5 / 3 pairs) occupy `stagingRow` 0, 64, 128, 192 for
+        `paddedRows` 256, so: `stagingRows: 512` gives one wave of four blocks;
+        `stagingRows: 128` gives two waves of two, the second restarting at
+        `stagingRow` 0; a single 600-pair expert at `stagingRows: 512` splits
+        into blocks of 512 and 88 rows with `pairStart` 0 and 512. Expect exact
+        `[PrefillRoutedExpertWave]` equality in all three cases.
+  - [ ] Step 3: failing test `groupedGEMMsMatchTheScalarPathAcrossWaves` —
+        the same fixture with `stagingRows: 128`, forcing three waves; and
+        `groupedGEMMsHandleASingleOnePairExpert` — one expert, one pair,
+        63 padded rows, compared against `encodeStreamedBatched` on the same
+        inputs at 2e-2, with the 63 padded `routePartials` rows still holding
+        the `-77` sentinel. `swift test --no-parallel --filter
+        PrefillGroupedRoutedMoETests` → FAIL: `encodeGroupedExpertGEMMs`,
+        `planExpertWaves`, `encodeGrouped` undefined.
+  - [ ] Step 4: implement `mpp_prefill_affine_grouped_f16`, the grouped
+        gather/scatter, `MPPPrefillInt4QMM.encodeGrouped` (with
+        `useResource(view.buffer, usage: .read)` for every bound view, as
+        `encodeStreamedBatched` does at `PrefillGroupedRoutedMoE.swift:593-595`),
+        `planExpertWaves`, and `encodeGroupedExpertGEMMs`. All three tests PASS.
+  - [ ] Step 5: `swift run -c release ShrikeBench routed_gemm 20` — the ornith
+        tile shape (8 experts × 128 rows, D 2048, F 512, int4 group-64): the P3
+        per-expert dispatch sequence against the grouped one, ms per tile and
+        TFLOPS for gate/up (`128×2048×1024` per expert) and down
+        (`128×512×2048`), printed against the `gemm` ceiling the same mode
+        prints. **Bar: ≥ 50 % of 5.74 / 5.88 TFLOPS on the M4 Pro.** If short,
+        the knobs in order are (a) `stagingRows` 1024 → 2048 so the whole tile
+        is one wave, (b) `tileN` 32 → 64 for the `n = 2048` down GEMM only —
+        measured, not assumed. If neither clears 50 %, record the achieved
+        share and land it anyway if it beats 35 %; say so in the verdict.
+  - [ ] Step 6: wire `encodeRoutedTileExperts` (`RealForwardRunner.swift:5109-5165`):
+        grouped when `scratch.layout.usesRoutedExpertMatrixPath` and
+        `prefillGroupedMoE.matrixPath(for:d:intermediate:)` returns an `mpp`
+        (`PrefillGroupedRoutedMoE.swift:456-468`); the P3 per-expert path stays
+        behind `SHRIKE_PREFILL_ROUTED_GEMM=per-expert` for the same-binary A/B;
+        the whole-tile scalar path stays as the last fallback exactly as at
+        `:5139-5146`. Five gates: release build 0 warnings, lint, links,
+        `swift test --no-parallel`, the same under TSAN.
+  - [ ] Step 7: `tools/golden-baseline.sh --check 4` (M4 Pro, server stopped) —
+        expected to differ (the row's reduction is unchanged but its owning
+        threadgroup is not, and the 1–31-pair experts move from the scalar
+        GEMV to the GEMM); recapture, record the before/after greedy digests,
+        and commit `prefill: grouped routed-expert GEMMs (v12 P6)` with the
+        baseline via `git commit --only`.
+  - [ ] Step 8: ledger on both boxes (fresh server, 3.7k + 12k + 25k on the
+        M4 Pro, 3.7k + 12k on the mini, `tools/prefill-measure.sh`); mini
+        `tools/mini-deploy.sh --restart`, mini golden recapture, scp into
+        `baselines/`. Verdict line with `prefill_routed_tile` before → after on
+        both boxes and the achieved share of the 128-row expert-shape ceiling;
+        design doc: the "Follow-ons" entry becomes a landed step with its
+        ledger rows and the routed row of "Where the time goes"; task review by
+        a fresh reviewer; fixes folded into the commit.
+
+---
+
+### Task 7: P7 — attention KV-tile staging per KV-head group
+
+- [ ] **P7: attention KV-tile staging per KV-head group** — target
+  `prefill_attn_router` 0.45 → ≤ 0.32 ms/prompt-token (M4 Pro, 12k) and
+  0.80 → ≤ 0.58 at 25k; 2.41 → ≈ 1.75 (M1, 12k). Bar: **≥ 50 % of the M4 Pro's
+  measured attention ceiling**, computed as the design does at
+  `docs/v12-prefill-matrix-kernels.md:174-176` — 12.4 TFLOP of scores and
+  values at 12k, 52.2 at 25k, against the 7.46 TFLOPS `4096³` figure; the
+  shipped kernel sits at ≈ 36 % (2.6–2.7 TFLOPS), the M1 at ≈ 26 %.
+
+  **What P2 left.** `attention_prefill_causal_matrix_r32s4`
+  (`attention_matrix.metal:42-210`, instantiated at `:232`) gives one
+  threadgroup 32 query rows of **one** query head (`qh = tg.y`, `:72`) and
+  reads its K/V tiles straight out of the device fp16 shadow (`:89-96`,
+  `:112`, `:177`) — no threadgroup staging at all. With 16 query heads over 2
+  KV heads the same 64-key × 256 shadow tile is fetched by eight threadgroups
+  (`PrefillAttention.swift:331-336` dispatches
+  `(ceil(queryCount/32), numQHeads)`), and the matmul's M is only 32.
+
+  **The change.** A threadgroup owns `Rq` query positions × all **eight**
+  query heads of one KV head — `8·Rq` matmul rows — stages the key tile once
+  into threadgroup memory, runs one `matmul2d` QKᵀ against it, then reloads
+  the same threadgroup buffer with the value tile and runs one `matmul2d` PV.
+  Device K/V traffic per (query, head) pair drops by `8·Rq / 32`, and the
+  matmul's M rises from 32 to `8·Rq`.
+
+  **The 32 KB budget, stated plainly.** A 64-key × 256 fp16 tile is exactly
+  32,768 bytes — the whole threadgroup allocation, with nothing left for the
+  score tile. That is why P2 put the shadow in device memory
+  (`attention_matrix.metal:5-8`). Three ways to fit, and the spike picks one:
+
+  | variant | rows `8·Rq` | keys S | staged tile (K, then V, one buffer) | score tile fp32 | threadgroup | O accum. bytes/thread |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | `g4k32` (Rq 4, 4 simdgroups, 128 threads) | 32 | 32 | 32×256×2 = 16 KB | 32×32×4 = 4 KB | 20 KB | 256 (64 regs) |
+  | `g8k32` (Rq 8, 8 simdgroups, 256 threads) | 64 | 32 | 16 KB | 64×32×4 = 8 KB | 24 KB | 256 (64 regs) |
+  | `g8k64` (Rq 8, 8 sg) | 64 | 64 | 64×128×2 = 16 KB, head-dim in two halves, QKᵀ accumulated over two `matmul2d` runs | 64×64×4 = 16 KB | 32 KB | 256 (64 regs) |
+  | `g16k32` (Rq 16, 8 sg) | 128 | 32 | 16 KB | 128×32×4 = 16 KB | 32 KB | 512 (128 regs) |
+
+  Staging **K then V through the same 16 KB buffer**, separated by a barrier,
+  is what keeps every variant inside 32 KB; `g8k64` additionally splits the
+  head dim into two 128-wide halves. The full eightfold traffic cut would need
+  `Rq = 32` (256 rows), whose fp32 output accumulators are 256 KB — beyond the
+  register file — so the honest modelled cut is 2× (`g8k32`) to 4× (`g16k32`);
+  the rest of the gain is the wider matmul M. Say that in the verdict rather
+  than claiming 8×.
+
+  **Q must become a uniform-stride operand.** P2's note that "the eight heads'
+  Q rows are not a single uniform-stride matrix" (`:179-181`) is true of the
+  live layout: a row is `Q + q·qTokenStrideElements + h·headDim`, and
+  `qTokenStrideElements` is 4096 while a head is 256. So P7 adds a pack pass,
+  the exact twin of `attention_prefill_kv_dequant` (`:26-40`): write
+  `qGroup[((kvh · queryCount) + q) · 8 + hLocal][256]`, a matrix of row stride
+  256 in which the eight heads of a KV group and the query positions interleave
+  on one axis. One read plus one write of `queryCount × numQHeads × headDim`
+  fp16 per layer — 33.5 MB at a 4,096-token chunk, ≈ 0.3 ms on the M4 Pro,
+  ≈ 0.0001 ms/prompt-token — bought back many times over by the single
+  `8·Rq`-row matmul.
+
+  **Files:**
+  - Modify: `sources/Shrike/Metal/Prefill/attention_matrix.metal:26-40` (add
+    `attention_prefill_q_group_pack`), `:42-210` (a second body template
+    `attention_prefill_causal_group_matrix_body<Rq, S, SG>` beside the shipped
+    one, which stays untouched), `:212-235` (a second macro and the four
+    instantiations `g4k32`, `g8k32`, `g8k64`, `g16k32`)
+  - Modify: `sources/Shrike/Kernels/Attention/PrefillAttention.swift:84-95`
+    (`matrixTile` becomes a variant enum), `:96-131` (pipeline names, the pack
+    pipeline), `:283-295` (`matrixPathAccepts` gains
+    `numQHeads / numKVHeads == 8`), `:297-338` (`encodeMatrix`: pack dispatch,
+    grouped dispatch geometry), `:340-355` (`ensureQGroup` beside
+    `ensureShadow`)
+  - Test: `tests/Shrike/Core/Kernels/Attention/PrefillAttentionMatrixTests.swift`
+    (`:15-124` are the oracle: `PrefillAttentionRef.apply` on fp16, the
+    `KVCacheManager`/`KVCacheQuantizer` int8/int4 cases, the gate cases)
+  - `sources/Shrike/Infrastructure/Metal/MetalContext.swift:89-106` needs no
+    change: `"attention_matrix"` is already registered after `"prefill"`
+    (`:101-102`), which is what gives the new kernels `PrefillAttentionParams`.
+
+  **Interfaces:**
+  - Consumes: `PrefillAttentionParams` unchanged
+    (`PrefillAttention.swift:4-52`), the device fp16 shadow from
+    `attention_prefill_kv_dequant`, `PrefillAttentionRef.apply(_:) -> [Float]`
+    and `PrefillAttentionRef.Inputs`, `RelError`, `Fp16Buffer`,
+    `KVCacheQuantizer.encode`.
+  - Produces:
+
+    ```swift
+    extension PrefillAttention {
+        enum MatrixTile: String, Sendable {
+            case r32s4, r64s8          // P2, one query head per threadgroup
+            case g4k32, g8k32, g8k64, g16k32   // P7, one KV-head group per threadgroup
+            var kernelName: String     // "attention_prefill_causal_matrix_<rawValue>"
+            var groupsEightHeads: Bool { self != .r32s4 && self != .r64s8 }
+            var queryRows: Int         // r32s4 32, r64s8 64, g4k32 4, g8k32 8, g8k64 8, g16k32 16
+            var threadsPerThreadgroup: Int  // 32 * simdgroups
+        }
+        /// `SHRIKE_ATTN_MATRIX_TILE` names the variant; anything unrecognised
+        /// keeps the measured production choice.
+        static let matrixTile: MatrixTile
+        /// Group-major Q, `[numKVHeads][queryCount * 8][headDim]`, row stride
+        /// `headDim`. Chunk-sized, not context-sized: it never grows past
+        /// `prefillChunkTokens * numQHeads * headDim` halves (33.5 MB at 4,096
+        /// tokens). Grown in 8 MiB quanta and never released, like the shadow.
+        private func ensureQGroup(bytes: Int) throws -> MTLBuffer
+    }
+    ```
+
+    Metal:
+
+    ```metal
+    kernel void attention_prefill_q_group_pack(
+        device const half* Q [[buffer(0)]],
+        device half* qGroup   [[buffer(1)]],
+        constant PrefillAttentionParams& p [[buffer(2)]],
+        uint3 gid [[thread_position_in_grid]]);   // (headDim, numQHeads, queryCount)
+    // qGroup[((gid.y / 8) * p.queryCount + gid.z) * 8 * p.headDim
+    //        + (gid.y % 8) * p.headDim + gid.x]
+    //   = Q[gid.z * p.qTokenStrideElements + gid.y * p.headDim + gid.x];
+    ```
+
+    and, per key tile inside
+    `attention_prefill_causal_group_matrix_<variant>`: cooperative load of
+    `S × headDim` (or `S × headDim/2`) halves of `shadowK` into
+    `threadgroup half kv_tile[...]`; `matmul2d_descriptor(8*Rq, S, headDim,
+    false, true, false)` with the left operand the device `qGroup` slice at row
+    `(kvh · queryCount + q0) · 8` and the right operand `kv_tile`; the causal
+    bound for row `r` is `min(kvValidCount, startPosition + q0 + r / 8 + 1)`
+    (the eight heads of one query share it); the existing lane-parallel online
+    softmax (`attention_matrix.metal:127-174`) is reused verbatim with
+    `R → 8·Rq`; barrier; reload `kv_tile` from `shadowV`; barrier;
+    `matmul2d_descriptor(8*Rq, headDim, S, false, false, false)` for PV; the
+    store maps row `r` back to
+    `O[(q0 + r/8) * oTokenStrideElements + (kvh * 8 + r % 8) * headDim + d]`.
+
+    Dispatch (`PrefillAttention.swift:331-336`) becomes
+    `MTLSize(width: ceil(queryCount / Rq), height: numKVHeads, depth: 1)` with
+    `threadsPerThreadgroup = tile.threadsPerThreadgroup`, preceded by the pack
+    dispatch `dispatchThreads((headDim, numQHeads, queryCount), (256, 1, 1))`
+    on the same encoder as the dequant, so P7 adds no command buffer and no
+    encoder — one more dispatch inside the encoder P2 already opens at `:310`.
+
+    Memory: `ensureQGroup` adds 32 MiB at the mini's 4,096-token chunk (64 MiB
+    with the MTP draft runner's own instance), independent of context length —
+    unlike the KV shadow, which the design bounds at `:276-282`. Record the
+    `memory_pressure -Q` free-percentage span on the mini at 25k in the verdict,
+    as P2 did.
+
+  Steps (TDD; correctness on the reference before any geometry hunting):
+
+  - [ ] Step 1: failing test `qGroupPackMatchesStridedQuery` in
+        `PrefillAttentionMatrixTests.swift`: `makeFixture(start: 512, chunk: 64,
+        seed: 0xB130)` (whose `qStride` is `qHeads * headDim + 3`, `:127`),
+        a non-zero `qOffset`, run the pack kernel alone, read back and
+        `#expect(qGroup[((kvh * chunk + q) * 8 + hLocal) * 256 + d]
+        == fixture.q[q * qStride + (kvh * 8 + hLocal) * 256 + d])` as exact
+        fp16 bit equality over all 16 heads (a copy must not round). FAIL:
+        `attention_prefill_q_group_pack` undefined.
+  - [ ] Step 2: failing test
+        `groupMatrixMatchesReferenceOnFP16Cache(c:)` — the three existing
+        arguments `(single-tile, 0, 64)`, `(ragged-rows-three-key-tiles, 0,
+        130)`, `(history-ragged-tail, 600, 40)` (`:15-19`) run through
+        `Self.runFP16(..., path: .causalMatrix)` with
+        `SHRIKE_ATTN_MATRIX_TILE` forced to the group variant, compared to
+        `PrefillAttentionRef.apply(fixture)` at `Self.tolerance` (2e-2) on both
+        `RelError.maxAbsDiff` and `RelError.compute`; and
+        `groupMatrixMatchesTiledOnQuantizedCache(c:)` — the five existing
+        int8/int4 arguments (`:32-37`) against `path: .causalTiled` on the same
+        `KVCacheManager` views, same tolerance. Because `matrixTile` is read
+        once from the environment (`:87-89`), add
+        `PrefillAttention(context:supportsMLA:matrixTile:)` with the static as
+        its default so the tests can pin a variant without a process-wide env
+        var. FAIL: the group kernels do not exist.
+  - [ ] Step 3: failing test `groupTileGateRequiresEightHeadsPerKVHead`:
+        `matrixPathAccepts` false for a params with `numQHeads = 16,
+        numKVHeads = 4`, still true for 16/2; and
+        `rejectedShapeRunsTheTiledKernelEndToEnd` (`:87-96`) re-run with the
+        group variant pinned, expecting byte equality with `.causalTiled`.
+  - [ ] Step 4: implement `attention_prefill_q_group_pack`,
+        `attention_prefill_causal_group_matrix_body<Rq, S, SG>` and the four
+        instantiations, `ensureQGroup`, the `MatrixTile` enum, the gate clause
+        and the dispatch. `static_assert` the threadgroup arithmetic in the
+        body exactly as the shipped one does (`:56-58`) plus
+        `static_assert(S * kAttnMatrixHeadDim * 2 + 8 * Rq * S * 4 <= 32768)`.
+        `swift test --no-parallel --filter PrefillAttentionMatrixTests` → PASS
+        for every variant.
+  - [ ] Step 5 (spike, on the ledger — there is no `attn` bench mode in
+        `sources/ShrikeBench/`, and P2's own geometry was settled this way):
+        one M4 Pro server per variant, fresh each time, `--port 8082
+        --ram-budget 20G --thinking off`, `SHRIKE_KERNEL_STATS=1
+        SHRIKE_RUNNER_STATS=1`, the 12k prompt sent once, `SHRIKE_ATTN_MATRIX_TILE`
+        ∈ {`r32s4` (control), `g4k32`, `g8k32`, `g8k64`, `g16k32`}. Record
+        `prefill_attn_router` ms/prompt-token and the derived TFLOPS
+        (`12.4e3 / role_ms` at 12k) for each. **Accept the first variant at
+        ≥ 50 % of 7.46 TFLOPS** (`prefill_attn_router` ≤ 0.32 ms/token at 12k);
+        if none reaches it, take the best above the shipped 36 % and record the
+        table plus the achieved share as the verdict. Verdict line: the
+        candidate table.
+  - [ ] Step 6: make the winner the default `matrixTile`, keep every variant
+        selectable by `SHRIKE_ATTN_MATRIX_TILE` (including `r32s4`/`r64s8` and
+        `SHRIKE_PREFILL_ATTENTION=tiled` for the scalar kernel), extend
+        `prefillAttentionPathDescription` (`RealForwardRunner.swift:189-196`)
+        with `tile=<rawValue>` so the residency line records which geometry
+        ran. Five gates: release build 0 warnings, lint, links,
+        `swift test --no-parallel`, the same under TSAN.
+  - [ ] Step 7: `tools/golden-baseline.sh --check 4` (M4 Pro, server stopped) —
+        expected to differ (the PV reduction order changes with the tile
+        geometry); recapture, record the before/after greedy digests, and
+        commit `prefill: KV-head-group attention tiles on the matrix path
+        (v12 P7)` with the baseline via `git commit --only`.
+  - [ ] Step 8: ledger on both boxes (fresh server, 3.7k + 12k + 25k on the
+        M4 Pro, 3.7k + 12k on the mini, `tools/prefill-measure.sh`); the mini
+        memory check at 25k (`memory_pressure -Q` free span, server RSS) as P2
+        recorded; mini `tools/mini-deploy.sh --restart`, mini golden recapture,
+        scp into `baselines/`. Verdict line with `prefill_attn_router` before →
+        after at 12k and 25k on both boxes, the achieved share of the ceiling,
+        and the modelled-vs-measured traffic cut; design doc: the "Follow-ons"
+        entry becomes a landed step with its ledger rows and the attention
+        paragraph at `:174-183` updated; task review by a fresh reviewer; fixes
+        folded into the commit.
+
 ## Follow-ons (not scheduled)
 
-- Tile command-buffer batching (the ~1.3 ms per tile boundary), once P3 lands.
-- The mini's SSD term (v10 P3 follow-on: batched miss loads, deeper queue depth),
-  once P2 exposes it.
-- The `expert_hit_rate_prefill` counter that reads 8–14 % with every expert
+- The mini's SSD term (v10 P3 follow-on: batched miss loads, deeper queue
+  depth) — also the second lever for speculative decode's verify pass
+  (measured at P4 on the mini: 6.6 tok/s against 25.5 plain; see the design's
+  out-of-scope note).
+- Speculative decode's acceptance rate: 25.9 % on the counting rig prompt at
+  P4 — audit the draft/verify path before any kernel work on that track.
+- The `expert_hit_rate_prefill` counter that reads 0–14 % with every expert
   resident.
