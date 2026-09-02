@@ -12,6 +12,7 @@ public enum PrefillRoutedGEMMBenchmark {
         public let groupedWaves: Int
         public let perExpertMillisPerTile: Double
         public let groupedMillisPerTile: Double
+        public let variant: String
         public var gflopPerTile: Double {
             Double(experts) * 6.0 * Double(rowsPerExpert) * Double(d) * Double(f) / 1.0e9
         }
@@ -142,7 +143,8 @@ public enum PrefillRoutedGEMMBenchmark {
                       stagingRows: stagingRows,
                       groupedWaves: waves.count,
                       perExpertMillisPerTile: perExpert,
-                      groupedMillisPerTile: groupedMillis)
+                      groupedMillisPerTile: groupedMillis,
+                      variant: mpp.variant.rawValue)
     }
 
     /// Gate, up and down per expert, each as packed int4 rows then bf16 group

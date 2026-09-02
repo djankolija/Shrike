@@ -204,6 +204,106 @@ private let mppTensorOpsAvailable: Bool = {
         return path
     }
 
+    private static let variantShapes: [(m: Int, n: Int, k: Int)] = [
+        (m: 64, n: 32, k: 128),
+        (m: 33, n: 512, k: 2048),
+        (m: 128, n: 2048, k: 512),
+    ]
+
+    private static func runPair(context: MetalContext,
+                                first: MPPPrefillInt4QMM,
+                                second: MPPPrefillInt4QMM,
+                                m: Int,
+                                n: Int,
+                                k: Int) throws -> (first: [Float16], second: [Float16]) {
+        let inputs = makeInputs(m: m, n: n, k: k)
+        guard let weights = makeBuffer(device: context.device, values: inputs.packed),
+              let scales = makeBuffer(device: context.device, values: inputs.scales),
+              let biases = makeBuffer(device: context.device, values: inputs.biases),
+              let input = Fp16Buffer.make(context.device, halves: inputs.x),
+              let firstOutput = Fp16Buffer.make(context.device, count: m * n),
+              let secondOutput = Fp16Buffer.make(context.device, count: m * n),
+              let commandBuffer = context.queue.makeCommandBuffer() else {
+            Issue.record("buffer allocation failed")
+            throw CocoaError(.fileReadUnknown)
+        }
+        let firstPath = try first.encode(commandBuffer: commandBuffer,
+                                         weights: weights, scales: scales, biases: biases,
+                                         x: input, y: firstOutput,
+                                         m: m, n: n, k: k, required: true)
+        let secondPath = try second.encode(commandBuffer: commandBuffer,
+                                           weights: weights, scales: scales, biases: biases,
+                                           x: input, y: secondOutput,
+                                           m: m, n: n, k: k, required: true)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        #expect(commandBuffer.error == nil)
+        #expect(firstPath == .affineThreadgroupF16 && secondPath == .affineThreadgroupF16)
+        return (Fp16Buffer.readHalf(firstOutput, count: m * n),
+                Fp16Buffer.readHalf(secondOutput, count: m * n))
+    }
+
+    @Test(.enabled(if: mppTensorOpsAvailable,
+                   "Requires runtime MPP TensorOps support"))
+    func doubleBufferedDequantIsBitIdenticalToTheSingleBuffered() throws {
+        let context = try MetalContext()
+        let single = MPPPrefillInt4QMM(context: context, variant: .n32b1)
+        let double = MPPPrefillInt4QMM(context: context, variant: .n32b2)
+        #expect(double.isAvailable, "n32b2 pipeline unavailable")
+        for shape in Self.variantShapes {
+            let outputs = try Self.runPair(context: context, first: single, second: double,
+                                           m: shape.m, n: shape.n, k: shape.k)
+            let finite = outputs.second.allSatisfy(\.isFinite)
+            #expect(finite, "shape \(shape) produced a non-finite output")
+            let firstMismatch = zip(outputs.first, outputs.second).enumerated()
+                .first { $0.element.0 != $0.element.1 }?.offset
+            #expect(firstMismatch == nil,
+                    "shape M=\(shape.m) N=\(shape.n) K=\(shape.k) first mismatch=\(firstMismatch ?? -1)")
+        }
+    }
+
+    @Test(.enabled(if: mppTensorOpsAvailable,
+                   "Requires runtime MPP TensorOps support"),
+          arguments: [MPPPrefillInt4QMM.TileVariant.n64b1, .n64b2])
+    func wideNTileMatchesTheNarrowTile(variant: MPPPrefillInt4QMM.TileVariant) throws {
+        let context = try MetalContext()
+        let narrow = MPPPrefillInt4QMM(context: context, variant: .n32b1)
+        let wide = MPPPrefillInt4QMM(context: context, variant: variant)
+        let baseline = try PrefillInt4QMM(context: context)
+        #expect(wide.isAvailable, "\(variant) pipeline unavailable")
+        for shape in Self.variantShapes {
+            try Self.runShape(context: context, candidate: wide, baseline: baseline,
+                              m: shape.m, n: shape.n, k: shape.k, compareCPUReference: true)
+            let outputs = try Self.runPair(context: context, first: narrow, second: wide,
+                                           m: shape.m, n: shape.n, k: shape.k)
+            let actual = outputs.second.map(Float.init)
+            let reference = outputs.first.map(Float.init)
+            let finite = actual.allSatisfy(\.isFinite)
+            #expect(finite, "\(variant) shape \(shape) produced a non-finite output")
+            let firstMismatch = zip(outputs.first, outputs.second).enumerated()
+                .first { $0.element.0 != $0.element.1 }?.offset
+            #expect(firstMismatch == nil,
+                    "\(variant) M=\(shape.m) N=\(shape.n) K=\(shape.k) first mismatch=\(firstMismatch ?? -1)")
+            let maxAbs = RelError.maxAbsDiff(actual, reference)
+            let rel = RelError.compute(actual: actual, reference: reference)
+            #expect(maxAbs <= 2e-2, "\(variant) M=\(shape.m) N=\(shape.n) K=\(shape.k) maxAbs=\(maxAbs) rel=\(rel)")
+            #expect(rel <= 2e-2, "\(variant) M=\(shape.m) N=\(shape.n) K=\(shape.k) rel=\(rel) maxAbs=\(maxAbs)")
+        }
+    }
+
+    @Test func tileVariantsParseTheirEnvironmentNames() {
+        #expect(MPPPrefillInt4QMM.TileVariant(tileN: "64", buffers: "2", fallback: .n32b1) == .n64b2)
+        #expect(MPPPrefillInt4QMM.TileVariant(tileN: nil, buffers: "2", fallback: .n32b1) == .n32b2)
+        #expect(MPPPrefillInt4QMM.TileVariant(tileN: "64", buffers: nil, fallback: .n32b1) == .n64b1)
+        #expect(MPPPrefillInt4QMM.TileVariant(tileN: "48", buffers: "2", fallback: .n32b1) == nil)
+        #expect(MPPPrefillInt4QMM.TileVariant(tileN: "32", buffers: "3", fallback: .n32b1) == nil)
+        #expect(MPPPrefillInt4QMM.TileVariant.n32b1.kernelName == "mpp_prefill_affine_threadgroup_f16")
+        #expect(MPPPrefillInt4QMM.TileVariant.n32b1.groupedKernelName == "mpp_prefill_affine_grouped_f16")
+        #expect(MPPPrefillInt4QMM.TileVariant.n64b2.kernelName == "mpp_prefill_affine_threadgroup_f16_n64b2")
+        #expect(MPPPrefillInt4QMM.TileVariant.n64b2.groupedKernelName == "mpp_prefill_affine_grouped_f16_n64b2")
+        #expect(MPPPrefillInt4QMM.TileVariant.n64b1.tileN == 64 && MPPPrefillInt4QMM.TileVariant.n64b1.dequantBuffers == 1)
+    }
+
     @Test(.enabled(if: mppTensorOpsAvailable,
                    "Requires runtime MPP TensorOps support"))
     func affineThreadgroupCandidateMatchesFP32AffineReference() throws {

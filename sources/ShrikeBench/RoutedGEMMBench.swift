@@ -12,7 +12,7 @@ extension ShrikeBench {
                 + "d=\(result.d) f=\(result.f) gflop_per_tile=\(String(format: "%.3f", result.gflopPerTile)) "
                 + "per_tile_ms=\(String(format: "%.4f", result.perExpertMillisPerTile)) "
                 + "achieved_tflops=\(String(format: "%.3f", result.perExpertTFLOPS))")
-            print("kernel=routed_gemm_grouped staging_rows=\(result.stagingRows) waves=\(result.groupedWaves) "
+            print("kernel=routed_gemm_grouped variant=\(result.variant) staging_rows=\(result.stagingRows) waves=\(result.groupedWaves) "
                 + "per_tile_ms=\(String(format: "%.4f", result.groupedMillisPerTile)) "
                 + "achieved_tflops=\(String(format: "%.3f", result.groupedTFLOPS)) "
                 + "speedup=\(String(format: "%.2f", result.perExpertMillisPerTile / result.groupedMillisPerTile))x")

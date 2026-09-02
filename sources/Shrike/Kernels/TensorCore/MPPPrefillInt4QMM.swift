@@ -23,8 +23,17 @@ final class MPPPrefillInt4QMM {
     }
 
     static let tileM = 64
-    static let tileN = 32
     static let tileK = Quantization.groupSize
+    /// `SHRIKE_MPP_TILE_N` (32|64) and `SHRIKE_MPP_DEQUANT_BUFFERS` (1|2) name
+    /// the variant; anything unrecognised keeps the measured choice.
+    static let tileVariant: TileVariant = {
+        let environment = ProcessInfo.processInfo.environment
+        return TileVariant(tileN: environment["SHRIKE_MPP_TILE_N"],
+                           buffers: environment["SHRIKE_MPP_DEQUANT_BUFFERS"],
+                           fallback: .n32b1) ?? .n32b1
+    }()
+    let variant: TileVariant
+    var tileN: Int { variant.tileN }
     /// A wave is at most 2,048 staging rows, twice the runtime's staging block.
     static let groupedMaxRowTiles = 32
 
@@ -42,9 +51,11 @@ final class MPPPrefillInt4QMM {
     /// reusing this instance for another tensor must match it.
     let weightBits: Int
 
-    init(context: MetalContext, weightBits: Int = 4) {
+    init(context: MetalContext, weightBits: Int = 4,
+         variant: TileVariant = MPPPrefillInt4QMM.tileVariant) {
         precondition([4, 8].contains(weightBits))
         self.weightBits = weightBits
+        self.variant = variant
         let constants = MTLFunctionConstantValues()
         var bits = UInt32(weightBits)
         constants.setConstantValue(&bits, type: .uint, index: 78)
@@ -52,7 +63,7 @@ final class MPPPrefillInt4QMM {
         do {
             library = try Self.compileTensorOpsLibrary(device: context.device)
             let function = try library!.makeFunction(
-                name: "mpp_prefill_affine_threadgroup_f16",
+                name: variant.kernelName,
                 constantValues: constants)
             self.pipeline = try context.device.makeComputePipelineState(function: function)
             self.unavailableReason = ""
@@ -68,7 +79,7 @@ final class MPPPrefillInt4QMM {
                 throw MPPPrefillInt4QMMError.pipelineUnavailable(reason: unavailableReason)
             }
             let function = try library.makeFunction(
-                name: "mpp_prefill_affine_grouped_f16",
+                name: variant.groupedKernelName,
                 constantValues: constants)
             self.groupedPipeline = try context.device.makeComputePipelineState(function: function)
             self.groupedArgumentEncodedLength = function.makeArgumentEncoder(bufferIndex: 0).encodedLength
@@ -145,7 +156,7 @@ final class MPPPrefillInt4QMM {
         encoder.setBytes(&nValue, length: MemoryLayout<UInt32>.size, index: 6)
         encoder.setBytes(&kValue, length: MemoryLayout<UInt32>.size, index: 7)
         encoder.dispatchThreadgroups(
-            MTLSize(width: (n + Self.tileN - 1) / Self.tileN,
+            MTLSize(width: (n + tileN - 1) / tileN,
                     height: (m + Self.tileM - 1) / Self.tileM,
                     depth: 1),
             threadsPerThreadgroup: MTLSize(width: pipeline.threadExecutionWidth * 4,
@@ -247,7 +258,7 @@ final class MPPPrefillInt4QMM {
             encoder.useResource(view.buffer, usage: .read)
         }
         encoder.dispatchThreadgroups(
-            MTLSize(width: (n + Self.tileN - 1) / Self.tileN,
+            MTLSize(width: (n + tileN - 1) / tileN,
                     height: rowTiles,
                     depth: 1),
             threadsPerThreadgroup: MTLSize(width: groupedPipeline.threadExecutionWidth * 4,
@@ -259,5 +270,58 @@ final class MPPPrefillInt4QMM {
 
     private static func compileTensorOpsLibrary(device: MTLDevice) throws -> MTLLibrary {
         try MetalContext.moduleLibrary(device: device, module: "tensorops")
+    }
+}
+
+extension MPPPrefillInt4QMM {
+    /// `n<tileN>b<buffers>`: the N width of one weight tile and how many
+    /// weight tiles the threadgroup alternates between. `n32b1` is the
+    /// kernel P6 shipped and keeps its bare names; the numbers restate the
+    /// Metal instantiations' template arguments.
+    enum TileVariant: String, CaseIterable, Sendable {
+        case n32b1, n32b2, n64b1, n64b2
+
+        var tileN: Int {
+            switch self {
+            case .n32b1, .n32b2: 32
+            case .n64b1, .n64b2: 64
+            }
+        }
+        var dequantBuffers: Int {
+            switch self {
+            case .n32b1, .n64b1: 1
+            case .n32b2, .n64b2: 2
+            }
+        }
+        var kernelName: String {
+            self == .n32b1
+                ? "mpp_prefill_affine_threadgroup_f16"
+                : "mpp_prefill_affine_threadgroup_f16_\(rawValue)"
+        }
+        var groupedKernelName: String {
+            self == .n32b1
+                ? "mpp_prefill_affine_grouped_f16"
+                : "mpp_prefill_affine_grouped_f16_\(rawValue)"
+        }
+
+        /// A missing value takes the fallback's; an unrecognised one rejects
+        /// the whole selection so a typo cannot pick a variant by accident.
+        init?(tileN: String?, buffers: String?, fallback: TileVariant) {
+            let width: Int
+            switch tileN {
+            case nil: width = fallback.tileN
+            case "32"?: width = 32
+            case "64"?: width = 64
+            default: return nil
+            }
+            let count: Int
+            switch buffers {
+            case nil: count = fallback.dequantBuffers
+            case "1"?: count = 1
+            case "2"?: count = 2
+            default: return nil
+            }
+            self.init(rawValue: "n\(width)b\(count)")
+        }
     }
 }

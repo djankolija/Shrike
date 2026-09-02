@@ -181,12 +181,9 @@ import ShrikeValidationSupport
         #expect(got == ref)
     }
 
-    @Test func chunkSharedExpertMatchesRowLoop() throws {
-        try Self.runChunkSharedExpertMatchesRowLoop(rows: 64)
-    }
-
-    @Test func chunkSharedExpertMatchesRowLoopOnAPartialTile() throws {
-        try Self.runChunkSharedExpertMatchesRowLoop(rows: 33)
+    @Test(arguments: [64, 33], MPPPrefillInt4QMM.TileVariant.allCases)
+    func chunkSharedExpertMatchesRowLoop(rows: Int, variant: MPPPrefillInt4QMM.TileVariant) throws {
+        try Self.runChunkSharedExpertMatchesRowLoop(rows: rows, variant: variant)
     }
 
     @Test func chunkSharedExpertRejectsShortChunks() throws {
@@ -362,12 +359,13 @@ import ShrikeValidationSupport
         #expect(rel <= 2e-2)
     }
 
-    private static func runChunkSharedExpertMatchesRowLoop(rows: Int) throws {
+    private static func runChunkSharedExpertMatchesRowLoop(rows: Int,
+                                                           variant: MPPPrefillInt4QMM.TileVariant) throws {
         var rng = SeedTree(0xC0FFEE).key("prefill-shared-expert-chunk-\(rows)")
         let ctx = try MetalContext()
         let prefill = try PrefillSharedExpert(context: ctx, weightBits: 4, siluActivation: true)
-        let mpp = MPPPrefillInt4QMM(context: ctx, weightBits: 4)
-        #expect(mpp.isAvailable, "Requires runtime MPP TensorOps support")
+        let mpp = MPPPrefillInt4QMM(context: ctx, weightBits: 4, variant: variant)
+        #expect(mpp.isAvailable, "Requires runtime MPP TensorOps support (\(variant))")
         let d = chunkD
         let f = chunkF
 

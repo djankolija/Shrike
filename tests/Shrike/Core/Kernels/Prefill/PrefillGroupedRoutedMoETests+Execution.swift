@@ -245,7 +245,8 @@ extension PrefillGroupedRoutedMoETests {
 
     var partialElements: Int { rows * topK * d }
 
-    init?(siluActivation: Bool) throws {
+    init?(siluActivation: Bool,
+          variant: MPPPrefillInt4QMM.TileVariant = MPPPrefillInt4QMM.tileVariant) throws {
       var pairs: [PrefillTokenExpertPair] = []
       for token in 0..<40 {
         pairs.append(PrefillGroupedRoutedMoETests.pair(token: UInt32(token), expert: 0, rank: 0))
@@ -269,7 +270,7 @@ extension PrefillGroupedRoutedMoETests {
       let hidden = (0..<(rows * d)).map { i in Float16(Float((i % 17) - 8)) }
 
       ctx = try MetalContext()
-      mpp = MPPPrefillInt4QMM(context: ctx, weightBits: 4)
+      mpp = MPPPrefillInt4QMM(context: ctx, weightBits: 4, variant: variant)
       guard mpp.isAvailable else {
         Issue.record("""
           MPP prefill QMM pipeline unavailable; the GEMM path would silently \
@@ -434,8 +435,9 @@ extension PrefillGroupedRoutedMoETests {
             "token 0 rides expert 0 at rank 0 and expert 1 at rank 1: two distinct pair rows")
   }
 
-  @Test func groupedGEMMsMatchThePerExpertPathAcrossAllExperts() throws {
-    guard let fixture = try FourExpertTile(siluActivation: true) else { return }
+  @Test(arguments: MPPPrefillInt4QMM.TileVariant.allCases)
+  func groupedGEMMsMatchThePerExpertPathAcrossAllExperts(variant: MPPPrefillInt4QMM.TileVariant) throws {
+    guard let fixture = try FourExpertTile(siluActivation: true, variant: variant) else { return }
     guard let referenceBuffer = fixture.sentinelPartials(),
           let groupedBuffer = fixture.sentinelPartials() else {
       Issue.record("allocation failed")
@@ -553,8 +555,9 @@ extension PrefillGroupedRoutedMoETests {
     }
   }
 
-  @Test func groupedGEMMsMatchTheScalarPathAcrossWaves() throws {
-    guard let fixture = try FourExpertTile(siluActivation: true) else { return }
+  @Test(arguments: MPPPrefillInt4QMM.TileVariant.allCases)
+  func groupedGEMMsMatchTheScalarPathAcrossWaves(variant: MPPPrefillInt4QMM.TileVariant) throws {
+    guard let fixture = try FourExpertTile(siluActivation: true, variant: variant) else { return }
     guard let reference = try fixture.scalarReference(),
           let groupedBuffer = fixture.sentinelPartials() else {
       Issue.record("allocation failed")
@@ -593,7 +596,8 @@ extension PrefillGroupedRoutedMoETests {
     #expect(!untouched)
   }
 
-  @Test func groupedGEMMsHandleASingleOnePairExpert() throws {
+  @Test(arguments: MPPPrefillInt4QMM.TileVariant.allCases)
+  func groupedGEMMsHandleASingleOnePairExpert(variant: MPPPrefillInt4QMM.TileVariant) throws {
     let d = 64
     let f = 64
     let sentinelRows = 64
@@ -606,7 +610,7 @@ extension PrefillGroupedRoutedMoETests {
     let pool = Self.makeSyntheticExpertPool(numExperts: 8, d: d, f: f)
     let hidden = (0..<d).map { i in Float16(Float((i % 17) - 8)) }
     let ctx = try MetalContext()
-    let mpp = MPPPrefillInt4QMM(context: ctx, weightBits: 4)
+    let mpp = MPPPrefillInt4QMM(context: ctx, weightBits: 4, variant: variant)
     guard mpp.isAvailable else {
       Issue.record("MPP prefill QMM pipeline unavailable")
       return
