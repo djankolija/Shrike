@@ -428,14 +428,48 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
 
 ### Task 4: P4 — GDN chunked scan
 
-- [ ] **P4: GDN chunked scan** — scheduled by the P3 decision rule (M4 Pro 3.7k
+- [x] **P4: GDN chunked scan** — scheduled by the P3 decision rule (M4 Pro 3.7k
   GPU busy 2.42 ms/tok > 2.0). Target `prefill_gdn_router` 1.00 → ≈ 0.45
-  ms/prompt-token (M4 Pro, 12k): the scan is ≈ 0.6 of the role's 1.0 ms; the
-  projections, conv and norms stay. Scope: the scalar per-head decay shape
-  only (ornith: `in_proj_a` has `Hv = 32` rows). The per-channel variant
-  (`gdn_delta_step_prefill_vec`, Kimi KDA), any shape other than
-  `Dk = Dv = 128`, chunks under 64 rows and the 32-token MTP draft chunk keep
-  the serial kernel.
+  ms/prompt-token (M4 Pro, 12k). **LANDED 9b9374d (2026-09-02): measured
+  `prefill_gdn_router` 1.01 → 0.65 ms/prompt-token (M4 Pro 3.7k; 0.99 → 0.64
+  at 12k, 1.16 → 0.70 at 25k) and 4.39 → 3.44 (M1 3.7k; 4.37 → 3.43 at 12k).
+  The scan itself: 51.7 → 9.5 ms per 4,096-row layer call on the M4 Pro
+  (`ShrikeBench gdn_scan`, 5.4×, 2.27 TFLOPS ≈ 30 % of the ceiling). The 0.45
+  target was not reached because the serial scan was ≈ 0.38 of the role, not
+  the 0.6 the estimate assumed; the remaining ≈ 0.57 ms/token is the role's
+  projections, conv and norms, already on the matrix path — the role is now
+  GEMM-bound. Same-binary A/B at 3.7k (M4 Pro, two pairs): GDN 0.65 / 0.69
+  chunked against 0.96 / 0.99 serial, GPU busy 2.11 / 2.18 against 2.37 /
+  2.41, walls 12.98 / 11.51 against 12.49 / 12.52 s (the first pair's
+  inversion was 1.5 s of tile-boundary gap noise). Wall: M4 Pro 12k 34.3 →
+  32.6 s, 25k 92.1 → 81.2 s; M1 3.7k 40.6 → 39.1 s, 12k 135.6 → 126.3 s.
+  Untouched roles moved < 2 % on the M1 and ≤ 8 % on the M4 Pro (its
+  documented drift). Numerics: chunked against the serial kernel at the
+  ornith shape maxAbs 3.1e-5 (rel 5.8e-4), state rel 2.2e-5; against
+  `GDNReference` at T = 200 through the full chain within the 2e-2 bar; the
+  CPU chunk model against the serial reference within 1e-3. Golden: M4 Pro
+  short identical (its prompt is under 64 rows → serial kernel), long flipped
+  at a near-tie in the thinking block with a coherent continuation →
+  recaptured; M1 short and long identical (no tie crossed) → not recaptured.
+  Gates all green incl. TSAN (1129 tests, 0 reports). Review (opus) approved
+  with two Important findings — the availability probe did not check
+  `maxTotalThreadsPerThreadgroup ≥ 128` before the fixed 128-thread
+  dispatches, and no test could fail without the pad-row blit — plus minors;
+  two fix rounds folded into the commit (probe guard; a NaN sentinel in the
+  test's pad rows plus explicit finiteness assertions, because the kernel
+  masks every pad-row write and only `0 × NaN` in the state contraction can
+  leak, which `RelError`'s `max`-based helpers swallow — with the blit
+  disabled the T = 200 case now fails on the state assertion; the class doc
+  comment moved off the inserted enum, `usesGDNChunkedScan` removed as
+  unread, the parameter renamed `prefillChunkTokens`, the bench's serial
+  FLOP count 3 → 4 passes); scoped re-review clean. Deferred
+  minors, ledgered: the path description reads `chunked` when a sub-64-row
+  chunk configuration runs serial; the env knob has no typo guard; the
+  factors scratch is allocated under the serial A/B knob.** Scope: the scalar
+  per-head decay shape only (ornith: `in_proj_a` has `Hv = 32` rows). The
+  per-channel variant (`gdn_delta_step_prefill_vec`, Kimi KDA), any shape
+  other than `Dk = Dv = 128`, chunks under 64 rows and the 32-token MTP draft
+  chunk keep the serial kernel.
 
   **Math.** Per value head `h` (KV head `hk = h / (Hv/Hk)`), `S ∈ ℝ^{Dv×Dk}` is
   the fp32 state stored row-major as `state[h][dv][dk]`; the row vectors
@@ -546,20 +580,22 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
         static let chunkFactorsBytesPerChunk = 17_408
         /// The shape the chunked kernels are compiled for: scalar per-head decay, Dk = Dv = 128.
         static func chunkedScanSupports(config: LinearAttentionConfig, perChannelDecay: Bool) -> Bool
-        static func chunkFactorsBytes(config: LinearAttentionConfig, chunkTokens: Int) -> Int  // Hv · ⌈chunkTokens/64⌉ · 17_408
-        var chunkedScanAvailable: Bool             // shape supported and both pipelines compiled
+        static func chunkFactorsBytes(config: LinearAttentionConfig, prefillChunkTokens: Int) -> Int  // Hv · ⌈prefillChunkTokens/64⌉ · 17_408
+        var chunkedScanAvailable: Bool             // shape supported, both pipelines compiled, 128 threads per threadgroup allowed
         var chunkedScanUnavailableReason: String?  // nil when available
         /// Same contract as `encodeDeltaStepPrefill` plus the factors scratch. Throws
         /// `GDNChunkedScanError.tooFewRows` below 64 rows, `.unavailable(reason)`,
-        /// `.factorsTooSmall(needed:have:)`.
+        /// `.factorsTooSmall(needed:have:)`, `.convOutTooSmall(needed:have:)` when
+        /// `convOut` does not cover the 64-row multiple the pad blit writes.
         func encodeDeltaStepPrefillChunked(commandBuffer:, convOut:, convOutOffset:,
                                            aProj:, aProjOffset:, bProj:, bProjOffset:,
                                            aLog:, aLogOffset:, dtBias:, dtBiasOffset:,
                                            state:, checkpointState:, y:, yOffset:,
                                            rows: Int, factors: MTLBuffer) throws
     }
-    enum GDNChunkedScanError: Error {
-        case tooFewRows(Int), unavailable(String), factorsTooSmall(needed: Int, have: Int)
+    enum GDNChunkedScanError: Error, Equatable {
+        case tooFewRows(Int), unavailable(String)
+        case factorsTooSmall(needed: Int, have: Int), convOutTooSmall(needed: Int, have: Int)
     }
 
     public struct GDNChunkedReference {          // ShrikeValidation
@@ -582,21 +618,22 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
     {`chunked`, `serial`, `serial(unavailable: …)`}, logged as
     `prefill_gdn_scan=` on the server's residency line beside
     `prefill_attention_path=`. Scratch:
-    `PrefillChunkScratchLayout.usesGDNChunkedScan` (`gdnQKVDim > 0 &&
-    !perChannel && Dk == Dv == 128 && chunkTokens >= 64` — the 32-token draft
-    chunk allocates nothing) and `gdnChunkFactorBytes`, counted in
+    `PrefillChunkScratchLayout.gdnChunkFactorBytes`, non-zero only when
+    `gdnQKVDim > 0 && !perChannel && Dk == Dv == 128 && chunkTokens >= 64`
+    (the 32-token draft chunk allocates nothing), counted in
     `devicePrivateBytes` (34 MB at 4,096-token chunks for ornith);
-    `PrefillChunkScratchBuffers.gdnChunkFactors: MTLBuffer?`. Bench:
+    `PrefillChunkScratchBuffers.gdnChunkFactors: MTLBuffer?` — nil is the
+    runner's "serial" signal. Bench:
     `ShrikeBench gdn_scan [iterations]` — ornith shape, `T = 4096`, serial vs
     chunked ms per call and µs per token, chunked TFLOPS against the `gemm`
     ceiling.
 
   Steps (TDD; the CPU model first so the math is verified before any Metal):
 
-  - [ ] Step 1: `GDNReference` split — `normalize`, `deltaRule`, `gatedNorm`;
+  - [x] Step 1: `GDNReference` split — `normalize`, `deltaRule`, `gatedNorm`;
         `step` = the three in sequence. `swift test --no-parallel --filter
         GDNKernelTests` → still green.
-  - [ ] Step 2: failing test `GDNChunkedScanTests.chunkedReferenceMatchesSerialReference`:
+  - [x] Step 2: failing test `GDNChunkedScanTests.chunkedReferenceMatchesSerialReference`:
         cfg `(Hk 1, Hv 2, Dk 128, Dv 128, conv 4)`; seeded normed rows (q/k unit
         vectors scaled like the kernel's norm, then fp16-rounded; v fp16 in
         [−1, 1]), `a, b` in [−1, 1], `A_log` in [−1, 1.5], `dt_bias` in
@@ -604,9 +641,9 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
         200}; serial = `deltaRule` per row on a copy of the state; expect
         `RelError.maxAbsDiff(y) ≤ 1e-3`, state `≤ 1e-3`, checkpoint == serial
         state after row 0 within 1e-5. FAIL: `GDNChunkedReference` undefined.
-  - [ ] Step 3: implement `GDNChunkedReference.run` exactly as the math block
+  - [x] Step 3: implement `GDNChunkedReference.run` exactly as the math block
         (fp32, `T⁻¹` by forward substitution). PASS.
-  - [ ] Step 4: failing tests: `chunkedKernelMatchesSerialKernel` — same
+  - [x] Step 4: failing tests: `chunkedKernelMatchesSerialKernel` — same
         fixture at T ∈ {64, 200, 4096}: `conv_out` (normed rows as half),
         `a_proj`/`b_proj` half, bfloat `A_log`/`dt_bias`, two copies of the
         state; serial `encodeDeltaStepPrefill` with a checkpoint buffer vs
@@ -619,23 +656,23 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
         `chunkedScanSupports` false for per-channel decay, Dk 32, Dv 64;
         `encodeDeltaStepPrefillChunked(rows: 63)` throws `.tooFewRows`.
         FAIL: undefined.
-  - [ ] Step 5: kernels + `GDN.swift` + `MetalContext` registration → the
+  - [x] Step 5: kernels + `GDN.swift` + `MetalContext` registration → the
         tests PASS. If the compiler rejects the `(32, 128, 64, true, false)`
         descriptor (the one shape without precedent in the tree), use `(64,
         128, 64, true, false)` over a 64-row view of `u_tile` and keep the
         first 32 destination rows.
-  - [ ] Step 6: bench `swift run -c release ShrikeBench gdn_scan 20`: serial
+  - [x] Step 6: bench `swift run -c release ShrikeBench gdn_scan 20`: serial
         vs chunked at the ornith shape; the bar is ≥ 4× on the M4 Pro (the
         serial scan is ≈ 82 ms per 4,096-row layer call today; target ≤ 20
         ms). If short, the first knob is `chunkedScanValueBlock = 16`
         (`(Dv/16, Hv)` grid, 8 KB state tile) — measured, not assumed.
-  - [ ] Step 7: scratch + runner + env knob + description + server log line +
+  - [x] Step 7: scratch + runner + env knob + description + server log line +
         `ServerModelSession` field. Five gates: release build 0 warnings,
         lint, links, suite, TSAN.
-  - [ ] Step 8: `tools/golden-baseline.sh --check 4` (M4 Pro, server stopped)
+  - [x] Step 8: `tools/golden-baseline.sh --check 4` (M4 Pro, server stopped)
         — expected to differ; recapture; commit `gdn: chunked delta-rule scan
         on the matrix path (v12 P4)` with the baseline via `--only`.
-  - [ ] Step 9: ledger on both boxes (fresh server, 3.7k + 12k,
+  - [x] Step 9: ledger on both boxes (fresh server, 3.7k + 12k,
         `tools/prefill-measure.sh`); mini `tools/mini-deploy.sh --restart`,
         mini golden recapture, scp into `baselines/`. Verdict line here;
         design doc Step 4 + ledger rows + the GDN row of "Where the time

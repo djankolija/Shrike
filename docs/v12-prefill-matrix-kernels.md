@@ -135,9 +135,38 @@ experts with ≥ 32 pairs in a tile, scalar path for the rest):
 | **wall** | 3.42 | 2.79 | 3.65 | 10.80 | 11.04 |
 | wall, seconds | 12.9 | 34.3 | 92.1 | 40.6 | 135.6 |
 
-Against the chapter's start, the 12k prompt is 6.1× faster on the M4 Pro
-(207.8 → 34.3 s) and 5.3× on the M1 (725.2 → 135.6 s); the M1 now prefills at
-11.0 ms per prompt token against its 38.1 ms decode token. The routed GEMMs run
+After P3 the 12k prompt was 6.1× faster than the chapter's start on the M4
+Pro (207.8 → 34.3 s) and 5.3× on the M1 (725.2 → 135.6 s).
+
+**After P4** (commit 7315fb8, 2026-09-02; chunked delta-rule scan for the
+GDN layers, 64-row chunks):
+
+| role | M4 Pro 3.7k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `prefill_attn_router` | 0.26 | 0.45 | 0.80 | 1.35 | 2.41 |
+| `prefill_routed_tile` | 1.04 | 0.99 | 1.12 | 3.42 | 3.35 |
+| `prefill_gdn_router` | **0.65** | **0.64** | **0.70** | **3.44** | **3.43** |
+| `prefill_shared_expert` | 0.06 | 0.06 | 0.06 | 0.29 | 0.29 |
+| **GPU busy** | 2.11 | 2.17 | 2.71 | 8.72 | 9.58 |
+| **wall** | 3.46 | 2.65 | 3.22 | 10.40 | 10.28 |
+| wall, seconds | 13.0 | 32.6 | 81.2 | 39.1 | 126.3 |
+
+The scan took the GDN role from 1.0 to 0.65 ms/token on the M4 Pro (0.70 at
+25k) and from 4.4 to 3.4 on the M1; the other roles moved within their
+run-to-run noise. Same-binary A/B at 3.7k on the M4 Pro
+(`SHRIKE_GDN_PREFILL_SCAN=serial`), two pairs: GDN 0.65 / 0.69 chunked
+against 0.96 / 0.99 serial, GPU busy 2.11 / 2.18 against 2.37 / 2.41. The
+first pair's walls inverted (12.98 chunked, 12.49 serial) on a 1.5 s
+difference in tile-boundary gaps — host-side, ±0.4 ms/token run to run at
+this length — and the second pair read 11.5 against 12.5 s. What is left of
+the role, ≈ 0.64 ms/token on the M4 Pro, is ≈ 0.07 of scan (9.5 ms × 30
+layers per 4,096 rows) and ≈ 0.57 of projections, conv and norms; the in
+and out projections already run on the matrix path, so the role is now
+GEMM-bound like the routed experts.
+
+Against the chapter's start, the 12k prompt is 6.4× faster on the M4 Pro
+(207.8 → 32.6 s) and 5.7× on the M1 (725.2 → 126.3 s); the M1 now prefills at
+10.3 ms per prompt token against its 38.1 ms decode token. The routed GEMMs run
 at ≈ 2.0 TFLOPS on the M4 Pro, 35 % of the 128-row expert-shape ceiling; the
 tile-boundary gaps grew with the extra host encoding per tile (0.86 s of 12.9
 at 3.7k), which promotes the command-buffer batching follow-on.
