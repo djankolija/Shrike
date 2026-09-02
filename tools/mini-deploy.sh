@@ -74,11 +74,11 @@ ssh macmini '
     sleep 3
   done
   echo "server ready after $((tries * 3))s"
-  path=""
+  logged_path=""
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    path=$(grep -a -o "prefill_projection_path=[a-z0-9-]*" /tmp/ornith.log | head -n 1)
-    [ -n "$path" ] && break
+    logged_path=$(grep -a -o "prefill_projection_path=[a-z0-9-]*" /tmp/ornith.log | head -n 1)
+    [ -n "$logged_path" ] && break
     sleep 2
   done
-  echo "${path:-prefill_projection_path=NOT-LOGGED}"
+  echo "${logged_path:-prefill_projection_path=NOT-LOGGED}"
 '
