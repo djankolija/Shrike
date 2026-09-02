@@ -331,7 +331,7 @@ all scalar kernels:
 | role | kernel | structure | roofline gap (M4 Pro) |
 | --- | --- | --- | ---: |
 | attention core | `attention_prefill_causal_tiled` | one threadgroup per (query, head), 256 threads over head-dim, a serial walk over every key with a two-barrier threadgroup reduction per key. The decode kernel's shape, run once per prompt token: no K/V reuse across queries, none across the 8 query heads that share a KV head. | 30× at 3.7k, 60× at 25k |
-| routed experts | `prefill_grouped_routed_moe_batched_phase1` / `_down` | each thread computes one or two 2048-long scalar dot products; 32-pair microbatches; a command buffer per 8-expert tile | 7×; 2.6× after P6 (`mpp_prefill_affine_grouped_f16`, one dispatch per phase over the tile's experts: 0.69 ms/token at 12k against 0.27 at the 7.46 TFLOPS ceiling) |
+| routed experts | `prefill_grouped_routed_moe_batched_phase1` / `_down` | each thread computes one or two 2048-long scalar dot products; 32-pair microbatches; a command buffer per 8-expert tile | 7×; 2.6× after P6 (`mpp_prefill_affine_grouped_f16`, one dispatch per phase over the tile's experts: 0.69 ms/token at 12k against 0.27 at the 7.46 TFLOPS ceiling); P8's bench puts the tile at 67 % of the M4 Pro's same-run ceiling and 42 % of the M1's, the M1's remainder split 7 % unpack / 20 % weight loads / 31 % staged structure (Step 7) |
 | shared expert | `PrefillSharedExpert.encodeBlock` | a `for row in 0..<queryCount` loop over the decode runtime: 4–6 M=1 GEMV dispatches per token | 25× |
 | GDN | `gdn_delta_step_prefill` | the delta-rule scan is a serial loop over the chunk inside one dispatch of 32×32 threadgroups; projections, conv and norms are fine | 3.6× (scan ≈ 0.6 of the 1.0 ms) |
 
@@ -496,6 +496,39 @@ entirely — is only allowed under a single-simdgroup execution scope, so it
 needs per-simdgroup matmuls; that is the follow-on below. Ceiling share at
 12k on the M4 Pro: 30 % → 37 %; the task's 50 % bar was not reached.
 
+### Step 7 — the MPP GEMM core: a measured null, with the mini's cost ledger
+
+Two knobs on the K-group loop both kernels share, each an env-var A/B on the
+same binary (`SHRIKE_MPP_DEQUANT_BUFFERS=1|2`, `SHRIKE_MPP_TILE_N=32|64`;
+the bodies are now one `mpp_prefill_affine_body<TILE_N, BUFFERS>` template
+with `n32b1` under the bare kernel names, bit-identical to what P6 shipped —
+every variant is, the tests assert it). `ShrikeBench routed_gemm 20`, grouped
+ms per ornith tile:
+
+| arm | M4 Pro | M1 |
+| --- | ---: | ---: |
+| n32b1 (P6) | 1.67 | 8.25 |
+| n32b2, double-buffered dequant | 1.68 | 8.26 |
+| n64b1, 64-wide N tile | 2.32 | 9.69 |
+| n64b2 | 2.31 | 10.21 |
+
+Neither pays. Double buffering only hides latency, and the dequant is not a
+latency problem: the same 128 threads do the dequant and the matmul, so it is
+throughput work. The 64-wide tile halves the A re-reads but doubles the fp32
+accumulator footprint, and the occupancy that costs outweighs the traffic it
+saves on both GPUs. A bench-only probe that replaced the dequant with a single
+byte load per element, then with a constant, gives the ledger for the mini's
+8.25 ms tile: unpack arithmetic 0.57 ms (7 %), the int4 weight byte loads
+1.65 ms (20 %), the staged structure itself — threadgroup tile writes, one
+barrier and one 64×32×64 `matmul2d` per K group — 2.53 ms (31 %) over the
+3.50 ms a plain GEMM at the same-run ceiling would take (42 %). The same
+structure costs 9 % on the M4 Pro, which is why the two boxes' shares differ
+(the M4 Pro's kernel runs at 67 % of its ceiling, the M1's at 42 %; P6's 68 %
+for the M1 was measured against a depressed ceiling — the mini's ceiling bench
+read 1.15 TFLOPS that run and 1.84 today with the grouped tile unchanged). The
+two levers this leaves are in the follow-ons: vectorised weight loads and a
+128-wide K tile.
+
 ### Follow-ons, not scheduled
 
 - **Tile command-buffer batching — landed as a null result (P5, a7c8288 +
@@ -522,14 +555,20 @@ needs per-simdgroup matmuls; that is the follow-on below. Ceiling share at
   that do not — suggests residency work proportional to the slab, which an
   `MTLResidencySet` on the queue would remove; that is a model, not a
   measurement.
-- **The routed GEMM's last third.** After P6 both boxes run the routed tile
-  at two thirds of the MPS ceiling for the 128-row shape. Inside
-  `mpp_prefill_affine_grouped_f16` every K-group serializes dequantizing the
-  32×64 weight tile into threadgroup memory, a barrier, then the matmul;
-  double-buffering the weight tile would overlap the dequant with the
-  previous group's matmul, and a 64-wide N tile would halve the A-tile
-  re-reads on the `n = 2048` down GEMM. Both are unmeasured; the bench is the
-  gate.
+- **The MPP GEMM's int4 weight loads (M1: 20 % of the tile).** `mpp_affine_value`
+  loads one or two bytes per dequantized element; a `uint4` carries 32 int4
+  values, so the weight tile's 2,048 elements are 64 vector loads per K group
+  instead of ≈ 3,000 byte loads. Bit-identical (the values do not change);
+  the P8 probe bounds the win at 1.65 ms of the mini's 8.25 ms tile, 0.3 ms
+  of the M4 Pro's 1.66.
+- **A 128-wide K tile for the MPP GEMM (M1: up to 31 % of the tile).** Two
+  quant groups per staged tile halve the barriers and the `matmul2d` runs
+  (32 → 16 per gate/up GEMM at k = 2048); the weight tile is 8 KB at 32×128.
+  The dequant already applies each element's own scale and bias, so the
+  quant-group boundary inside the tile costs nothing. Not bit-identical —
+  MPP's in-run K order changes — so golden would move and the 2e-2 bar
+  applies; the P8 probe puts the whole staged structure at 2.53 ms of the
+  mini's tile, and this attacks half its barriers and runs.
 - **Per-layer host routing on the M1.** ≈ 15 ms per layer between the GDN or
   attention buffer and the shared expert (`host_ms` 1.38 + 0.48 s at 12k,
   ≈ 1.5 % of wall); 2.8 ms per layer on the M4 Pro. The router readback,
