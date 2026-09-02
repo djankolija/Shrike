@@ -226,8 +226,8 @@ extension PrefillGroupedRoutedMoETests {
   /// carries a pair in both matrix experts, so the scatter has to keep the two
   /// `(token, rank)` rows apart.
   struct FourExpertTile {
-    let d = 64
-    let f = 64
+    let d: Int
+    let f: Int
     let rows = 40
     let topK = 2
     let ctx: MetalContext
@@ -246,7 +246,11 @@ extension PrefillGroupedRoutedMoETests {
     var partialElements: Int { rows * topK * d }
 
     init?(siluActivation: Bool,
-          variant: MPPPrefillInt4QMM.TileVariant = MPPPrefillInt4QMM.tileVariant) throws {
+          variant: MPPPrefillInt4QMM.TileVariant = MPPPrefillInt4QMM.tileVariant,
+          d: Int = 256,
+          f: Int = 256) throws {
+      self.d = d
+      self.f = f
       var pairs: [PrefillTokenExpertPair] = []
       for token in 0..<40 {
         pairs.append(PrefillGroupedRoutedMoETests.pair(token: UInt32(token), expert: 0, rank: 0))
@@ -596,10 +600,64 @@ extension PrefillGroupedRoutedMoETests {
     #expect(!untouched)
   }
 
+  private static func groupedPartialsAcrossWaves(variant: MPPPrefillInt4QMM.TileVariant,
+                                                 d: Int = 256,
+                                                 f: Int = 256) throws -> [Float16]? {
+    guard let fixture = try FourExpertTile(siluActivation: true, variant: variant, d: d, f: f) else { return nil }
+    guard let groupedBuffer = fixture.sentinelPartials() else {
+      Issue.record("allocation failed")
+      return nil
+    }
+    let ranges = try PrefillExpertPairRange.ranges(forTile: fixture.tile, routes: fixture.routes)
+    let staging = try PrefillExpertStaging.allocate(device: fixture.ctx.device,
+                                                    rowBlock: 64,
+                                                    hiddenSize: fixture.d,
+                                                    intermediate: fixture.f)
+    let waves = try PrefillGroupedRoutedMoE.planExpertWaves(ranges: ranges,
+                                                            binding: fixture.binding,
+                                                            stagingRows: 64)
+    try fixture.run { commandBuffer in
+      try fixture.grouped.encodeGroupedExpertGEMMs(
+        commandBuffer: commandBuffer,
+        mpp: fixture.mpp,
+        hidden: fixture.hiddenBuffer,
+        sortedPairs: fixture.pairBuffer,
+        routePartials: groupedBuffer,
+        binding: fixture.binding,
+        argumentBuffer: fixture.argumentBuffer,
+        waves: waves,
+        staging: staging,
+        params: fixture.params)
+    }
+    return Fp16Buffer.readHalf(groupedBuffer, count: fixture.partialElements)
+  }
+
+  @Test func groupedWideKInstanceFallsBackOnARaggedK() throws {
+    guard let narrow = try Self.groupedPartialsAcrossWaves(variant: .n32b1, d: 192, f: 192),
+          let wide = try Self.groupedPartialsAcrossWaves(variant: .n32k128b1, d: 192, f: 192) else { return }
+    let finite = wide.allSatisfy(\.isFinite)
+    #expect(finite)
+    let mismatches = zip(narrow, wide).enumerated().filter { $0.element.0 != $0.element.1 }
+    #expect(mismatches.isEmpty, "grouped K 192 through the narrow pair: \(mismatches.count) of \(wide.count) differ")
+  }
+
+  @Test func groupedWideKTileMatchesTheNarrowTile() throws {
+    guard let narrow = try Self.groupedPartialsAcrossWaves(variant: .n32b1),
+          let wide = try Self.groupedPartialsAcrossWaves(variant: .n32k128b1) else { return }
+    let actual = wide.map(Float.init)
+    let reference = narrow.map(Float.init)
+    let finite = actual.allSatisfy(\.isFinite)
+    #expect(finite)
+    let maxAbsDiff = RelError.maxAbsDiff(actual, reference)
+    let relError = RelError.compute(actual: actual, reference: reference)
+    #expect(maxAbsDiff <= 2e-2, "grouped K128 vs K64 maxAbsDiff=\(maxAbsDiff)")
+    #expect(relError <= 2e-2, "grouped K128 vs K64 relError=\(relError)")
+  }
+
   @Test(arguments: MPPPrefillInt4QMM.TileVariant.allCases)
   func groupedGEMMsHandleASingleOnePairExpert(variant: MPPPrefillInt4QMM.TileVariant) throws {
-    let d = 64
-    let f = 64
+    let d = 256
+    let f = 256
     let sentinelRows = 64
     let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
       [Self.pair(token: 0, expert: 5, rank: 0)],

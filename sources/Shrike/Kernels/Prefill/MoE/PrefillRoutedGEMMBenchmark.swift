@@ -13,6 +13,7 @@ public enum PrefillRoutedGEMMBenchmark {
         public let perExpertMillisPerTile: Double
         public let groupedMillisPerTile: Double
         public let variant: String
+        public let weightLoads: String
         public var gflopPerTile: Double {
             Double(experts) * 6.0 * Double(rowsPerExpert) * Double(d) * Double(f) / 1.0e9
         }
@@ -144,7 +145,8 @@ public enum PrefillRoutedGEMMBenchmark {
                       groupedWaves: waves.count,
                       perExpertMillisPerTile: perExpert,
                       groupedMillisPerTile: groupedMillis,
-                      variant: mpp.variant.rawValue)
+                      variant: mpp.variant.rawValue,
+                      weightLoads: mpp.weightLoads.rawValue)
     }
 
     /// Gate, up and down per expert, each as packed int4 rows then bf16 group
@@ -212,5 +214,84 @@ public enum PrefillRoutedGEMMBenchmark {
                                   dtype: 0)
             }
         }
+    }
+}
+
+extension PrefillRoutedGEMMBenchmark {
+    public struct TileComparison: Sendable {
+        public let m: Int
+        public let n: Int
+        public let k: Int
+        public let bits: Int
+        public let mismatches: Int
+        public let maxAbsDiff: Float
+        public let maxRelDiff: Float
+        public let firstMismatch: Int
+    }
+
+    /// Runs the narrow (`n32b1`) and the wide-K (`n32k128b1`) kernels on one
+    /// deterministic full-mantissa input and compares the fp16 outputs element
+    /// for element, so a box without the test suite (the mini) can bound how
+    /// far MPP's 128-wide K run is from two 64-wide runs summed in fp32.
+    /// Inputs whose partial sums are exact in fp32 (integers over 64, a few
+    /// bf16 scales) hide the reduction order — they compare bit-identical.
+    public static func compareTileK(context: MetalContext,
+                                    m: Int = 128,
+                                    n: Int = 2048,
+                                    k: Int = 2048,
+                                    bits: Int = 4) throws -> TileComparison {
+        let device = context.device
+        let narrow = MPPPrefillInt4QMM(context: context, weightBits: bits, variant: .n32b1, weightLoads: .byte)
+        let wide = MPPPrefillInt4QMM(context: context, weightBits: bits, variant: .n32k128b1, weightLoads: .byte)
+        guard narrow.isAvailable, wide.isAvailable else {
+            throw MPPPrefillInt4QMMError.pipelineUnavailable(reason: "MPP prefill pipelines unavailable on this device")
+        }
+        let groups = k / Quantization.groupSize
+        var state: UInt32 = 0x9E37_79B9
+        func next() -> Float {
+            state = state &* 1_664_525 &+ 1_013_904_223
+            return Float(state >> 8) / Float(1 << 24)
+        }
+        var packed = [UInt8](repeating: 0, count: n * k * bits / 8)
+        for index in packed.indices { packed[index] = UInt8(truncatingIfNeeded: index &* 37 &+ 0x29) }
+        var scales = [UInt16](repeating: 0, count: n * groups)
+        var biases = [UInt16](repeating: 0, count: n * groups)
+        for index in scales.indices {
+            scales[index] = Quantization.bf16Bits(0.0005 + next() * 0.003)
+            biases[index] = Quantization.bf16Bits(-0.02 + next() * 0.04)
+        }
+        var x = [Float16](repeating: 0, count: m * k)
+        for index in x.indices { x[index] = Float16(next() - 0.5) }
+        guard let weights = device.makeBuffer(bytes: packed, length: packed.count, options: .storageModeShared),
+              let scaleBuffer = device.makeBuffer(bytes: scales, length: scales.count * 2, options: .storageModeShared),
+              let biasBuffer = device.makeBuffer(bytes: biases, length: biases.count * 2, options: .storageModeShared),
+              let input = device.makeBuffer(bytes: x, length: x.count * 2, options: .storageModeShared),
+              let narrowOut = device.makeBuffer(length: m * n * 2, options: .storageModeShared),
+              let wideOut = device.makeBuffer(length: m * n * 2, options: .storageModeShared),
+              let commandBuffer = context.queue.makeCommandBuffer() else {
+            throw MPPPrefillInt4QMMError.invalidArguments("buffer allocation failed")
+        }
+        try narrow.encode(commandBuffer: commandBuffer, weights: weights, scales: scaleBuffer, biases: biasBuffer,
+                          x: input, y: narrowOut, m: m, n: n, k: k, required: true)
+        try wide.encode(commandBuffer: commandBuffer, weights: weights, scales: scaleBuffer, biases: biasBuffer,
+                        x: input, y: wideOut, m: m, n: n, k: k, required: true)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        let a = narrowOut.contents().assumingMemoryBound(to: Float16.self)
+        let b = wideOut.contents().assumingMemoryBound(to: Float16.self)
+        var mismatches = 0
+        var maxAbs: Float = 0
+        var maxRel: Float = 0
+        var first = -1
+        for index in 0..<(m * n) where a[index] != b[index] {
+            mismatches += 1
+            if first < 0 { first = index }
+            let diff = abs(Float(a[index]) - Float(b[index]))
+            maxAbs = max(maxAbs, diff)
+            let magnitude = max(abs(Float(a[index])), 1e-6)
+            maxRel = max(maxRel, diff / magnitude)
+        }
+        return TileComparison(m: m, n: n, k: k, bits: bits, mismatches: mismatches,
+                              maxAbsDiff: maxAbs, maxRelDiff: maxRel, firstMismatch: first)
     }
 }

@@ -22,6 +22,7 @@ import Shrike
 ///   gdn family: gdn_inproj (baseline), gdn_inproj_xsh, gdn_inproj_r16,
 ///               gdn_scan (prefill delta-rule scan, serial vs chunked)
 ///   routed_gemm: the prefill routed tile, per-expert GEMMs vs grouped
+///   mpp_compare: the narrow vs the 128-wide-K MPP kernel, element for element
 @main
 struct ShrikeBench {
     /// Shader-side `ExpertOffsets` mirror: 9 packed UInt32 in the same order.
@@ -59,6 +60,17 @@ struct ShrikeBench {
 
         if kernelName == "routed_gemm" {
             try runRoutedGEMM(iterations: iterations, context: context)
+            return
+        }
+
+        if kernelName == "mpp_compare" {
+            for bits in [4, 8] {
+                let result = try PrefillRoutedGEMMBenchmark.compareTileK(context: context, bits: bits)
+                print("kernel=mpp_compare n32b1_vs_n32k128b1 m=\(result.m) n=\(result.n) k=\(result.k) bits=\(result.bits) "
+                    + "mismatches=\(result.mismatches) of \(result.m * result.n) "
+                    + "max_abs=\(String(format: "%.6f", result.maxAbsDiff)) max_rel=\(String(format: "%.6f", result.maxRelDiff)) "
+                    + "first=\(result.firstMismatch)")
+            }
             return
         }
 

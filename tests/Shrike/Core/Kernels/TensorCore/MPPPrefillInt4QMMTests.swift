@@ -25,12 +25,22 @@ private let mppTensorOpsAvailable: Bool = {
         let x: [Float16]
     }
 
+    /// `irregular` fills x, scales and biases with full-mantissa pseudo-random
+    /// values: the default inputs (integers over 64, a few bf16 scales) have
+    /// partial sums that are exact in fp32, so they cannot see a reduction
+    /// order and compare bit-identical whatever the order.
     private static func makeInputs(m: Int,
                                    n: Int,
                                    k: Int,
                                    bits: Int = 4,
-                                   adversarialAffine: Bool = false) -> Inputs {
+                                   adversarialAffine: Bool = false,
+                                   irregular: Bool = false) -> Inputs {
         let groups = k / Quantization.groupSize
+        var state: UInt32 = 0x9E37_79B9
+        func next() -> Float {
+            state = state &* 1_664_525 &+ 1_013_904_223
+            return Float(state >> 8) / Float(1 << 24)
+        }
         var packed = [UInt8](repeating: 0, count: n * k * bits / 8)
         for index in packed.indices {
             packed[index] = UInt8(truncatingIfNeeded: index &* 37 &+ 0x29)
@@ -52,7 +62,10 @@ private let mppTensorOpsAvailable: Bool = {
         for row in 0..<n {
             for group in 0..<groups {
                 let index = row * groups + group
-                if adversarialAffine {
+                if irregular {
+                    scales[index] = Quantization.bf16Bits(0.0005 + next() * 0.003)
+                    biases[index] = Quantization.bf16Bits(-0.02 + next() * 0.04)
+                } else if adversarialAffine {
                     scales[index] = adversarialScales[(row + group) % adversarialScales.count]
                     biases[index] = adversarialBiases[(row * 3 + group) % adversarialBiases.count]
                 } else {
@@ -65,7 +78,9 @@ private let mppTensorOpsAvailable: Bool = {
         }
         var x = [Float16](repeating: 0, count: m * k)
         for index in x.indices {
-            x[index] = Float16(Float((index * 11) % 29 - 14) / 64.0)
+            x[index] = irregular
+                ? Float16(next() - 0.5)
+                : Float16(Float((index * 11) % 29 - 14) / 64.0)
         }
         return Inputs(bits: bits, packed: packed, scales: scales, biases: biases, x: x)
     }
@@ -132,10 +147,11 @@ private let mppTensorOpsAvailable: Bool = {
                                  weightOffset: Int = 0,
                                  scaleOffset: Int = 0,
                                  biasOffset: Int = 0,
-                                 compareCPUReference: Bool = false) throws
+                                 compareCPUReference: Bool = false,
+                                 irregular: Bool = false) throws
         -> MPPPrefillInt4QMM.Path {
         let inputs = makeInputs(m: m, n: n, k: k, bits: bits,
-                                adversarialAffine: adversarialAffine)
+                                adversarialAffine: adversarialAffine, irregular: irregular)
         guard let weights = makeBuffer(device: context.device,
                                        values: inputs.packed,
                                        prefixBytes: weightOffset),
@@ -215,9 +231,13 @@ private let mppTensorOpsAvailable: Bool = {
                                 second: MPPPrefillInt4QMM,
                                 m: Int,
                                 n: Int,
-                                k: Int) throws -> (first: [Float16], second: [Float16]) {
-        let inputs = makeInputs(m: m, n: n, k: k)
-        guard let weights = makeBuffer(device: context.device, values: inputs.packed),
+                                k: Int,
+                                bits: Int = 4,
+                                weightOffset: Int = 0,
+                                irregular: Bool = false) throws -> (first: [Float16], second: [Float16]) {
+        let inputs = makeInputs(m: m, n: n, k: k, bits: bits, irregular: irregular)
+        guard let weights = makeBuffer(device: context.device, values: inputs.packed,
+                                       prefixBytes: weightOffset),
               let scales = makeBuffer(device: context.device, values: inputs.scales),
               let biases = makeBuffer(device: context.device, values: inputs.biases),
               let input = Fp16Buffer.make(context.device, halves: inputs.x),
@@ -228,11 +248,13 @@ private let mppTensorOpsAvailable: Bool = {
             throw CocoaError(.fileReadUnknown)
         }
         let firstPath = try first.encode(commandBuffer: commandBuffer,
-                                         weights: weights, scales: scales, biases: biases,
+                                         weights: weights, weightsOffset: weightOffset,
+                                         scales: scales, biases: biases,
                                          x: input, y: firstOutput,
                                          m: m, n: n, k: k, required: true)
         let secondPath = try second.encode(commandBuffer: commandBuffer,
-                                           weights: weights, scales: scales, biases: biases,
+                                           weights: weights, weightsOffset: weightOffset,
+                                           scales: scales, biases: biases,
                                            x: input, y: secondOutput,
                                            m: m, n: n, k: k, required: true)
         commandBuffer.commit()
@@ -291,12 +313,110 @@ private let mppTensorOpsAvailable: Bool = {
         }
     }
 
+    private static func expectBitIdentical(_ outputs: (first: [Float16], second: [Float16]),
+                                           _ label: String) {
+        let finite = outputs.second.allSatisfy(\.isFinite)
+        #expect(finite, "\(label) produced a non-finite output")
+        let firstMismatch = zip(outputs.first, outputs.second).enumerated()
+            .first { $0.element.0 != $0.element.1 }?.offset
+        #expect(firstMismatch == nil, "\(label) first mismatch=\(firstMismatch ?? -1)")
+    }
+
+    @Test(.enabled(if: mppTensorOpsAvailable,
+                   "Requires runtime MPP TensorOps support"))
+    func vectorWeightLoadsAreBitIdenticalToByteLoads() throws {
+        let context = try MetalContext()
+        let byte = MPPPrefillInt4QMM(context: context, variant: .n32b1, weightLoads: .byte)
+        let vector = MPPPrefillInt4QMM(context: context, variant: .n32b1, weightLoads: .vector)
+        for shape in Self.variantShapes {
+            for irregular in [false, true] {
+                let outputs = try Self.runPair(context: context, first: byte, second: vector,
+                                               m: shape.m, n: shape.n, k: shape.k, irregular: irregular)
+                Self.expectBitIdentical(outputs, "vector M=\(shape.m) N=\(shape.n) K=\(shape.k) irregular=\(irregular)")
+            }
+        }
+        let unaligned = try Self.runPair(context: context, first: byte, second: vector,
+                                         m: 33, n: 512, k: 2048, weightOffset: 13)
+        Self.expectBitIdentical(unaligned, "vector at weightOffset 13 (byte fallback)")
+        let byte8 = MPPPrefillInt4QMM(context: context, weightBits: 8, variant: .n32b1, weightLoads: .byte)
+        let vector8 = MPPPrefillInt4QMM(context: context, weightBits: 8, variant: .n32b1, weightLoads: .vector)
+        let eightBit = try Self.runPair(context: context, first: byte8, second: vector8,
+                                        m: 33, n: 35, k: 128, bits: 8)
+        Self.expectBitIdentical(eightBit, "vector 8-bit M=33 N=35 K=128")
+    }
+
+    @Test(.enabled(if: mppTensorOpsAvailable,
+                   "Requires runtime MPP TensorOps support"))
+    func vectorWeightLoadsAreBitIdenticalToByteLoadsOnTheWideKTile() throws {
+        let context = try MetalContext()
+        let byte = MPPPrefillInt4QMM(context: context, variant: .n32k128b1, weightLoads: .byte)
+        let vector = MPPPrefillInt4QMM(context: context, variant: .n32k128b1, weightLoads: .vector)
+        for shape in Self.variantShapes {
+            let outputs = try Self.runPair(context: context, first: byte, second: vector,
+                                           m: shape.m, n: shape.n, k: shape.k, irregular: true)
+            Self.expectBitIdentical(outputs, "vector K128 M=\(shape.m) N=\(shape.n) K=\(shape.k)")
+        }
+        let byte8 = MPPPrefillInt4QMM(context: context, weightBits: 8, variant: .n32k128b1, weightLoads: .byte)
+        let vector8 = MPPPrefillInt4QMM(context: context, weightBits: 8, variant: .n32k128b1, weightLoads: .vector)
+        let eightBit = try Self.runPair(context: context, first: byte8, second: vector8,
+                                        m: 33, n: 35, k: 256, bits: 8, irregular: true)
+        Self.expectBitIdentical(eightBit, "vector K128 8-bit M=33 N=35 K=256 (two-uint4 chunks)")
+    }
+
+    @Test(.enabled(if: mppTensorOpsAvailable,
+                   "Requires runtime MPP TensorOps support"))
+    func wideKTileMatchesTheNarrowTile() throws {
+        let context = try MetalContext()
+        let narrow = MPPPrefillInt4QMM(context: context, variant: .n32b1)
+        let wide = MPPPrefillInt4QMM(context: context, variant: .n32k128b1)
+        let baseline = try PrefillInt4QMM(context: context)
+        #expect(wide.isAvailable, "n32k128b1 pipeline unavailable")
+        for shape in Self.variantShapes {
+            try Self.runShape(context: context, candidate: wide, baseline: baseline,
+                              m: shape.m, n: shape.n, k: shape.k, compareCPUReference: true,
+                              irregular: true)
+            let outputs = try Self.runPair(context: context, first: narrow, second: wide,
+                                           m: shape.m, n: shape.n, k: shape.k, irregular: true)
+            let actual = outputs.second.map(Float.init)
+            let reference = outputs.first.map(Float.init)
+            let finite = actual.allSatisfy(\.isFinite)
+            #expect(finite, "n32k128b1 shape \(shape) produced a non-finite output")
+            let maxAbs = RelError.maxAbsDiff(actual, reference)
+            let rel = RelError.compute(actual: actual, reference: reference)
+            #expect(maxAbs <= 2e-2, "n32k128b1 M=\(shape.m) N=\(shape.n) K=\(shape.k) maxAbs=\(maxAbs) rel=\(rel)")
+            #expect(rel <= 2e-2, "n32k128b1 M=\(shape.m) N=\(shape.n) K=\(shape.k) rel=\(rel) maxAbs=\(maxAbs)")
+        }
+    }
+
+    @Test(.enabled(if: mppTensorOpsAvailable,
+                   "Requires runtime MPP TensorOps support"))
+    func wideKTileFallsBackOnARaggedK() throws {
+        let context = try MetalContext()
+        let narrow = MPPPrefillInt4QMM(context: context, variant: .n32b1)
+        let wide = MPPPrefillInt4QMM(context: context, variant: .n32k128b1)
+        for shape in [(m: 64, n: 32, k: 192), (m: 33, n: 128, k: 2880)] {
+            let outputs = try Self.runPair(context: context, first: narrow, second: wide,
+                                           m: shape.m, n: shape.n, k: shape.k)
+            Self.expectBitIdentical(outputs, "n32k128b1 narrow fallback M=\(shape.m) N=\(shape.n) K=\(shape.k)")
+        }
+    }
+
     @Test func tileVariantsParseTheirEnvironmentNames() {
-        #expect(MPPPrefillInt4QMM.TileVariant(tileN: "64", buffers: "2", fallback: .n32b1) == .n64b2)
-        #expect(MPPPrefillInt4QMM.TileVariant(tileN: nil, buffers: "2", fallback: .n32b1) == .n32b2)
-        #expect(MPPPrefillInt4QMM.TileVariant(tileN: "64", buffers: nil, fallback: .n32b1) == .n64b1)
-        #expect(MPPPrefillInt4QMM.TileVariant(tileN: "48", buffers: "2", fallback: .n32b1) == nil)
-        #expect(MPPPrefillInt4QMM.TileVariant(tileN: "32", buffers: "3", fallback: .n32b1) == nil)
+        typealias Tile = MPPPrefillInt4QMM.TileVariant
+        #expect(Tile(tileN: "64", tileK: nil, buffers: "2", fallback: .n32b1) == .n64b2)
+        #expect(Tile(tileN: nil, tileK: nil, buffers: "2", fallback: .n32b1) == .n32b2)
+        #expect(Tile(tileN: "64", tileK: nil, buffers: nil, fallback: .n32b1) == .n64b1)
+        #expect(Tile(tileN: "48", tileK: nil, buffers: "2", fallback: .n32b1) == nil)
+        #expect(Tile(tileN: "32", tileK: nil, buffers: "3", fallback: .n32b1) == nil)
+        #expect(Tile(tileN: nil, tileK: "128", buffers: nil, fallback: .n32b1) == .n32k128b1)
+        #expect(Tile(tileN: "64", tileK: "128", buffers: nil, fallback: .n32b1) == nil)
+        #expect(Tile(tileN: nil, tileK: "128", buffers: "2", fallback: .n32b1) == nil)
+        #expect(Tile(tileN: nil, tileK: "96", buffers: nil, fallback: .n32b1) == nil)
+        #expect(Tile(tileN: nil, tileK: nil, buffers: nil, fallback: .n32k128b1) == .n32k128b1)
+        #expect(Tile(tileN: nil, tileK: "64", buffers: nil, fallback: .n32k128b1) == .n32b1)
+        #expect(Tile.n32k128b1.tileK == 128 && Tile.n64b2.tileK == 64)
+        #expect(Tile.n32k128b1.kernelName == "mpp_prefill_affine_threadgroup_f16_n32k128b1")
+        #expect(MPPPrefillInt4QMM.WeightLoads(rawValue: "vector") == .vector)
         #expect(MPPPrefillInt4QMM.TileVariant.n32b1.kernelName == "mpp_prefill_affine_threadgroup_f16")
         #expect(MPPPrefillInt4QMM.TileVariant.n32b1.groupedKernelName == "mpp_prefill_affine_grouped_f16")
         #expect(MPPPrefillInt4QMM.TileVariant.n64b2.kernelName == "mpp_prefill_affine_threadgroup_f16_n64b2")

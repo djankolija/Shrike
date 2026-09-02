@@ -184,7 +184,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     public var prefillProjectionPath: String {
         guard let mpp = prefillMPPAffineInt4 else { return "unavailable" }
-        return "affine-threadgroup-f16 tile_n=\(mpp.tileN) buffers=\(mpp.variant.dequantBuffers)"
+        return "affine-threadgroup-f16 tile_n=\(mpp.tileN) tile_k=\(mpp.variant.tileK)"
+            + " buffers=\(mpp.variant.dequantBuffers) loads=\(mpp.weightLoads.rawValue)"
     }
 
     public var prefillAttentionPathDescription: String {

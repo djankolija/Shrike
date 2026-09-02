@@ -23,22 +23,38 @@ final class MPPPrefillInt4QMM {
     }
 
     static let tileM = 64
+    /// The matrix path's admission unit (`PrefillSharedExpert` and
+    /// `PrefillGroupedRoutedMoE` refuse a `d`/`intermediate` that is not a
+    /// multiple of it), not the kernel's K tile: a `tileK == 128` variant
+    /// carries the 64-wide pair and picks per dispatch.
     static let tileK = Quantization.groupSize
-    /// `SHRIKE_MPP_TILE_N` (32|64) and `SHRIKE_MPP_DEQUANT_BUFFERS` (1|2) name
-    /// the variant; anything unrecognised keeps the measured choice.
+    /// `SHRIKE_MPP_TILE_N` (32|64), `SHRIKE_MPP_TILE_K` (64|128) and
+    /// `SHRIKE_MPP_DEQUANT_BUFFERS` (1|2) name the variant; anything
+    /// unrecognised — including a 128-wide K with N 64 or two buffers, which
+    /// is what `SHRIKE_MPP_TILE_N=64` alone asks for against this default —
+    /// keeps the measured choice.
     static let tileVariant: TileVariant = {
         let environment = ProcessInfo.processInfo.environment
         return TileVariant(tileN: environment["SHRIKE_MPP_TILE_N"],
+                           tileK: environment["SHRIKE_MPP_TILE_K"],
                            buffers: environment["SHRIKE_MPP_DEQUANT_BUFFERS"],
-                           fallback: .n32b1) ?? .n32b1
+                           fallback: .n32k128b1) ?? .n32k128b1
     }()
+    /// `SHRIKE_MPP_WEIGHT_LOADS` (byte|vector) is a per-dispatch override;
+    /// the vector body runs only when the weight base is 16-byte aligned.
+    static let weightLoads: WeightLoads =
+        ProcessInfo.processInfo.environment["SHRIKE_MPP_WEIGHT_LOADS"]
+            .flatMap(WeightLoads.init(rawValue:)) ?? .vector
     let variant: TileVariant
+    let weightLoads: WeightLoads
     var tileN: Int { variant.tileN }
     /// A wave is at most 2,048 staging rows, twice the runtime's staging block.
     static let groupedMaxRowTiles = 32
 
     private var pipeline: MTLComputePipelineState?
     private var groupedPipeline: MTLComputePipelineState?
+    private var narrowPipeline: MTLComputePipelineState?
+    private var narrowGroupedPipeline: MTLComputePipelineState?
     /// K6: the compile failure reason, recorded once at init so an explicit
     /// MPP request can throw the real cause instead of silently degrading.
     private let unavailableReason: String
@@ -52,20 +68,20 @@ final class MPPPrefillInt4QMM {
     let weightBits: Int
 
     init(context: MetalContext, weightBits: Int = 4,
-         variant: TileVariant = MPPPrefillInt4QMM.tileVariant) {
+         variant: TileVariant = MPPPrefillInt4QMM.tileVariant,
+         weightLoads: WeightLoads = MPPPrefillInt4QMM.weightLoads) {
         precondition([4, 8].contains(weightBits))
         self.weightBits = weightBits
         self.variant = variant
+        self.weightLoads = weightLoads
         let constants = MTLFunctionConstantValues()
         var bits = UInt32(weightBits)
         constants.setConstantValue(&bits, type: .uint, index: 78)
         var library: MTLLibrary?
         do {
             library = try Self.compileTensorOpsLibrary(device: context.device)
-            let function = try library!.makeFunction(
-                name: variant.kernelName,
-                constantValues: constants)
-            self.pipeline = try context.device.makeComputePipelineState(function: function)
+            self.pipeline = try Self.makePipeline(
+                library: library, name: variant.kernelName, constants: constants).pipeline
             self.unavailableReason = ""
         } catch {
             // Capability probe: this path is optional on non-Apple10 hardware,
@@ -75,20 +91,37 @@ final class MPPPrefillInt4QMM {
             self.unavailableReason = "\(error)"
         }
         do {
-            guard let library else {
-                throw MPPPrefillInt4QMMError.pipelineUnavailable(reason: unavailableReason)
-            }
-            let function = try library.makeFunction(
-                name: variant.groupedKernelName,
-                constantValues: constants)
-            self.groupedPipeline = try context.device.makeComputePipelineState(function: function)
-            self.groupedArgumentEncodedLength = function.makeArgumentEncoder(bufferIndex: 0).encodedLength
+            let grouped = try Self.makePipeline(
+                library: library, name: variant.groupedKernelName, constants: constants)
+            self.groupedPipeline = grouped.pipeline
+            self.groupedArgumentEncodedLength =
+                grouped.function.makeArgumentEncoder(bufferIndex: 0).encodedLength
             self.groupedUnavailableReason = ""
         } catch {
             self.groupedPipeline = nil
             self.groupedArgumentEncodedLength = 0
             self.groupedUnavailableReason = "\(error)"
         }
+        if variant.tileK == Self.tileK {
+            self.narrowPipeline = pipeline
+            self.narrowGroupedPipeline = groupedPipeline
+        } else {
+            self.narrowPipeline = try? Self.makePipeline(
+                library: library, name: TileVariant.n32b1.kernelName, constants: constants).pipeline
+            self.narrowGroupedPipeline = try? Self.makePipeline(
+                library: library, name: TileVariant.n32b1.groupedKernelName, constants: constants).pipeline
+        }
+    }
+
+    private static func makePipeline(library: MTLLibrary?,
+                                     name: String,
+                                     constants: MTLFunctionConstantValues) throws
+        -> (pipeline: MTLComputePipelineState, function: MTLFunction) {
+        guard let library else {
+            throw MPPPrefillInt4QMMError.pipelineUnavailable(reason: "tensorops library failed to compile")
+        }
+        let function = try library.makeFunction(name: name, constantValues: constants)
+        return (try library.device.makeComputePipelineState(function: function), function)
     }
 
     var isAvailable: Bool {
@@ -129,7 +162,7 @@ final class MPPPrefillInt4QMM {
             }
             return .unavailable
         }
-        guard let pipeline else {
+        guard let pipeline = k.isMultiple(of: variant.tileK) ? pipeline : narrowPipeline else {
             if required {
                 throw MPPPrefillInt4QMMError.pipelineUnavailable(
                     reason: unavailableReason.isEmpty
@@ -155,6 +188,8 @@ final class MPPPrefillInt4QMM {
         encoder.setBytes(&mValue, length: MemoryLayout<UInt32>.size, index: 5)
         encoder.setBytes(&nValue, length: MemoryLayout<UInt32>.size, index: 6)
         encoder.setBytes(&kValue, length: MemoryLayout<UInt32>.size, index: 7)
+        var loads = vectorLoadsFlag(weightsOffset: weightsOffset)
+        encoder.setBytes(&loads, length: MemoryLayout<UInt32>.size, index: 8)
         encoder.dispatchThreadgroups(
             MTLSize(width: (n + tileN - 1) / tileN,
                     height: (m + Self.tileM - 1) / Self.tileM,
@@ -214,7 +249,8 @@ final class MPPPrefillInt4QMM {
             }
             return .unavailable
         }
-        guard let groupedPipeline else {
+        guard let groupedPipeline = k.isMultiple(of: variant.tileK)
+                ? groupedPipeline : narrowGroupedPipeline else {
             if required {
                 throw MPPPrefillInt4QMMError.pipelineUnavailable(
                     reason: groupedUnavailableReason.isEmpty
@@ -254,6 +290,9 @@ final class MPPPrefillInt4QMM {
         encoder.setBytes(&sOff, length: MemoryLayout<UInt32>.size, index: 8)
         encoder.setBytes(&bOff, length: MemoryLayout<UInt32>.size, index: 9)
         encoder.setBytes(&mValue, length: MemoryLayout<UInt32>.size, index: 10)
+        var loads = expertViews.allSatisfy({ $0.offset.isMultiple(of: 16) })
+            ? vectorLoadsFlag(weightsOffset: weightsOffset) : 0
+        encoder.setBytes(&loads, length: MemoryLayout<UInt32>.size, index: 11)
         for view in expertViews {
             encoder.useResource(view.buffer, usage: .read)
         }
@@ -268,28 +307,40 @@ final class MPPPrefillInt4QMM {
         return .affineGroupedF16
     }
 
+    /// The row stride is already a multiple of 16 (from the `k % 64` guard), so
+    /// the base offset alone decides whether the vector body may run.
+    private func vectorLoadsFlag(weightsOffset: Int) -> UInt32 {
+        weightLoads == .vector && weightsOffset.isMultiple(of: 16) ? 1 : 0
+    }
+
     private static func compileTensorOpsLibrary(device: MTLDevice) throws -> MTLLibrary {
         try MetalContext.moduleLibrary(device: device, module: "tensorops")
     }
 }
 
 extension MPPPrefillInt4QMM {
-    /// `n<tileN>b<buffers>`: the N width of one weight tile and how many
-    /// weight tiles the threadgroup alternates between. `n32b1` is the
-    /// kernel P6 shipped and keeps its bare names; the numbers restate the
-    /// Metal instantiations' template arguments.
+    /// `n<tileN>[k<tileK>]b<buffers>`: the N and K widths of one weight tile
+    /// and how many weight tiles the threadgroup alternates between. `n32b1`
+    /// is the kernel P6 shipped and keeps its bare names; the numbers restate
+    /// the Metal instantiations' template arguments.
     enum TileVariant: String, CaseIterable, Sendable {
-        case n32b1, n32b2, n64b1, n64b2
+        case n32b1, n32b2, n64b1, n64b2, n32k128b1
 
         var tileN: Int {
             switch self {
-            case .n32b1, .n32b2: 32
+            case .n32b1, .n32b2, .n32k128b1: 32
             case .n64b1, .n64b2: 64
+            }
+        }
+        var tileK: Int {
+            switch self {
+            case .n32b1, .n32b2, .n64b1, .n64b2: 64
+            case .n32k128b1: 128
             }
         }
         var dequantBuffers: Int {
             switch self {
-            case .n32b1, .n64b1: 1
+            case .n32b1, .n64b1, .n32k128b1: 1
             case .n32b2, .n64b2: 2
             }
         }
@@ -304,14 +355,22 @@ extension MPPPrefillInt4QMM {
                 : "mpp_prefill_affine_grouped_f16_\(rawValue)"
         }
 
-        /// A missing value takes the fallback's; an unrecognised one rejects
-        /// the whole selection so a typo cannot pick a variant by accident.
-        init?(tileN: String?, buffers: String?, fallback: TileVariant) {
+        /// A missing value takes the fallback's; an unrecognised one — or a
+        /// 128-wide K tile with anything but N 32 / one buffer — rejects the
+        /// whole selection so a typo cannot pick a variant by accident.
+        init?(tileN: String?, tileK: String?, buffers: String?, fallback: TileVariant) {
             let width: Int
             switch tileN {
             case nil: width = fallback.tileN
             case "32"?: width = 32
             case "64"?: width = 64
+            default: return nil
+            }
+            let depth: Int
+            switch tileK {
+            case nil: depth = fallback.tileK
+            case "64"?: depth = 64
+            case "128"?: depth = 128
             default: return nil
             }
             let count: Int
@@ -321,7 +380,16 @@ extension MPPPrefillInt4QMM {
             case "2"?: count = 2
             default: return nil
             }
+            if depth == 128 {
+                guard width == 32, count == 1 else { return nil }
+                self = .n32k128b1
+                return
+            }
             self.init(rawValue: "n\(width)b\(count)")
         }
+    }
+
+    enum WeightLoads: String, CaseIterable, Sendable {
+        case byte, vector
     }
 }
