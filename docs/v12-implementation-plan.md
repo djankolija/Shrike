@@ -936,13 +936,48 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
 ### Task 6: P6 — routed GEMM grouping
 
-- [ ] **P6: routed GEMM grouping** — target `prefill_routed_tile` 0.99 → ≤ 0.70
+- [x] **P6: routed GEMM grouping** — target `prefill_routed_tile` 0.99 → ≤ 0.70
   ms/prompt-token (M4 Pro, 12k; 1.04 → ≤ 0.73 at 3.7k, 1.12 → ≤ 0.79 at 25k)
   and 3.35 → ≈ 2.35 (M1, 12k). Bar: **≥ 50 % of the 128-row expert-shape
   ceiling** on the M4 Pro — 5.74 TFLOPS for gate/up (128×2048×1024) and 5.88
   for down (128×512×2048), `docs/v12-prefill-matrix-kernels.md:49-50`; today
   the role runs at ≈ 2.0 TFLOPS, 35 % (`:170-171`). The M1's same-shape
   ceilings are 1.84 and 1.78 TFLOPS.
+  **LANDED 4c44b8c (2026-09-02): measured `prefill_routed_tile` 1.02 → 0.72
+  ms/prompt-token (M4 Pro 3.7k; 0.98 → 0.69 at 12k, 1.12 → 0.82 at 25k) and
+  3.40 → 3.22 (M1 3.7k; 3.35 → 3.13 at 12k).** The M4 Pro bars are met at 3.7k
+  and 12k and missed by 4 % at 25k; the M1 bar is missed. Bench (`ShrikeBench
+  routed_gemm 20`, the ornith tile, 6.44 GFLOP): M4 Pro per-expert 3.81 ms
+  (1.69 TFLOPS) → grouped 1.67 ms (3.86 TFLOPS, 2.28×), **67 % of the 5.77
+  TFLOPS gate/up ceiling measured in the same run** (29 % before); M1 9.39 ms
+  (0.69 TFLOPS) → 8.24 ms (0.78 TFLOPS, 1.14×), 68 % of its same-run ceiling of
+  1.15 (60 % before — the M1's eight cores were already filled by the 32-
+  threadgroup per-expert grids, so grouping, whose gain is filling idle cores,
+  buys 14 % of kernel time there; the M1 bar rested on the M4 Pro's 35 % share,
+  which the M1 never had). Neither Step-5 knob was needed: staging 2,048 is a
+  no-op at one wave per tile and `tileN` 64 is untried. Same-binary A/B
+  (`SHRIKE_PREFILL_ROUTED_GEMM=per-expert`, 1,024-row staging on both arms,
+  fresh servers): M4 Pro 3.7k walls 11.11 / 11.12 per-expert against 13.56 /
+  10.90 grouped (pair 1's grouped run carried a 22 ms-per-layer driver spike
+  on the first routed buffer; pair 2 is the reading), 12k 32.27 → 31.64 s, 25k
+  81.2 (P4) → 78.8 s; M1 3.7k 36.8 → 36.5 s, 12k 126.0 → 123.4 s. On the M4
+  Pro the GPU saving reappears as routed→routed gap (0.76 → 1.39 ms per
+  boundary at 3.7k, `host_ms`) because the loop is fetch-bound at 3.9 ms per
+  tile (P5); the M1 hides the fetch under its 7.5 ms tile and keeps the whole
+  7 %. Golden: short identical on both boxes (the 51-byte prompt never reaches
+  the matrix path); long differs as designed and was recaptured once per box —
+  sha256 M4 Pro 7c545301a1d3fe8d → 79aa5873bb2a167f, M1 899a25e60a365e60 →
+  39c38734e8f9d22a (the files' `# commit:` header records the parent 811fa7f;
+  both captures ran before the commit). Numerics: grouped against the P3 GEMMs
+  plus scalar leftovers and against the scalar path at 2e-2 over every row,
+  finiteness asserted; the 5- and 3-pair experts of the fixture run inside the
+  grouped dispatch. Review (opus): Approved with two Important findings, both
+  folded in (the residency field probed with a placeholder shape; the golden
+  digests unrecorded) plus seven minors; minors 4, 6, 8, 11, 12 ruled or
+  deferred in the ledger. Deviations: the block tables go inline (`setBytes`)
+  rather than into shared buffers rewritten per wave — a CPU→GPU hazard with
+  the pending-tile overlap; the bench harness is a public façade in the module
+  because ShrikeBench sees only public API.
 
   **What the P3 path costs.** `encodeExpertGEMMs`
   (`PrefillGroupedRoutedMoE.swift:639-688`) loops experts and, per expert row
