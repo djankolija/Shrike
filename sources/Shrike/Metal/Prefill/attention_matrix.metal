@@ -234,4 +234,218 @@ ATTN_MATRIX_KERNEL(attention_prefill_causal_matrix_r64s8, 64, 8)
 
 #undef ATTN_MATRIX_KERNEL
 
+// v12 P7: one threadgroup owns Rq query positions × the eight query heads of
+// one KV head (8·Rq matmul rows) against S-key tiles read straight from the
+// shadow, as P2 does. Q is first packed group-major
+// (`attention_prefill_q_group_pack`) so the block is one uniform-stride
+// operand. The measured win is the tile shape, not traffic: fewer rows and
+// more keys per tile amortise the score round-trip, the accumulator rescale
+// and the barriers (the spike's staged forms, which copied K/V through
+// threadgroup memory once per group, all lost). Scores are fp32, the softmax
+// weights fp16 in a second region, the row sums taken from the rounded weights.
+
+constant constexpr int kAttnGroupHeads = 8;
+
+kernel void attention_prefill_q_group_pack(
+    device const half* Q [[buffer(0)]],
+    device half* qGroup [[buffer(1)]],
+    constant PrefillAttentionParams& p [[buffer(2)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= p.headDim || gid.y >= p.numQHeads || gid.z >= p.queryCount) return;
+    const uint kvh = gid.y / uint(kAttnGroupHeads);
+    const uint hLocal = gid.y % uint(kAttnGroupHeads);
+    const uint row = (kvh * p.queryCount + gid.z) * uint(kAttnGroupHeads) + hLocal;
+    qGroup[row * p.headDim + gid.x] =
+        Q[gid.z * p.qTokenStrideElements + gid.y * p.headDim + gid.x];
+}
+
+template <int Rq, int KEYS, int SG>
+static inline void attention_prefill_causal_group_matrix_body(
+    device half* qGroup,
+    device half* shadowK,
+    device half* shadowV,
+    device half* O,
+    constant PrefillAttentionParams& p,
+    uint3 tg,
+    uint lid,
+    threadgroup float* score_tile,
+    threadgroup half* weight_tile,
+    threadgroup float* row_scale
+) {
+    constexpr int R = kAttnGroupHeads * Rq;
+    constexpr int threads = 32 * SG;
+    static_assert(R * KEYS * 4 + R * KEYS * 2 + R * 4 <= 32768, "threadgroup budget");
+    static_assert(threads % R == 0, "every row needs the same number of lanes");
+    static_assert(32 % (threads / R) == 0, "a row's lanes must share one simdgroup");
+    static_assert(KEYS % (threads / R) == 0, "keys must split evenly across a row's lanes");
+    constexpr auto accumulate = matmul2d_descriptor::mode::multiply_accumulate;
+    constexpr auto qk_desc = matmul2d_descriptor(
+        R, KEYS, kAttnMatrixHeadDim, false, true, false, accumulate);
+    constexpr auto pv_desc = matmul2d_descriptor(
+        R, kAttnMatrixHeadDim, KEYS, false, false, false, accumulate);
+    matmul2d<qk_desc, execution_simdgroups<SG>> qk_op;
+    matmul2d<pv_desc, execution_simdgroups<SG>> pv_op;
+
+    using device_half_tensor =
+        tensor<device half, dextents<int32_t, 2>, tensor_inline>;
+    using threadgroup_half_tensor =
+        tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline>;
+
+    const uint q0 = tg.x * uint(Rq);
+    const uint kvh = tg.y;
+    if (q0 >= p.queryCount) return;
+    const uint queries_valid = min(uint(Rq), p.queryCount - q0);
+    const uint rows_valid = queries_valid * uint(kAttnGroupHeads);
+    const uint elements = p.numKVHeads * p.headDim;
+    const uint kv_column0 = kvh * uint(kAttnMatrixHeadDim);
+
+    constexpr uint threads_per_row = uint(threads) / uint(R);
+    constexpr uint keys_per_thread = uint(KEYS) / threads_per_row;
+    const uint row = lid / threads_per_row;
+    const uint part = lid % threads_per_row;
+    const uint key0 = part * keys_per_thread;
+    const uint query = q0 + row / uint(kAttnGroupHeads);
+    float run_max = -INFINITY;
+    float run_sum = 0.0f;
+
+    device_half_tensor query_tensor(
+        qGroup + (kvh * p.queryCount * uint(kAttnGroupHeads)) * uint(kAttnMatrixHeadDim),
+        dextents<int32_t, 2>(kAttnMatrixHeadDim, int32_t(p.queryCount * uint(kAttnGroupHeads))),
+        array<int32_t, 2>({1, kAttnMatrixHeadDim}));
+    auto query_slice = query_tensor.slice(0, int32_t(q0 * uint(kAttnGroupHeads)));
+    device_half_tensor key_tensor(
+        shadowK + kv_column0,
+        dextents<int32_t, 2>(kAttnMatrixHeadDim, int32_t(p.kvValidCount)),
+        array<int32_t, 2>({1, int32_t(elements)}));
+    device_half_tensor value_tensor(
+        shadowV + kv_column0,
+        dextents<int32_t, 2>(kAttnMatrixHeadDim, int32_t(p.kvValidCount)),
+        array<int32_t, 2>({1, int32_t(elements)}));
+    threadgroup_half_tensor weight_tensor(
+        weight_tile,
+        dextents<int32_t, 2>(KEYS, R),
+        array<int32_t, 2>({1, KEYS}));
+
+    auto first_key_slice = key_tensor.slice(0, 0);
+    auto first_value_slice = value_tensor.slice(0, 0);
+    auto score_accumulator = qk_op.template get_destination_cooperative_tensor<
+        decltype(query_slice), decltype(first_key_slice), float>();
+    auto output_accumulator = pv_op.template get_destination_cooperative_tensor<
+        decltype(weight_tensor), decltype(first_value_slice), float>();
+#pragma clang loop unroll(full)
+    for (int element = 0; element < output_accumulator.get_capacity(); ++element) {
+        output_accumulator[element] = 0.0f;
+    }
+
+    const uint last = min(p.kvValidCount, p.startPosition + q0 + queries_valid);
+    for (uint key_start = 0u; key_start < last; key_start += uint(KEYS)) {
+#pragma clang loop unroll(full)
+        for (int element = 0; element < score_accumulator.get_capacity(); ++element) {
+            score_accumulator[element] = 0.0f;
+        }
+        auto key_slice = key_tensor.slice(0, int32_t(key_start));
+        qk_op.run(query_slice, key_slice, score_accumulator);
+#pragma clang loop unroll(full)
+        for (int element = 0; element < score_accumulator.get_capacity(); ++element) {
+            if (!score_accumulator.is_valid_element(element)) continue;
+            const auto position = score_accumulator.get_multidimensional_index(element);
+            score_tile[uint(position[1]) * uint(KEYS) + uint(position[0])] =
+                score_accumulator[element] * p.scale;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        {
+            uint visible = 0u;
+            if (row < rows_valid) {
+                const uint causal_last = min(p.kvValidCount, p.startPosition + query + 1u);
+                visible = causal_last > key_start
+                    ? min(uint(KEYS), causal_last - key_start)
+                    : 0u;
+            }
+            threadgroup float* scores = score_tile + row * uint(KEYS);
+            threadgroup half* weights = weight_tile + row * uint(KEYS);
+            float tile_max = -INFINITY;
+            for (uint i = 0u; i < keys_per_thread; ++i) {
+                const uint key = key0 + i;
+                if (key < visible) tile_max = max(tile_max, scores[key]);
+            }
+            for (uint offset = 1u; offset < threads_per_row; offset <<= 1u) {
+                tile_max = max(tile_max, simd_shuffle_xor(tile_max, offset));
+            }
+            const float next_max = max(run_max, tile_max);
+            const float old_scale = run_sum > 0.0f
+                ? fast::exp(run_max - next_max)
+                : 0.0f;
+            float tile_sum = 0.0f;
+            for (uint i = 0u; i < keys_per_thread; ++i) {
+                const uint key = key0 + i;
+                const half weight = key < visible
+                    ? half(fast::exp(scores[key] - next_max))
+                    : half(0.0f);
+                weights[key] = weight;
+                tile_sum += float(weight);
+            }
+            for (uint offset = 1u; offset < threads_per_row; offset <<= 1u) {
+                tile_sum += simd_shuffle_xor(tile_sum, offset);
+            }
+            run_sum = run_sum * old_scale + tile_sum;
+            run_max = next_max;
+            if (part == 0u) row_scale[row] = old_scale;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+#pragma clang loop unroll(full)
+        for (int element = 0; element < output_accumulator.get_capacity(); ++element) {
+            if (!output_accumulator.is_valid_element(element)) continue;
+            const auto position = output_accumulator.get_multidimensional_index(element);
+            output_accumulator[element] *= row_scale[uint(position[1])];
+        }
+        auto value_slice = value_tensor.slice(0, int32_t(key_start));
+        pv_op.run(weight_tensor, value_slice, output_accumulator);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (part == 0u) row_scale[row] = run_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+#pragma clang loop unroll(full)
+    for (int element = 0; element < output_accumulator.get_capacity(); ++element) {
+        if (!output_accumulator.is_valid_element(element)) continue;
+        const auto position = output_accumulator.get_multidimensional_index(element);
+        const uint d = uint(position[0]);
+        const uint r = uint(position[1]);
+        if (r >= rows_valid) continue;
+        const float denominator = row_scale[r];
+        const uint head = kvh * uint(kAttnGroupHeads) + r % uint(kAttnGroupHeads);
+        O[(q0 + r / uint(kAttnGroupHeads)) * p.oTokenStrideElements + head * p.headDim + d] =
+            denominator > 0.0f
+                ? half(output_accumulator[element] / denominator)
+                : half(0.0f);
+    }
+}
+
+#define ATTN_GROUP_MATRIX_KERNEL(NAME, RQ, KEYS, SG)                               \
+[[kernel, max_total_threads_per_threadgroup(32 * SG)]]                          \
+kernel void NAME(                                                              \
+    device half* qGroup [[buffer(0)]],                                          \
+    device half* shadowK [[buffer(1)]],                                         \
+    device half* shadowV [[buffer(2)]],                                         \
+    device half* O [[buffer(3)]],                                               \
+    constant PrefillAttentionParams& p [[buffer(4)]],                           \
+    uint3 tg [[threadgroup_position_in_grid]],                                  \
+    uint lid [[thread_index_in_threadgroup]]                                    \
+) {                                                                             \
+    threadgroup float score_tile[kAttnGroupHeads * RQ * KEYS];                     \
+    threadgroup half weight_tile[kAttnGroupHeads * RQ * KEYS];                     \
+    threadgroup float row_scale[kAttnGroupHeads * RQ];                          \
+    attention_prefill_causal_group_matrix_body<RQ, KEYS, SG>(                      \
+        qGroup, shadowK, shadowV, O, p, tg, lid,                                \
+        score_tile, weight_tile, row_scale);                                    \
+}
+
+ATTN_GROUP_MATRIX_KERNEL(attention_prefill_causal_matrix_g4k128d, 4, 128, 4)
+ATTN_GROUP_MATRIX_KERNEL(attention_prefill_causal_matrix_g2k256d, 2, 256, 4)
+
+#undef ATTN_GROUP_MATRIX_KERNEL
+
 #endif

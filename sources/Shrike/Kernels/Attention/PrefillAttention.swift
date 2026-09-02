@@ -56,6 +56,7 @@ enum PrefillAttentionError: Error, CustomStringConvertible {
     case tensorOpsUnavailable(reason: String)
     case commandEncoderFailed
     case shadowAllocationFailed(bytes: Int)
+    case qGroupAllocationFailed(bytes: Int)
 
     public var description: String {
         switch self {
@@ -65,6 +66,8 @@ enum PrefillAttentionError: Error, CustomStringConvertible {
             return "Failed to create Metal compute command encoder"
         case .shadowAllocationFailed(let bytes):
             return "Could not allocate \(bytes)-byte KV shadow buffers for matrix prefill attention"
+        case .qGroupAllocationFailed(let bytes):
+            return "Could not allocate a \(bytes)-byte group-major Q buffer for matrix prefill attention"
         }
     }
 }
@@ -80,39 +83,52 @@ final class PrefillAttention {
     private let tensorOpsUnavailableReason: String
     private let psoKVDequant: MTLComputePipelineState?
     private let psoCausalMatrix: MTLComputePipelineState?
+    private let psoQGroupPack: MTLComputePipelineState?
     let matrixUnavailableReason: String
-    /// Tile geometry: rows of queries per threadgroup and simdgroups per
-    /// threadgroup. `SHRIKE_ATTN_MATRIX_TILE=r64s8` selects the wider variant
-    /// for A/B measurement; the default is the measured production choice.
-    static let matrixTile: (rows: Int, simdgroups: Int) =
-        ProcessInfo.processInfo.environment["SHRIKE_ATTN_MATRIX_TILE"] == "r64s8"
-            ? (64, 8) : (32, 4)
+    /// `SHRIKE_ATTN_MATRIX_TILE` names the variant; anything unrecognised
+    /// keeps the measured production choice.
+    static let matrixTile: MatrixTile =
+        ProcessInfo.processInfo.environment["SHRIKE_ATTN_MATRIX_TILE"]
+            .flatMap(MatrixTile.init(rawValue:)) ?? .g2k256d
     static let matrixHeadDim: UInt32 = 256
+    static let matrixGroupHeads: UInt32 = 8
+    let tile: MatrixTile
     private var shadowK: MTLBuffer?
     private var shadowV: MTLBuffer?
+    private var qGroup: MTLBuffer?
 
-    var matrixPathAvailable: Bool { psoCausalMatrix != nil && psoKVDequant != nil }
+    var matrixPathAvailable: Bool {
+        psoCausalMatrix != nil && psoKVDequant != nil
+            && (!tile.groupsEightHeads || psoQGroupPack != nil)
+    }
 
-    init(context: MetalContext, supportsMLA: Bool = false) throws {
+    init(context: MetalContext, supportsMLA: Bool = false,
+         matrixTile: MatrixTile = PrefillAttention.matrixTile) throws {
         self.context = context
+        self.tile = matrixTile
         self.psoCausalTiled = try context.pipeline("attention_prefill_causal_tiled")
         self.psoMLACausal = supportsMLA
             ? try context.pipeline("attention_prefill_mla_causal")
             : nil
         var kvDequant: MTLComputePipelineState?
         var causalMatrix: MTLComputePipelineState?
+        var qGroupPack: MTLComputePipelineState?
         var matrixReason = ""
         do {
             kvDequant = try context.pipeline("attention_prefill_kv_dequant")
-            causalMatrix = try context.pipeline(
-                "attention_prefill_causal_matrix_r\(Self.matrixTile.rows)s\(Self.matrixTile.simdgroups)")
+            causalMatrix = try context.pipeline(matrixTile.kernelName)
+            qGroupPack = matrixTile.groupsEightHeads
+                ? try context.pipeline("attention_prefill_q_group_pack")
+                : nil
         } catch {
             kvDequant = nil
             causalMatrix = nil
+            qGroupPack = nil
             matrixReason = "\(error)"
         }
         self.psoKVDequant = kvDequant
         self.psoCausalMatrix = causalMatrix
+        self.psoQGroupPack = qGroupPack
         self.matrixUnavailableReason = matrixReason
         if context.device.supportsFamily(.apple10) {
             do {
@@ -284,8 +300,8 @@ final class PrefillAttention {
                                   kvRingCapacity: UInt32,
                                   hasSinks: Bool) -> Bool {
         params.headDim == matrixHeadDim
-            && params.numQHeads == 16
             && params.numKVHeads == 2
+            && params.numQHeads == params.numKVHeads * matrixGroupHeads
             && kvRingCapacity == 0
             && !hasSinks
             && (params.slidingWindow == 0 || params.slidingWindow >= params.kvValidCount)
@@ -321,23 +337,66 @@ final class PrefillAttention {
             MTLSize(width: elements, height: Int(params.kvValidCount), depth: 1),
             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
 
-        enc.setComputePipelineState(psoCausalMatrix)
-        enc.setBuffer(q, offset: qOffset, index: 0)
+        if tile.groupsEightHeads {
+            let qGroup = try encodeQGroupPack(encoder: enc, q: q, qOffset: qOffset, params: params)
+            enc.setComputePipelineState(psoCausalMatrix)
+            enc.setBuffer(qGroup, offset: 0, index: 0)
+        } else {
+            enc.setComputePipelineState(psoCausalMatrix)
+            enc.setBuffer(q, offset: qOffset, index: 0)
+        }
         enc.setBuffer(shadowK, offset: 0, index: 1)
         enc.setBuffer(shadowV, offset: 0, index: 2)
         enc.setBuffer(out, offset: outOffset, index: 3)
         enc.setBytes(&p, length: MemoryLayout<PrefillAttentionParams>.stride, index: 4)
-        let rows = Self.matrixTile.rows
+        let rows = tile.queryRows
+        let heads = tile.groupsEightHeads ? params.numKVHeads : params.numQHeads
         enc.dispatchThreadgroups(
             MTLSize(width: (Int(params.queryCount) + rows - 1) / rows,
-                    height: Int(params.numQHeads),
+                    height: Int(heads),
                     depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 32 * Self.matrixTile.simdgroups,
+            threadsPerThreadgroup: MTLSize(width: tile.threadsPerThreadgroup,
                                            height: 1, depth: 1))
         enc.endEncoding()
     }
 
+    /// Packs the strided Q rows group-major, `[numKVHeads][queryCount * 8][headDim]`
+    /// with row stride `headDim`, and returns the buffer holding them.
+    func encodeQGroupPack(encoder enc: MTLComputeCommandEncoder,
+                          q: MTLBuffer, qOffset: Int,
+                          params: PrefillAttentionParams) throws -> MTLBuffer {
+        guard let psoQGroupPack else {
+            throw PrefillAttentionError.tensorOpsUnavailable(reason: matrixUnavailableReason)
+        }
+        let bytes = Int(params.queryCount) * Int(params.numQHeads) * Int(params.headDim)
+            * MemoryLayout<Float16>.stride
+        let qGroup = try ensureQGroup(bytes: bytes)
+        var p = params
+        enc.setComputePipelineState(psoQGroupPack)
+        enc.setBuffer(q, offset: qOffset, index: 0)
+        enc.setBuffer(qGroup, offset: 0, index: 1)
+        enc.setBytes(&p, length: MemoryLayout<PrefillAttentionParams>.stride, index: 2)
+        enc.dispatchThreads(
+            MTLSize(width: Int(params.headDim), height: Int(params.numQHeads),
+                    depth: Int(params.queryCount)),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        return qGroup
+    }
+
     private static let shadowQuantumBytes = 8 << 20
+
+    /// Chunk-sized, not context-sized: grown in the shadow's quanta and never
+    /// released, like the shadow.
+    private func ensureQGroup(bytes: Int) throws -> MTLBuffer {
+        if let qGroup, qGroup.length >= bytes { return qGroup }
+        let quantum = Self.shadowQuantumBytes
+        let rounded = (bytes + quantum - 1) / quantum * quantum
+        guard let buffer = context.device.makeBuffer(length: rounded, options: .storageModePrivate) else {
+            throw PrefillAttentionError.qGroupAllocationFailed(bytes: rounded)
+        }
+        qGroup = buffer
+        return buffer
+    }
 
     private func ensureShadow(bytes: Int) throws -> (MTLBuffer, MTLBuffer) {
         if let shadowK, let shadowV, shadowK.length >= bytes, shadowV.length >= bytes {
@@ -398,6 +457,38 @@ final class PrefillAttention {
                                         constants: constants)
         } catch {
             preconditionFailure("failed to build prefill attention pipeline: \(error)")
+        }
+    }
+}
+
+extension PrefillAttention {
+    /// `r*` variants give one threadgroup a block of query rows of one query
+    /// head (v12 P2); `g*` variants give it `queryRows` query positions × the
+    /// eight query heads of one KV head (v12 P7). The digits name the query
+    /// rows and, for `g*`, the keys per tile; the `d` suffix is the spike's
+    /// name for the device-operand form that landed (its staged twins lost).
+    /// `queryRows` and `threadsPerThreadgroup` restate the Metal
+    /// instantiations' template arguments; the numeric tests are what ties
+    /// them together.
+    enum MatrixTile: String, CaseIterable, Sendable {
+        case r32s4, r64s8
+        case g4k128d, g2k256d
+
+        var kernelName: String { "attention_prefill_causal_matrix_\(rawValue)" }
+        var groupsEightHeads: Bool { self != .r32s4 && self != .r64s8 }
+        var queryRows: Int {
+            switch self {
+            case .r32s4: 32
+            case .r64s8: 64
+            case .g4k128d: 4
+            case .g2k256d: 2
+            }
+        }
+        var threadsPerThreadgroup: Int {
+            switch self {
+            case .r32s4, .g4k128d, .g2k256d: 128
+            case .r64s8: 256
+            }
         }
     }
 }

@@ -189,6 +189,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public var prefillAttentionPathDescription: String {
         let available = prefillAttention.matrixPathAvailable
         var description = "\(prefillAttentionPath.rawValue) matrix_available=\(available)"
+            + " tile=\(prefillAttention.tile.rawValue)"
         if !available {
             description += " reason=\(prefillAttention.matrixUnavailableReason)"
         }

@@ -11,41 +11,74 @@ import ShrikeValidationSupport
     private static let kvHeads = 2
     private static let scale: Float = 0.0625
     private static let tolerance: Float = 2e-2
-
-    @Test(arguments: [
+    private static let groupTiles: [PrefillAttention.MatrixTile] = [.g4k128d, .g2k256d]
+    private static let fp16Cases: [(label: String, start: Int, chunk: Int)] = [
         (label: "single-tile", start: 0, chunk: 64),
         (label: "ragged-rows-three-key-tiles", start: 0, chunk: 130),
         (label: "history-ragged-tail", start: 600, chunk: 40),
-    ]) func matrixMatchesReferenceOnFP16Cache(c: (label: String, start: Int, chunk: Int)) throws {
-        let ctx = try MetalContext()
-        let attention = try PrefillAttention(context: ctx)
-        #expect(attention.matrixPathAvailable, "\(attention.matrixUnavailableReason)")
-        let fixture = Self.makeFixture(start: c.start, chunk: c.chunk, seed: 0xB120)
-        let actual = try Self.runFP16(fixture, attention: attention, context: ctx, path: .causalMatrix)
-        let reference = PrefillAttentionRef.apply(fixture)
-        let maxAbs = RelError.maxAbsDiff(actual, reference)
-        let rel = RelError.compute(actual: actual, reference: reference)
-        #expect(maxAbs <= Self.tolerance, "\(c.label) maxAbs=\(maxAbs) rel=\(rel)")
-        #expect(rel <= Self.tolerance, "\(c.label) rel=\(rel) maxAbs=\(maxAbs)")
-    }
-
-    @Test(arguments: [
+    ]
+    private static let quantizedCases: [(label: String, start: Int, chunk: Int, bits: Int)] = [
         (label: "single-chunk", start: 0, chunk: 96, bits: 8),
         (label: "second-chunk-history", start: 1024, chunk: 64, bits: 8),
         (label: "deep-history-ragged", start: 4000, chunk: 130, bits: 8),
         (label: "deep-history-short-block", start: 2048, chunk: 37, bits: 8),
         (label: "int4-history", start: 1024, chunk: 64, bits: 4),
-    ]) func matrixMatchesTiledOnQuantizedCache(c: (label: String, start: Int, chunk: Int, bits: Int)) throws {
+    ]
+
+    @Test(arguments: fp16Cases)
+    func matrixMatchesReferenceOnFP16Cache(c: (label: String, start: Int, chunk: Int)) throws {
         let ctx = try MetalContext()
-        let attention = try PrefillAttention(context: ctx)
+        try Self.checkFP16Reference(c, attention: PrefillAttention(context: ctx), context: ctx)
+    }
+
+    @Test(arguments: fp16Cases, groupTiles)
+    func groupMatrixMatchesReferenceOnFP16Cache(c: (label: String, start: Int, chunk: Int),
+                                                tile: PrefillAttention.MatrixTile) throws {
+        let ctx = try MetalContext()
+        try Self.checkFP16Reference(c, attention: PrefillAttention(context: ctx, matrixTile: tile),
+                                    context: ctx)
+    }
+
+    private static func checkFP16Reference(_ c: (label: String, start: Int, chunk: Int),
+                                           attention: PrefillAttention,
+                                           context ctx: MetalContext) throws {
         #expect(attention.matrixPathAvailable, "\(attention.matrixUnavailableReason)")
-        let fixture = Self.makeFixture(start: c.start, chunk: c.chunk, seed: 0xB121)
+        let fixture = makeFixture(start: c.start, chunk: c.chunk, seed: 0xB120)
+        let actual = try runFP16(fixture, attention: attention, context: ctx, path: .causalMatrix)
+        let reference = PrefillAttentionRef.apply(fixture)
+        let finite = actual.allSatisfy(\.isFinite)
+        #expect(finite, "\(c.label) \(attention.tile) produced a non-finite output")
+        let maxAbs = RelError.maxAbsDiff(actual, reference)
+        let rel = RelError.compute(actual: actual, reference: reference)
+        #expect(maxAbs <= tolerance, "\(c.label) \(attention.tile) maxAbs=\(maxAbs) rel=\(rel)")
+        #expect(rel <= tolerance, "\(c.label) \(attention.tile) rel=\(rel) maxAbs=\(maxAbs)")
+    }
+
+    @Test(arguments: quantizedCases)
+    func matrixMatchesTiledOnQuantizedCache(c: (label: String, start: Int, chunk: Int, bits: Int)) throws {
+        let ctx = try MetalContext()
+        try Self.checkQuantizedAgainstTiled(c, attention: PrefillAttention(context: ctx), context: ctx)
+    }
+
+    @Test(arguments: quantizedCases, groupTiles)
+    func groupMatrixMatchesTiledOnQuantizedCache(c: (label: String, start: Int, chunk: Int, bits: Int),
+                                                 tile: PrefillAttention.MatrixTile) throws {
+        let ctx = try MetalContext()
+        try Self.checkQuantizedAgainstTiled(c, attention: PrefillAttention(context: ctx, matrixTile: tile),
+                                            context: ctx)
+    }
+
+    private static func checkQuantizedAgainstTiled(_ c: (label: String, start: Int, chunk: Int, bits: Int),
+                                                   attention: PrefillAttention,
+                                                   context ctx: MetalContext) throws {
+        #expect(attention.matrixPathAvailable, "\(attention.matrixUnavailableReason)")
+        let fixture = makeFixture(start: c.start, chunk: c.chunk, seed: 0xB121)
         let config = ArchConfig.qwen36_35B_A3B
         let cache = try KVCacheManager(device: ctx.device, config: config,
                                        maxContext: fixture.kvValid,
                                        precision: c.bits == 4 ? .int4 : .int8)
         let quantizer = try KVCacheQuantizer(context: ctx)
-        let kvRow = Self.kvHeads * Self.headDim
+        let kvRow = kvHeads * headDim
         guard let kBuffer = Fp16Buffer.make(ctx.device, values: fixture.k),
               let vBuffer = Fp16Buffer.make(ctx.device, values: fixture.v),
               let commandBuffer = ctx.queue.makeCommandBuffer() else {
@@ -72,27 +105,97 @@ import ShrikeValidationSupport
         params.kvValueBytes = UInt32(keyView.valueBytes)
         params.kvGroupSize = UInt32(keyView.groupSize)
         params.kvTokenStrideElements = UInt32(kvRow)
-        let tiled = try Self.run(fixture, attention: attention, context: ctx,
-                                 k: keyView.buffer, v: valueView.buffer,
-                                 params: params, path: .causalTiled)
-        let matrix = try Self.run(fixture, attention: attention, context: ctx,
-                                  k: keyView.buffer, v: valueView.buffer,
-                                  params: params, path: .causalMatrix)
+        let tiled = try run(fixture, attention: attention, context: ctx,
+                            k: keyView.buffer, v: valueView.buffer,
+                            params: params, path: .causalTiled)
+        let matrix = try run(fixture, attention: attention, context: ctx,
+                             k: keyView.buffer, v: valueView.buffer,
+                             params: params, path: .causalMatrix)
+        let finite = matrix.allSatisfy(\.isFinite)
+        #expect(finite, "\(c.label) \(attention.tile) produced a non-finite output")
         let maxAbs = RelError.maxAbsDiff(matrix, tiled)
         let rel = RelError.compute(actual: matrix, reference: tiled)
-        #expect(maxAbs <= Self.tolerance, "\(c.label) maxAbs=\(maxAbs) rel=\(rel)")
-        #expect(rel <= Self.tolerance, "\(c.label) rel=\(rel) maxAbs=\(maxAbs)")
+        #expect(maxAbs <= tolerance, "\(c.label) \(attention.tile) maxAbs=\(maxAbs) rel=\(rel)")
+        #expect(rel <= tolerance, "\(c.label) \(attention.tile) rel=\(rel) maxAbs=\(maxAbs)")
     }
 
-    @Test func rejectedShapeRunsTheTiledKernelEndToEnd() throws {
+    @Test func qGroupPackMatchesStridedQuery() throws {
         let ctx = try MetalContext()
-        let attention = try PrefillAttention(context: ctx)
+        let attention = try PrefillAttention(context: ctx, matrixTile: .g2k256d)
+        #expect(attention.matrixPathAvailable, "\(attention.matrixUnavailableReason)")
+        let fixture = Self.makeFixture(start: 512, chunk: 64, seed: 0xB130)
+        let halfBytes = MemoryLayout<Float16>.size
+        let packedCount = fixture.chunk * Self.qHeads * Self.headDim
+        guard let qBuf = Fp16Buffer.make(ctx.device,
+                                         values: [Float](repeating: 0, count: Self.qPrefix) + fixture.q),
+              let readback = Fp16Buffer.make(ctx.device, count: packedCount),
+              let cb = ctx.queue.makeCommandBuffer(),
+              let enc = cb.makeComputeCommandEncoder() else {
+            Issue.record("alloc failed")
+            return
+        }
+        let qGroup = try attention.encodeQGroupPack(encoder: enc, q: qBuf,
+                                                    qOffset: Self.qPrefix * halfBytes,
+                                                    params: Self.params(fixture))
+        enc.endEncoding()
+        guard let blit = cb.makeBlitCommandEncoder() else {
+            Issue.record("blit encoder failed")
+            return
+        }
+        blit.copy(from: qGroup, sourceOffset: 0, to: readback, destinationOffset: 0,
+                  size: packedCount * halfBytes)
+        blit.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        #expect(cb.error == nil)
+        let packed = Fp16Buffer.readHalf(readback, count: packedCount)
+        var mismatches = 0
+        for q in 0..<fixture.chunk {
+            for head in 0..<Self.qHeads {
+                for d in 0..<Self.headDim {
+                    let kvh = head / 8
+                    let hLocal = head % 8
+                    let expected = Float16(fixture.q[q * fixture.qStride + head * Self.headDim + d])
+                    let actual = packed[((kvh * fixture.chunk + q) * 8 + hLocal) * Self.headDim + d]
+                    if actual != expected { mismatches += 1 }
+                }
+            }
+        }
+        #expect(mismatches == 0, "\(mismatches) of \(packedCount) packed halves differ from the strided Q")
+    }
+
+    @Test(arguments: PrefillAttention.MatrixTile.allCases)
+    func rejectedShapeRunsTheTiledKernelEndToEnd(tile: PrefillAttention.MatrixTile) throws {
+        let ctx = try MetalContext()
+        let attention = try PrefillAttention(context: ctx, matrixTile: tile)
         var fixture = Self.makeFixture(start: 512, chunk: 64, seed: 0xB122)
         fixture.window = 256
         #expect(!PrefillAttention.matrixPathAccepts(Self.params(fixture), kvRingCapacity: 0, hasSinks: false))
         let viaMatrixRequest = try Self.runFP16(fixture, attention: attention, context: ctx, path: .causalMatrix)
         let tiled = try Self.runFP16(fixture, attention: attention, context: ctx, path: .causalTiled)
         #expect(viaMatrixRequest == tiled)
+    }
+
+    @Test func groupTileGateRequiresEightHeadsPerKVHead() {
+        let base = Self.params(Self.makeFixture(start: 512, chunk: 64, seed: 1))
+        #expect(PrefillAttention.matrixPathAccepts(base, kvRingCapacity: 0, hasSinks: false))
+        var fourKVHeads = base
+        fourKVHeads.numKVHeads = 4
+        #expect(!PrefillAttention.matrixPathAccepts(fourKVHeads, kvRingCapacity: 0, hasSinks: false))
+    }
+
+    @Test func matrixTileVariantsDescribeTheirGeometry() {
+        #expect(PrefillAttention.MatrixTile.r32s4.kernelName == "attention_prefill_causal_matrix_r32s4")
+        #expect(PrefillAttention.MatrixTile.g2k256d.kernelName == "attention_prefill_causal_matrix_g2k256d")
+        #expect(!PrefillAttention.MatrixTile.r64s8.groupsEightHeads)
+        let grouped = Self.groupTiles.allSatisfy(\.groupsEightHeads)
+        #expect(grouped)
+        #expect(PrefillAttention.MatrixTile.r32s4.queryRows == 32)
+        #expect(PrefillAttention.MatrixTile.g4k128d.queryRows == 4)
+        #expect(PrefillAttention.MatrixTile.g2k256d.queryRows == 2)
+        #expect(PrefillAttention.MatrixTile.g2k256d.threadsPerThreadgroup == 128)
+        #expect(PrefillAttention.MatrixTile.r64s8.threadsPerThreadgroup == 256)
+        #expect(PrefillAttention.matrixTile == .g2k256d)
     }
 
     @Test func gateAcceptsOnlyTheMatrixShape() {
