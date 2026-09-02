@@ -27,6 +27,10 @@ import Metal
         #expect(layout.routedPairMicrobatchRows == 32)
         #expect(layout.routedGateUpActElements == 3 * 32 * 512)
         #expect(layout.routedDownOutputElements == 32 * 2048)
+        #expect(layout.usesRoutedExpertMatrixPath == false)
+        #expect(layout.routedExpertStagingRows == 0)
+        #expect(layout.routedExpertHiddenStagingElements == 0)
+        #expect(layout.routedExpertActStagingElements == 0)
         // Qwen 3.6 extensions: split q/gate halves, gated-DeltaNet bundle,
         // and the shared-expert scalar gate.
         #expect(layout.attnGateElementsPerToken == 4096)
@@ -41,6 +45,7 @@ import Metal
 
         let worksheetT32UpperBound = Int(4.5 * 1_048_576.0)
         #expect(layout.totalPersistentBytes <= worksheetT32UpperBound)
+        #expect(layout.totalPersistentBytes == 4_692_544)
     }
 
     @Test func layoutClampsChunkSizeToRuntimeBounds() {
@@ -72,13 +77,45 @@ import Metal
         #expect(scratch.routeWeights.length == layout.routeWeightElements * MemoryLayout<Float16>.stride)
         #expect(scratch.routedGateUpActScratch.length == layout.routedGateUpActElements * MemoryLayout<Float16>.stride)
         #expect(scratch.routedDownScratch.length == layout.routedDownOutputElements * MemoryLayout<Float16>.stride)
+        #expect(layout.usesRoutedExpertMatrixPath == false)
+        #expect(scratch.routedExpertStaging.rowBlock == 0)
+        #expect(scratch.routedExpertStaging.hidden.length == MemoryLayout<Float16>.stride)
+        #expect(scratch.routedExpertStaging.gate.length == MemoryLayout<Float16>.stride)
         #expect(scratch.hidden.storageMode == MTLStorageMode.private)
         #expect(scratch.denseX.storageMode == MTLStorageMode.private)
         #expect(scratch.routedX.storageMode == MTLStorageMode.private)
         #expect(scratch.routerX.storageMode == MTLStorageMode.private)
         #expect(scratch.routedGateUpActScratch.storageMode == MTLStorageMode.private)
         #expect(scratch.routedDownScratch.storageMode == MTLStorageMode.private)
+        #expect(scratch.routedExpertStaging.hidden.storageMode == MTLStorageMode.private)
         #expect(scratch.routeIDs.storageMode == MTLStorageMode.shared)
         #expect(scratch.routeWeights.storageMode == MTLStorageMode.shared)
+    }
+
+    @Test func routedExpertStagingIsAllocatedOnlyForChunksThatCanFeedTheMatrixPath() throws {
+        let ctx = try MetalContext()
+        let toy = ArchConfig.qwenToy()
+        let threshold = PrefillGroupedRoutedMoE.matrixPathMinimumRows
+
+        let atThreshold = PrefillChunkScratchLayout(config: toy, chunkTokens: threshold)
+        #expect(atThreshold.usesRoutedExpertMatrixPath == false)
+        #expect(atThreshold.routedExpertStagingRows == 0)
+
+        let live = PrefillChunkScratchLayout(config: toy, chunkTokens: threshold + 1)
+        #expect(live.usesRoutedExpertMatrixPath)
+        #expect(live.routedExpertStagingRows == threshold + 1)
+        #expect(live.routedExpertHiddenStagingElements == (threshold + 1) * toy.hiddenSize)
+        #expect(live.routedExpertActStagingElements == (threshold + 1) * toy.moeIntermediateSize)
+
+        let scratch = try PrefillChunkScratchBuffers.allocate(device: ctx.device, layout: live)
+        #expect(scratch.routedExpertStaging.rowBlock == threshold + 1)
+        #expect(scratch.routedExpertStaging.hidden.length
+            == live.routedExpertHiddenStagingElements * MemoryLayout<Float16>.stride)
+        #expect(scratch.routedExpertStaging.down.length
+            == live.routedExpertHiddenStagingElements * MemoryLayout<Float16>.stride)
+        #expect(scratch.routedExpertStaging.gate.length
+            == live.routedExpertActStagingElements * MemoryLayout<Float16>.stride)
+        #expect(scratch.routedExpertStaging.up.length
+            == live.routedExpertActStagingElements * MemoryLayout<Float16>.stride)
     }
 }

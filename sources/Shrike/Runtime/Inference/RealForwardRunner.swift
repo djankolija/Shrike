@@ -4996,17 +4996,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     guard let tileCB = ctx.queue.makeCommandBuffer() else {
                         throw ModelError.residentBufferWrapFailed
                     }
-                    _ = try prefillGroupedMoE.encodeStreamedBatched(
-                        commandBuffer: tileCB,
-                        hidden: scratch.routedX,
-                        sortedPairs: metadata.sortedPairs,
-                        routePartials: scratch.routePartials,
-                        gateUpActScratch: scratch.routedGateUpActScratch,
-                        downScratch: scratch.routedDownScratch,
-                        argumentBuffer: argumentBuffer,
-                        binding: fetch.binding,
-                        params: streamedParams,
-                        pairMicrobatchRows: scratch.layout.routedPairMicrobatchRows)
+                    try encodeRoutedTileExperts(commandBuffer: tileCB,
+                                                scratch: scratch,
+                                                sortedPairs: metadata.sortedPairs,
+                                                routes: routes,
+                                                tile: tile,
+                                                binding: fetch.binding,
+                                                argumentBuffer: argumentBuffer,
+                                                params: streamedParams)
                     tileCB.commit()
                     pendingTiles.append(PendingPrefillTile(tileIndex: tileIndex,
                                                            commandBuffer: tileCB,
@@ -5062,6 +5059,68 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     cb = nextCB
                 }
                 prefillTailNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - prefillTileEnd
+    }
+
+    /// One routed tile's experts: per-expert GEMMs for every expert whose
+    /// pairs fill a matrix tile, the scalar microbatch path for the rest. When
+    /// no expert clears the threshold the tile takes the scalar path whole, as
+    /// it did before the matrix path existed.
+    private func encodeRoutedTileExperts(
+        commandBuffer tileCB: MTLCommandBuffer,
+        scratch: PrefillChunkScratchBuffers,
+        sortedPairs: MTLBuffer,
+        routes: PrefillMoEGroupedRoutes,
+        tile: PrefillMoETile,
+        binding: PrefillStreamedTileBinding,
+        argumentBuffer: PrefillStreamedTileArgumentBuffer,
+        params: PrefillGroupedRoutedMoEStreamedParams
+    ) throws {
+        func encodeScalar(pairStart: UInt32, pairCount: UInt32) throws {
+            var scalarParams = params
+            scalarParams.pairStart = pairStart
+            scalarParams.pairCount = pairCount
+            _ = try prefillGroupedMoE.encodeStreamedBatched(
+                commandBuffer: tileCB,
+                hidden: scratch.routedX,
+                sortedPairs: sortedPairs,
+                routePartials: scratch.routePartials,
+                gateUpActScratch: scratch.routedGateUpActScratch,
+                downScratch: scratch.routedDownScratch,
+                argumentBuffer: argumentBuffer,
+                binding: binding,
+                params: scalarParams,
+                pairMicrobatchRows: scratch.layout.routedPairMicrobatchRows)
+        }
+
+        let ranges = try PrefillExpertPairRange.ranges(forTile: tile, routes: routes)
+        // `usesRoutedExpertMatrixPath` is the same predicate the scratch layout
+        // sizes the staging with, so the branch can never outrun its buffers.
+        guard scratch.layout.usesRoutedExpertMatrixPath,
+              let mpp = prefillGroupedMoE.matrixPath(
+                for: prefillMPPAffineInt4,
+                d: Int(params.d),
+                intermediate: Int(params.routedIntermediate)) else {
+            try encodeScalar(pairStart: tile.pairStart, pairCount: tile.pairCount)
+            return
+        }
+        let leftovers = try prefillGroupedMoE.encodeExpertGEMMs(
+            commandBuffer: tileCB,
+            mpp: mpp,
+            hidden: scratch.routedX,
+            sortedPairs: sortedPairs,
+            routePartials: scratch.routePartials,
+            binding: binding,
+            ranges: ranges,
+            staging: scratch.routedExpertStaging,
+            params: params)
+        guard leftovers.count < ranges.count else {
+            try encodeScalar(pairStart: tile.pairStart, pairCount: tile.pairCount)
+            return
+        }
+        for leftover in leftovers {
+            try encodeScalar(pairStart: UInt32(leftover.pairStart),
+                             pairCount: UInt32(leftover.pairCount))
+        }
     }
 
     /// Attention stage of one decode layer: the gated-DeltaNet branch or the

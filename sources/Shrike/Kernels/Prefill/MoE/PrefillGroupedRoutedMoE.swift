@@ -12,6 +12,93 @@ enum PrefillGroupedRoutedMoEBufferIndex {
     static let params = 10
 }
 
+enum PrefillRoutedRowBlockBufferIndex {
+    static let source = 0
+    static let sortedPairs = 1
+    static let destination = 2
+    static let params = 3
+}
+
+struct PrefillRoutedRowBlockParams: Equatable, Sendable {
+    var pairStart: UInt32
+    var rows: UInt32
+    var d: UInt32
+    var topK: UInt32
+    var hiddenStrideElements: UInt32
+}
+
+/// One expert's `[pairStart, pairStart + pairCount)` window in `sortedPairs`.
+@frozen
+public struct PrefillExpertPairRange: Equatable, Sendable {
+    public var expert: UInt32
+    public var pairStart: Int
+    public var pairCount: Int
+
+    public init(expert: UInt32, pairStart: Int, pairCount: Int) {
+        self.expert = expert
+        self.pairStart = pairStart
+        self.pairCount = pairCount
+    }
+
+    /// The tile's experts in `sortedPairs` order, which is the order
+    /// `PrefillStreamedTileBinding.expertIDs` and `views` are bound in.
+    public static func ranges(forTile tile: PrefillMoETile,
+                              routes: PrefillMoEGroupedRoutes) throws -> [PrefillExpertPairRange] {
+        let start = Int(tile.groupStart)
+        let count = Int(tile.groupCount)
+        guard count > 0, count <= 16 else {
+            throw PrefillGroupedRoutedMoEError.invalidStreamedTileBinding(
+                "tile has \(count) live experts; expected 1...16")
+        }
+        guard start >= 0, start + count <= routes.groups.count else {
+            throw PrefillGroupedRoutedMoEError.invalidStreamedTileBinding(
+                "tile group range \(start)..<\(start + count) exceeds \(routes.groups.count)")
+        }
+        let end = start + count
+        return routes.groups[start..<end].map { group in
+            PrefillExpertPairRange(expert: group.expert,
+                                   pairStart: Int(group.pairStart),
+                                   pairCount: Int(group.pairCount))
+        }
+    }
+}
+
+/// Contiguous fp16 blocks the matrix path stages one expert's rows through:
+/// gathered hidden rows, the gate and up GEMM outputs, and the down GEMM
+/// output before it is scattered back into the per-pair partial rows.
+struct PrefillExpertStaging {
+    let hidden: MTLBuffer
+    let gate: MTLBuffer
+    let up: MTLBuffer
+    let down: MTLBuffer
+    let rowBlock: Int
+    let hiddenSize: Int
+    let intermediate: Int
+
+    static func allocate(device: MTLDevice,
+                         rowBlock: Int,
+                         hiddenSize: Int,
+                         intermediate: Int) throws -> PrefillExpertStaging {
+        func buffer(_ elements: Int, _ label: String) throws -> MTLBuffer {
+            guard let buffer = device.makeBuffer(
+                length: max(elements, 1) * MemoryLayout<Float16>.stride,
+                options: .storageModePrivate) else {
+                throw PrefillGroupedRoutedMoEError.allocationFailed(label)
+            }
+            buffer.label = label
+            return buffer
+        }
+        return PrefillExpertStaging(
+            hidden: try buffer(rowBlock * hiddenSize, "prefill.routedExpertHiddenStaging"),
+            gate: try buffer(rowBlock * intermediate, "prefill.routedExpertGateStaging"),
+            up: try buffer(rowBlock * intermediate, "prefill.routedExpertUpStaging"),
+            down: try buffer(rowBlock * hiddenSize, "prefill.routedExpertDownStaging"),
+            rowBlock: rowBlock,
+            hiddenSize: hiddenSize,
+            intermediate: intermediate)
+    }
+}
+
 struct PrefillGroupedRoutedMoEStreamedMetadataBuffers {
     let sortedPairs: MTLBuffer
 }
@@ -331,6 +418,7 @@ public struct PrefillStreamedTileBinding: Sendable, Equatable {
 enum PrefillGroupedRoutedMoEError: Error, Equatable, CustomStringConvertible {
     case invalidStreamedTileBinding(String)
     case allocationFailed(String)
+    case stagingTooSmall(String)
 
     public var description: String {
         switch self {
@@ -338,6 +426,8 @@ enum PrefillGroupedRoutedMoEError: Error, Equatable, CustomStringConvertible {
             return "invalid streamed tile binding: \(reason)"
         case .allocationFailed(let label):
             return "failed to allocate \(label)"
+        case .stagingTooSmall(let detail):
+            return "prefill routed expert staging is too small: \(detail)"
         }
     }
 }
@@ -345,7 +435,37 @@ enum PrefillGroupedRoutedMoEError: Error, Equatable, CustomStringConvertible {
 final class PrefillGroupedRoutedMoE {
     private let batchedPhase1PSO: MTLComputePipelineState
     private let batchedDownPSO: MTLComputePipelineState
+    private let gatherRowsPSO: MTLComputePipelineState
+    private let scatterRowsPSO: MTLComputePipelineState
+    private let activationPSO: MTLComputePipelineState
     private let streamedArgEncoder: MTLArgumentEncoder
+    private let weightBits: Int
+    private let supportsMatrixPath: Bool
+
+    /// Below this an expert's pairs do not fill one GEMM tile, so the scalar
+    /// microbatch path still wins.
+    static let matrixPathMinimumRows = 32
+
+    /// The MPP instance `encodeExpertGEMMs` may use, or nil when this runtime
+    /// belongs on the scalar path: no MPP object, a pipeline that failed to
+    /// compile, a bit width the GEMM cannot read, an epilogue the GEMM path
+    /// cannot reproduce (gpt-oss additive biases, clamped SwiGLU), or a
+    /// reduction length the GEMM would reject mid-tile — `encode` requires a
+    /// `k` that is a whole number of quantization groups, and the gate/up and
+    /// down GEMMs reduce over `d` and `intermediate` respectively.
+    func matrixPath(for mpp: MPPPrefillInt4QMM?,
+                    d: Int,
+                    intermediate: Int) -> MPPPrefillInt4QMM? {
+        guard supportsMatrixPath,
+              let mpp,
+              mpp.isAvailable,
+              mpp.weightBits == weightBits,
+              d > 0,
+              intermediate > 0,
+              d.isMultiple(of: MPPPrefillInt4QMM.tileK),
+              intermediate.isMultiple(of: MPPPrefillInt4QMM.tileK) else { return nil }
+        return mpp
+    }
 
     func makeStreamedArgumentBuffer(device: MTLDevice,
                                            binding: PrefillStreamedTileBinding) throws -> PrefillStreamedTileArgumentBuffer {
@@ -370,6 +490,8 @@ final class PrefillGroupedRoutedMoE {
          expertAdditiveBiases: Bool = false,
          clampedSwiGLU: Bool = false) throws {
         precondition([4, 8].contains(weightBits))
+        self.weightBits = weightBits
+        self.supportsMatrixPath = weightBits == 4 && !expertAdditiveBiases && !clampedSwiGLU
         let biasConstants: [MetalFunctionConstant] = expertAdditiveBiases
             ? [MetalFunctionConstant(index: 120, value: .bool(true))]
             : []
@@ -393,6 +515,10 @@ final class PrefillGroupedRoutedMoE {
             constants: [MetalFunctionConstant(index: 78,
                                                value: .uint32(UInt32(weightBits)))]
                 + biasConstants)
+        self.gatherRowsPSO = try context.pipeline("prefill_routed_gather_rows")
+        self.scatterRowsPSO = try context.pipeline("prefill_routed_scatter_rows")
+        self.activationPSO = try context.pipeline(
+            siluActivation ? "silu_mul_fp16" : "gelu_mul_fp16")
         guard let streamedFn = context.library.makeFunction(name: "prefill_grouped_routed_moe_batched_phase1") else {
             throw MetalError.missingFunction("prefill_grouped_routed_moe_batched_phase1")
         }
@@ -504,4 +630,194 @@ final class PrefillGroupedRoutedMoE {
         return microbatchCount
     }
 
+    /// Per expert in the tile: gather its pair rows into contiguous staging,
+    /// run gate / up / down as GEMMs over the packed expert slot, and scatter
+    /// the result into the same per-pair `routePartials` rows the scalar path
+    /// writes, unweighted — the router weight stays in the reduce. Experts
+    /// with fewer than `minimumRows` pairs come back untouched for the scalar
+    /// path.
+    func encodeExpertGEMMs(commandBuffer: MTLCommandBuffer,
+                           mpp: MPPPrefillInt4QMM,
+                           hidden: MTLBuffer,
+                           hiddenOffset: Int = 0,
+                           sortedPairs: MTLBuffer,
+                           sortedPairsOffset: Int = 0,
+                           routePartials: MTLBuffer,
+                           routePartialsOffset: Int = 0,
+                           binding: PrefillStreamedTileBinding,
+                           ranges: [PrefillExpertPairRange],
+                           staging: PrefillExpertStaging,
+                           params: PrefillGroupedRoutedMoEStreamedParams,
+                           minimumRows: Int = PrefillGroupedRoutedMoE.matrixPathMinimumRows) throws
+        -> [PrefillExpertPairRange] {
+        guard staging.rowBlock > 0,
+              staging.hiddenSize >= Int(params.d),
+              staging.intermediate >= Int(params.routedIntermediate) else {
+            throw PrefillGroupedRoutedMoEError.stagingTooSmall(
+                "\(staging.rowBlock) rows of \(staging.hiddenSize)/\(staging.intermediate)"
+                    + " cannot hold \(params.d)/\(params.routedIntermediate)")
+        }
+        var leftovers: [PrefillExpertPairRange] = []
+        for range in ranges {
+            guard range.pairCount >= minimumRows,
+                  let slot = binding.localSlot(for: range.expert) else {
+                leftovers.append(range)
+                continue
+            }
+            var consumed = 0
+            while consumed < range.pairCount {
+                let rows = min(staging.rowBlock, range.pairCount - consumed)
+                try encodeExpertRowBlock(
+                    commandBuffer: commandBuffer,
+                    mpp: mpp,
+                    hidden: hidden,
+                    hiddenOffset: hiddenOffset,
+                    sortedPairs: sortedPairs,
+                    sortedPairsOffset: sortedPairsOffset,
+                    routePartials: routePartials,
+                    routePartialsOffset: routePartialsOffset,
+                    view: binding.views[slot],
+                    staging: staging,
+                    params: params,
+                    pairStart: range.pairStart + consumed,
+                    rows: rows)
+                consumed += rows
+            }
+        }
+        return leftovers
+    }
+
+    private func encodeExpertRowBlock(commandBuffer: MTLCommandBuffer,
+                                      mpp: MPPPrefillInt4QMM,
+                                      hidden: MTLBuffer,
+                                      hiddenOffset: Int,
+                                      sortedPairs: MTLBuffer,
+                                      sortedPairsOffset: Int,
+                                      routePartials: MTLBuffer,
+                                      routePartialsOffset: Int,
+                                      view: TensorView,
+                                      staging: PrefillExpertStaging,
+                                      params: PrefillGroupedRoutedMoEStreamedParams,
+                                      pairStart: Int,
+                                      rows: Int) throws {
+        let d = Int(params.d)
+        let f = Int(params.routedIntermediate)
+        var block = PrefillRoutedRowBlockParams(pairStart: UInt32(pairStart),
+                                                rows: UInt32(rows),
+                                                d: UInt32(d),
+                                                topK: params.topK,
+                                                hiddenStrideElements: params.hiddenStrideElements)
+        try encodeRowBlockCopy(pso: gatherRowsPSO,
+                               commandBuffer: commandBuffer,
+                               source: hidden,
+                               sourceOffset: hiddenOffset,
+                               sortedPairs: sortedPairs,
+                               sortedPairsOffset: sortedPairsOffset,
+                               destination: staging.hidden,
+                               destinationOffset: 0,
+                               params: &block,
+                               width: d)
+        try project(mpp: mpp, on: commandBuffer, view: view,
+                    weightsOffset: Int(params.gateWOff),
+                    scalesOffset: Int(params.gateSOff),
+                    biasesOffset: Int(params.gateBOff),
+                    x: staging.hidden, y: staging.gate, m: rows, n: f, k: d)
+        try project(mpp: mpp, on: commandBuffer, view: view,
+                    weightsOffset: Int(params.upWOff),
+                    scalesOffset: Int(params.upSOff),
+                    biasesOffset: Int(params.upBOff),
+                    x: staging.hidden, y: staging.up, m: rows, n: f, k: d)
+        try encodeActivation(commandBuffer: commandBuffer,
+                             gate: staging.gate,
+                             up: staging.up,
+                             count: rows * f)
+        try project(mpp: mpp, on: commandBuffer, view: view,
+                    weightsOffset: Int(params.downWOff),
+                    scalesOffset: Int(params.downSOff),
+                    biasesOffset: Int(params.downBOff),
+                    x: staging.gate, y: staging.down, m: rows, n: d, k: f)
+        try encodeRowBlockCopy(pso: scatterRowsPSO,
+                               commandBuffer: commandBuffer,
+                               source: staging.down,
+                               sourceOffset: 0,
+                               sortedPairs: sortedPairs,
+                               sortedPairsOffset: sortedPairsOffset,
+                               destination: routePartials,
+                               destinationOffset: routePartialsOffset,
+                               params: &block,
+                               width: d)
+    }
+
+    private func project(mpp: MPPPrefillInt4QMM,
+                         on commandBuffer: MTLCommandBuffer,
+                         view: TensorView,
+                         weightsOffset: Int,
+                         scalesOffset: Int,
+                         biasesOffset: Int,
+                         x: MTLBuffer,
+                         y: MTLBuffer,
+                         m: Int,
+                         n: Int,
+                         k: Int) throws {
+        let base = Int(view.offset)
+        try mpp.encode(commandBuffer: commandBuffer,
+                       weights: view.buffer, weightsOffset: base + weightsOffset,
+                       scales: view.buffer, scalesOffset: base + scalesOffset,
+                       biases: view.buffer, biasesOffset: base + biasesOffset,
+                       x: x,
+                       y: y,
+                       m: m,
+                       n: n,
+                       k: k,
+                       required: true)
+    }
+
+    /// The activation folds back into the gate block, as the shared expert's
+    /// chunk path does: the kernel reads and writes only its own element.
+    private func encodeActivation(commandBuffer: MTLCommandBuffer,
+                                  gate: MTLBuffer,
+                                  up: MTLBuffer,
+                                  count: Int) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encoder.setComputePipelineState(activationPSO)
+        encoder.setBuffer(gate, offset: 0, index: 0)
+        encoder.setBuffer(up, offset: 0, index: 1)
+        encoder.setBuffer(gate, offset: 0, index: 2)
+        var elements = UInt32(count)
+        encoder.setBytes(&elements, length: MemoryLayout<UInt32>.size, index: 3)
+        let width = min(activationPSO.maxTotalThreadsPerThreadgroup, 256)
+        encoder.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    private func encodeRowBlockCopy(pso: MTLComputePipelineState,
+                                    commandBuffer: MTLCommandBuffer,
+                                    source: MTLBuffer,
+                                    sourceOffset: Int,
+                                    sortedPairs: MTLBuffer,
+                                    sortedPairsOffset: Int,
+                                    destination: MTLBuffer,
+                                    destinationOffset: Int,
+                                    params: inout PrefillRoutedRowBlockParams,
+                                    width: Int) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encoder.setComputePipelineState(pso)
+        encoder.setBuffer(source, offset: sourceOffset,
+                          index: PrefillRoutedRowBlockBufferIndex.source)
+        encoder.setBuffer(sortedPairs, offset: sortedPairsOffset,
+                          index: PrefillRoutedRowBlockBufferIndex.sortedPairs)
+        encoder.setBuffer(destination, offset: destinationOffset,
+                          index: PrefillRoutedRowBlockBufferIndex.destination)
+        encoder.setBytes(&params,
+                         length: MemoryLayout<PrefillRoutedRowBlockParams>.stride,
+                         index: PrefillRoutedRowBlockBufferIndex.params)
+        encoder.dispatchThreads(MTLSize(width: width, height: Int(params.rows), depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 32, height: 8, depth: 1))
+        encoder.endEncoding()
+    }
 }

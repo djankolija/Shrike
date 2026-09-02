@@ -107,6 +107,23 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     var sharedExpertActScratchElements: Int { sharedIntermediate }
     var routedGateUpActElements: Int { 3 * routedPairMicrobatchRows * routedIntermediate }
     var routedDownOutputElements: Int { routedPairMicrobatchRows * hiddenSize }
+    /// The strict `>` keeps the 32-token MTP draft chunk off the matrix path
+    /// so its hard memory budget stays unchanged; a dense architecture has no
+    /// routed experts at all. This same predicate gates the allocation below
+    /// and the branch in `RealForwardRunner.encodeRoutedTileExperts`.
+    var usesRoutedExpertMatrixPath: Bool {
+        routedIntermediate > 0
+            && topK > 0
+            && chunkTokens > PrefillGroupedRoutedMoE.matrixPathMinimumRows
+    }
+    /// The matrix path loops over row blocks of this size, so the staging never
+    /// needs more rows than this however long the chunk is.
+    static let routedExpertGEMMRowBlock = 512
+    var routedExpertStagingRows: Int {
+        usesRoutedExpertMatrixPath ? min(Self.routedExpertGEMMRowBlock, chunkTokens) : 0
+    }
+    var routedExpertHiddenStagingElements: Int { routedExpertStagingRows * hiddenSize }
+    var routedExpertActStagingElements: Int { routedExpertStagingRows * routedIntermediate }
 
     var devicePrivateBytes: Int {
         let fp16Elements = hiddenElements
@@ -125,6 +142,8 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
             + sharedExpertActScratchElements
             + routedGateUpActElements
             + routedDownOutputElements
+            + 2 * routedExpertHiddenStagingElements
+            + 2 * routedExpertActStagingElements
             + attnQElements
             + attnGateElements
             + gdnConvOutElements
@@ -170,6 +189,7 @@ struct PrefillChunkScratchBuffers {
     let sharedActScratch: MTLBuffer
     let routedGateUpActScratch: MTLBuffer
     let routedDownScratch: MTLBuffer
+    let routedExpertStaging: PrefillExpertStaging
     // Qwen 3.6 additions. Placeholder-sized (1 element) when the arch does
     // not use them, so the struct stays non-optional.
     let attnQ: MTLBuffer
@@ -234,6 +254,11 @@ struct PrefillChunkScratchBuffers {
                                                       label: "prefill.routedGateUpActScratch"),
             routedDownScratch: try privateBuffer(layout.routedDownOutputElements,
                                                  label: "prefill.routedDownScratch"),
+            routedExpertStaging: try PrefillExpertStaging.allocate(
+                device: device,
+                rowBlock: layout.routedExpertStagingRows,
+                hiddenSize: layout.hiddenSize,
+                intermediate: layout.routedIntermediate),
             attnQ: try privateBuffer(layout.attnQElements, label: "prefill.attnQ"),
             attnGate: try privateBuffer(layout.attnGateElements, label: "prefill.attnGate"),
             gdnConvOut: try privateBuffer(layout.gdnConvOutElements, label: "prefill.gdnConvOut"),

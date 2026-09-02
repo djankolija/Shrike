@@ -646,6 +646,44 @@ kernel void prefill_grouped_routed_moe_batched_down(
     route_partials[(pair.token * p.top_k + pair.rank) * p.D + d] = value;
 }
 
+struct PrefillRoutedRowBlockParamsMSL {
+    uint pair_start;
+    uint rows;
+    uint D;
+    uint top_k;
+    uint hidden_stride_elements;
+};
+
+kernel void prefill_routed_gather_rows(
+    device const half*                            hidden       [[buffer(0)]],
+    device const PrefillTokenExpertPairMSL*       sorted_pairs [[buffer(1)]],
+    device half*                                  staging      [[buffer(2)]],
+    constant PrefillRoutedRowBlockParamsMSL&      p            [[buffer(3)]],
+    uint2                                         gid          [[thread_position_in_grid]]
+) {
+    const uint d = gid.x;
+    const uint row = gid.y;
+    if (d >= p.D || row >= p.rows) return;
+
+    const PrefillTokenExpertPairMSL pair = sorted_pairs[p.pair_start + row];
+    staging[row * p.D + d] = hidden[pair.token * p.hidden_stride_elements + d];
+}
+
+kernel void prefill_routed_scatter_rows(
+    device const half*                            staging        [[buffer(0)]],
+    device const PrefillTokenExpertPairMSL*       sorted_pairs   [[buffer(1)]],
+    device half*                                  route_partials [[buffer(2)]],
+    constant PrefillRoutedRowBlockParamsMSL&      p              [[buffer(3)]],
+    uint2                                         gid            [[thread_position_in_grid]]
+) {
+    const uint d = gid.x;
+    const uint row = gid.y;
+    if (d >= p.D || row >= p.rows) return;
+
+    const PrefillTokenExpertPairMSL pair = sorted_pairs[p.pair_start + row];
+    route_partials[(pair.token * p.top_k + pair.rank) * p.D + d] = staging[row * p.D + d];
+}
+
 kernel void prefill_dequant_affine_qmm_f16_block(
     device const uint8_t* W      [[buffer(0)]],
     device const bfloat*  scales [[buffer(1)]],
