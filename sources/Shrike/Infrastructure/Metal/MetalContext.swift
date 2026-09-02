@@ -84,7 +84,8 @@ public final class MetalContext: @unchecked Sendable {
 
     /// Production shader modules compiled into the shared runtime library.
     /// Order is significant — these are concatenated into one source, and
-    /// "attention_matrix" uses "prefill"'s `PrefillAttentionParams`, `prefill_load_kv`, and `prefill_kv_slot`, so "prefill" must stay earlier here.
+    /// "attention_matrix" uses "prefill"'s `PrefillAttentionParams`, `prefill_load_kv`, and `prefill_kv_slot`, so "prefill" must stay earlier here;
+    /// "gdn_chunked" uses "gdn"'s `gdn_softplus`.
     private static let shaderModules: [String] = [
         "dequant_int4",
         "dequant_int8",
@@ -100,6 +101,7 @@ public final class MetalContext: @unchecked Sendable {
         "prefill",
         "attention_matrix",
         "gdn",
+        "gdn_chunked",
         "mla",
     ]
 
@@ -112,6 +114,7 @@ public final class MetalContext: @unchecked Sendable {
         "kv_cache_quantize": "Metal/Quant",
         "fused": "Metal/Fusions",
         "gdn": "Metal/GDN",
+        "gdn_chunked": "Metal/GDN",
         "logit": "Metal/Sampling",
         "mla": "Metal/MLA",
         "moe": "Metal/MoE",

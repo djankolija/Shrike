@@ -33,11 +33,16 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     let mlaUnembedDim: Int
     /// Non-zero when the shared expert output is scalar-gated (Qwen).
     let sharedScalarGateElements: Int
+    /// v12 P4: the chunked delta-rule scan's factors scratch, sized only for
+    /// the compiled shape and chunks of 64+ rows — the 32-token MTP draft
+    /// chunk stays on the serial kernel and allocates nothing here.
+    let gdnChunkFactorBytes: Int
 
     init(config: ArchConfig,
                 chunkTokens: Int,
                 routedPairMicrobatchRows: Int = 32) {
-        self.chunkTokens = max(1, min(chunkTokens, PrefillRuntimeConfig.maxChunkTokens))
+        let tokens = max(1, min(chunkTokens, PrefillRuntimeConfig.maxChunkTokens))
+        self.chunkTokens = tokens
         self.hiddenSize = config.hiddenSize
         self.maxQElementsPerToken = config.numHeads * max(config.headDim, config.fullHeadDim)
         self.maxKVElementsPerToken = max(config.numKVHeads * config.headDim,
@@ -60,6 +65,12 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
             ? config.linearAttention.numVHeads * config.linearAttention.keyHeadDim
             : (hasLinear ? config.linearAttention.numVHeads : 0)
         self.gdnLowRankDim = perChannel ? config.linearAttention.keyHeadDim : 0
+        let chunkedScan = hasLinear && !perChannel
+            && GDN.chunkedScanSupports(config: config.linearAttention, perChannelDecay: false)
+            && tokens >= GDN.chunkTokens
+        self.gdnChunkFactorBytes = chunkedScan
+            ? GDN.chunkFactorsBytes(config: config.linearAttention, prefillChunkTokens: tokens)
+            : 0
         if let mla = config.mla, config.hasMLALayers {
             self.mlaQDim = config.numHeads * (mla.latentDim + mla.qkRopeDim)
             self.mlaUnembedDim = config.numHeads * mla.valueHeadDim
@@ -155,7 +166,7 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
             + mlaQElements
             + mlaUnembedElements
             + sharedScalarGateBufferElements
-        return fp16Elements * MemoryLayout<Float16>.stride
+        return fp16Elements * MemoryLayout<Float16>.stride + gdnChunkFactorBytes
     }
 
     var sharedMetadataBytes: Int {
@@ -199,6 +210,7 @@ struct PrefillChunkScratchBuffers {
     let gdnA: MTLBuffer
     let gdnB: MTLBuffer
     let gdnY: MTLBuffer
+    let gdnChunkFactors: MTLBuffer?
     let gdnLowRank: MTLBuffer
     let mlaQ: MTLBuffer
     let mlaUnembed: MTLBuffer
@@ -211,6 +223,15 @@ struct PrefillChunkScratchBuffers {
                 length: max(elements, 1) * MemoryLayout<Float16>.stride,
                 options: .storageModePrivate)
             else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            buffer.label = label
+            return buffer
+        }
+
+        func privateBytes(_ bytes: Int, label: String) throws -> MTLBuffer? {
+            guard bytes > 0 else { return nil }
+            guard let buffer = device.makeBuffer(length: bytes, options: .storageModePrivate) else {
                 throw ModelError.residentBufferWrapFailed
             }
             buffer.label = label
@@ -266,6 +287,8 @@ struct PrefillChunkScratchBuffers {
             gdnA: try privateBuffer(layout.gdnAElements, label: "prefill.gdnA"),
             gdnB: try privateBuffer(layout.gdnBElements, label: "prefill.gdnB"),
             gdnY: try privateBuffer(layout.gdnYElements, label: "prefill.gdnY"),
+            gdnChunkFactors: try privateBytes(layout.gdnChunkFactorBytes,
+                                              label: "prefill.gdnChunkFactors"),
             gdnLowRank: try privateBuffer(layout.gdnLowRankElements,
                                           label: "prefill.gdnLowRank"),
             mlaQ: try privateBuffer(layout.mlaQElements, label: "prefill.mlaQ"),

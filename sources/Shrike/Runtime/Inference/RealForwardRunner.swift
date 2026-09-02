@@ -195,6 +195,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return description
     }
 
+    /// `chunked` applies to chunks of 64+ rows; shorter chunks take the serial
+    /// kernel regardless.
+    public var prefillGDNScanPathDescription: String {
+        guard let gdn else { return "none" }
+        guard gdn.chunkedScanAvailable else {
+            return "serial reason=\(gdn.chunkedScanUnavailableReason ?? "unavailable")"
+        }
+        return gdnPrefillScanChunked ? "chunked" : "serial"
+    }
+
     // Scratch — preallocated per spec'd D / F / vocab.
     private let decodeScratch: DecodeScratchBuffers
     private var hidden: MTLBuffer { decodeScratch.hidden }          // [D] FP16
@@ -332,6 +342,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// `forceLogitsHead: true` or they read a never-written buffer.
     private let useFusedGreedyHead: Bool
     private let prefillAttentionPath: RuntimePrefillAttentionPath
+    private let gdnPrefillScanChunked: Bool
     private let decodeExpertExecution: RuntimeDecodeExpertExecution
     private let expertIOSynchronization: RuntimeExpertIOSynchronization
     private let expertIOSubmission: RuntimeExpertIOSubmission
@@ -363,6 +374,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         case "matrix": self.prefillAttentionPath = .causalMatrix
         default: self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
         }
+        self.gdnPrefillScanChunked =
+            ProcessInfo.processInfo.environment["SHRIKE_GDN_PREFILL_SCAN"] != "serial"
         self.decodeExpertExecution = runtimeConfiguration.decodeExpertExecution
         self.expertIOSynchronization = runtimeConfiguration.expertIOSynchronization
         self.expertIOSubmission = runtimeConfiguration.expertIOSubmission
@@ -3749,6 +3762,43 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     /// Gated-DeltaNet (linear attention) branch of one chunked-prefill layer.
     ///
+    /// The chunked scan (v12 P4) when the runner, the kernels and the scratch
+    /// all allow it; the serial kernel for the 32-token draft chunk, an
+    /// uncompiled shape, or `SHRIKE_GDN_PREFILL_SCAN=serial`.
+    private func encodeGDNDeltaStep(
+        cb: MTLCommandBuffer, gdn: GDN, gdnState: GDNStateManager, layer L: Int,
+        scratch: PrefillChunkScratchBuffers,
+        aLog: MTLBuffer, aLogOffset: Int, dtBias: MTLBuffer, dtBiasOffset: Int,
+        rows t: Int, snapshotAfterFirstToken: Bool
+    ) throws {
+        let checkpoint = snapshotAfterFirstToken
+            ? gdnState.speculativeStateBuffer(layer: L) : nil
+        if gdnPrefillScanChunked, gdn.chunkedScanAvailable,
+           let factors = scratch.gdnChunkFactors, t >= GDN.chunkTokens {
+            try gdn.encodeDeltaStepPrefillChunked(commandBuffer: cb,
+                                                  convOut: scratch.gdnConvOut,
+                                                  aProj: scratch.gdnA,
+                                                  bProj: scratch.gdnB,
+                                                  aLog: aLog, aLogOffset: aLogOffset,
+                                                  dtBias: dtBias, dtBiasOffset: dtBiasOffset,
+                                                  state: gdnState.stateBuffer(layer: L),
+                                                  checkpointState: checkpoint,
+                                                  y: scratch.gdnY,
+                                                  rows: t, factors: factors)
+        } else {
+            try gdn.encodeDeltaStepPrefill(commandBuffer: cb,
+                                           convOut: scratch.gdnConvOut,
+                                           aProj: scratch.gdnA,
+                                           bProj: scratch.gdnB,
+                                           aLog: aLog, aLogOffset: aLogOffset,
+                                           dtBias: dtBias, dtBiasOffset: dtBiasOffset,
+                                           state: gdnState.stateBuffer(layer: L),
+                                           checkpointState: checkpoint,
+                                           y: scratch.gdnY,
+                                           rows: t)
+        }
+    }
+
     /// lint:allow-long one layer's linear-attention pipeline is a single
     /// ordered sequence -- in-projection, causal conv, QK norm, delta step,
     /// gated norm, out-projection -- sharing scratch buffers at every step.
@@ -3861,21 +3911,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         try gdn.encodeQKNorm(commandBuffer: cb,
                          convOut: scratch.gdnConvOut,
                          rows: t)
-        let aLog = linALog
-        let dtBias = linDtBias
-        try gdn.encodeDeltaStepPrefill(commandBuffer: cb,
-                                   convOut: scratch.gdnConvOut,
-                                   aProj: scratch.gdnA,
-                                   bProj: scratch.gdnB,
-                                   aLog: aLog.buffer,
-                                   aLogOffset: Int(aLog.offset),
-                                   dtBias: dtBias.buffer,
-                                   dtBiasOffset: Int(dtBias.offset),
-                                   state: gdnState.stateBuffer(layer: L),
-                                   checkpointState: snapshotGDNAfterFirstToken
-                                    ? gdnState.speculativeStateBuffer(layer: L) : nil,
-                                   y: scratch.gdnY,
-                                   rows: t)
+        try encodeGDNDeltaStep(cb: cb, gdn: gdn, gdnState: gdnState, layer: L,
+                               scratch: scratch,
+                               aLog: linALog.buffer, aLogOffset: Int(linALog.offset),
+                               dtBias: linDtBias.buffer, dtBiasOffset: Int(linDtBias.offset),
+                               rows: t,
+                               snapshotAfterFirstToken: snapshotGDNAfterFirstToken)
         let gatedNormW = linNorm
         try gdn.encodeGatedNorm(commandBuffer: cb,
                             y: scratch.gdnY,

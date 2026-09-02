@@ -19,7 +19,8 @@ import Shrike
 /// Usage: ShrikeBench [kernelName] [iterations]
 ///   qkv family: baseline (default), bandwidth, unroll2, ulong2
 ///   moe family: moe_phase1, moe_phase2, moe
-///   gdn family: gdn_inproj (baseline), gdn_inproj_xsh, gdn_inproj_r16
+///   gdn family: gdn_inproj (baseline), gdn_inproj_xsh, gdn_inproj_r16,
+///               gdn_scan (prefill delta-rule scan, serial vs chunked)
 @main
 struct ShrikeBench {
     /// Shader-side `ExpertOffsets` mirror: 9 packed UInt32 in the same order.
@@ -47,6 +48,11 @@ struct ShrikeBench {
 
         if kernelName.hasPrefix("gemm") {
             try runGEMM(kernelName: kernelName, iterations: iterations, context: context)
+            return
+        }
+
+        if kernelName == "gdn_scan" {
+            try runGDNScan(iterations: iterations, context: context)
             return
         }
 

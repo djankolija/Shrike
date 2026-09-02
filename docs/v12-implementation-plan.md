@@ -426,20 +426,220 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
   - [ ] Step 6: ledger both boxes; mini recapture. Verdict line. **Decision
         point:** if the M4 Pro 3.7k ledger is ≤ 2.0 ms/token, P4 is optional.
 
-### Task 4: P4 — GDN chunked scan (conditional)
+### Task 4: P4 — GDN chunked scan
 
-- [ ] **P4: GDN chunked scan** — conditional on the P3 decision point; target
-  1.0 → ~0.45 ms/token. Chunked gated delta rule at 64-token chunks: per chunk,
-  build the WY factors (`W = (I + tril(β K Kᵀ))⁻¹ β K`, forward-substitution on
-  a 64×64 lower-triangular block), intra-chunk output `Q·(W-corrected KV)` via
-  `matmul2d`, inter-chunk state `S ← decay · S + Kᵀ·U` carried in the same
-  `state` buffer `gdn_delta_step_prefill` writes; the per-channel decay variant
-  (`perChannelG`) needs the decay folded into the chunk's `K` rows before the
-  factorization. Oracle: `GDNReference` (`Sources/ShrikeValidation/Support/
-  Reference/GDN/GDNReference.swift`), tolerance `2e-2`, at `T ∈ {64, 200,
-  4096}` with a non-zero incoming state. Bench: `ShrikeBench gdn_scan` at
-  `T = 4096`. Same gates, recapture, ledger. Written out in full only when
-  scheduled; the P3 verdict says whether it is.
+- [ ] **P4: GDN chunked scan** — scheduled by the P3 decision rule (M4 Pro 3.7k
+  GPU busy 2.42 ms/tok > 2.0). Target `prefill_gdn_router` 1.00 → ≈ 0.45
+  ms/prompt-token (M4 Pro, 12k): the scan is ≈ 0.6 of the role's 1.0 ms; the
+  projections, conv and norms stay. Scope: the scalar per-head decay shape
+  only (ornith: `in_proj_a` has `Hv = 32` rows). The per-channel variant
+  (`gdn_delta_step_prefill_vec`, Kimi KDA), any shape other than
+  `Dk = Dv = 128`, chunks under 64 rows and the 32-token MTP draft chunk keep
+  the serial kernel.
+
+  **Math.** Per value head `h` (KV head `hk = h / (Hv/Hk)`), `S ∈ ℝ^{Dv×Dk}` is
+  the fp32 state stored row-major as `state[h][dv][dk]`; the row vectors
+  `q_t, k_t ∈ ℝ^{Dk}`, `v_t ∈ ℝ^{Dv}` are the normed conv rows the serial
+  kernel reads. The serial rule `GDNReference.step` implements, per token:
+
+  ```
+  α_t = exp(−exp(A_log[h]) · softplus(a_t + dt_bias[h]))     β_t = σ(b_t)
+  u_t = β_t (v_t − α_t S_{t−1} k_t)      S_t = α_t S_{t−1} + u_t k_tᵀ      o_t = S_t q_t
+  ```
+
+  Over a chunk of `C = 64` rows with incoming state `S_0`, cumulative
+  log-decay `ℓ_t = Σ_{j≤t} log α_j` and `γ_t = exp ℓ_t`, unrolling gives
+  `S_t = γ_t S_0 + Σ_{i≤t} exp(ℓ_t − ℓ_i) u_i k_iᵀ`; substituting into `u_t`
+  and stacking rows (`K, Q ∈ ℝ^{C×Dk}`, `V, U, O ∈ ℝ^{C×Dv}`):
+
+  ```
+  (I + A) U = diag(β) (V − diag(γ) K S_0ᵀ)     A[t,i] = β_t exp(ℓ_t − ℓ_i) k_t·k_i   (i < t, else 0)
+  O = diag(γ) Q S_0ᵀ + M U                     M[t,i] = exp(ℓ_t − ℓ_i) q_t·k_i       (i ≤ t, else 0)
+  S_C = γ_{C−1} S_0 + (diag(λ) U)ᵀ K           λ_i = exp(ℓ_{C−1} − ℓ_i)
+  ```
+
+  `I + A` is unit lower triangular, so `T⁻¹ = (I + A)⁻¹` comes from forward
+  substitution and `U = T⁻¹ diag(β)(V − diag(γ) K S_0ᵀ)`. Every product except
+  `T⁻¹` and `M` is independent per `dv` column, which is what lets the
+  sequential pass run on `Dv/32` column blocks per head. The speculative
+  checkpoint (state after the chunk's first row) is `α_0 S_0 + u_0 k_0ᵀ` with
+  `u_0 = U[0,:]`. A partial last chunk pads rows `t ≥ rows` with `α = 1`,
+  `β = 0` and zeroed `q, k, v` (a blit fill of the `conv_out` rows
+  `[rows, ⌈rows/64⌉·64)` before the scan), so the pads add nothing and
+  `γ_{C−1}` is the last real token's decay. `ℓ_t ≤ ℓ_i` for `i ≤ t`, so every
+  ratio `exp(ℓ_t − ℓ_i) ≤ 1` and nothing overflows; `γ_t` underflowing to 0 is
+  the same fully-forgotten state the serial product of `g` reaches.
+
+  **Kernels** — new module `gdn_chunked`
+  (`Sources/Shrike/Metal/GDN/gdn_chunked.metal`), listed after `gdn` in
+  `MetalContext.shaderModules` because it uses `gdn_softplus`, guarded by
+  `__HAVE_TENSOR__` like `attention_matrix.metal`, both 128 threads
+  (`execution_simdgroups<4>`):
+
+  1. `gdn_chunk_factors`, grid `(⌈rows/64⌉, Hv)`. Per (chunk, head): `ℓ` and
+     `β` for the 64 rows (pads: `log α = 0`, `β = 0`); `K Kᵀ` and `Q Kᵀ` from
+     one `matmul2d_descriptor(64, 64, 128, false, true)` op over device
+     tensors on `conv_out` (row stride `C`); `A` into a 16 KB fp32 threadgroup
+     tile; `T⁻¹` by forward substitution, one thread per column
+     (`x_j = 1; x_t = −Σ_{i=j}^{t−1} A[t,i] x_i`), stored as fp16; `M` stored
+     as fp16; `β, γ, λ` and `γ_{C−1}` as fp32. Output: the *factors* scratch,
+     `17,408` bytes per (head, chunk), head-major (`((h · chunkCount) + c) ·
+     17,408`): `tinv: half[64·64]` @0, `m: half[64·64]` @8192, `beta, gamma,
+     lambda: float[64]` each from @16384, `gammaChunk: float` @17152, padded
+     to a 256-byte multiple. fp16 factors are the precision
+     flash-linear-attention ships (bf16 there); the products accumulate fp32.
+  2. `gdn_chunk_scan`, grid `(Dv/32, Hv)`. One threadgroup owns a 32-column
+     block of one head's state for the whole chunk sequence. Threadgroup
+     memory: `s_tile: float[32·128]` (16 KB, the state block), `u_tile:
+     float[64·32]` (8 KB). Per chunk, in this order: (1) `P = K S_blkᵀ`
+     (`matmul2d_descriptor(64, 32, 128, false, true)`, left device half, right
+     threadgroup float), `u_tile[t,dv] = t < valid ? β_t (v[t,dv] − γ_t P[t,dv])
+     : 0`; (2) `U = T⁻¹ X` (`matmul2d_descriptor(64, 32, 64, false, false)`,
+     left device half `tinv`, right `u_tile`), written back over `u_tile`
+     after a barrier; (3) chunk 0 with `checkpointEnabled`: `checkpointState
+     = γ_0 s_tile + u_tile[0,·] ⊗ k_0`; (4) `O₁ = Q S_blkᵀ` (the op from (1))
+     and `O₂ = M U` (the op from (2)) into two cooperative tensors; (5)
+     `u_tile[t,·] *= λ_t`; (6) `S_blk = γ_{C−1} S_blk + Uλᵀ K`
+     (`matmul2d_descriptor(32, 128, 64, true, false)`, left `u_tile`
+     transposed, right device half `K`), read-modify-write per element into
+     `s_tile`; (7) `u_tile = γ_t O₁ + O₂` across two barriers, then `y[t] =
+     half(u_tile[t])` for `t < valid`. After the last chunk `s_tile` is written
+     back to `state`. Cooperative tensors of different ops are never combined
+     by element index — everything crosses through `u_tile` / `s_tile`.
+
+  **Files:**
+  - Create: `Sources/Shrike/Metal/GDN/gdn_chunked.metal` (both kernels, a
+    `GDNChunkParams` struct);
+    `Sources/ShrikeValidation/Support/Reference/GDN/GDNChunkedReference.swift`
+    (fp32 CPU model of the chunk math — the oracle for the kernel's
+    intermediates); `Tests/Shrike/Core/Kernels/GDN/GDNChunkedScanTests.swift`.
+  - Modify: `Sources/ShrikeValidation/Support/Reference/GDN/GDNReference.swift`
+    (split `step` into `normalize`, `deltaRule`, `gatedNorm`; `step` composes
+    them, behaviour unchanged); `Sources/Shrike/Kernels/GDN/GDN.swift` (chunked
+    pipelines, `encodeDeltaStepPrefillChunked`, the shape predicate, scratch
+    sizing); `Sources/Shrike/Infrastructure/Metal/MetalContext.swift:88-123`
+    (register the module);
+    `Sources/Shrike/Runtime/Prefill/PrefillChunkScratch.swift`
+    (`usesGDNChunkedScan`, `gdnChunkFactorBytes`, the buffer);
+    `Sources/Shrike/Runtime/Inference/RealForwardRunner.swift` (~185-195 the
+    path description, ~361 the env knob, ~3866 the delta-step call — extracted
+    into a private helper so the baselined layer function does not grow);
+    `Sources/ShrikeServer/Core/ServerInference.swift:527-528, 816-817, 848-849`
+    (`prefill_gdn_scan=` on the residency line);
+    `Sources/ShrikeBench/ShrikeBench.swift` (`gdn_scan` mode);
+    `docs/v12-prefill-matrix-kernels.md` (Step 4, ledger rows, the GDN row of
+    "Where the time goes").
+
+  **Interfaces:**
+  - Consumes: `GDN.encodeDeltaStepPrefill`'s buffer contract (`conv_out
+    [T, C]` half with normed q/k and raw v; `a_proj`/`b_proj [T, Hv]` half;
+    `A_log`, `dt_bias [Hv]` bfloat; `state [Hv, Dv, Dk]` fp32; `y [T, Hv·Dv]`
+    half; optional `checkpointState`), `MetalContext.pipeline`,
+    `GDNReference`, `RelError`, `Fp16Buffer`, `SeedTree`.
+  - Produces:
+
+    ```swift
+    extension GDN {
+        static let chunkTokens = 64
+        static let chunkedScanHeadDim = 128
+        static let chunkedScanValueBlock = 32
+        static let chunkFactorsBytesPerChunk = 17_408
+        /// The shape the chunked kernels are compiled for: scalar per-head decay, Dk = Dv = 128.
+        static func chunkedScanSupports(config: LinearAttentionConfig, perChannelDecay: Bool) -> Bool
+        static func chunkFactorsBytes(config: LinearAttentionConfig, chunkTokens: Int) -> Int  // Hv · ⌈chunkTokens/64⌉ · 17_408
+        var chunkedScanAvailable: Bool             // shape supported and both pipelines compiled
+        var chunkedScanUnavailableReason: String?  // nil when available
+        /// Same contract as `encodeDeltaStepPrefill` plus the factors scratch. Throws
+        /// `GDNChunkedScanError.tooFewRows` below 64 rows, `.unavailable(reason)`,
+        /// `.factorsTooSmall(needed:have:)`.
+        func encodeDeltaStepPrefillChunked(commandBuffer:, convOut:, convOutOffset:,
+                                           aProj:, aProjOffset:, bProj:, bProjOffset:,
+                                           aLog:, aLogOffset:, dtBias:, dtBiasOffset:,
+                                           state:, checkpointState:, y:, yOffset:,
+                                           rows: Int, factors: MTLBuffer) throws
+    }
+    enum GDNChunkedScanError: Error {
+        case tooFewRows(Int), unavailable(String), factorsTooSmall(needed: Int, have: Int)
+    }
+
+    public struct GDNChunkedReference {          // ShrikeValidation
+        public init(cfg: LinearAttentionConfig, aLog: [Float], dtBias: [Float])
+        /// `normed`: [T][C] rows as `GDNReference.normalize` returns them; `state` is
+        /// consumed and replaced. Returns fp32 y rows [T][Hv·Dv] (unrounded) and the
+        /// state after row 0.
+        public func run(normed: [[Float]], a: [[Float]], b: [[Float]],
+                        state: inout [Float]) -> (y: [[Float]], checkpoint: [Float])
+    }
+    extension GDNReference {
+        public mutating func normalize(qkvRaw: [Float]) -> [Float]   // conv + SiLU + tail carry + q/k norm
+        public mutating func deltaRule(normed: [Float], a: [Float], b: [Float]) -> [Float]  // one token; fp16-rounded y
+        public func gatedNorm(y: [Float], z: [Float]) -> [Float]
+    }
+    ```
+
+    Runner: `SHRIKE_GDN_PREFILL_SCAN=serial|chunked` (default: chunked when
+    available); `RealForwardRunner.prefillGDNScanPathDescription` ∈
+    {`chunked`, `serial`, `serial(unavailable: …)`}, logged as
+    `prefill_gdn_scan=` on the server's residency line beside
+    `prefill_attention_path=`. Scratch:
+    `PrefillChunkScratchLayout.usesGDNChunkedScan` (`gdnQKVDim > 0 &&
+    !perChannel && Dk == Dv == 128 && chunkTokens >= 64` — the 32-token draft
+    chunk allocates nothing) and `gdnChunkFactorBytes`, counted in
+    `devicePrivateBytes` (34 MB at 4,096-token chunks for ornith);
+    `PrefillChunkScratchBuffers.gdnChunkFactors: MTLBuffer?`. Bench:
+    `ShrikeBench gdn_scan [iterations]` — ornith shape, `T = 4096`, serial vs
+    chunked ms per call and µs per token, chunked TFLOPS against the `gemm`
+    ceiling.
+
+  Steps (TDD; the CPU model first so the math is verified before any Metal):
+
+  - [ ] Step 1: `GDNReference` split — `normalize`, `deltaRule`, `gatedNorm`;
+        `step` = the three in sequence. `swift test --no-parallel --filter
+        GDNKernelTests` → still green.
+  - [ ] Step 2: failing test `GDNChunkedScanTests.chunkedReferenceMatchesSerialReference`:
+        cfg `(Hk 1, Hv 2, Dk 128, Dv 128, conv 4)`; seeded normed rows (q/k unit
+        vectors scaled like the kernel's norm, then fp16-rounded; v fp16 in
+        [−1, 1]), `a, b` in [−1, 1], `A_log` in [−1, 1.5], `dt_bias` in
+        [−0.5, 0.5], a random non-zero incoming state in [−0.5, 0.5]; T ∈ {64,
+        200}; serial = `deltaRule` per row on a copy of the state; expect
+        `RelError.maxAbsDiff(y) ≤ 1e-3`, state `≤ 1e-3`, checkpoint == serial
+        state after row 0 within 1e-5. FAIL: `GDNChunkedReference` undefined.
+  - [ ] Step 3: implement `GDNChunkedReference.run` exactly as the math block
+        (fp32, `T⁻¹` by forward substitution). PASS.
+  - [ ] Step 4: failing tests: `chunkedKernelMatchesSerialKernel` — same
+        fixture at T ∈ {64, 200, 4096}: `conv_out` (normed rows as half),
+        `a_proj`/`b_proj` half, bfloat `A_log`/`dt_bias`, two copies of the
+        state; serial `encodeDeltaStepPrefill` with a checkpoint buffer vs
+        `encodeDeltaStepPrefillChunked` with its own; expect y `maxAbs ≤ 2e-2`
+        and `RelError.compute ≤ 2e-2`, state `RelError.compute ≤ 2e-2`,
+        checkpoint `maxAbs ≤ 2e-2`. `chunkedKernelMatchesReference` — T = 200
+        through the real chain (conv → tail → qk norm → chunked scan → gated
+        norm) against `GDNReference.step`, the existing prefill test's
+        tolerance `max(2e-2, |want|·4e-2)`. `chunkedScanShapeGate` —
+        `chunkedScanSupports` false for per-channel decay, Dk 32, Dv 64;
+        `encodeDeltaStepPrefillChunked(rows: 63)` throws `.tooFewRows`.
+        FAIL: undefined.
+  - [ ] Step 5: kernels + `GDN.swift` + `MetalContext` registration → the
+        tests PASS. If the compiler rejects the `(32, 128, 64, true, false)`
+        descriptor (the one shape without precedent in the tree), use `(64,
+        128, 64, true, false)` over a 64-row view of `u_tile` and keep the
+        first 32 destination rows.
+  - [ ] Step 6: bench `swift run -c release ShrikeBench gdn_scan 20`: serial
+        vs chunked at the ornith shape; the bar is ≥ 4× on the M4 Pro (the
+        serial scan is ≈ 82 ms per 4,096-row layer call today; target ≤ 20
+        ms). If short, the first knob is `chunkedScanValueBlock = 16`
+        (`(Dv/16, Hv)` grid, 8 KB state tile) — measured, not assumed.
+  - [ ] Step 7: scratch + runner + env knob + description + server log line +
+        `ServerModelSession` field. Five gates: release build 0 warnings,
+        lint, links, suite, TSAN.
+  - [ ] Step 8: `tools/golden-baseline.sh --check 4` (M4 Pro, server stopped)
+        — expected to differ; recapture; commit `gdn: chunked delta-rule scan
+        on the matrix path (v12 P4)` with the baseline via `--only`.
+  - [ ] Step 9: ledger on both boxes (fresh server, 3.7k + 12k,
+        `tools/prefill-measure.sh`); mini `tools/mini-deploy.sh --restart`,
+        mini golden recapture, scp into `baselines/`. Verdict line here;
+        design doc Step 4 + ledger rows + the GDN row of "Where the time
+        goes"; task review by a fresh reviewer; fixes folded into the commit.
 
 ## Follow-ons (not scheduled)
 

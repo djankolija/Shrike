@@ -26,6 +26,11 @@ final class GDN {
     private let gatedNormPSO: MTLComputePipelineState
     private let inProjPSO: MTLComputePipelineState
     private let inProjSpecializedPSO: MTLComputePipelineState?
+    private let chunkFactorsPSO: MTLComputePipelineState?
+    private let chunkScanPSO: MTLComputePipelineState?
+    /// nil when `encodeDeltaStepPrefillChunked` can run (v12 P4): the shape
+    /// is the compiled one and the tensor-ops pipelines exist on this device.
+    let chunkedScanUnavailableReason: String?
 
     let config: LinearAttentionConfig
     /// Kimi KDA: decay is per key channel (`g[head, dk]` from `a_proj
@@ -89,6 +94,35 @@ final class GDN {
         } else {
             self.inProjSpecializedPSO = nil
         }
+        var factorsPSO: MTLComputePipelineState?
+        var scanPSO: MTLComputePipelineState?
+        var unavailableReason: String?
+        if Self.chunkedScanSupports(config: config, perChannelDecay: perChannelDecay) {
+            do {
+                let factors = try context.pipeline("gdn_chunk_factors")
+                let scan = try context.pipeline("gdn_chunk_scan")
+                let limit = min(factors.maxTotalThreadsPerThreadgroup,
+                                scan.maxTotalThreadsPerThreadgroup)
+                if limit >= Self.chunkThreads {
+                    factorsPSO = factors
+                    scanPSO = scan
+                } else {
+                    unavailableReason =
+                        "maxTotalThreadsPerThreadgroup \(limit) < \(Self.chunkThreads)"
+                }
+            } catch {
+                factorsPSO = nil
+                scanPSO = nil
+                unavailableReason = "\(error)"
+            }
+        } else {
+            unavailableReason = perChannelDecay
+                ? "per-channel decay"
+                : "head dims \(config.keyHeadDim)/\(config.valueHeadDim)"
+        }
+        self.chunkFactorsPSO = factorsPSO
+        self.chunkScanPSO = scanPSO
+        self.chunkedScanUnavailableReason = unavailableReason
     }
 
     /// Fused `in_proj_qkv` / `in_proj_z` / `in_proj_a` / `in_proj_b` INT4 GEMV.
@@ -378,6 +412,117 @@ final class GDN {
         encoder.endEncoding()
     }
 
+    // MARK: - Chunked prefill scan (v12 P4)
+
+    static let chunkTokens = 64
+    static let chunkedScanHeadDim = 128
+    static let chunkedScanValueBlock = 32
+    static let chunkFactorsBytesPerChunk = 17_408
+    private static let chunkThreads = 128
+
+    /// The shape `gdn_chunked.metal` is compiled for: scalar per-head decay
+    /// with Dk = Dv = 128.
+    static func chunkedScanSupports(config: LinearAttentionConfig,
+                                    perChannelDecay: Bool) -> Bool {
+        !perChannelDecay
+            && config.numVHeads > 0
+            && config.keyHeadDim == chunkedScanHeadDim
+            && config.valueHeadDim == chunkedScanHeadDim
+    }
+
+    static func chunkFactorsBytes(config: LinearAttentionConfig, prefillChunkTokens: Int) -> Int {
+        let chunks = (prefillChunkTokens + Self.chunkTokens - 1) / Self.chunkTokens
+        return config.numVHeads * chunks * chunkFactorsBytesPerChunk
+    }
+
+    var chunkedScanAvailable: Bool { chunkScanPSO != nil }
+
+    private struct GDNChunkParams {
+        var kHeads: UInt32
+        var vHeads: UInt32
+        var keyDim: UInt32
+        var valueDim: UInt32
+        var rows: UInt32
+        var rowStride: UInt32
+        var chunkCount: UInt32
+        var checkpointEnabled: UInt32
+    }
+
+    /// Same contract as `encodeDeltaStepPrefill`, plus `factors`, the
+    /// `chunkFactorsBytes` scratch the two kernels share. `convOut` must hold
+    /// `rows` rounded up to a 64-row multiple: the pad rows are zeroed here.
+    func encodeDeltaStepPrefillChunked(commandBuffer: MTLCommandBuffer,
+                                       convOut: MTLBuffer, convOutOffset: Int = 0,
+                                       aProj: MTLBuffer, aProjOffset: Int = 0,
+                                       bProj: MTLBuffer, bProjOffset: Int = 0,
+                                       aLog: MTLBuffer, aLogOffset: Int,
+                                       dtBias: MTLBuffer, dtBiasOffset: Int,
+                                       state: MTLBuffer,
+                                       checkpointState: MTLBuffer? = nil,
+                                       y: MTLBuffer, yOffset: Int = 0,
+                                       rows: Int, factors: MTLBuffer) throws {
+        guard let factorsPSO = chunkFactorsPSO, let scanPSO = chunkScanPSO else {
+            throw GDNChunkedScanError.unavailable(
+                chunkedScanUnavailableReason ?? "pipelines missing")
+        }
+        guard rows >= Self.chunkTokens else {
+            throw GDNChunkedScanError.tooFewRows(rows)
+        }
+        let chunkCount = (rows + Self.chunkTokens - 1) / Self.chunkTokens
+        let paddedRows = chunkCount * Self.chunkTokens
+        let rowBytes = config.qkvDim * MemoryLayout<Float16>.stride
+        let factorBytes = config.numVHeads * chunkCount * Self.chunkFactorsBytesPerChunk
+        guard factors.length >= factorBytes else {
+            throw GDNChunkedScanError.factorsTooSmall(needed: factorBytes, have: factors.length)
+        }
+        let convOutBytes = paddedRows * rowBytes
+        guard convOut.length - convOutOffset >= convOutBytes else {
+            throw GDNChunkedScanError.convOutTooSmall(needed: convOutBytes,
+                                                      have: convOut.length - convOutOffset)
+        }
+        if paddedRows > rows {
+            guard let blit = commandBuffer.makeBlitCommandEncoder() else {
+                throw MetalError.commandEncoderFailed
+            }
+            let start = convOutOffset + rows * rowBytes
+            blit.fill(buffer: convOut, range: start..<(convOutOffset + convOutBytes), value: 0)
+            blit.endEncoding()
+        }
+        var params = GDNChunkParams(
+            kHeads: UInt32(config.numKHeads), vHeads: UInt32(config.numVHeads),
+            keyDim: UInt32(config.keyHeadDim), valueDim: UInt32(config.valueHeadDim),
+            rows: UInt32(rows), rowStride: UInt32(config.qkvDim),
+            chunkCount: UInt32(chunkCount),
+            checkpointEnabled: checkpointState == nil ? 0 : 1)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        let threads = MTLSize(width: Self.chunkThreads, height: 1, depth: 1)
+        encoder.setComputePipelineState(factorsPSO)
+        encoder.setBuffer(convOut, offset: convOutOffset, index: 0)
+        encoder.setBuffer(aProj, offset: aProjOffset, index: 1)
+        encoder.setBuffer(bProj, offset: bProjOffset, index: 2)
+        encoder.setBuffer(aLog, offset: aLogOffset, index: 3)
+        encoder.setBuffer(dtBias, offset: dtBiasOffset, index: 4)
+        encoder.setBuffer(factors, offset: 0, index: 5)
+        encoder.setBytes(&params, length: MemoryLayout<GDNChunkParams>.stride, index: 6)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: chunkCount, height: config.numVHeads, depth: 1),
+            threadsPerThreadgroup: threads)
+        encoder.setComputePipelineState(scanPSO)
+        encoder.setBuffer(convOut, offset: convOutOffset, index: 0)
+        encoder.setBuffer(factors, offset: 0, index: 1)
+        encoder.setBuffer(state, offset: 0, index: 2)
+        encoder.setBuffer(y, offset: yOffset, index: 3)
+        encoder.setBuffer(checkpointState ?? state, offset: 0, index: 4)
+        encoder.setBytes(&params, length: MemoryLayout<GDNChunkParams>.stride, index: 5)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: config.valueHeadDim / Self.chunkedScanValueBlock,
+                    height: config.numVHeads, depth: 1),
+            threadsPerThreadgroup: threads)
+        encoder.endEncoding()
+    }
+
     /// out = rmsnorm(y; weight) * silu(z), per value head, `rows` rows.
     func encodeGatedNorm(commandBuffer: MTLCommandBuffer,
                          y: MTLBuffer, yOffset: Int = 0,
@@ -449,4 +594,11 @@ final class GDN {
             MTLSize(width: width, height: height, depth: 1),
             threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
     }
+}
+
+enum GDNChunkedScanError: Error, Equatable {
+    case tooFewRows(Int)
+    case unavailable(String)
+    case factorsTooSmall(needed: Int, have: Int)
+    case convOutTooSmall(needed: Int, have: Int)
 }

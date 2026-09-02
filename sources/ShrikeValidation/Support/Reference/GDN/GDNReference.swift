@@ -51,12 +51,18 @@ public struct GDNReference {
 
     public mutating func step(qkvRaw: [Float], a: [Float], b: [Float],
                        z: [Float]) -> [Float] {
+        let normed = normalize(qkvRaw: qkvRaw)
+        let y = deltaRule(normed: normed, a: a, b: b)
+        return gatedNorm(y: y, z: z)
+    }
+
+    /// Returns the row the delta rule reads: `[q: Hk*Dk][k: Hk*Dk][v: Hv*Dv]`,
+    /// each element fp16-rounded, and advances the conv tail.
+    public mutating func normalize(qkvRaw: [Float]) -> [Float] {
         let C = cfg.qkvDim
         let K = cfg.convKernelSize
         let Hk = cfg.numKHeads
-        let Hv = cfg.numVHeads
         let Dk = cfg.keyHeadDim
-        let Dv = cfg.valueHeadDim
 
         // Conv + SiLU (fp32; row order [tail..., current]).
         var conv = [Float](repeating: 0, count: C)
@@ -84,8 +90,16 @@ public struct GDNReference {
                 normed[base + i] = Float(Float16(conv[base + i] * invRms * scale))
             }
         }
+        return normed
+    }
 
-        // Delta recurrence per value head.
+    /// `y` is fp16-rounded like the kernel's output; the state stays fp32.
+    public mutating func deltaRule(normed: [Float], a: [Float], b: [Float]) -> [Float] {
+        let Hk = cfg.numKHeads
+        let Hv = cfg.numVHeads
+        let Dk = cfg.keyHeadDim
+        let Dv = cfg.valueHeadDim
+
         var y = [Float](repeating: 0, count: Hv * Dv)
         for h in 0..<Hv {
             let hk = h / (Hv / Hk)
@@ -116,8 +130,13 @@ public struct GDNReference {
                 y[h * Dv + dv] = Float(Float16(out))
             }
         }
+        return y
+    }
 
-        // Gated output norm.
+    public func gatedNorm(y: [Float], z: [Float]) -> [Float] {
+        let Hv = cfg.numVHeads
+        let Dv = cfg.valueHeadDim
+
         var gated = [Float](repeating: 0, count: Hv * Dv)
         for h in 0..<Hv {
             let base = h * Dv

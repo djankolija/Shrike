@@ -265,12 +265,35 @@ Expected: 2.03 → ~0.6 ms/token (128-row GEMMs at 60 % of their ceiling).
 After steps 1–3 the M4 Pro ledger models to ~1.9 ms/token at 4k (3.9×) and
 ~2.5 at 25k (10×); step 4 is what closes the last 0.5 to the 1.4 target.
 
-### Step 4 — GDN chunked scan (−7 %, conditional)
+### Step 4 — GDN chunked scan (landed)
 
-The only step with new math: the chunked gated delta rule (64-token chunks,
-intra-chunk in matmul form via the WY representation, inter-chunk state
-handoff), the form flash-linear-attention uses for prefill. Scheduled only if
-steps 1–3 land short of the target; `GDNReference` is the oracle.
+The only step with new math, scheduled by P3's decision rule. The serial
+kernel walks a chunk's rows inside one dispatch: each threadgroup (one value
+head, four `dv` rows) keeps its state rows in registers and does one delta
+step per row, so a 4,096-row chunk is 4,096 dependent steps of a few dozen
+FMAs — 51.7 ms per layer call at the ornith shape on the M4 Pro, 0.25 TFLOPS.
+The chunked gated delta rule (Yang et al.; flash-linear-attention's
+`chunk_gated_delta_rule`) rewrites each 64-row chunk as matrix products with
+the intra-chunk dependency solved through the unit-lower-triangular
+`I + A`; the derivation, with the symbols the code uses, is in the plan's
+Task 4. Two kernels in `gdn_chunked.metal`: `gdn_chunk_factors` (parallel
+over chunks and heads) builds `T⁻¹ = (I + A)⁻¹`, `M` and the per-row decay
+scalars into a 34 MB factors scratch (4,096-token chunks, 32 heads, 17,408
+bytes per head-chunk); `gdn_chunk_scan` (one threadgroup per head and
+32-column state block) walks the chunks in order with the state block in
+threadgroup memory, five `matmul2d` products per chunk. fp16 factors, fp32
+accumulation and state — the precision flash-linear-attention ships.
+
+`ShrikeBench gdn_scan` (T = 4,096, Hv 32, Dk = Dv = 128, M4 Pro): serial 51.7
+ms per layer call, chunked 9.5 ms, 5.4× at 2.27 TFLOPS (30 % of the measured
+ceiling); on the same inputs and state the chunked output differs from the
+serial kernel by 3.1e-5 maxAbs (rel 5.8e-4) and the state by rel 2.2e-5. The
+kernels are compiled for the scalar per-head decay shape with Dk = Dv = 128
+and take chunks of 64+ rows; the 32-token MTP draft chunk, per-channel decay
+(Kimi KDA) and other head dims keep the serial kernel, and no scratch is
+allocated for them. `SHRIKE_GDN_PREFILL_SCAN=serial` re-selects the serial
+kernel on the same binary; the server logs `prefill_gdn_scan=` on its
+residency line. Measured on the ledger: see "After P4" above.
 
 ### Follow-ons, not scheduled
 
