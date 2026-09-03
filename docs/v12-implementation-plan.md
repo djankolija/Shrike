@@ -4942,7 +4942,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
 ### Task 15b: P15b — a 32-row tail tile for the grouped routed GEMM
 
-- [ ] **P15b: the padding tax's recoverable half.** Task 15 measured the
+- [x] **P15b: the padding tax's recoverable half.** Task 15 measured the
   grouped routed GEMM's padding on the mini at **+25.8 %** of the real rows
   per 12k prompt (`P64` 4,946,880 against 3,931,200; a 32-row tail would hold
   them in 4,410,976, (P64 − P32) / P64 = 10.8 %), and its bench control showed
@@ -4955,6 +4955,44 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   against one 64-row tile). The descriptor compiles and links at TILE_M = 32
   and 16 (offline, `xcrun metal -std=metal4.0`); pipeline creation on the M1
   is the runtime check.
+
+  **LANDED cbff561 (2026-09-03): measured on the mini on 50acb42's build
+  (cbff561 adds only the ragged-K guard, a no-op at K 2048 / 512; golden
+  re-verified on both boxes), one binary, tail off → on:
+  `prefill_routed_tile` 1.807 → 1.650 ms/prompt-token (3.7k; 1.751 → 1.613 at
+  12k), `prefill_gdn_router` 1.789 → 1.796 / 1.777 → 1.775, `prefill_attn_router`
+  0.760 → 0.768 / 1.582 → 1.575, `prefill_shared_expert` 0.170 → 0.171 / 0.169
+  → 0.169, GPU busy 4.690 → 4.551 and 5.373 → 5.228, gaps 0.485 → 0.542 and
+  0.215 → 0.244 (`routed→routed` 861 → 1,239 ms at 12k, host 586 → 941),
+  wall 21.57 → 21.29 s and 70.81 → 69.07 s (−2.5 %) = 5.62 ms/prompt-token.**
+  α measured 0.545 on the mini (4.888 vs 4.488 ms per 1,024 rows as 32 tiles
+  of 32 against 16 of 64; 0.53 on the M4 Pro) → Δ modelled 0.154–0.160
+  ms/token, the gate cleared. Step 4 bench on the mini: tail / off at 128 / 97
+  / 65 rows per expert = 1.004 / 1.001 / **0.816** (bar ≤ 0.85 ✓; within 1 %
+  at 128 and 97 ✓; M4 Pro 1.010 / 0.999 / 0.871). Bars: routed ≤ 1.63 (the
+  α = 0.70 line) ✓ 1.613, the α = 0.55 line ≤ 1.58 ✗; 3.7k routed ≤ 1.66 ✓
+  1.650; `routed→routed` grew 378 ms against a 1,704 ms GEMM saving ✓; busy
+  ≤ 5.23 ✓ 5.228; wall
+  ≤ 68.1–68.7 ✗ 69.07 — the GEMM cut lands at 88 % of the model and a quarter
+  of it resurfaces as fetch wait: three encode variants (separate encoders,
+  one encoder, reused bindings) read the same `routed→routed` host term
+  (937–960 ms), so it is not CPU encoding — the routed tile shrank 5.96 → 5.50
+  ms of GPU while a tile's fetch is ≈ 14.2 MB ≈ 5.1 ms at 2.8 GB/s (the v10
+  measurement; less on average with P15's 34 % hits, but per tile), and the depth-2
+  pipeline no longer hides it all; the mini's routed tile is on its
+  SSD floor (design doc, follow-ons). Lands as the default on the same-binary
+  −2.5 %; `SHRIKE_PREFILL_TAIL_TILE=off` is the A/B. M4 Pro check:
+  The M4 Pro, fetch-bound since P15, reads flat on the same binary: 12k 22.58 → 22.89 s, 25k 49.31 → 48.95 s (routed −3 to −5 %, the `routed→routed` gap +0.04 and +0.01 ms/token) — the GEMM cut lands in its fetch wait, as the mechanism predicts. Numerics: the K loop and the fold are unchanged by `TILE_M`; the
+  intra-tile reduction is asserted, not derived — bit-identical by test
+  (`tailTileIsBitIdenticalToTheSixtyFourRowPath` at 64 and 512 staging rows,
+  `thirtyTwoRowGroupedTileIsBitIdenticalToTheSixtyFourRowTile`, full-mantissa
+  inputs across split waves); golden IDENTICAL on both boxes, short and long
+  (digests unchanged: M4 Pro long `e04d4e8ee7f1590d`, M1 long
+  `899a25e60a365e60`). Five gates green on cbff561 (counts on the SDD ledger).
+  Kept: the shared encoder per GEMM (a tail wave issues the plain wave's six
+  encoders). Tried and reverted: binding reuse across the two dispatches (no
+  measured effect). `groupedMaxRowTiles` 32 → 64; the runner's knob parsers
+  and the bench façade's timing loop extracted for the 120-line lint gate.
 
   **The α gate comes first.** α is a 32-row tile's cost relative to a 64-row
   tile's — bounded below by 0.5 (only the matmul scales with M) and above by
@@ -5007,21 +5045,21 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   scheduler, decode.
 
   Steps:
-  - [ ] Step 1 (the spike, lands): the `TILE_M` plumbing, the `_m32`
+  - [x] Step 1 (the spike, lands): the `TILE_M` plumbing, the `_m32`
         instantiation, the `rowTile:` parameters (default 64 everywhere), the
         α bench line, the bit-identity and planner tests (RED first);
         `swift test --no-parallel --filter PrefillGroupedRoutedMoE`;
         `ShrikeBench routed_gemm 20` on the mini (GPU idle) then the M4 Pro;
         record α on both boxes.
-  - [ ] Step 2 (the gate): Δ from the mini's α; proceed only at α ≤ 0.70.
-  - [ ] Step 3: failing tests for the body/tail packing and the empty-region
+  - [x] Step 2 (the gate): Δ from the mini's α; proceed only at α ≤ 0.70.
+  - [x] Step 3: failing tests for the body/tail packing and the empty-region
         skip; implement; `SHRIKE_PREFILL_TAIL_TILE=off|32` (default `32` if
         Step 2 passed, else `off`); `tail_tile=` on the projection-path line.
-  - [ ] Step 4: `routed_gemm` tail arm at 128 / 97 / 65 on both boxes (bars
+  - [x] Step 4: `routed_gemm` tail arm at 128 / 97 / 65 on both boxes (bars
         above); on a miss, default `off` and say so.
-  - [ ] Step 5: five gates; golden both boxes (IDENTICAL); deploy; ledger rows
+  - [x] Step 5: five gates; golden both boxes (IDENTICAL); deploy; ledger rows
         mini 3.7k + 12k (the verdict), M4 Pro 12k + 25k (the check).
-  - [ ] Step 6: design doc Step 14 + "After P15b"; plan `[x]` with the landed
+  - [x] Step 6: design doc Step 14 + "After P15b"; plan `[x]` with the landed
         paragraph; task review; fixes folded in.
 
 ## Follow-ons (not scheduled)

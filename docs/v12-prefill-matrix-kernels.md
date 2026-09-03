@@ -460,6 +460,25 @@ chunk, nothing to alternate):
 `expert_hits_prefill` 0 → 9,549 of 28,404 on the M1 at 12k; 0 → 28,909 of
 65,776 on the M4 Pro at 25k. Golden identical on both boxes and both profiles.
 
+**After P15b** (commit cbff561, 2026-09-03; the grouped routed GEMM's 32-row
+tail tile, default on — `SHRIKE_PREFILL_TAIL_TILE=off` keeps every block on
+64-row tiles; the M4 Pro 3.7k column is P14's, one chunk on a box that decides
+nothing here):
+
+| role | M4 Pro 3.7k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `prefill_attn_router` | 0.17 | 0.29 | 0.48 | 0.77 | 1.58 |
+| `prefill_routed_tile` | 0.46 | 0.44 | 0.45 | **1.65** | **1.61** |
+| `prefill_gdn_router` | 0.41 | 0.40 | 0.40 | 1.80 | 1.78 |
+| `prefill_shared_expert` | 0.04 | 0.04 | 0.04 | 0.17 | 0.17 |
+| **GPU busy** | 1.11 | 1.20 | 1.40 | **4.55** | **5.23** |
+| gaps (span − busy) | 1.05 | 0.56 | 0.48 | 0.54 | 0.24 |
+| **wall** | 2.48 | 1.86 | 1.94 | 5.67 | **5.62** |
+| wall, seconds | 9.3 | 22.9 | 49.0 | 21.3 | **69.1** |
+
+Same binary, tail off: M1 12k 70.81 s (routed 1.75, gaps 0.22), 3.7k 21.57 s.
+Golden identical on both boxes and both profiles.
+
 ## Where the time goes
 
 Every dense projection in prefill (attention Q/K/V/O, GDN in/out) already runs
@@ -470,7 +489,7 @@ all scalar kernels:
 | role | kernel | structure | roofline gap (M4 Pro) |
 | --- | --- | --- | ---: |
 | attention core | `attention_prefill_causal_tiled` | one threadgroup per (query, head), 256 threads over head-dim, a serial walk over every key with a two-barrier threadgroup reduction per key. The decode kernel's shape, run once per prompt token: no K/V reuse across queries, none across the 8 query heads that share a KV head. | 30× at 3.7k, 60× at 25k |
-| routed experts | `prefill_grouped_routed_moe_batched_phase1` / `_down` | each thread computes one or two 2048-long scalar dot products; 32-pair microbatches; a command buffer per 8-expert tile | 7×; 2.6× after P6 (`mpp_prefill_affine_grouped_f16`, one dispatch per phase over the tile's experts: 0.69 ms/token at 12k against 0.27 at the 7.46 TFLOPS ceiling); P8's bench puts the tile at 67 % of the M4 Pro's same-run ceiling and 42 % of the M1's, the M1's remainder split 7 % unpack / 20 % weight loads / 31 % staged structure (Step 7); after P9 (vector loads + 128-wide K) 71 % of the M1's ceiling and 99 % of the M4 Pro's (Step 8); after P10 (256-wide K) 78 % of the M1's (Step 9); after P15 the M1's tile carries +25.8 % padded rows (Step 13, a 32-row tail tile is Task 15b) and the expert sweep alternates per chunk |
+| routed experts | `prefill_grouped_routed_moe_batched_phase1` / `_down` | each thread computes one or two 2048-long scalar dot products; 32-pair microbatches; a command buffer per 8-expert tile | 7×; 2.6× after P6 (`mpp_prefill_affine_grouped_f16`, one dispatch per phase over the tile's experts: 0.69 ms/token at 12k against 0.27 at the 7.46 TFLOPS ceiling); P8's bench puts the tile at 67 % of the M4 Pro's same-run ceiling and 42 % of the M1's, the M1's remainder split 7 % unpack / 20 % weight loads / 31 % staged structure (Step 7); after P9 (vector loads + 128-wide K) 71 % of the M1's ceiling and 99 % of the M4 Pro's (Step 8); after P10 (256-wide K) 78 % of the M1's (Step 9); after P15 the M1's tile carries +25.8 % padded rows (Step 13; the 32-row tail tile of Step 14 recovers 0.14 ms/token of it, to 1.61) and the expert sweep alternates per chunk |
 | shared expert | `PrefillSharedExpert.encodeBlock` | a `for row in 0..<queryCount` loop over the decode runtime: 4–6 M=1 GEMV dispatches per token | 25× |
 | GDN | `gdn_delta_step_prefill` | the delta-rule scan is a serial loop over the chunk inside one dispatch of 32×32 threadgroups; projections, conv and norms are fine | 3.6× (scan ≈ 0.6 of the 1.0 ms); after P12 the mini's 319 ms per layer-chunk is scan 56 + projections 166 (85–99 % of the MPS ceiling) + pre-scan chain 9 + router 83 → 10 after P14 (Steps 11–12) |
 
@@ -898,6 +917,44 @@ moved 1.4 %; the M4 Pro's 1.5 ms tile hid nothing and the check box moved 15 %.
 The decode counters are unchanged (the last chunk is even, ascending in both
 arms). At the default the M1 prefills 12k in 69.97 s = **5.70 ms/token**.
 
+### Step 14 — a 32-row tail tile for the grouped routed GEMM (−2.5 % of the M1's 12k wall, bit-identical)
+
+Step 13 measured the padding at +25.8 % of the real rows and showed a padded
+row costs a real row; this is the padding's recoverable half. `TILE_M` became
+the affine body's first template parameter and the grouped kernel gained a
+32-row instantiation for the default variant. The wave planner packs
+body-first: every block's full 64-row tiles, then each block's remainder of
+≤ 32 rows in a 32-row tail region after the body — a larger remainder stays on
+a padded 64-row tile, since two 32-row tiles cost 2α against one. Each GEMM is
+two dispatches on one encoder, the 64-row kernel over the body and the 32-row
+one over the tail, either skipped when its region is empty; the gather and
+scatter walk the wave at 32-row granularity. α — a 32-row tile's cost relative
+to a 64-row one — measured **0.545** on the M1 (0.53 on the M4 Pro): the
+dequant of the weight tile is per threadgroup and does not shrink with M, so a
+half-height tile costs a little over half. `TILE_M` changes which rows share a
+threadgroup, not the K loop or the `accumulator += groupProduct` fold; the
+intra-tile reduction inside `matmul2d` is asserted, not derived — the tail path
+is **bit-identical** on full-mantissa inputs across split and mixed waves, and
+golden identical on both boxes and both profiles.
+
+| `ShrikeBench routed_gemm`, tail / off | 128 rows per expert | 97 (a 33-row remainder) | 65 (a 1-row tail per block) |
+| --- | ---: | ---: | ---: |
+| M1 | 1.004 | 1.001 | **0.816** (modelled (8 + 8α) / 16 = 0.77) |
+| M4 Pro | 1.010 | 0.999 | 0.871 |
+
+On the M1 at 12k, one binary, a fresh server per prompt: routed 1.751 →
+**1.613** ms/token (−0.139; the model at α = 0.545 said −0.155), GPU busy
+5.373 → 5.228, gaps 0.215 → 0.244, wall 70.81 → **69.07 s (−2.5 %) = 5.62
+ms/token**; 3.7k 21.57 → 21.29 s. The gap growth is not host encoding — three
+encode variants (separate encoders, one encoder, reused bindings) read the same
+`routed→routed` host term, 937–960 ms — it is the expert fetch surfacing: the
+routed tile shrank from 5.96 to 5.50 ms of GPU while a tile's eight experts are
+≈ 14.2 MB, ≈ 5.1 ms at the M1's 2.8 GB/s (the v10 measurement; less on
+average with P15's 34 % hits, but per tile), so the depth-2 fetch pipeline no
+longer hides all of it. A quarter of the GEMM cut resurfaces as fetch wait; the
+M1's routed tile now sits on its SSD floor, and the next routed lever is fetch
+overlap, not arithmetic. The M4 Pro, fetch-bound since P15, reads flat on the same binary: 12k 22.58 → 22.89 s, 25k 49.31 → 48.95 s (routed −3 to −5 %, the `routed→routed` gap +0.04 and +0.01 ms/token) — the GEMM cut lands in its fetch wait, as the mechanism predicts.
+
 ### Follow-ons, not scheduled
 
 - **The cache settle's re-prefill after a degenerate turn (not a
@@ -967,8 +1024,12 @@ arms). At the default the M1 prefills 12k in 69.97 s = **5.70 ms/token**.
   eight heads (M = 8) and the eight-head K/V tile would be shared per
   threadgroup. Unmeasured; the spike harness (`SHRIKE_ATTN_MATRIX_TILE`, one
   fresh server per arm) is the gate, and the bar stays the 50 % share.
-- **The mini's SSD term** (0.8 ms/token per chunk) surfaces after step 2; the
-  v10 P3 follow-on (batched miss loads, deeper queue depth) is the lever then.
+- **The mini's SSD term surfaced at P15b (Step 14).** With the routed tile at
+  5.50 ms of GPU against ≈ 5.1 ms of fetch per tile, `routed→routed` grew by
+  ≈ 0.10 ms per boundary of exposed fetch (host 586 → 941 ms at 12k over
+  3,485 boundaries). The v10 P3 follow-on — batched miss
+  loads, a deeper fetch queue, two fetches in flight — is the lever; every
+  further routed-GEMM cut on the M1 lands there first.
 
 ## Numerics policy
 
