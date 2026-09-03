@@ -5752,9 +5752,16 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
 ## Follow-ons (not scheduled)
 
+The prefill levers the chapter leaves on the table — two fetches in flight, tile 0
+before the shared-expert wait, the reader's thread count, the 16-row rung, the
+byte-load fallback, the GDN pre-scan chain, the M4 Pro's per-tile host work, the
+ANE — are priced in the design doc's "Follow-ons, not scheduled"
+(`v12-prefill-matrix-kernels.md`); this list carries the decode-side items only.
+
 - The mini's SSD term (v10 P3 follow-on: batched miss loads, deeper queue
-  depth) — the lever for plain decode's hit-rate-bound steps (25 → 14 tok/s
-  from a counting prompt to a 1.4k tools context, Task 17); not the verify
+  depth) — the lever for plain decode's hit-rate-bound steps (body 39.6 → 72.5
+  ms = 25 → 14 tok/s by `1000 / body_ms`, 22 → 12.5 end to end, from a counting
+  prompt to a 1.4k tools context, Task 17); not the verify
   pass's lever — that pass is structure-bound (Step 17).
 - Speculative decode: audited at Task 17 and retired as a lever for now —
   acceptance is prompt-dependent (21 / 32 / 76 %), the verify pass runs the

@@ -1093,7 +1093,10 @@ Depth 2 is the default by the rule (≥ 0.5 % on the M1's 12k; depth 3 a further
 further −0.25 %, outside the band and judged noise-level against eight more
 held slots) — 24 of the M1's 128 slots held instead of 16,
 hits within 0.13 % across the sweep, memory unmoved; `SHRIKE_PREFILL_TILE_DEPTH=1`
-is the A/B. Numerics cannot move (commit order and buffer contents are
+is the A/B. `SHRIKE_PREFILL_TILE_BATCH` stays at 1 and its widths > 1 were last
+validated end to end at P5 (M4 Pro, before the alternating sweep, the tail tile and
+depth 2); at depth 2 a width of 4 would hold 96 of the mini's 128 slots — an A/B
+knob only, unvalidated in the shipped configuration. Numerics cannot move (commit order and buffer contents are
 unchanged; the shared staging scratch relies on the queue's serial execution
 exactly as depth 1 did) and golden is identical on both boxes and both profiles.
 
@@ -1176,6 +1179,18 @@ re-run: k = 1 is a hard gate, so the three thresholds above are the useful
 object. Verdict: exit (c) — speculation is retired as a lever for now, the
 priced path is recorded below, and the decode fetch work goes to plain decode,
 where the hit-rate numbers say the prize is.
+
+### The chapter's close (2026-09-04)
+
+Whole-branch review (opus) over 06278ed..dc8c5db — P4 onward as a diff; P0–P3
+(3c326d9..06278ed, 2,517 source and test lines: the first grouped routed MoE, the
+matrix attention kernel, the shared expert's matrix path, the runner's prefill
+restructure) were reviewed per task when they landed and re-read in their current
+form at the close, not re-reviewed as a diff. Verdict: ready to merge; 0 Critical,
+2 Important (the `residency=` print under the per-slot layout and the cache layout
+missing from the projection-path line — fixed in the close commit; the review
+range — recorded here), 10 Minor (fixed or ruled on the SDD ledger); the 18 deferred
+minors triaged 17 fine, 1 moot. Merge target and push are the owner's.
 
 ### Follow-ons, not scheduled
 
