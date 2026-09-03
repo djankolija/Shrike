@@ -223,26 +223,33 @@ extension PrefillRoutedGEMMBenchmark {
         public let n: Int
         public let k: Int
         public let bits: Int
+        public let pair: String
         public let mismatches: Int
         public let maxAbsDiff: Float
         public let maxRelDiff: Float
         public let firstMismatch: Int
     }
 
-    /// Runs the narrow (`n32b1`) and the wide-K (`n32k128b1`) kernels on one
-    /// deterministic full-mantissa input and compares the fp16 outputs element
-    /// for element, so a box without the test suite (the mini) can bound how
-    /// far MPP's 128-wide K run is from two 64-wide runs summed in fp32.
+    /// Runs two K-tile variants (by name, `n32b1` against `n32k128b1` by
+    /// default) on one deterministic full-mantissa input and compares the fp16
+    /// outputs element for element, so a box without the test suite (the mini)
+    /// can bound how far one K reduction order is from the other.
     /// Inputs whose partial sums are exact in fp32 (integers over 64, a few
     /// bf16 scales) hide the reduction order — they compare bit-identical.
     public static func compareTileK(context: MetalContext,
                                     m: Int = 128,
                                     n: Int = 2048,
                                     k: Int = 2048,
-                                    bits: Int = 4) throws -> TileComparison {
+                                    bits: Int = 4,
+                                    narrow narrowName: String = "n32b1",
+                                    wide wideName: String = "n32k128b1") throws -> TileComparison {
         let device = context.device
-        let narrow = MPPPrefillInt4QMM(context: context, weightBits: bits, variant: .n32b1, weightLoads: .byte)
-        let wide = MPPPrefillInt4QMM(context: context, weightBits: bits, variant: .n32k128b1, weightLoads: .byte)
+        guard let narrowVariant = MPPPrefillInt4QMM.TileVariant(rawValue: narrowName),
+              let wideVariant = MPPPrefillInt4QMM.TileVariant(rawValue: wideName) else {
+            throw MPPPrefillInt4QMMError.invalidArguments("unknown tile variant \(narrowName) / \(wideName)")
+        }
+        let narrow = MPPPrefillInt4QMM(context: context, weightBits: bits, variant: narrowVariant, weightLoads: .byte)
+        let wide = MPPPrefillInt4QMM(context: context, weightBits: bits, variant: wideVariant, weightLoads: .byte)
         guard narrow.isAvailable, wide.isAvailable else {
             throw MPPPrefillInt4QMMError.pipelineUnavailable(reason: "MPP prefill pipelines unavailable on this device")
         }
@@ -291,7 +298,8 @@ extension PrefillRoutedGEMMBenchmark {
             let magnitude = max(abs(Float(a[index])), 1e-6)
             maxRel = max(maxRel, diff / magnitude)
         }
-        return TileComparison(m: m, n: n, k: k, bits: bits, mismatches: mismatches,
-                              maxAbsDiff: maxAbs, maxRelDiff: maxRel, firstMismatch: first)
+        return TileComparison(m: m, n: n, k: k, bits: bits, pair: "\(narrowName)_vs_\(wideName)",
+                              mismatches: mismatches, maxAbsDiff: maxAbs, maxRelDiff: maxRel,
+                              firstMismatch: first)
     }
 }

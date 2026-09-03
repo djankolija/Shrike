@@ -35,16 +35,25 @@ static inline void mpp_affine_load_words(
     } else if (chunkBytes == 16u) {
         const uint4 v = *reinterpret_cast<device const uint4*>(src);
         words[0] = v.x; words[1] = v.y; words[2] = v.z; words[3] = v.w;
-    } else {
+    } else if (chunkBytes == 32u) {
         const uint4 v = *reinterpret_cast<device const uint4*>(src);
         const uint4 w = *reinterpret_cast<device const uint4*>(src + 16);
         words[0] = v.x; words[1] = v.y; words[2] = v.z; words[3] = v.w;
         words[4] = w.x; words[5] = w.y; words[6] = w.z; words[7] = w.w;
+    } else {
+        const uint4 a = *reinterpret_cast<device const uint4*>(src);
+        const uint4 b = *reinterpret_cast<device const uint4*>(src + 16);
+        const uint4 c = *reinterpret_cast<device const uint4*>(src + 32);
+        const uint4 d = *reinterpret_cast<device const uint4*>(src + 48);
+        words[0] = a.x; words[1] = a.y; words[2] = a.z; words[3] = a.w;
+        words[4] = b.x; words[5] = b.y; words[6] = b.z; words[7] = b.w;
+        words[8] = c.x; words[9] = c.y; words[10] = c.z; words[11] = c.w;
+        words[12] = d.x; words[13] = d.y; words[14] = d.z; words[15] = d.w;
     }
 }
 
 // One chunk per thread: E = TILE_K / 4 consecutive elements of one row, one
-// vector load (8, 16 or 32 bytes — never straddling a row or a quant group),
+// vector load (8 to 64 bytes — never straddling a row or a quant group),
 // the same q / scale / bias / fma / slot as the byte path, so the two bodies
 // are bit-identical. `vectorLoads` is per dispatch: the host sets it only when
 // the weight base is 16-byte aligned (the row stride already is, from the
@@ -84,7 +93,7 @@ static inline void mpp_affine_dequant_tile(
                 const uint group = globalK0 / kW4A8GroupSize;
                 const float scale = float(scales[globalN * groupsPerRow + group]);
                 const float bias = float(biases[globalN * groupsPerRow + group]);
-                uint words[8];
+                uint words[16];
                 mpp_affine_load_words(
                     words, packedWeights + globalN * rowBytes + (globalK0 * bits) / 8u, chunkBytes);
 #pragma clang loop unroll(full)
@@ -264,6 +273,7 @@ MPP_AFFINE_KERNEL(mpp_prefill_affine_threadgroup_f16_n32b2, 32, 64, 2)
 MPP_AFFINE_KERNEL(mpp_prefill_affine_threadgroup_f16_n64b1, 64, 64, 1)
 MPP_AFFINE_KERNEL(mpp_prefill_affine_threadgroup_f16_n64b2, 64, 64, 2)
 MPP_AFFINE_KERNEL(mpp_prefill_affine_threadgroup_f16_n32k128b1, 32, 128, 1)
+MPP_AFFINE_KERNEL(mpp_prefill_affine_threadgroup_f16_n32k256b1, 32, 256, 1)
 
 #undef MPP_AFFINE_KERNEL
 
@@ -322,6 +332,7 @@ MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n32b2, 32, 64, 2)
 MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n64b1, 64, 64, 1)
 MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n64b2, 64, 64, 2)
 MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n32k128b1, 32, 128, 1)
+MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n32k256b1, 32, 256, 1)
 
 #undef MPP_GROUPED_KERNEL
 

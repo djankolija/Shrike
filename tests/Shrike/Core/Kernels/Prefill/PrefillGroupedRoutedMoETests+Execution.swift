@@ -247,8 +247,8 @@ extension PrefillGroupedRoutedMoETests {
 
     init?(siluActivation: Bool,
           variant: MPPPrefillInt4QMM.TileVariant = MPPPrefillInt4QMM.tileVariant,
-          d: Int = 256,
-          f: Int = 256) throws {
+          d: Int = 512,
+          f: Int = 512) throws {
       self.d = d
       self.f = f
       var pairs: [PrefillTokenExpertPair] = []
@@ -601,8 +601,8 @@ extension PrefillGroupedRoutedMoETests {
   }
 
   private static func groupedPartialsAcrossWaves(variant: MPPPrefillInt4QMM.TileVariant,
-                                                 d: Int = 256,
-                                                 f: Int = 256) throws -> [Float16]? {
+                                                 d: Int = 512,
+                                                 f: Int = 512) throws -> [Float16]? {
     guard let fixture = try FourExpertTile(siluActivation: true, variant: variant, d: d, f: f) else { return nil }
     guard let groupedBuffer = fixture.sentinelPartials() else {
       Issue.record("allocation failed")
@@ -641,23 +641,33 @@ extension PrefillGroupedRoutedMoETests {
     #expect(mismatches.isEmpty, "grouped K 192 through the narrow pair: \(mismatches.count) of \(wide.count) differ")
   }
 
-  @Test func groupedWideKTileMatchesTheNarrowTile() throws {
+  @Test(arguments: [MPPPrefillInt4QMM.TileVariant.n32k128b1, .n32k256b1])
+  func groupedWideKTileMatchesTheNarrowTile(variant: MPPPrefillInt4QMM.TileVariant) throws {
     guard let narrow = try Self.groupedPartialsAcrossWaves(variant: .n32b1),
-          let wide = try Self.groupedPartialsAcrossWaves(variant: .n32k128b1) else { return }
+          let wide = try Self.groupedPartialsAcrossWaves(variant: variant) else { return }
     let actual = wide.map(Float.init)
     let reference = narrow.map(Float.init)
     let finite = actual.allSatisfy(\.isFinite)
     #expect(finite)
     let maxAbsDiff = RelError.maxAbsDiff(actual, reference)
     let relError = RelError.compute(actual: actual, reference: reference)
-    #expect(maxAbsDiff <= 2e-2, "grouped K128 vs K64 maxAbsDiff=\(maxAbsDiff)")
-    #expect(relError <= 2e-2, "grouped K128 vs K64 relError=\(relError)")
+    #expect(maxAbsDiff <= 2e-2, "grouped \(variant) vs K64 maxAbsDiff=\(maxAbsDiff)")
+    #expect(relError <= 2e-2, "grouped \(variant) vs K64 relError=\(relError)")
+  }
+
+  @Test func groupedWideK256InstanceTakesTheK128Rung() throws {
+    guard let k128 = try Self.groupedPartialsAcrossWaves(variant: .n32k128b1, d: 384, f: 384),
+          let widest = try Self.groupedPartialsAcrossWaves(variant: .n32k256b1, d: 384, f: 384) else { return }
+    let finite = widest.allSatisfy(\.isFinite)
+    #expect(finite)
+    let mismatches = zip(k128, widest).enumerated().filter { $0.element.0 != $0.element.1 }
+    #expect(mismatches.isEmpty, "grouped K 384 through the K128 rung: \(mismatches.count) of \(widest.count) differ")
   }
 
   @Test(arguments: MPPPrefillInt4QMM.TileVariant.allCases)
   func groupedGEMMsHandleASingleOnePairExpert(variant: MPPPrefillInt4QMM.TileVariant) throws {
-    let d = 256
-    let f = 256
+    let d = 512
+    let f = 512
     let sentinelRows = 64
     let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
       [Self.pair(token: 0, expert: 5, rank: 0)],

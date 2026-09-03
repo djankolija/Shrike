@@ -363,28 +363,95 @@ private let mppTensorOpsAvailable: Bool = {
         Self.expectBitIdentical(eightBit, "vector K128 8-bit M=33 N=35 K=256 (two-uint4 chunks)")
     }
 
-    @Test(.enabled(if: mppTensorOpsAvailable,
-                   "Requires runtime MPP TensorOps support"))
-    func wideKTileMatchesTheNarrowTile() throws {
+    private static let wideK256Shapes: [(m: Int, n: Int, k: Int)] = [
+        (m: 64, n: 32, k: 256),
+        (m: 33, n: 512, k: 2048),
+        (m: 128, n: 2048, k: 512),
+    ]
+
+    private static func expectWideKTileMatchesTheNarrowTile(variant: MPPPrefillInt4QMM.TileVariant,
+                                                            shapes: [(m: Int, n: Int, k: Int)]) throws {
         let context = try MetalContext()
         let narrow = MPPPrefillInt4QMM(context: context, variant: .n32b1)
-        let wide = MPPPrefillInt4QMM(context: context, variant: .n32k128b1)
+        let wide = MPPPrefillInt4QMM(context: context, variant: variant)
         let baseline = try PrefillInt4QMM(context: context)
-        #expect(wide.isAvailable, "n32k128b1 pipeline unavailable")
-        for shape in Self.variantShapes {
-            try Self.runShape(context: context, candidate: wide, baseline: baseline,
-                              m: shape.m, n: shape.n, k: shape.k, compareCPUReference: true,
-                              irregular: true)
-            let outputs = try Self.runPair(context: context, first: narrow, second: wide,
-                                           m: shape.m, n: shape.n, k: shape.k, irregular: true)
+        #expect(wide.isAvailable, "\(variant) pipeline unavailable")
+        for shape in shapes {
+            try runShape(context: context, candidate: wide, baseline: baseline,
+                         m: shape.m, n: shape.n, k: shape.k, compareCPUReference: true,
+                         irregular: true)
+            let outputs = try runPair(context: context, first: narrow, second: wide,
+                                      m: shape.m, n: shape.n, k: shape.k, irregular: true)
             let actual = outputs.second.map(Float.init)
             let reference = outputs.first.map(Float.init)
             let finite = actual.allSatisfy(\.isFinite)
-            #expect(finite, "n32k128b1 shape \(shape) produced a non-finite output")
+            #expect(finite, "\(variant) shape \(shape) produced a non-finite output")
             let maxAbs = RelError.maxAbsDiff(actual, reference)
             let rel = RelError.compute(actual: actual, reference: reference)
-            #expect(maxAbs <= 2e-2, "n32k128b1 M=\(shape.m) N=\(shape.n) K=\(shape.k) maxAbs=\(maxAbs) rel=\(rel)")
-            #expect(rel <= 2e-2, "n32k128b1 M=\(shape.m) N=\(shape.n) K=\(shape.k) rel=\(rel) maxAbs=\(maxAbs)")
+            #expect(maxAbs <= 2e-2, "\(variant) M=\(shape.m) N=\(shape.n) K=\(shape.k) maxAbs=\(maxAbs) rel=\(rel)")
+            #expect(rel <= 2e-2, "\(variant) M=\(shape.m) N=\(shape.n) K=\(shape.k) rel=\(rel) maxAbs=\(maxAbs)")
+        }
+    }
+
+    @Test(.enabled(if: mppTensorOpsAvailable,
+                   "Requires runtime MPP TensorOps support"))
+    func wideKTileMatchesTheNarrowTile() throws {
+        try Self.expectWideKTileMatchesTheNarrowTile(variant: .n32k128b1, shapes: Self.variantShapes)
+    }
+
+    @Test(.enabled(if: mppTensorOpsAvailable,
+                   "Requires runtime MPP TensorOps support"))
+    func wideK256TileMatchesTheNarrowTile() throws {
+        try Self.expectWideKTileMatchesTheNarrowTile(variant: .n32k256b1, shapes: Self.wideK256Shapes)
+    }
+
+    @Test(.enabled(if: mppTensorOpsAvailable,
+                   "Requires runtime MPP TensorOps support"))
+    func wideK256TileTakesTheWidestRungThatDividesK() throws {
+        let context = try MetalContext()
+        let widest = MPPPrefillInt4QMM(context: context, variant: .n32k256b1)
+        let k128 = MPPPrefillInt4QMM(context: context, variant: .n32k128b1)
+        let narrow = MPPPrefillInt4QMM(context: context, variant: .n32b1)
+        let viaK128 = try Self.runPair(context: context, first: k128, second: widest,
+                                       m: 64, n: 32, k: 384, irregular: true)
+        Self.expectBitIdentical(viaK128, "n32k256b1 K 384 through the K128 rung")
+        let viaK64 = try Self.runPair(context: context, first: narrow, second: widest,
+                                      m: 33, n: 128, k: 2880, irregular: true)
+        Self.expectBitIdentical(viaK64, "n32k256b1 K 2880 through the K64 rung")
+    }
+
+    @Test(.enabled(if: mppTensorOpsAvailable,
+                   "Requires runtime MPP TensorOps support"))
+    func vectorWeightLoadsAreBitIdenticalToByteLoadsOnTheK256Tile() throws {
+        let context = try MetalContext()
+        let byte = MPPPrefillInt4QMM(context: context, variant: .n32k256b1, weightLoads: .byte)
+        let vector = MPPPrefillInt4QMM(context: context, variant: .n32k256b1, weightLoads: .vector)
+        for shape in Self.wideK256Shapes {
+            let outputs = try Self.runPair(context: context, first: byte, second: vector,
+                                           m: shape.m, n: shape.n, k: shape.k, irregular: true)
+            Self.expectBitIdentical(outputs, "vector K256 M=\(shape.m) N=\(shape.n) K=\(shape.k)")
+        }
+    }
+
+    @Test(.enabled(if: mppTensorOpsAvailable,
+                   "Requires runtime MPP TensorOps support"))
+    func wideK256TileMatchesTheNarrowTileAtEightBits() throws {
+        let context = try MetalContext()
+        let byte8 = MPPPrefillInt4QMM(context: context, weightBits: 8, variant: .n32k256b1, weightLoads: .byte)
+        let vector8 = MPPPrefillInt4QMM(context: context, weightBits: 8, variant: .n32k256b1, weightLoads: .vector)
+        let narrow8 = MPPPrefillInt4QMM(context: context, weightBits: 8, variant: .n32b1)
+        for shape in [(m: 33, n: 35, k: 256), (m: 33, n: 512, k: 2048)] {
+            let loads = try Self.runPair(context: context, first: byte8, second: vector8,
+                                         m: shape.m, n: shape.n, k: shape.k, bits: 8, irregular: true)
+            Self.expectBitIdentical(loads, "vector K256 8-bit M=\(shape.m) N=\(shape.n) K=\(shape.k) (four-uint4 chunks)")
+            let widths = try Self.runPair(context: context, first: narrow8, second: vector8,
+                                          m: shape.m, n: shape.n, k: shape.k, bits: 8, irregular: true)
+            let actual = widths.second.map(Float.init)
+            let reference = widths.first.map(Float.init)
+            let maxAbs = RelError.maxAbsDiff(actual, reference)
+            let rel = RelError.compute(actual: actual, reference: reference)
+            #expect(maxAbs <= 2e-2, "n32k256b1 8-bit M=\(shape.m) N=\(shape.n) K=\(shape.k) maxAbs=\(maxAbs) rel=\(rel)")
+            #expect(rel <= 2e-2, "n32k256b1 8-bit M=\(shape.m) N=\(shape.n) K=\(shape.k) rel=\(rel) maxAbs=\(maxAbs)")
         }
     }
 
@@ -412,6 +479,14 @@ private let mppTensorOpsAvailable: Bool = {
         #expect(Tile(tileN: "64", tileK: "128", buffers: nil, fallback: .n32b1) == nil)
         #expect(Tile(tileN: nil, tileK: "128", buffers: "2", fallback: .n32b1) == nil)
         #expect(Tile(tileN: nil, tileK: "96", buffers: nil, fallback: .n32b1) == nil)
+        #expect(Tile(tileN: nil, tileK: "256", buffers: nil, fallback: .n32b1) == .n32k256b1)
+        #expect(Tile(tileN: "64", tileK: "256", buffers: nil, fallback: .n32b1) == nil)
+        #expect(Tile(tileN: nil, tileK: "256", buffers: "2", fallback: .n32b1) == nil)
+        #expect(Tile(tileN: nil, tileK: nil, buffers: nil, fallback: .n32k256b1) == .n32k256b1)
+        #expect(Tile(tileN: nil, tileK: "128", buffers: nil, fallback: .n32k256b1) == .n32k128b1)
+        #expect(Tile.n32k256b1.tileK == 256 && Tile.n32k256b1.tileN == 32 && Tile.n32k256b1.dequantBuffers == 1)
+        #expect(Tile.n32k256b1.kernelName == "mpp_prefill_affine_threadgroup_f16_n32k256b1")
+        #expect(Tile.n32k256b1.groupedKernelName == "mpp_prefill_affine_grouped_f16_n32k256b1")
         #expect(Tile(tileN: nil, tileK: nil, buffers: nil, fallback: .n32k128b1) == .n32k128b1)
         #expect(Tile(tileN: nil, tileK: "64", buffers: nil, fallback: .n32k128b1) == .n32b1)
         #expect(Tile.n32k128b1.tileK == 128 && Tile.n64b2.tileK == 64)

@@ -22,7 +22,7 @@ import Shrike
 ///   gdn family: gdn_inproj (baseline), gdn_inproj_xsh, gdn_inproj_r16,
 ///               gdn_scan (prefill delta-rule scan, serial vs chunked)
 ///   routed_gemm: the prefill routed tile, per-expert GEMMs vs grouped
-///   mpp_compare: the narrow vs the 128-wide-K MPP kernel, element for element
+///   mpp_compare: each K-tile pair of the MPP kernel (64 vs 128, 128 vs 256), element for element
 @main
 struct ShrikeBench {
     /// Shader-side `ExpertOffsets` mirror: 9 packed UInt32 in the same order.
@@ -64,13 +64,7 @@ struct ShrikeBench {
         }
 
         if kernelName == "mpp_compare" {
-            for bits in [4, 8] {
-                let result = try PrefillRoutedGEMMBenchmark.compareTileK(context: context, bits: bits)
-                print("kernel=mpp_compare n32b1_vs_n32k128b1 m=\(result.m) n=\(result.n) k=\(result.k) bits=\(result.bits) "
-                    + "mismatches=\(result.mismatches) of \(result.m * result.n) "
-                    + "max_abs=\(String(format: "%.6f", result.maxAbsDiff)) max_rel=\(String(format: "%.6f", result.maxRelDiff)) "
-                    + "first=\(result.firstMismatch)")
-            }
+            try runMPPCompare(context: context)
             return
         }
 
@@ -583,5 +577,21 @@ struct ShrikeBench {
         print("bytes/launch=\(bytes) "
             + "achieved=\(String(format: "%.1f", gbPerSec)) GB/s "
             + "efficiency=\(String(format: "%.0f", gbPerSec / theoretical * 100))% of ~100 GB/s peak")
+    }
+}
+
+extension ShrikeBench {
+    /// `mpp_compare`: each K-tile pair, element for element, at 4 and 8 bits.
+    private static func runMPPCompare(context: MetalContext) throws {
+        for (narrow, wide) in [("n32b1", "n32k128b1"), ("n32k128b1", "n32k256b1")] {
+            for bits in [4, 8] {
+                let result = try PrefillRoutedGEMMBenchmark.compareTileK(
+                    context: context, bits: bits, narrow: narrow, wide: wide)
+                print("kernel=mpp_compare \(result.pair) m=\(result.m) n=\(result.n) k=\(result.k) bits=\(result.bits) "
+                    + "mismatches=\(result.mismatches) of \(result.m * result.n) "
+                    + "max_abs=\(String(format: "%.6f", result.maxAbsDiff)) max_rel=\(String(format: "%.6f", result.maxRelDiff)) "
+                    + "first=\(result.firstMismatch)")
+            }
+        }
     }
 }
