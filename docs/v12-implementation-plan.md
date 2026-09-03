@@ -5093,6 +5093,289 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   - [x] Step 6: design doc Step 14 + "After P15b"; plan `[x]` with the landed
         paragraph; task review; fixes folded in.
 
+### Task 16: P16 — fetch-overlap depth on the routed prefill path
+
+- [ ] **P16: the tile pipeline is one tile deep, and what it leaves exposed is
+  variance, not bandwidth.** P15b cut the routed tile 5.96 → 5.50 ms of GPU and
+  a quarter of the cut resurfaced as `routed→routed` gap (861 → 1,239 ms at 12k
+  on the mini, host term 586 → 941); three encode variants read the same host
+  term 937–960 ms, so it is not CPU encoding (Task 15b's verdict). The loop that
+  must hide the fetch is one tile deep —
+  `PrefillRoutedTileSchedulerConfig(maxPendingDepth: 1, tileExperts: 8,
+  tilesPerCommandBuffer: 1)` (`PrefillRoutedTileScheduler.swift:42-51`, built at
+  `RealForwardRunner.swift:506-507`; `inFlightBatches = maxPendingDepth + 1`,
+  `:81-82`) — so exactly one tile of GPU work is banked against the host's next
+  fetch. Depth 1 is not a v12 choice: it arrives at the fork point (341d6ee) and
+  P5 widened the budget arithmetic to batches while leaving the depth alone
+  (`docs/v12-implementation-plan.md:796-806`). This task makes it a knob and
+  sweeps it. **The mini decides.** The M4 Pro is both check and control: its mean
+  fetch is 1.80× its GPU tile, so the model says it must **not** move, and a gain
+  there falsifies the model rather than confirming the lever.
+
+  **The decision rule, in two lines.** `SHRIKE_PREFILL_TILE_DEPTH=<n>` (1…8,
+  parsed like `environmentPrefillTileBatch`, `RealForwardRunner.swift:444-450`)
+  lands either way, printed as `depth=` in the `prefill_tile_batch=` field of the
+  projection-path line (`prefillTileBatchDescription`, `:214-225`; emitted at
+  `ServerInference.swift:821-824`, where `tail_tile=` and `sweep=` print). The
+  code default becomes the sweep's winner only if it beats depth 1 by **≥ 0.5 %**
+  (≥ 0.35 s of 69.07) on the mini's 12k same-binary A/B with golden IDENTICAL and
+  `expert_hits_prefill` ≥ 9,072; below that it lands defaulted to 1 with the rows
+  (P8's precedent — a measured null is a result). Ties within 0.2 % go to the
+  shallower depth; same-arm repeatability is ≈ 0.06 % (69.07 / 69.11 across two
+  builds, SDD ledger), so 0.5 % is 8× noise.
+
+  **Where the boundary goes — measured, three points.** `F̄` = fetch wall per
+  tile (`io_fetch_ms × completion_tokens`, `ServerInference.swift:2023`, divisor
+  `result.newTokens` = 8 at `:1957`, over the routed role's count); `G` =
+  `prefill_routed_tile` `gpu_ms / count`; host-late = the `routed→routed` gap's
+  `host_ms / count`, by definition (`RealForwardRunner.swift:1820-1825`) one
+  tile's GPU end to the next tile's `kernelStartTime` — only the boundaries where
+  the host had not yet submitted.
+
+  | box, prompt | F̄ / tile | G / tile | F̄ / G | host-late | total host | source |
+  | --- | ---: | ---: | ---: | ---: | ---: | --- |
+  | **mini 12k** | **3.20 ms** | 5.496 | **0.58** | 0.270 ms | 940.7 ms | 1442.4692 × 8 ÷ 3,605; 19,812.6 ÷ 3,605; 940.7 ÷ 3,485 |
+  | mini 3.7k | 4.86 | 5.096 | 0.95 | 0.487 | 572.9 | 739.1294 × 8 ÷ 1,216; 6,196.6 ÷ 1,216; 572.9 ÷ 1,176 |
+  | M4 Pro 12k | 2.67 | 1.485 | 1.80 | 1.416 | 4,930.5 | 1200.757 × 8 ÷ 3,602; 5,350.2 ÷ 3,602; 4,930.5 ÷ 3,482 |
+
+  All rows from the P15b final ledger and its server logs; `F̄` is an upper bound
+  by ≲ 4 % (it includes the 8 decode tokens' plans, `runner.io_ms` 58.4 ms/token =
+  467 ms at 12k). Two quantities fall out. **Marginal read cost:**
+  (4.863 − 3.201) / (7.868 − 5.230) = **0.630 ms per 1.6875 MiB expert** (2.81
+  GB/s at the reader's four threads), intercept −0.09 ≈ 0 — a tile's fetch is
+  linear in its miss count with no fixed per-plan I/O term. **Non-read host cost:**
+  at 3.7k the prefill hit rate is **0**, so every expert of every tile is a miss and
+  the per-tile fetch is near-uniform (9,568 misses / 1,216 tiles = 7.87 of ≤ 8);
+  host-late is then ≈ H − G directly and c = 0.487 + (5.096 − 4.863) ≈ **0.72 ms** (modelled; variance in
+  `G` inflates it, so it is an upper bound). At 12k an all-miss tile therefore
+  costs 8 × 0.630 + 0.72 = 5.76 ms against 5.496 of GPU (+0.26); an all-hit tile
+  0.72 (−4.78).
+
+  **What raising the depth does — and what it does not.** The fetch is issued
+  **and awaited in one expression**: `fetchBindingForTile`
+  (`PrefillGroupedRoutedMoE.swift:562-604`) awaits `model.fetchRoutedExperts(plan:)`
+  at `:584` = `beginFetchRoutedExperts(plan:).completion()`
+  (`ModelExpertIO.swift:208-210`, `:55-58`). `beginExpertCachePlan` really does
+  return before any read completes — it hands the plan to
+  `ExpertIOScheduler.shared`'s four workers (`PreadExpertStreamer.swift:834-845`,
+  `ExpertLoadOperation.swift:168-169`) — but the runner suspends on it immediately
+  (`RealForwardRunner.swift:5245`), so **at most one tile's fetch is ever in
+  flight**. Inside a tile the reads *are* concurrent: production takes the bounded
+  branch (`SHRIKE_BOUNDED_IO` unset → `ParallelExpertReader(threads: 4,
+  bypassCache: true)`, `:447-455`) and `executeBoundedReads` hands the whole miss
+  list to one `fetch` (`:977-988`) spread over four threads. Drive queue depth is
+  ≈ 4 **inside** a tile and **1 across** tiles, and `maxPendingDepth` changes
+  neither — only how much committed GPU work is banked against the host's next
+  fetch. Hence `TILE_DEPTH` (beside `TILE_BATCH`, the width), not `FETCH_DEPTH`.
+
+  Per boundary at depth 1: plan tile N avoiding the pending batch's slots
+  (`:5190-5196`), await its fetch (`:5245`), encode (`:5273`), commit — then
+  `while pendingBatches.count + open > maxPendingDepth` (`:5289-5292`) waits for
+  tile N−1. The host may run one tile (5.50 ms) ahead and measurably uses 44 % of
+  that bank: `routed→routed` `queue_ms` is 8,463.7 ms over 3,485 boundaries =
+  **2.43 ms** of submitted-but-not-started work per boundary. At depth 2 the drain
+  waits for tile N−2, the bank doubles to 11.0 ms and three batches are live;
+  nothing else changes — one tile on the GPU, one tile's reads on the drive, the
+  host still plan → fetch → encode → commit. On a `drainBeforeIssue` the planned
+  fetch is abandoned (`ModelExpertIO.swift:143-148`) and the oldest batch waited
+  on before the tile is re-planned: depth-1 behaviour, one batch later. **The
+  ceiling is the whole host-late term, 940.7 ms = 0.0766 ms/prompt-token, 1.36 %
+  of the wall.** Its deterministic part is small — an excursion of *k* consecutive
+  all-miss tiles at +0.26 ms overflows a 5.50 ms bank only past k = 21 and a
+  layer-chunk is ≈ 30 tiles, so the mean model explains ≈ 90 of the 940.7. **The
+  other ≈ 850 ms is per-tile variance** (tiles differ in pair count, hence `G`,
+  and in miss count, hence `F`), and smoothing variance is what a deeper bank
+  does. The variance is bounded — `expert_load_p99_ms` = 8.000 on a power-of-two
+  upper-bound histogram (`PreadExpertStreamer.swift:93-94`), so the worst plan
+  sits in (4, 8] ms, ≤ 2.5 ms over `G`, and a second banked tile covers four
+  consecutive worst-case tiles. This is the model; the sweep is its test.
+
+  **Slot budget, and why the sweep should not cost hits.** `fitting`
+  (`PrefillRoutedTileScheduler.swift:63-79`) narrows `tilesPerCommandBuffer`
+  first and then `tileExperts`, passing `maxPendingDepth` through unchanged in
+  both returns — **it never narrows the depth**. At 128 slots (`--ram-budget 8G`
+  snaps there, `RuntimeConfiguration.swift:142`, `:202-213`) depth 2 holds
+  3 × 1 × 8 = **24 of 128** against depth 1's 16 and `fitting` returns the config
+  unchanged; the ceiling at width 1 is (D + 1) × 8 ≤ 128 → **D = 15**. A smaller
+  cache pays in tile width instead — `fitting(slotCount: 8)` gives `tileExperts` 4
+  at depth 1 and **2** at depth 2 — and returns `nil` (→ `chunkedUnsupported`,
+  `RealForwardRunner.swift:4877-4884`) only when slotCount < D + 1. The hit-rate
+  risk is smaller than 24 slots suggests: the held set is `avoidingSlots`,
+  reserved before victim selection (`PreadExpertStreamer.swift:646-650`), and is
+  by construction the **most recently used** 8D experts — which aging-LFU with an
+  LRU tiebreak (`:1138-1151`) ranks last for eviction anyway, since a sweep gives
+  every expert of a layer-chunk the same use count and the tiebreak is then
+  exactly recency. The victim at depth 2 is the victim depth 1 would have picked,
+  so the prediction is **`expert_hits_prefill` unmoved at 9,549**. The
+  second-order case is real and bounded: a just-loaded protected slot carries a
+  *low* count, so under aging-LFU protection can displace one victim per plan — at
+  most 8 of the ≈ 112 evictable residents, ≤ 7 % of hits (≈ 640 ≈ 1.1 GB ≈ 0.40 s
+  of drive time, mostly hidden). `selectVictimSlots` can only fail at
+  8D + hits + misses > 128 (`:1111-1135`), i.e. D > 14.
+
+  **`tilesPerCommandBuffer` stays at 1.** P5 measured it a null and worse — at
+  width 4 the M4 Pro's 12k wall went 32.9 → 41.4 s and `routed→routed` 0.85 →
+  3.1 s, because every non-first tile of a batch is fetched against an idle GPU
+  (Task 5's verdict). Batch **removes** overlap, depth **adds** it: opposite
+  levers on one boundary, multiplying in the budget (`maxInFlightTiles =
+  inFlightBatches × tilesPerCommandBuffer`, `:82`), so a cross-product sweep would
+  confound them. Hold batch at 1; record the cross term as unmeasured.
+
+  **Scheduling only; memory unchanged.** Depth changes when a buffer is committed
+  and which one is waited on — not what any buffer contains nor their commit
+  order. `routePartials` is written per (token, rank) by that pair's own expert
+  block (`prefill.metal:946`) and `prefill_moe_reduce_token_major` folds the 8
+  ranks in rank order, so tile issue order cannot change a value (P15's argument).
+  The lifetime invariant is *stronger*, not weaker:
+  `PrefillStreamedTileSlotLifetime.begin` throws on any slot overlap between
+  in-flight tiles (`PrefillGroupedRoutedMoE.swift:387-397`) and `avoidingSlots` at
+  `:5250-5252` is already the union of the open batch and **every** pending batch,
+  so a third live batch needs no new set; `validateCoversPairs` is per tile and
+  untouched. **Golden IDENTICAL on both boxes and profiles is a hard bar**
+  (digests unchanged: M4 Pro long `e04d4e8ee7f1590d`, M1 long `899a25e60a365e60`).
+  One invariant carries the change: tiles share one staging scratch
+  (`RealForwardRunner.swift:5365-5366`), so correctness rests on `ctx.queue`'s
+  buffers executing serially in commit order — which depth 1 already relies on
+  (tiles N and N+1 are both committed between `commitOpenBatch()` and the drain),
+  so depth 2 deepens an existing dependence rather than creating one. If golden
+  moves, that is the reason, and per-tile staging (or a fence) is the fix, never a
+  recapture. **No new buffers:** the same fixed 128-slot pool slab (≈ 9.06 GB at
+  `--ram-budget 8G`, CLAUDE.md) with held slots inside it; the only growth is
+  D + 1 live command and argument buffers instead of 2, each argument buffer one
+  `streamedArgEncoder.encodedLength` allocation for ≤ 16 views (`:708-714`).
+
+  **The first tile of a layer-chunk is out of scope.** `shared→routed` (463.2 ms
+  over 120 at 12k = 0.038 ms/token, host 403.9) is the tile the pipeline cannot
+  help by construction: `heldSlots` is empty at `:5190`, `plan` is nil, `decide`
+  returns `.issueWithoutPending`, the fetch runs with nothing banked — identically
+  at any depth; and layer L+1's routes depend on layer L's output, so no
+  cross-layer prefetch exists without speculation. State the term **unmoved**. A
+  depth-independent overlap does exist and is *not* this task:
+  `buildPrefillRoutes` completes before `try waitForCompletion(sharedCB)`
+  (`:5142-5156`), so tile 0's fetch could be issued against the shared expert's
+  ≈ 17 ms of GPU. Record it as a follow-on — folding it in would make the A/B
+  measure two things.
+
+  **Bars (mini, 12k, ms per prompt token unless stated), on the After-P15b rows.**
+  `routed→routed` **0.101 → ≤ 0.07** (a 40 % capture of the 0.0766 host term; the
+  residual 0.024 is driver + queue turnaround, 298 ms, which depth cannot take);
+  gaps **0.244 → ≤ 0.213**; wall **69.07 → ≤ 68.7 s** (the same 40 %, 0.38 s).
+  Davor's draft bar of ≤ 68.4 s is a 71 % capture, carried as the **stretch**; the
+  ceiling is 68.13 s, so 68.4 is reached only if depth also takes part of the
+  850 ms the mean model does not explain — report which was met.
+  `expert_hits_prefill` **≥ 9,072** (−5 %; predicted unmoved), any larger loss
+  priced at 0.630 ms of drive per lost hit against the wall gain. `shared→routed`
+  **unmoved** (0.038 ± noise). **Control: 3.7k must not move** (21.29 s ± 0.5 %) —
+  uniformly all-miss tiles at F̄ / G = 0.95 leave no variance for a bank to
+  absorb; a gain there means depth buys something the model does not name and the
+  verdict must say what. Golden IDENTICAL both boxes both profiles;
+  `memory_pressure -Q` read before and during every mini arm. M4 Pro check (12k
+  22.89 s, 25k 48.95 s): predicted **flat** at F̄ / G = 1.80; decides nothing.
+
+  **Tests (RED first, host-only — no Metal, no model)** in
+  `tests/Shrike/Core/Kernels/Prefill/PrefillRoutedTileSchedulerTests.swift`
+  (`decide` at depth 2 is already covered by
+  `schedulerAllowsSecondLookaheadWhenDepthBudgetAllowsIt` and
+  `schedulerDrainsAtConfiguredPendingDepth`; the new ones are the budget, the
+  deeper drain and the knob): `fittingKeepsTheDepthAndNarrowsTheTile` — depth 2 at
+  `slotCount: 128` returns itself, at 16 gives `tileExperts: 5`, at 8 gives `2`,
+  at 2 gives `nil`; `theSlotBudgetCeilingIsFifteenAtOneHundredTwentyEightSlots` —
+  `fitsSlotBudget(slotCount: 128)` true at depth 15, false at 16;
+  `configFloorsTheDepth` — `maxPendingDepth: 0` clamps to 1 (`:48`);
+  `depthThreeDrainsOnlyPastThreePending` — `pendingDepth: 3` → `.prefetchNext`,
+  `4` → `.drainBeforeIssue(.maxPendingDepthReached)`. Plus the parser's clamp and
+  the `depth=` field, asserted as P5's `prefillTileBatchDescription` is.
+
+  **Files.** `sources/Shrike/Runtime/Inference/RealForwardRunner.swift:444-450`
+  (an `environmentPrefillTileDepth()` static beside `environmentPrefillTileBatch`,
+  clamped 1…8), `:506-507` (`maxPendingDepth:` from it), `:214-225`
+  (`prefillTileBatchDescription` gains `depth=`; `fitting` never narrows it, so
+  one field suffices); `tests/…/PrefillRoutedTileSchedulerTests.swift` (the four
+  tests). Lint: the runner's `init` sat at 122 lines during P15b and both knob
+  parsers were extracted for it — one more call is one line; re-check
+  `function_body_length` and regenerate the baseline if a span moves.
+  **Unchanged:** `PrefillRoutedTileScheduler.swift` (the type already carries
+  `maxPendingDepth` and its budget arithmetic; this task only sets it), every
+  kernel and `.metal` file, the grouped GEMM and its tail tile, the sweep,
+  `PrefillMoEGrouping`, the streamer, the eviction policy, decode.
+
+  Steps:
+
+  - [ ] Step 1: the four failing tests, then the knob, the config wiring and the
+        `depth=` field. `swift test --no-parallel --filter
+        PrefillRoutedTileScheduler` → FAIL then PASS. Five gates (build 0
+        warnings, `swiftlint --strict --baseline`, `check-md-links.py`,
+        `swift test --no-parallel`, the same under TSAN with
+        `TSAN_OPTIONS=suppressions=tsan-suppressions.txt`).
+  - [ ] Step 2 (the sweep, the gate): `pgrep -fl 'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI'`
+        first; `tools/mini-deploy.sh --restart`; then four arms on **one binary**,
+        each a fresh server, **one send per server lifetime** (the settle
+        re-prefills after a `finish=length` turn): depth **1** (control), **2**,
+        **3**, **4** — a fourth curve point: a plateau after 2 confirms the
+        variance model, a monotone rise says the bank buys something the model
+        does not name (the knob clamps at 8, so the slot-failure regime at
+        16 × 8 = 128 held is unreachable in production and is left to the
+        scheduler's drain tests). 12k on every arm, 3.7k on the control and the winner. Read the
+        routed role and count, `routed→routed` total / `host_ms` / `queue_ms` /
+        count, `shared→routed`, busy, gaps, `expert_hits_prefill` /
+        `expert_misses_prefill`, `io_fetch_ms`, `expert_load_p99_ms`, the wall —
+        `tools/prefill-measure.sh macmini 8081 <promptdir> <outdir> p16-d<n>-mini
+        2k 6k`, a **distinct tag per arm and per box** (P10's lesson:
+        `resp-<tag>-<label>.json` collides).
+  - [ ] Step 3 (the rule): apply it to the mini's 12k walls; the winner becomes
+        the default with `=1` as the A/B, or the default stays 1. **Record the
+        verdict either way**, with `queue_ms` per boundary at each depth — the
+        direct read of how much bank was used, and what tells a null apart from an
+        unused knob.
+  - [ ] Step 4 (only on a null, a follow-on decision and not a scope extension):
+        the arm the mechanism points at is two fetches in flight —
+        `beginFetchRoutedExperts` for tile N+1 issued before tile N's encode and
+        awaited at the next iteration's head, which would raise the drive's
+        *cross-tile* queue depth from 1 to 2 (v10 P3: +48 % aggregate at QD4) and
+        take the ≈ 0.72 ms of non-read host cost off the critical path. Price it
+        from Step 2's counters, record it in the design doc, stop.
+  - [ ] Step 5: five gates on the landed tree; `tools/golden-baseline.sh --check`
+        on both boxes — short and long **IDENTICAL**, a difference is a defect and
+        never a recapture. Then `tools/mini-deploy.sh --restart`, mini golden
+        check, and the ledger: **mini 3.7k + 12k is the verdict**, M4 Pro
+        `2k 6k 12k` the check, fresh server and one send per prompt.
+  - [ ] Step 6: design doc — a "Step 16" section with the F̄ / G / host-late table
+        at every depth, an "**After P16**" ledger block, the SSD-floor follow-on
+        rewritten with what the sweep measured, and two follow-ons with their
+        prices (the first-tile overlap before the shared-expert wait; two fetches
+        in flight). Plan: Task 16 `[x]` with the landed paragraph. Task review by
+        a fresh reviewer; fixes folded into the owning commit (rebase and amend,
+        never a fixup commit).
+
+  **Risks and what falsifies the model.**
+  - **The host term does not fall at any depth.** Then the exposure is not
+    variance a bank can smooth, and the next measurement is the *distribution* —
+    a per-tile histogram of (miss count, `G`, host-late) from one instrumented
+    build, reverted (P15 Step 1's precedent). That points at Step 4's arm, not a
+    deeper knob.
+  - **`expert_hits_prefill` falls.** Then aging-LFU's count term is binding rather
+    than the LRU tiebreak and protection is displacing victims. Price the loss at
+    0.630 ms of drive per hit: a depth that wins the wall while losing > 7 % of
+    hits is still a loss at 25k, where the sweep has more passes to lose.
+  - **The drive's aggregate does not scale — and this task never asks it to.**
+    v10 P3's +48 % at QD4 is *per-read* depth inside one plan, which the bounded
+    reader already takes (`:447-455`; measured here at 0.630 ms per expert = 2.81
+    GB/s against v10's 0.79 ms single-read). `maxPendingDepth` is *cross-tile*
+    depth and leaves the drive at one plan at a time; a verdict claiming a
+    bandwidth gain from this knob is misattributed.
+  - **A default change is not inert on small-cache models.** At depth 2
+    `fitting(slotCount: 8)` narrows `tileExperts` 4 → 2 and `slotCount: 16`
+    narrows 8 → 5, so a model streaming into a small cache gets more, narrower
+    tiles. Values do not move (grouping is per expert block), but P15b's ragged-K
+    gate failure came from exactly this class of small-model path — run the
+    **full** suite, not the filtered one, before calling it done.
+  - **Golden moves** → two buffers are executing concurrently over the shared
+    staging scratch and the serial-commit-order assumption is wrong: a defect in
+    the loop, not a numerics change. The default stays 1 until it is fixed.
+  - **The mini is production.** Every arm stops the server on 8081 and relaunches
+    it; Turbo on 8080 is never touched. One model process at a time — `pgrep`
+    first, every time.
+
 ## Follow-ons (not scheduled)
 
 - The mini's SSD term (v10 P3 follow-on: batched miss loads, deeper queue
