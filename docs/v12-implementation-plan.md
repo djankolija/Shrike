@@ -2724,7 +2724,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
 ### Task 11: P11 — the FlashAttention-shape attention body
 
-- [ ] **P11: Q and the probabilities in registers under a single-simdgroup
+- [x] **P11: Q and the probabilities in registers under a single-simdgroup
   scope** — target on the mini at 12k: `prefill_attn_router` 1.75 → **≤ 1.58**
   ms/prompt-token (−10 %); at 3.7k 0.96 → **≤ 0.91**; GPU busy 6.26 → ≈ 6.09 at
   12k, wall 86.0 → ≈ 84 s. Bar: **the attention core reaches ≥ 55 % of the
@@ -2735,6 +2735,37 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   isolated tile-ms bar** and the role is the only instrument. **The mini
   decides.** M4 Pro iteration check only: role 0.39 → ≤ 0.36 at 12k, 0.54 →
   ≤ 0.51 at 25k; an arm that regresses there never reaches the mini.
+
+  **LANDED 1a3175e (2026-09-03) — a measured null.** Built to the draft's shape
+  (one simdgroup per query, M = 8, Q and the probabilities in cooperative
+  tensors, no threadgroup memory, no barrier), numerically right (9 fp16 and
+  15 quantized cases at 2e-2 across `f4k128`, `f4k64`, `f8k128`; every width
+  built a pipeline on both boxes — registers were not the limit), and slower
+  on the box that decides by 2.8–3.6×: `ShrikeBench attn 10` per 12k prompt on
+  the mini `g2k256d` 1,419–1,423 ms (0.87 TFLOPS, core 1.155 ms/token — the
+  fit above confirmed) against `f4k64` 3,911, `f4k128` 4,839 (4,783 on the
+  pre-ablation build), `f8k128`
+  5,072; M4 Pro 222 against 293–296 / 420–425 / 419–424. Ablations (temporary
+  kernels): the single-simdgroup QKᵀ with a cooperative Q at M = 8 alone costs
+  2.3× the shipped kernel's whole QK + softmax + PV on the mini (3,236 vs
+  1,423 ms); along the mini's QK → softmax → PV path softmax ≈ +0.7 s, PV +
+  relayout ≈ +0.9 s (the M4 Pro's arms invert; only QK-only compares across
+  boxes); select chains for the
+  row statistics changed nothing. Mechanism: eight rows of K/V reuse per
+  simdgroup against the group kernel's sixteen shared by four. The accept
+  rule's last clause: tests, variants (`SHRIKE_ATTN_MATRIX_TILE`), the `attn`
+  bench mode (Step 5, taken) and two SDK facts land; `g2k256d` stays the
+  default. `f4k256` is not in the ladder: a single-simdgroup `matmul2d` with a
+  cooperative left input writes only the first 128 columns of a 256-wide
+  destination in this SDK (PV runs as two halves; a 256-key QKᵀ tile fails at
+  rel 0.10), and a cooperative tensor cannot be copy-assigned (constructed per
+  tile instead). The server A/B was not run — at a 3× bench loss it could not
+  change the verdict (ledger ruling). Golden IDENTICAL on both boxes, short and
+  long (the default path is untouched); five gates green on 1a3175e — 1,177
+  tests in 167 suites, TSAN 0 reports (gates-p11/). Bars (restated on the ledger against the After-P15b rows:
+  12k ≤ 1.41, 3.7k ≤ 0.72): missed — no arm reached the server. Core share
+  measured 47 % of the 1.84 TFLOPS same-run ceiling (0.87 TFLOPS; the modelled
+  48 % confirmed — the ≥ 55 % bar needed the fixed term gone).
 
   **Why those numbers.** The role is not the core, and the mini's split has
   never been measured directly. Take the design's own model — attention time
@@ -2980,7 +3011,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
   Steps (TDD; correctness on the reference before any geometry hunting):
 
-  - [ ] Step 1: failing tests `flashMatrixMatchesReferenceOnFP16Cache(c:tile:)`
+  - [x] Step 1: failing tests `flashMatrixMatchesReferenceOnFP16Cache(c:tile:)`
         — the three `fp16Cases` (`PrefillAttentionMatrixTests.swift:15-19`) ×
         `flashTiles` through `checkFP16Reference` against
         `PrefillAttentionRef.apply` at the suite's 2e-2 on both
@@ -2988,18 +3019,18 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         `flashMatrixMatchesTiledOnQuantizedCache(c:tile:)`, the five
         `quantizedCases` (`:20-26`) against `.causalTiled`. FAIL: no `f*`
         kernels.
-  - [ ] Step 2: failing test `flashTilesBuildTheirPipelines` — for every `f*`
+  - [x] Step 2: failing test `flashTilesBuildTheirPipelines` — for every `f*`
         case, construct `PrefillAttention(context:supportsMLA:matrixTile:)` and
         `#expect(attention.matrixPathAvailable)` with `matrixUnavailableReason`
         in the message. This is the register gate: the kernel's
         `max_total_threads_per_threadgroup(32·SG)` makes pipeline creation fail
         rather than silently derate, and the test says so on whichever box runs.
-  - [ ] Step 3: extend `matrixTileVariantsDescribeTheirGeometry` (`:187`) to pin
+  - [x] Step 3: extend `matrixTileVariantsDescribeTheirGeometry` (`:187`) to pin
         `queryRows`/`threadsPerThreadgroup` for the `f*` cases, and re-run
         `rejectedShapeRunsTheTiledKernelEndToEnd` (`:167-177`) over `allCases`
         for byte equality with `.causalTiled` on a rejected shape.
         `swift test --no-parallel --filter PrefillAttentionMatrixTests` → FAIL.
-  - [ ] Step 4: implement the body, the macro and the instantiations `f4k256`,
+  - [x] Step 4: implement the body, the macro and the instantiations `f4k256`,
         `f4k128`, `f4k64`, `f8k128`, plus the `MatrixTile` cases. Every
         cooperative-tensor loop carries `#pragma clang loop unroll(full)`
         (`attention_matrix.metal:336`, `:343`;
@@ -3007,7 +3038,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         widths built a pipeline on each box** — that is the register answer the
         source could not give, and it belongs in the verdict whether or not the
         spike proceeds.
-  - [ ] Step 5 (optional, recommended): add an `attn` mode to
+  - [x] Step 5 (optional, recommended): add an `attn` mode to
         `Sources/ShrikeBench/ShrikeBench.swift` (`:23-25` is the mode list) that
         times the causal-matrix kernel alone at the ornith shape over synthetic
         buffers, `RoutedGEMMBench`-style, per `MatrixTile`. It turns each spike
@@ -3015,7 +3046,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         and gives every future attention task the isolated instrument P7 and
         this task both lacked. If skipped, say so in the verdict; the server A/B
         is the gate of record either way.
-  - [ ] Step 6 (spike, the gate): one **M4 Pro** server per arm, fresh each
+  - [x] Step 6 (spike, the gate): one **M4 Pro** server per arm, fresh each
         time, `--port 8082 --ram-budget 20G --thinking off`,
         `SHRIKE_KERNEL_STATS=1 SHRIKE_RUNNER_STATS=1`, the 12k prompt sent once
         per server lifetime (a resend hits the prompt cache — Global
@@ -3037,14 +3068,14 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         the tests and the variants only, keep `g2k256d` the default, and say
         so — P5's and P8's precedent, with the measured-loser knob staying
         selectable on the same binary.** Verdict line: the arm table per box.
-  - [ ] Step 7: make the winner the default `matrixTile`
+  - [x] Step 7: make the winner the default `matrixTile`
         (`PrefillAttention.swift:90-92`) and keep every variant selectable by
         `SHRIKE_ATTN_MATRIX_TILE`. Five gates: release build 0 warnings;
         `swiftlint lint --strict --baseline .swiftlint-baseline.json`; markdown
         link check; `swift test --no-parallel`; the same under
         `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test
         --no-parallel --sanitize=thread`.
-  - [ ] Step 8: `tools/golden-baseline.sh --check` (M4 Pro, server stopped).
+  - [x] Step 8: `tools/golden-baseline.sh --check` (M4 Pro, server stopped).
         **Expected IDENTICAL on the short profile** (it never reaches the matrix
         path, `docs/v12-prefill-matrix-kernels.md:320-322`) and **expected to
         differ on the long profile** for two named reasons: the probabilities
@@ -3061,7 +3092,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         have fp32-exact partial sums no reduction order can disturb
         (`:1833-1837`). Commit `prefill: the FlashAttention-shape attention body
         on the matrix path (v12 P11)`, baselines via `git commit --only`.
-  - [ ] Step 9: ledger on both boxes (fresh server, `tools/prefill-measure.sh`,
+  - [x] Step 9: ledger on both boxes (fresh server, `tools/prefill-measure.sh`,
         one send per prompt per server lifetime; **mini 3.7k + 12k is the
         verdict**, M4 Pro 3.7k + 12k + 25k the check); `tools/mini-deploy.sh
         --restart`, mini golden recapture, scp into `baselines/`. Verdict line:

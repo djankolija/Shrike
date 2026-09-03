@@ -186,15 +186,19 @@ at 3.7k), which promotes the command-buffer batching follow-on.
 
 Attention-core efficiency after P7: ≈ 37 % of the M4 Pro's measured ceiling
 at 12k (2.8 TFLOPS on 12.4 TFLOP of scores and values), ≈ 30 % before; the
-M1 ≈ 29 %. The remaining cost is per key tile, not per byte: the scores go
+M1 ≈ 29 % of its 3.0 TFLOPS peak — measured at Step 15 as 0.87 TFLOPS, which
+is 47 % of the 1.84 TFLOPS same-run gate/up ceiling the later bars use. The
+remaining cost is per key tile, not per byte: the scores go
 through threadgroup memory and back as fp16 weights, the R×256 fp32 output
 accumulator is rescaled once per tile, and the tile loop is barriered — which
 is why 256-key tiles on 16 rows beat P2's 64-key tiles on 32 rows and why
 staging K/V once per KV-head group (the follow-on P7 set out to build) lost
 on both boxes. The FlashAttention shape — Q and the probabilities resident in
-registers, no score round-trip — needs MPP's single-simdgroup execution scope
-and is the follow-on below. `SHRIKE_ATTN_MATRIX_TILE` selects `g4k128d`,
-`r32s4` or `r64s8` on the same binary; `SHRIKE_PREFILL_ATTENTION=tiled` A/Bs
+registers, no score round-trip — needs MPP's single-simdgroup execution scope;
+it was built and measured at Step 15 and is a null, 3× slower on the M1: the
+K/V reuse it gives up costs more than the round-trip it removes.
+`SHRIKE_ATTN_MATRIX_TILE` selects `g4k128d`, `r32s4`, `r64s8`, `f4k128`,
+`f4k64` or `f8k128` on the same binary; `SHRIKE_PREFILL_ATTENTION=tiled` A/Bs
 the scalar kernel.
 
 - **Attention time is proportional to query–key pairs, not tokens.** Across
@@ -478,6 +482,11 @@ nothing here):
 
 Same binary, tail off: M1 12k 70.81 s (routed 1.75, gaps 0.22), 3.7k 21.57 s.
 Golden identical on both boxes and both profiles.
+
+**After P11** (commit 1a3175e, 2026-09-03): a measured null (Step 15) — the
+`g2k256d` default is untouched, the rows are the After P15b rows; the `attn`
+bench puts the M1's attention core at 1.155 ms/token of the role's 1.58 (the
+table above).
 
 ## Where the time goes
 
@@ -955,6 +964,63 @@ longer hides all of it. A quarter of the GEMM cut resurfaces as fetch wait; the
 M1's routed tile now sits on its SSD floor, and the next routed lever is fetch
 overlap, not arithmetic. The M4 Pro, fetch-bound since P15, reads flat on the same binary: 12k 22.58 → 22.89 s, 25k 49.31 → 48.95 s (routed −3 to −5 %, the `routed→routed` gap +0.04 and +0.01 ms/token) — the GEMM cut lands in its fetch wait, as the mechanism predicts.
 
+### Step 15 — the FlashAttention-shape attention body: a measured null (commit 1a3175e)
+
+The follow-on that P7 left — keep Q and the probabilities in registers, one
+simdgroup per query position — was built and measured. The body is exactly the
+shape the headers allow: input cooperative tensors need `execution_simdgroup`,
+so one simdgroup owns one query's eight heads (M = 8); Q loads once into a
+left-input cooperative tensor; QKᵀ lands in a destination cooperative tensor;
+the mask, the running max, the `exp`, the row sums and the O rescale run
+element-wise in registers; the probabilities relay into PV's left input; no
+threadgroup memory, no barrier. It is numerically right — nine fp16 reference
+cases and fifteen quantized-cache cases at 2e-2 across `f4k128`, `f4k64` and
+`f8k128` — and every width built a pipeline on both boxes, so registers were
+not the limit. It is also slower on both boxes by a wide margin, and the
+`ShrikeBench attn` mode this step adds (the isolated attention instrument P7
+and this task both lacked) says where. Per 12k prompt, dequant and q-group
+pack included:
+
+| tile | M1 ms | M1 TFLOPS | M4 Pro ms | M4 Pro TFLOPS |
+| --- | ---: | ---: | ---: | ---: |
+| `g2k256d` (shipped) | 1,419–1,423 | 0.87 | 222 | 5.56 |
+| `g4k128d` | 1,472 | 0.84 | 263 | 4.70 |
+| `f4k64` | 3,911 | 0.32 | 293–296 | 4.2 |
+| `f4k128` | 4,839 (4,783 on the pre-ablation build) | 0.26 | 420–425 | 2.9 |
+| `f8k128` | 5,072 | 0.24 | 419–424 | 2.9 |
+
+Ablations of `f4k128` (temporary kernels) price the pieces: on the M1, QKᵀ
+alone under this shape costs 3,236 ms — **2.3× the shipped kernel's whole QK +
+softmax + PV** — and along the M1's QK → softmax → PV path the softmax adds
+≈ 0.7 s and PV with its relayout ≈ 0.9 s (the other path splits them the other
+way, and the M4 Pro's arms invert — QK-only 292, QK + softmax 270, QK + PV 446,
+full 425 against 222 — the ablation kernels dead-code-eliminate differently,
+so only the QK-only arm compares across boxes). Replacing the runtime-indexed
+per-row arrays with select chains changed nothing. The mechanism is the
+operand reuse the shape gives up: a single-simdgroup matmul with a cooperative
+left input at M = 8 reads each K/V tile for eight rows where the group kernel's
+four cooperating simdgroups share a 16-row block, and the M = 8 op runs at a
+fraction of the M = 16 op's rate on both GPUs. The shipped kernel with its
+dequant and q-group pack — 1.155 ms/token on the M1 — is consistent with the
+fit's core of 1.14–1.16 (the two included flat items are under 1 % of it,
+modelled), so the flat/core split of the role stands; its 0.87 TFLOPS is 47 %
+of the 1.84 TFLOPS same-run gate/up ceiling — the brief's modelled 48 %
+confirmed, and the ≥ 55 % bar was never in reach without the fixed term going.
+
+Two SDK facts found on the way (MacOSX26.5.sdk): a cooperative tensor cannot be
+copy-assigned (its `operator=` hands a const source to MPP's non-const
+`copy_assign`), so PV's left operand is constructed per tile; and **a
+single-simdgroup `matmul2d` with a cooperative left input writes only the
+first 128 columns of a 256-wide destination** (a one-hot probability row
+against V[key][d] = d/256 came back as d/256 below column 128 and 0 above), so
+PV runs as two 128-column halves and a 256-key QKᵀ tile is unusable — the
+planned `f4k256` is not in the ladder.
+
+Landed: the tests, the three variants (selectable by
+`SHRIKE_ATTN_MATRIX_TILE=f4k128|f4k64|f8k128` on the same binary), the bench
+mode. `g2k256d` stays the default; golden identical on both boxes and both
+profiles, no ledger row moves.
+
 ### Follow-ons, not scheduled
 
 - **The cache settle's re-prefill after a degenerate turn (not a
@@ -1015,15 +1081,15 @@ overlap, not arithmetic. The M4 Pro, fetch-bound since P15, reads flat on the sa
 - **The GDN pre-scan chain** is within 2.3 ms per layer-chunk of its
   streaming floor (Step 11); fusing conv → qk-norm and vectorising the norms
   would take ≤ 0.02 ms per token and is not scheduled.
-- **Attention: Q and the probabilities in registers (the FlashAttention
-  shape).** After P7 the matrix-path attention is bound by its per-tile fixed
-  work, not by K/V traffic (see "After P7"). MPP's left-input cooperative
-  tensor would keep the Q block resident and let the QKᵀ destination become
-  the PV left operand without touching threadgroup memory, but it is only
-  allowed under `execution_simdgroup`: each simdgroup would own one query's
-  eight heads (M = 8) and the eight-head K/V tile would be shared per
-  threadgroup. Unmeasured; the spike harness (`SHRIKE_ATTN_MATRIX_TILE`, one
-  fresh server per arm) is the gate, and the bar stays the 50 % share.
+- **Attention after the FlashAttention null (Step 15).** The matrix-path
+  attention is bound by its per-tile fixed work at 16 rows per K/V read, and
+  the register-resident shape that removes the round-trip loses that reuse and
+  runs 3× slower on the M1. The 32-row block at 128 keys is `g4k128d`,
+  measured at Step 15 at 1,472 ms against the control's 1,419 (3.7 % behind);
+  32 rows at 256 keys exceeds the group body's 32 KB threadgroup budget. So
+  more rows per K/V read needs either the score round-trip gone (the register
+  shape did that and lost the reuse) or a narrower staged tile; no cheap shape
+  is left, and `ShrikeBench attn` is the instrument for whatever is proposed.
 - **The mini's SSD term surfaced at P15b (Step 14).** With the routed tile at
   5.50 ms of GPU against ≈ 5.1 ms of fetch per tile, `routed→routed` grew by
   ≈ 0.10 ms per boundary of exposed fetch (host 586 → 941 ms at 12k over
