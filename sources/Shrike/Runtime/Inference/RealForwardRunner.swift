@@ -253,6 +253,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return "overlap=\(prefillRouteOverlap ? "on" : "off") residency=\(residency)"
     }
 
+    /// The prefill router kernel in force (`block` or `tiled tokens=N`) and its
+    /// weight bits.
+    public var prefillRouterDescription: String {
+        prefillRouter.description
+    }
+
     // Scratch — preallocated per spec'd D / F / vocab.
     private let decodeScratch: DecodeScratchBuffers
     private var hidden: MTLBuffer { decodeScratch.hidden }          // [D] FP16

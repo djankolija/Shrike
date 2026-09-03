@@ -28,6 +28,8 @@ constant bool FC_PREFILL_ACT_CLAMPED_SWIGLU [[function_constant(121)]];
 // gpt-oss attention sinks: a learned per-Q-head logit folded into each row's
 // streaming softmax after the key loop; it contributes no value row.
 constant bool FC_PREFILL_HAS_SINKS [[function_constant(122)]];
+constant uint FC_PREFILL_ROUTER_TOKENS [[function_constant(123)]];
+constant constexpr uint kPrefillRouterMaxTokens = 24;
 
 static inline bool prefill_has_sinks() {
     return is_function_constant_defined(FC_PREFILL_HAS_SINKS) && FC_PREFILL_HAS_SINKS;
@@ -369,6 +371,78 @@ static inline float prefill_moe_affine_gemv_row_dev(
 // (the bias applies to the SELECTION score only, and weights renormalize the
 // original sigmoid scores × `scaling`); the softmax families keep the bias
 // folded into the stored score. `sigmoid_scores` is a literal per entry.
+static inline void prefill_router_select(
+    threadgroup const float* scores,
+    device const bfloat*  per_expert_scale,
+    device const bfloat*  bias_vec,
+    device uint*          out_indices,
+    device half*          out_weights,
+    uint NE, uint KK, uint top_k,
+    bool sigmoid_scores, float scaling,
+    uint row
+) {
+    uint top_idx[kPrefillRouterMaxTopK];
+    float top_score[kPrefillRouterMaxTopK];
+    for (uint i = 0; i < kPrefillRouterMaxTopK; ++i) {
+        top_idx[i] = 0u;
+        top_score[i] = -INFINITY;
+    }
+
+    for (uint e = 0; e < NE; ++e) {
+        float s = sigmoid_scores
+            ? (1.0f / (1.0f + exp(-scores[e])) + float(bias_vec[e]))
+            : scores[e];
+        if (KK > 0 && s <= top_score[KK - 1]) continue;
+        uint pos = KK;
+        for (uint i = 0; i < KK; ++i) {
+            if (s > top_score[i] || (s == top_score[i] && e < top_idx[i])) {
+                pos = i;
+                break;
+            }
+        }
+        if (pos >= KK) continue;
+        for (uint i = KK - 1; i > pos; --i) {
+            top_idx[i] = top_idx[i - 1];
+            top_score[i] = top_score[i - 1];
+        }
+        top_idx[pos] = e;
+        top_score[pos] = s;
+    }
+
+    if (sigmoid_scores) {
+        float orig[kPrefillRouterMaxTopK];
+        float sum = 0.0f;
+        for (uint i = 0; i < KK; ++i) {
+            orig[i] = 1.0f / (1.0f + exp(-scores[top_idx[i]]));
+            sum += orig[i];
+        }
+        const float inv = scaling / (sum + 1e-20f);
+        for (uint i = 0; i < KK; ++i) {
+            const uint expert_idx = top_idx[i];
+            const float gain = float(per_expert_scale[expert_idx]);
+            out_indices[row * top_k + i] = expert_idx;
+            out_weights[row * top_k + i] = half(orig[i] * inv * gain);
+        }
+        return;
+    }
+
+    float max_s = top_score[0];
+    float sum_exp = 0.0f;
+    float exps[kPrefillRouterMaxTopK];
+    for (uint i = 0; i < KK; ++i) {
+        float e = fast::exp(top_score[i] - max_s);
+        exps[i] = e;
+        sum_exp += e;
+    }
+    for (uint i = 0; i < KK; ++i) {
+        const uint expert_idx = top_idx[i];
+        const float w = exps[i] / sum_exp;
+        const float gain = float(per_expert_scale[expert_idx]);
+        out_indices[row * top_k + i] = expert_idx;
+        out_weights[row * top_k + i] = half(w * gain);
+    }
+}
+
 static inline void prefill_router_block_body(
     device const uint8_t* W,
     device const bfloat*  scales,
@@ -422,66 +496,8 @@ static inline void prefill_router_block_body(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (tid == 0) {
-        uint top_idx[kPrefillRouterMaxTopK];
-        float top_score[kPrefillRouterMaxTopK];
-        for (uint i = 0; i < kPrefillRouterMaxTopK; ++i) {
-            top_idx[i] = 0u;
-            top_score[i] = -INFINITY;
-        }
-
-        for (uint e = 0; e < NE; ++e) {
-            float s = sigmoid_scores
-                ? (1.0f / (1.0f + exp(-scores[e])) + float(bias_vec[e]))
-                : scores[e];
-            if (KK > 0 && s <= top_score[KK - 1]) continue;
-            uint pos = KK;
-            for (uint i = 0; i < KK; ++i) {
-                if (s > top_score[i] || (s == top_score[i] && e < top_idx[i])) {
-                    pos = i;
-                    break;
-                }
-            }
-            if (pos >= KK) continue;
-            for (uint i = KK - 1; i > pos; --i) {
-                top_idx[i] = top_idx[i - 1];
-                top_score[i] = top_score[i - 1];
-            }
-            top_idx[pos] = e;
-            top_score[pos] = s;
-        }
-
-        if (sigmoid_scores) {
-            float orig[kPrefillRouterMaxTopK];
-            float sum = 0.0f;
-            for (uint i = 0; i < KK; ++i) {
-                orig[i] = 1.0f / (1.0f + exp(-scores[top_idx[i]]));
-                sum += orig[i];
-            }
-            const float inv = scaling / (sum + 1e-20f);
-            for (uint i = 0; i < KK; ++i) {
-                const uint expert_idx = top_idx[i];
-                const float gain = float(per_expert_scale[expert_idx]);
-                out_indices[row * top_k + i] = expert_idx;
-                out_weights[row * top_k + i] = half(orig[i] * inv * gain);
-            }
-            return;
-        }
-
-        float max_s = top_score[0];
-        float sum_exp = 0.0f;
-        float exps[kPrefillRouterMaxTopK];
-        for (uint i = 0; i < KK; ++i) {
-            float e = fast::exp(top_score[i] - max_s);
-            exps[i] = e;
-            sum_exp += e;
-        }
-        for (uint i = 0; i < KK; ++i) {
-            const uint expert_idx = top_idx[i];
-            const float w = exps[i] / sum_exp;
-            const float gain = float(per_expert_scale[expert_idx]);
-            out_indices[row * top_k + i] = expert_idx;
-            out_weights[row * top_k + i] = half(w * gain);
-        }
+        prefill_router_select(scores, per_expert_scale, bias_vec, out_indices, out_weights,
+                              NE, KK, top_k, sigmoid_scores, scaling, row);
     }
 }
 
@@ -538,6 +554,190 @@ kernel void prefill_router_block_sigmoid(
                               T, num_experts, D, top_k, hidden_stride,
                               score_bias, true, scaling,
                               row, tid, tg_size, scores);
+}
+
+// One threadgroup owns TOK consecutive tokens and every expert: thread e keeps
+// expert e's row and TOK accumulators, so one weight read serves TOK tokens;
+// thread t stages token t's x ⊙ e for the group in k order and sums it there,
+// which is the same three statements the block kernel runs per (token, expert)
+// — the arithmetic, its order and the top-k scan are unchanged, only the
+// operands' source and the thread ownership move.
+static inline void prefill_router_tiled_body(
+    device const uint8_t* W,
+    device const bfloat*  scales,
+    device const bfloat*  biases,
+    device const half*    hidden,
+    device const bfloat*  effective_scale,
+    device const bfloat*  per_expert_scale,
+    device uint*          out_indices,
+    device half*          out_weights,
+    uint T, uint num_experts, uint D, uint top_k, uint hidden_stride,
+    device const bfloat*  bias_vec,
+    bool sigmoid_scores,
+    float scaling,
+    bool vector_loads,
+    uint block, uint tid, uint tg_size,
+    threadgroup float* scores,
+    threadgroup float* staged
+) {
+    const uint TOK = FC_PREFILL_ROUTER_TOKENS;
+    const uint row0 = block * TOK;
+    if (row0 >= T) return;
+    const uint rows_valid = min(TOK, T - row0);
+    const uint NE = min(num_experts, kPrefillRouterMaxExperts);
+    const uint KK = min(top_k, kPrefillRouterMaxTopK);
+    const uint n_groups = D / kPrefillGroupSize;
+    const uint bits = is_function_constant_defined(FC_PREFILL_ROUTER_BITS)
+        ? FC_PREFILL_ROUTER_BITS : 8u;
+    const uint row_bytes = D * bits / 8u;
+    const uint tok4 = TOK / 4u;
+    threadgroup float* sums = staged + TOK * kPrefillGroupSize;
+    threadgroup const float4* staged4 = reinterpret_cast<threadgroup const float4*>(staged);
+    threadgroup const float4* sums4 = reinterpret_cast<threadgroup const float4*>(sums);
+    const bool owns_expert = tid < NE;
+    device const uint8_t* W_row = W + tid * row_bytes;
+    device const bfloat* s_row = scales + tid * n_groups;
+    device const bfloat* b_row = biases + tid * n_groups;
+
+    float4 acc[kPrefillRouterMaxTokens / 4];
+    for (uint t = 0; t < kPrefillRouterMaxTokens / 4; ++t) {
+        acc[t] = float4(0.0f);
+    }
+
+    for (uint g = 0; g < n_groups; ++g) {
+        device const bfloat* eg = effective_scale + g * kPrefillGroupSize;
+        for (uint idx = tid; idx < TOK * kPrefillGroupSize; idx += tg_size) {
+            const uint t = idx % TOK;
+            const uint k = idx / TOK;
+            staged[idx] = t < rows_valid
+                ? float(hidden[(row0 + t) * hidden_stride + g * kPrefillGroupSize + k]) * float(eg[k])
+                : 0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < TOK) {
+            float sum_x = 0.0f;
+            for (uint k = 0; k < kPrefillGroupSize; ++k) {
+                sum_x += staged[k * TOK + tid];
+            }
+            sums[tid] = sum_x;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (owns_expert) {
+            const float4 s = float4(float(s_row[g]));
+            const float4 b = float4(float(b_row[g]));
+            float4 dot_qx[kPrefillRouterMaxTokens / 4];
+            for (uint t = 0; t < tok4; ++t) {
+                dot_qx[t] = float4(0.0f);
+            }
+            if (vector_loads) {
+                // A group's weight bytes arrive as whole uint4s and are
+                // unpacked from registers: one load instruction per 16 bytes
+                // instead of one per element, the same q in the same order.
+                const uint chunk_bytes = kPrefillGroupSize * bits / 8u;
+                const uint per_word = 32u / bits;
+                const uint mask = (1u << bits) - 1u;
+                device const uint4* wp = reinterpret_cast<device const uint4*>(W_row + g * chunk_bytes);
+                for (uint v = 0; v < chunk_bytes / 16u; ++v) {
+                    const uint4 words = wp[v];
+                    for (uint c = 0; c < 4u; ++c) {
+                        const uint word = words[c];
+                        for (uint j = 0; j < per_word; ++j) {
+                            const uint k = (v * 4u + c) * per_word + j;
+                            const float4 q = float4(float((word >> (j * bits)) & mask));
+                            for (uint t = 0; t < tok4; ++t) {
+                                dot_qx[t] = fma(q, staged4[k * tok4 + t], dot_qx[t]);
+                            }
+                        }
+                    }
+                }
+            } else {
+                for (uint k = 0; k < kPrefillGroupSize; ++k) {
+                    const float4 q = float4(float(prefill_affine_value(W_row, g * kPrefillGroupSize + k, bits)));
+                    for (uint t = 0; t < tok4; ++t) {
+                        dot_qx[t] = fma(q, staged4[k * tok4 + t], dot_qx[t]);
+                    }
+                }
+            }
+            for (uint t = 0; t < tok4; ++t) {
+                acc[t] = fma(s, dot_qx[t], acc[t]);
+                acc[t] = fma(b, sums4[t], acc[t]);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (owns_expert) {
+        for (uint t = 0; t < rows_valid; ++t) {
+            const float score = acc[t >> 2][t & 3u];
+            scores[t * kPrefillRouterMaxExperts + tid] =
+                sigmoid_scores ? score : (score + float(bias_vec[tid]));
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint t = tid; t < rows_valid; t += tg_size) {
+        prefill_router_select(scores + t * kPrefillRouterMaxExperts, per_expert_scale, bias_vec,
+                              out_indices, out_weights, NE, KK, top_k, sigmoid_scores, scaling,
+                              row0 + t);
+    }
+}
+
+kernel void prefill_router_block_tiled(
+    device const uint8_t* W                [[buffer(0)]],
+    device const bfloat*  scales           [[buffer(1)]],
+    device const bfloat*  biases           [[buffer(2)]],
+    device const half*    hidden           [[buffer(3)]],
+    device const bfloat*  effective_scale  [[buffer(4)]],
+    device const bfloat*  per_expert_scale [[buffer(5)]],
+    device uint*          out_indices      [[buffer(6)]],
+    device half*          out_weights      [[buffer(7)]],
+    constant uint&        T                [[buffer(8)]],
+    constant uint&        num_experts      [[buffer(9)]],
+    constant uint&        D                [[buffer(10)]],
+    constant uint&        top_k            [[buffer(11)]],
+    constant uint&        hidden_stride    [[buffer(12)]],
+    device const bfloat*  logit_bias       [[buffer(13)]],
+    constant uint&        vector_loads     [[buffer(15)]],
+    threadgroup float*    scores           [[threadgroup(0)]],
+    threadgroup float*    staged           [[threadgroup(1)]],
+    uint                  block            [[threadgroup_position_in_grid]],
+    uint                  tid              [[thread_position_in_threadgroup]],
+    uint                  tg_size          [[threads_per_threadgroup]]
+) {
+    prefill_router_tiled_body(W, scales, biases, hidden, effective_scale,
+                              per_expert_scale, out_indices, out_weights,
+                              T, num_experts, D, top_k, hidden_stride,
+                              logit_bias, false, 1.0f, vector_loads != 0u,
+                              block, tid, tg_size, scores, staged);
+}
+
+kernel void prefill_router_block_tiled_sigmoid(
+    device const uint8_t* W                [[buffer(0)]],
+    device const bfloat*  scales           [[buffer(1)]],
+    device const bfloat*  biases           [[buffer(2)]],
+    device const half*    hidden           [[buffer(3)]],
+    device const bfloat*  effective_scale  [[buffer(4)]],
+    device const bfloat*  per_expert_scale [[buffer(5)]],
+    device uint*          out_indices      [[buffer(6)]],
+    device half*          out_weights      [[buffer(7)]],
+    constant uint&        T                [[buffer(8)]],
+    constant uint&        num_experts      [[buffer(9)]],
+    constant uint&        D                [[buffer(10)]],
+    constant uint&        top_k            [[buffer(11)]],
+    constant uint&        hidden_stride    [[buffer(12)]],
+    device const bfloat*  score_bias       [[buffer(13)]],
+    constant float&       scaling          [[buffer(14)]],
+    constant uint&        vector_loads     [[buffer(15)]],
+    threadgroup float*    scores           [[threadgroup(0)]],
+    threadgroup float*    staged           [[threadgroup(1)]],
+    uint                  block            [[threadgroup_position_in_grid]],
+    uint                  tid              [[thread_position_in_threadgroup]],
+    uint                  tg_size          [[threads_per_threadgroup]]
+) {
+    prefill_router_tiled_body(W, scales, biases, hidden, effective_scale,
+                              per_expert_scale, out_indices, out_weights,
+                              T, num_experts, D, top_k, hidden_stride,
+                              score_bias, true, scaling, vector_loads != 0u,
+                              block, tid, tg_size, scores, staged);
 }
 
 kernel void prefill_moe_reduce_token_major(

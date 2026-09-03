@@ -30,7 +30,8 @@ import ShrikeValidationSupport
         #expect(pairs.map { Float($0.weight) } == weights.map { Float($0) })
     }
 
-    @Test func blockRouterMatchesRepeatedScalarRows() throws {
+    @Test(arguments: [PrefillRouter.Kind.block, .tiled])
+    func routerMatchesRepeatedScalarRows(kind: PrefillRouter.Kind) throws {
         var rng = SplitMix64(seed: 0x9A7E_2026)
         let rows = 3
         let hiddenStride = Self.d + 13
@@ -47,7 +48,7 @@ import ShrikeValidationSupport
 
         let ctx = try MetalContext()
         let moe = try MoE(context: ctx)
-        let prefill = try PrefillRouter(context: ctx)
+        let prefill = try PrefillRouter(context: ctx, kind: kind)
         let buffers = try Self.makeBuffers(ctx: ctx,
                                            weights: weights,
                                            hidden: hidden,
@@ -101,14 +102,15 @@ import ShrikeValidationSupport
                                     used: Self.d)
     }
 
-    @Test func blockRouterNearTieMatchesScalarPath() throws {
+    @Test(arguments: [PrefillRouter.Kind.block, .tiled])
+    func routerNearTieMatchesScalarPath(kind: PrefillRouter.Kind) throws {
         let weights = Self.makeNearTieWeights()
         let hidden = [Float16](repeating: 1, count: Self.d)
         let effectiveScale = [Float](repeating: 1, count: Self.d)
         let perExpertScale = [Float](repeating: 1, count: Self.experts)
         let ctx = try MetalContext()
         let moe = try MoE(context: ctx)
-        let prefill = try PrefillRouter(context: ctx)
+        let prefill = try PrefillRouter(context: ctx, kind: kind)
         let buffers = try Self.makeBuffers(ctx: ctx,
                                            weights: weights,
                                            hidden: hidden,
@@ -164,12 +166,19 @@ import ShrikeValidationSupport
                                     hidden: [Float16],
                                     effectiveScale: [Float],
                                     perExpertScale: [Float],
-                                    rows: Int) throws -> RouterBuffers {
-        let packed = packWeights(weights)
+                                    rows: Int,
+                                    bits: Int = 8,
+                                    topK: Int = PrefillRouterTests.topK,
+                                    logitBias: [Float]? = nil,
+                                    weightPrefixBytes: Int = 0) throws -> RouterBuffers {
+        let packed = packWeights(weights, bits: bits)
+        let prefixedWeights = [UInt8](repeating: 0x5A, count: weightPrefixBytes) + packed.packed
         let effBits = effectiveScale.map { Quantization.bf16Bits($0) }
         let pesBits = perExpertScale.map { Quantization.bf16Bits($0) }
-        guard let wBuf = ctx.device.makeBuffer(bytes: packed.packed,
-                                               length: packed.packed.count,
+        let logitBiasBits = (logitBias ?? [Float](repeating: 0, count: perExpertScale.count))
+            .map { Quantization.bf16Bits($0) }
+        guard let wBuf = ctx.device.makeBuffer(bytes: prefixedWeights,
+                                               length: prefixedWeights.count,
                                                options: .storageModeShared),
               let sBuf = ctx.device.makeBuffer(bytes: packed.scales,
                                                length: packed.scales.count * MemoryLayout<UInt16>.size,
@@ -187,13 +196,12 @@ import ShrikeValidationSupport
                                                length: pesBits.count * MemoryLayout<UInt16>.size,
                                                options: .storageModeShared),
               let lbBuf = ctx.device.makeBuffer(
-                  bytes: [Float](repeating: 0, count: Self.experts)
-                      .map { Quantization.bf16Bits($0) },
-                  length: Self.experts * MemoryLayout<UInt16>.size,
+                  bytes: logitBiasBits,
+                  length: logitBiasBits.count * MemoryLayout<UInt16>.size,
                   options: .storageModeShared),
-              let idxBuf = ctx.device.makeBuffer(length: rows * Self.topK * MemoryLayout<UInt32>.size,
+              let idxBuf = ctx.device.makeBuffer(length: rows * topK * MemoryLayout<UInt32>.size,
                                                  options: .storageModeShared),
-              let wtBuf = ctx.device.makeBuffer(length: rows * Self.topK * MemoryLayout<Float16>.size,
+              let wtBuf = ctx.device.makeBuffer(length: rows * topK * MemoryLayout<Float16>.size,
                                                 options: .storageModeShared) else {
             throw RouterTestError.allocationFailed
         }
@@ -287,26 +295,147 @@ import ShrikeValidationSupport
         return values
     }
 
-    private static func packWeights(_ weights: [[Float]])
+    private static func packWeights(_ weights: [[Float]], bits: Int = 8)
         -> (packed: [UInt8], scales: [UInt16], biases: [UInt16])
     {
         let eCount = weights.count
         let d = weights[0].count
+        let rowBytes = d * bits / 8
         let groupsPerRow = d / Quantization.groupSize
-        var packed = [UInt8](repeating: 0, count: eCount * d)
+        var packed = [UInt8](repeating: 0, count: eCount * rowBytes)
         var scales = [UInt16](repeating: 0, count: eCount * groupsPerRow)
         var biases = [UInt16](repeating: 0, count: eCount * groupsPerRow)
         for e in 0..<eCount {
-            let q = Quantization.quantizeInt8Affine(weights[e])
-            for i in 0..<d {
-                packed[e * d + i] = q.packed[i]
+            let rowPacked: [UInt8]
+            let rowScales: [UInt16]
+            let rowBiases: [UInt16]
+            if bits == 4 {
+                let q = Quantization.quantizeInt4Affine(weights[e])
+                (rowPacked, rowScales, rowBiases) = (q.packed, q.scales, q.biases)
+            } else {
+                let q = Quantization.quantizeInt8Affine(weights[e])
+                (rowPacked, rowScales, rowBiases) = (q.packed, q.scales, q.biases)
+            }
+            for i in 0..<rowBytes {
+                packed[e * rowBytes + i] = rowPacked[i]
             }
             for g in 0..<groupsPerRow {
-                scales[e * groupsPerRow + g] = q.scales[g]
-                biases[e * groupsPerRow + g] = q.biases[g]
+                scales[e * groupsPerRow + g] = rowScales[g]
+                biases[e * groupsPerRow + g] = rowBiases[g]
             }
         }
         return (packed, scales, biases)
+    }
+
+    private struct RouterOutput {
+        let indices: [UInt32]
+        let weights: [Float16]
+        var weightBits: [UInt16] { weights.map { $0.bitPattern } }
+    }
+
+    private static func runRouter(_ router: PrefillRouter,
+                                  ctx: MetalContext,
+                                  buffers: RouterBuffers,
+                                  rows: Int,
+                                  experts: Int,
+                                  d: Int,
+                                  topK: Int,
+                                  hiddenStride: Int,
+                                  weightsOffset: Int = 0) throws -> RouterOutput {
+        guard let idxBuf = ctx.device.makeBuffer(length: rows * topK * MemoryLayout<UInt32>.size,
+                                                 options: .storageModeShared),
+              let wtBuf = ctx.device.makeBuffer(length: rows * topK * MemoryLayout<Float16>.size,
+                                                options: .storageModeShared),
+              let cb = ctx.queue.makeCommandBuffer() else {
+            throw RouterTestError.allocationFailed
+        }
+        try router.encodeBlock(commandBuffer: cb,
+                               weights: buffers.weights,
+                               weightsOffset: weightsOffset,
+                               scales: buffers.scales,
+                               biases: buffers.biases,
+                               hidden: buffers.hidden,
+                               effectiveScale: buffers.effectiveScale,
+                               perExpertScale: buffers.perExpertScale,
+                               logitBias: buffers.logitBias,
+                               outIndices: idxBuf,
+                               outWeights: wtBuf,
+                               queryCount: UInt32(rows),
+                               numExperts: UInt32(experts),
+                               d: UInt32(d),
+                               topK: UInt32(topK),
+                               hiddenStrideElements: UInt32(hiddenStride))
+        cb.commit()
+        cb.waitUntilCompleted()
+        if let error = cb.error {
+            throw error
+        }
+        return RouterOutput(indices: readUInt32(idxBuf, count: rows * topK),
+                            weights: Fp16Buffer.readHalf(wtBuf, count: rows * topK))
+    }
+
+    private struct TiledCase {
+        let rows: Int
+        let experts: Int
+        let d: Int
+        let bits: Int
+        let sigmoid: Bool
+        let stride: Int
+        var weightOffset: Int = 0
+        var label: String {
+            "T=\(rows) E=\(experts) D=\(d) bits=\(bits) sigmoid=\(sigmoid) stride=\(stride) offset=\(weightOffset)"
+        }
+    }
+
+    private static let tiledCases: [TiledCase] = [
+        TiledCase(rows: 1, experts: 16, d: 128, bits: 8, sigmoid: false, stride: 128),
+        TiledCase(rows: 7, experts: 16, d: 128, bits: 8, sigmoid: false, stride: 128 + 13),
+        TiledCase(rows: 17, experts: 16, d: 128, bits: 4, sigmoid: false, stride: 128),
+        TiledCase(rows: 17, experts: 16, d: 128, bits: 8, sigmoid: true, stride: 128),
+        TiledCase(rows: 4096, experts: 16, d: 128, bits: 4, sigmoid: true, stride: 128),
+        TiledCase(rows: 4096, experts: 256, d: 2048, bits: 8, sigmoid: false, stride: 2048),
+        TiledCase(rows: 17, experts: 16, d: 128, bits: 8, sigmoid: false, stride: 128, weightOffset: 13),
+        TiledCase(rows: 17, experts: 16, d: 128, bits: 4, sigmoid: true, stride: 128, weightOffset: 13),
+    ]
+
+    @Test func tiledRouterIsBitIdenticalToTheBlockRouter() throws {
+        var rng = SplitMix64(seed: 0x14_2026)
+        let ctx = try MetalContext()
+        for c in Self.tiledCases {
+            let weights = (0..<c.experts).map { e in
+                (0..<c.d).map { _ in rng.uniform(-0.04, 0.04) + Float(e) * 0.0005 }
+            }
+            let hidden = Self.makeHiddenBlock(rows: c.rows, rowStride: c.stride, d: c.d,
+                                              rng: &rng, sentinel: Float16(-31.0))
+            let effectiveScale = (0..<c.d).map { _ in rng.uniform(0.5, 1.5) / Float(c.d).squareRoot() }
+            let perExpertScale = (0..<c.experts).map { _ in rng.uniform(0.6, 1.4) }
+            let logitBias = (0..<c.experts).map { _ in rng.uniform(-0.05, 0.05) }
+            let block = try PrefillRouter(context: ctx, weightBits: c.bits,
+                                          sigmoidRouterScores: c.sigmoid, routedScalingFactor: 2.446,
+                                          kind: .block)
+            let tiled = try PrefillRouter(context: ctx, weightBits: c.bits,
+                                          sigmoidRouterScores: c.sigmoid, routedScalingFactor: 2.446,
+                                          kind: .tiled)
+            let buffers = try Self.makeBuffers(ctx: ctx, weights: weights, hidden: hidden,
+                                               effectiveScale: effectiveScale,
+                                               perExpertScale: perExpertScale, rows: c.rows,
+                                               bits: c.bits, logitBias: logitBias,
+                                               weightPrefixBytes: c.weightOffset)
+            let reference = try Self.runRouter(block, ctx: ctx, buffers: buffers, rows: c.rows,
+                                               experts: c.experts, d: c.d, topK: Self.topK,
+                                               hiddenStride: c.stride, weightsOffset: c.weightOffset)
+            let candidate = try Self.runRouter(tiled, ctx: ctx, buffers: buffers, rows: c.rows,
+                                               experts: c.experts, d: c.d, topK: Self.topK,
+                                               hiddenStride: c.stride, weightsOffset: c.weightOffset)
+            let finite = candidate.weights.allSatisfy(\.isFinite)
+            #expect(finite, "\(c.label): non-finite route weight")
+            #expect(candidate.indices == reference.indices, "\(c.label): indices differ")
+            let firstMismatch = zip(reference.weightBits, candidate.weightBits).enumerated()
+                .first { $0.element.0 != $0.element.1 }?.offset
+            #expect(firstMismatch == nil, "\(c.label): route weights differ at \(firstMismatch ?? -1)")
+            Self.assertPaddingUnchanged(buffer: buffers.hidden, original: hidden,
+                                        rows: c.rows, rowStride: c.stride, used: c.d)
+        }
     }
 
     private static func readUInt32(_ buffer: MTLBuffer, count: Int) -> [UInt32] {

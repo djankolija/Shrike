@@ -27,22 +27,87 @@ public struct PrefillTokenExpertPair: Equatable, Sendable {
     }
 }
 
+enum PrefillRouterError: Error, CustomStringConvertible {
+    case threadgroupTooNarrow(maxThreads: Int, experts: Int)
+
+    var description: String {
+        switch self {
+        case .threadgroupTooNarrow(let maxThreads, let experts):
+            return "prefill router: the tiled pipeline allows \(maxThreads) threads per threadgroup, fewer than the \(experts) experts"
+        }
+    }
+}
+
 final class PrefillRouter {
+    /// `block` is one threadgroup per token (the kernel P0 shipped), kept as the
+    /// reference and the A/B arm; `tiled` gives a threadgroup `tokenBlock`
+    /// tokens against every expert (v12 P14) and is the default.
+    enum Kind: String, Sendable {
+        case block, tiled
+    }
+
+    static let maxTokenBlock = 24
+    static let defaultTokenBlock = 12
+
+    /// `SHRIKE_PREFILL_ROUTER=block` keeps the per-token kernel for the
+    /// same-binary A/B; anything else takes `tiled`.
+    static func environmentKind() -> Kind {
+        ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTER"] == "block" ? .block : .tiled
+    }
+
+    /// `SHRIKE_PREFILL_ROUTER_TOKENS` (4...24, a multiple of 4) sets the tiled
+    /// kernel's token block.
+    static func environmentTokenBlock() -> Int {
+        guard let raw = ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTER_TOKENS"],
+              let block = Int(raw.trimmingCharacters(in: .whitespaces)) else {
+            return defaultTokenBlock
+        }
+        return max(4, min(maxTokenBlock, block / 4 * 4))
+    }
+
     private let pso: MTLComputePipelineState
     private let sigmoidRouterScores: Bool
     private let routedScalingFactor: Float
+    let kind: Kind
+    let tokenBlock: Int
+    let weightBits: Int
 
     init(context: MetalContext, weightBits: Int = 8,
          sigmoidRouterScores: Bool = false,
-         routedScalingFactor: Float = 1.0) throws {
+         routedScalingFactor: Float = 1.0,
+         kind: Kind = PrefillRouter.environmentKind(),
+         tokenBlock: Int = PrefillRouter.environmentTokenBlock()) throws {
         precondition([4, 8].contains(weightBits))
+        precondition((4...PrefillRouter.maxTokenBlock).contains(tokenBlock) && tokenBlock % 4 == 0)
         self.sigmoidRouterScores = sigmoidRouterScores
         self.routedScalingFactor = routedScalingFactor
-        self.pso = try context.pipeline(
-            sigmoidRouterScores ? "prefill_router_block_sigmoid"
-                                : "prefill_router_block",
-            constants: [MetalFunctionConstant(index: 79,
-                                              value: .uint32(UInt32(weightBits)))])
+        self.kind = kind
+        self.tokenBlock = tokenBlock
+        self.weightBits = weightBits
+        let name: String
+        switch (kind, sigmoidRouterScores) {
+        case (.block, false): name = "prefill_router_block"
+        case (.block, true): name = "prefill_router_block_sigmoid"
+        case (.tiled, false): name = "prefill_router_block_tiled"
+        case (.tiled, true): name = "prefill_router_block_tiled_sigmoid"
+        }
+        var constants = [MetalFunctionConstant(index: 79, value: .uint32(UInt32(weightBits)))]
+        if kind == .tiled {
+            constants.append(MetalFunctionConstant(index: 123, value: .uint32(UInt32(tokenBlock))))
+        }
+        self.pso = try context.pipeline(name, constants: constants)
+    }
+
+    var description: String {
+        kind == .tiled ? "tiled tokens=\(tokenBlock) bits=\(weightBits)" : "block bits=\(weightBits)"
+    }
+
+    func threadgroupWidth(numExperts: Int) -> Int {
+        min(max(numExperts, 32), pso.maxTotalThreadsPerThreadgroup)
+    }
+
+    func threadgroups(queryCount: Int) -> Int {
+        kind == .tiled ? (queryCount + tokenBlock - 1) / tokenBlock : queryCount
     }
 
     func encodeBlock(commandBuffer: MTLCommandBuffer,
@@ -102,10 +167,33 @@ final class PrefillRouter {
             var scaling = routedScalingFactor
             enc.setBytes(&scaling, length: MemoryLayout<Float>.size, index: 14)
         }
-        let tgWidth = min(max(Int(numExperts), 32), pso.maxTotalThreadsPerThreadgroup)
-        enc.dispatchThreadgroups(MTLSize(width: Int(queryCount), height: 1, depth: 1),
+        let tgWidth = threadgroupWidth(numExperts: Int(numExperts))
+        if kind == .tiled {
+            guard tgWidth >= Int(numExperts) else {
+                enc.endEncoding()
+                throw PrefillRouterError.threadgroupTooNarrow(maxThreads: tgWidth,
+                                                              experts: Int(numExperts))
+            }
+            let floats = MemoryLayout<Float>.stride
+            var vectorLoads: UInt32 = weightsOffset.isMultiple(of: 16) ? 1 : 0
+            enc.setBytes(&vectorLoads, length: MemoryLayout<UInt32>.size, index: 15)
+            enc.setThreadgroupMemoryLength(
+                Self.roundedThreadgroupBytes(tokenBlock * Self.maxExperts * floats),
+                index: 0)
+            enc.setThreadgroupMemoryLength(
+                Self.roundedThreadgroupBytes((tokenBlock * Quantization.groupSize + tokenBlock) * floats),
+                index: 1)
+        }
+        enc.dispatchThreadgroups(MTLSize(width: threadgroups(queryCount: Int(queryCount)),
+                                         height: 1, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
         enc.endEncoding()
+    }
+
+    private static let maxExperts = 256
+
+    private static func roundedThreadgroupBytes(_ bytes: Int) -> Int {
+        (bytes + 15) / 16 * 16
     }
 
     static func makeTokenExpertPairs(indices: [UInt32],

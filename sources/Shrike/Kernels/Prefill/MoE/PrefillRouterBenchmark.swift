@@ -9,14 +9,20 @@ public enum PrefillRouterBenchmark {
         public let numExperts: Int
         public let topK: Int
         public let weightBits: Int
+        public let kind: String
+        public let tokenBlock: Int
         public let threadgroupWidth: Int
+        public let threadgroups: Int
         public let millisPerLaunch: Double
-        public var threadgroups: Int { queryCount }
         public var weightBytesPerThreadgroup: Int { numExperts * d * weightBits / 8 }
         public var gflop: Double {
             2.0 * Double(queryCount) * Double(d) * Double(numExperts) / 1.0e9
         }
         public var tflops: Double { gflop / millisPerLaunch }
+    }
+
+    public static func environmentTokenBlock() -> Int {
+        PrefillRouter.environmentTokenBlock()
     }
 
     /// Drives `PrefillRouter.encodeBlock` itself, so the pipeline, its function
@@ -27,8 +33,12 @@ public enum PrefillRouterBenchmark {
                            d: Int = 2048,
                            numExperts: Int = 256,
                            topK: Int = 8,
-                           weightBits: Int = 8) throws -> Result {
-        let router = try PrefillRouter(context: context, weightBits: weightBits)
+                           weightBits: Int = 8,
+                           kind kindName: String = "tiled",
+                           tokenBlock: Int = 12) throws -> Result {
+        let kind = PrefillRouter.Kind(rawValue: kindName) ?? .tiled
+        let router = try PrefillRouter(context: context, weightBits: weightBits,
+                                       kind: kind, tokenBlock: tokenBlock)
         let fixture = try Fixture(device: context.device, queryCount: queryCount, d: d,
                                   numExperts: numExperts, topK: topK, weightBits: weightBits)
         func encode(_ commandBuffer: MTLCommandBuffer) throws {
@@ -62,13 +72,12 @@ public enum PrefillRouterBenchmark {
         let runs = max(1, iterations)
         var total = 0.0
         for _ in 0..<runs { total += try once() }
-        let pipeline = try context.pipeline(
-            "prefill_router_block",
-            constants: [MetalFunctionConstant(index: 79, value: .uint32(UInt32(weightBits)))])
         return Result(queryCount: queryCount, d: d, numExperts: numExperts, topK: topK,
                       weightBits: weightBits,
-                      threadgroupWidth: min(max(numExperts, 32),
-                                            pipeline.maxTotalThreadsPerThreadgroup),
+                      kind: kind.rawValue,
+                      tokenBlock: kind == .tiled ? tokenBlock : 1,
+                      threadgroupWidth: router.threadgroupWidth(numExperts: numExperts),
+                      threadgroups: router.threadgroups(queryCount: queryCount),
                       millisPerLaunch: total / Double(runs) * 1000)
     }
 
