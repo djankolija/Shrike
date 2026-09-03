@@ -206,6 +206,9 @@ import ShrikeValidationSupport
         var fourKVHeads = base
         fourKVHeads.numKVHeads = 4
         #expect(!PrefillAttention.matrixPathAccepts(fourKVHeads, kvRingCapacity: 0, hasSinks: false))
+        var eightQHeads = base
+        eightQHeads.numQHeads = 8
+        #expect(!PrefillAttention.matrixPathAccepts(eightQHeads, kvRingCapacity: 0, hasSinks: false))
     }
 
     @Test func matrixTileVariantsDescribeTheirGeometry() {

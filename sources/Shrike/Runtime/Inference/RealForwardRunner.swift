@@ -257,18 +257,36 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     /// The P12 gap levers in force: the shared expert committed before the
-    /// router wait, and the expert pools held in a queue residency set.
+    /// router wait, and the expert pools held in a queue residency set. The
+    /// set only gains an allocation under `SHRIKE_EXPERT_CACHE_LAYOUT=pool`,
+    /// so `allocations=` and the cache layout are reported alongside it
+    /// rather than inferred from the holder's mere existence.
     public var prefillGapLeversDescription: String {
+        Self.prefillGapLeversDescription(
+            overlap: prefillRouteOverlap,
+            residencyAllocationCount: poolResidency?.allocationCount,
+            poolResidencyUnavailableReason: poolResidencyUnavailableReason,
+            sweepAlternate: prefillSweepAlternate,
+            cacheLayout: (try? ExpertCacheLayout.environmentValue()) ?? .pool)
+    }
+
+    static func prefillGapLeversDescription(
+        overlap: Bool,
+        residencyAllocationCount: Int?,
+        poolResidencyUnavailableReason: String?,
+        sweepAlternate: Bool,
+        cacheLayout: ExpertCacheLayout
+    ) -> String {
         let residency: String
-        if poolResidency != nil {
-            residency = "set"
+        if let residencyAllocationCount {
+            residency = "set allocations=\(residencyAllocationCount)"
         } else if let reason = poolResidencyUnavailableReason {
             residency = "unavailable reason=\(reason)"
         } else {
             residency = "none"
         }
-        return "overlap=\(prefillRouteOverlap ? "on" : "off") residency=\(residency)"
-            + " sweep=\(prefillSweepAlternate ? "alternate" : "fixed")"
+        return "overlap=\(overlap ? "on" : "off") residency=\(residency)"
+            + " sweep=\(sweepAlternate ? "alternate" : "fixed") cache_layout=\(cacheLayout.rawValue)"
     }
 
     /// The prefill router kernel in force (`block` or `tiled tokens=N`) and its
@@ -459,14 +477,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// `SHRIKE_PREFILL_TILE_DEPTH=<n>` (1…8) sets the routed tile pipeline's
     /// pending-tile depth; unset or unparsable takes `prefillTileDepthDefault`
     /// (P16 sweep: depth 2 beat depth 1 on the mini's 12k wall, hits unmoved).
+    private static let prefillTileDepthDefault = 2
+
     static func parsePrefillTileDepth(_ raw: String?) -> Int {
         guard let raw, let depth = Int(raw.trimmingCharacters(in: .whitespaces)) else {
             return prefillTileDepthDefault
         }
         return max(1, min(8, depth))
     }
-
-    private static let prefillTileDepthDefault = 2
 
     private static func environmentPrefillTileDepth() -> Int {
         parsePrefillTileDepth(ProcessInfo.processInfo.environment["SHRIKE_PREFILL_TILE_DEPTH"])
@@ -1843,11 +1861,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// total idle by a buffer count and assume the quotient means something,
     /// which is exactly the reasoning that produced a failed optimisation.
     ///
-    /// The gap is also split three ways: `host` is the previous buffer's GPU
-    /// end to this one's `kernelStartTime` (work the host did before
-    /// submitting), `driver` is `kernelStartTime` to `kernelEndTime` (the
-    /// driver's own scheduling), and `queue` is `kernelEndTime` to the GPU
-    /// start (waiting behind other work).
+    /// The gap is also broken down, but not as a strict partition: `host` is
+    /// host-late time only, clamped to zero (the previous buffer's GPU end to
+    /// this one's `kernelStartTime`, when submission came later), while
+    /// `driver` (`kernelStartTime` to `kernelEndTime`) and `queue`
+    /// (`kernelEndTime` to the GPU start) are both measured from
+    /// `kernelStartTime` regardless. When the host submits early (the depth ≥
+    /// 2 regime this chapter ships by default), `host` clamps to zero and the
+    /// three no longer sum to the gap.
     public func kernelGPUGaps() -> [KernelGPUGap] {
         guard kernelGPUTimings.count > 1 else { return [] }
         let sorted = kernelGPUTimings.sorted { $0.start < $1.start }

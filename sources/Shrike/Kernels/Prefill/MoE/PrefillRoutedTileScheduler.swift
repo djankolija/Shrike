@@ -93,6 +93,9 @@ struct PrefillRoutedTileScheduler: Sendable, Equatable {
         guard input.hasPendingTile else {
             return .issueWithoutPending
         }
+        // In production `RealForwardRunner.encodeRoutedMoEPrefill`'s post-append
+        // drain loop already holds pendingDepth ≤ maxPendingDepth before the next
+        // `decide`, so this guard only fires if a caller violates that invariant.
         guard input.pendingDepth <= config.maxPendingDepth else {
             return .drainBeforeIssue(reason: .maxPendingDepthReached)
         }

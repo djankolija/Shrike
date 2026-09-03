@@ -8,6 +8,8 @@ import Testing
                                  onFree: @escaping @Sendable () -> Void) -> MTLBuffer? {
         var raw: UnsafeMutableRawPointer?
         guard posix_memalign(&raw, 16_384, length) == 0, let pointer = raw else { return nil }
+        // unchecked-invariant: only the deallocator below ever touches this pointer, and Metal
+        // calls it at most once for the buffer it was handed to.
         nonisolated(unsafe) let capturedPointer = pointer
         return device.makeBuffer(
             bytesNoCopy: pointer, length: length, options: .storageModeShared,
@@ -52,6 +54,8 @@ import Testing
         #expect(freed.value, "the pool's deallocator did not run after the holder and the buffer went away")
     }
 
+    // unchecked-invariant: `flag` is only ever read or written under `lock`, so the type is
+    // safe to share across the deallocator's thread and the asserting test thread.
     private final class Freed: @unchecked Sendable {
         private let lock = NSLock()
         private var flag = false

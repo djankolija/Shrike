@@ -325,6 +325,25 @@ import Testing
             == "depth=4")
     }
 
+    @Test func prefillGapLeversDescriptionReportsResidencyAllocationsAndCacheLayout() {
+        #expect(RealForwardRunner.prefillGapLeversDescription(
+            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
+            sweepAlternate: false, cacheLayout: .pool)
+            == "overlap=on residency=set allocations=24 sweep=fixed cache_layout=pool")
+        #expect(RealForwardRunner.prefillGapLeversDescription(
+            overlap: false, residencyAllocationCount: 0, poolResidencyUnavailableReason: nil,
+            sweepAlternate: true, cacheLayout: .perSlot)
+            == "overlap=off residency=set allocations=0 sweep=alternate cache_layout=per-slot")
+        #expect(RealForwardRunner.prefillGapLeversDescription(
+            overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: "boom",
+            sweepAlternate: true, cacheLayout: .pool)
+            == "overlap=on residency=unavailable reason=boom sweep=alternate cache_layout=pool")
+        #expect(RealForwardRunner.prefillGapLeversDescription(
+            overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
+            sweepAlternate: false, cacheLayout: .pool)
+            == "overlap=on residency=none sweep=fixed cache_layout=pool")
+    }
+
     @Test func slotLifetimeRejectsReuseInsideAnOpenBatch() throws {
         var lifetime = PrefillStreamedTileSlotLifetime()
         try lifetime.begin(tileIndex: 0, plannedSlots: [1, 2])

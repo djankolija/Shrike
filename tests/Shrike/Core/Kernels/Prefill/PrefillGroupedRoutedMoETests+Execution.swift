@@ -4,6 +4,13 @@ import ShrikeValidationSupport
 
 @testable import Shrike
 
+/// Mirrors `MPPPrefillInt4QMMTests.swift`'s `mppTensorOpsAvailable`: a
+/// missing MPP path is a recorded skip here, never a vacuous pass.
+private let mppTensorOpsAvailable: Bool = {
+  guard let context = try? MetalContext() else { return false }
+  return MPPPrefillInt4QMM(context: context).isAvailable
+}()
+
 extension PrefillGroupedRoutedMoETests {
   @Test(arguments: [4, 8])
   func streamedBatchedMatchesReferenceAcrossPartialMicrobatch(weightBits: Int) throws {
@@ -649,7 +656,9 @@ extension PrefillGroupedRoutedMoETests {
 
   /// 64 staging rows split the fixture into body-only and tail-only waves;
   /// 512 packs it into one wave with both regions on one encoder.
-  @Test(arguments: [64, 512])
+  @Test(.enabled(if: mppTensorOpsAvailable,
+                 "Requires runtime MPP TensorOps support"),
+        arguments: [64, 512])
   func tailTileIsBitIdenticalToTheSixtyFourRowPath(stagingRows: Int) throws {
     guard let plain = try Self.groupedPartialsAcrossWaves(variant: .n32k256b1, irregular: true,
                                                           stagingRows: stagingRows),
@@ -753,7 +762,8 @@ extension PrefillGroupedRoutedMoETests {
     #expect(tables.gather == [0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
   }
 
-  @Test func thirtyTwoRowGroupedTileIsBitIdenticalToTheSixtyFourRowTile() throws {
+  @Test(.enabled(if: mppTensorOpsAvailable, "Requires runtime MPP TensorOps support"))
+  func thirtyTwoRowGroupedTileIsBitIdenticalToTheSixtyFourRowTile() throws {
     guard let wide = try Self.groupedPartialsAcrossWaves(variant: .n32k256b1, irregular: true),
           let narrow = try Self.groupedPartialsAcrossWaves(variant: .n32k256b1, rowTile: .m32,
                                                            irregular: true) else { return }
@@ -785,7 +795,8 @@ extension PrefillGroupedRoutedMoETests {
     #expect(PrefillGroupedRoutedMoE.rowTileTable(for: waves[0], rowTile: 32) == [0, 0, 1, 2, 3])
   }
 
-  @Test func groupedWideKInstanceFallsBackOnARaggedK() throws {
+  @Test(.enabled(if: mppTensorOpsAvailable, "Requires runtime MPP TensorOps support"))
+  func groupedWideKInstanceFallsBackOnARaggedK() throws {
     guard let narrow = try Self.groupedPartialsAcrossWaves(variant: .n32b1, d: 192, f: 192),
           let wide = try Self.groupedPartialsAcrossWaves(variant: .n32k128b1, d: 192, f: 192) else { return }
     let finite = wide.allSatisfy(\.isFinite)
