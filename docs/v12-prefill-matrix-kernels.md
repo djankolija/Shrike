@@ -677,6 +677,11 @@ step are recorded in the plan.
   the two-row union's bandwidth floor, so viability hinges first on the
   acceptance rate (26 % on a counting prompt is the thing to audit), then on
   the verify pass's miss I/O — a decode-chapter follow-on, not a prefill one.
+  Re-measured at the P9 build (same launch, 5 runs): 6.3–6.5 tok/s, per pass
+  17.5 ms proposal + 166–171 ms verify (155–159 the backbone) at 22.3 %
+  acceptance, 1.22 tokens per pass — the prefill GEMM levers (P7, P9) moved
+  nothing here, as the width-2 reading predicts; the acceptance shift from
+  25.9 % on the same greedy prompt is unexplained and belongs to the audit.
 
 ## Risks
 

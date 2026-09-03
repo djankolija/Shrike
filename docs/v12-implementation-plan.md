@@ -2260,9 +2260,10 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
 - The mini's SSD term (v10 P3 follow-on: batched miss loads, deeper queue
   depth) — also the second lever for speculative decode's verify pass
-  (measured at P4 on the mini: 6.6 tok/s against 25.5 plain; see the design's
+  (measured at P4 on the mini: 6.6 tok/s against 25.5 plain, and again at P9:
+  6.3–6.5 tok/s with the verify backbone unchanged at 155–159 ms; see the design's
   out-of-scope note).
-- Speculative decode's acceptance rate: 25.9 % on the counting rig prompt at
+- Speculative decode's acceptance rate: 25.9 % (22.3 % at P9) on the counting rig prompt at
   P4 — audit the draft/verify path before any kernel work on that track.
 - The `expert_hit_rate_prefill` counter that reads 0–14 % with every expert
   resident.
