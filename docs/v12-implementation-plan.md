@@ -4444,6 +4444,463 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
     and ledger arm is a GPU run: `pgrep -fl 'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI|ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`
     first, every time; never terminate a process this session did not start.
 
+### Task 15: P15 — the routed GEMM's padding tax and the prefill expert-cache sweep order: probe both, then take the larger
+
+- [ ] **P15: two levers, neither of them measured** — the audit's L2 (the grouped
+  routed GEMM rounds every expert block up to a whole 64-row tile, modelled
+  0.15–0.40 ms/prompt-token) and L5 (every chunk sweeps its ~237 experts through
+  a 128-slot cache in the same direction, so `expert_hits_prefill` is **0**,
+  modelled 0.05–0.11 direct) are the two largest unclaimed items left on the
+  mini after P14, and **both bands are arithmetic, not measurement**. L2's band
+  is worse than unmeasured: two independent estimates of the same quantity
+  disagree by 2× (below), and nothing in the tree prints the padded-row count.
+  So Steps 1 and 2 are two cheap probes — one instrumented build that is
+  reverted, one comparator flip behind an env knob that lands either way — and
+  the kernel work in Step 3 is chosen by what they measure. **The mini decides.**
+  The M4 Pro is the iteration check: its prefill hit rate is also 0 %
+  (`docs/v12-prefill-matrix-kernels.md:833-836`), so L5 should move there too,
+  but its SSD, its slot pressure and its tile/fetch balance differ and it
+  confirms nothing about the mini's I/O.
+
+  **The decision rule, in two lines.** Step 2's knob lands on its own measured
+  merit — it is a comparator flip, so if the mini's 12k wall improves by ≥ 1.0 %
+  (≥ 0.71 s) with golden identical and the 3.7k control unmoved, `alternate`
+  becomes the default and `=fixed` the A/B; below that it lands defaulted to
+  `fixed` and the verdict says so (P8's precedent, a measured null is a result).
+  Step 3 — the kernel work — proceeds **only if** L2's saving modelled from Step
+  1's counts clears **0.10 ms/prompt-token** (1.23 s of the 70.76 s wall, 1.7 %)
+  *and* exceeds Step 2's measured delta; if L5 measured larger, this task's body
+  is L5 and L2's probe numbers are recorded as the follow-on's size.
+
+  **Where the 5.76 goes.** After P14 (HEAD `e3dea75`) the mini's 12k prompt
+  (12,285 tokens, `tools/prefill-prompts.py:9-11`; 3 chunks of 4,096 → **120
+  layer-chunks**, all 40 layers routed) is 70.76 s wall = **5.76 ms/prompt
+  token**, GPU busy 5.337, gaps 0.273; roles `prefill_gdn_router` 1.775 ·
+  `prefill_routed_tile` 1.737 · `prefill_attn_router` 1.565 ·
+  `prefill_shared_expert` 0.169 (`docs/v12-prefill-matrix-kernels.md:424-433`).
+  At 3.7k: wall 21.52 s, busy 4.665, gaps 0.493, routed 1.79. The gaps split
+  measured at P12 and unchanged at P14 (`:742-744`): `routed→routed` ≈ 0.10
+  (the per-tile host work over ≈ 3,485 tile boundaries — audit L10) and
+  `shared→routed` ≈ 0.07 (the tile metadata build plus the first tile of each
+  layer-chunk fetched with nothing in flight). Derived from those rows:
+
+  | quantity | value | source |
+  | --- | ---: | --- |
+  | routed role, per layer-chunk | 177.8 ms | 1.737 × 12,285 / 120 |
+  | routed role, per tile | 5.918 ms | 1.737 × 12,285 / 3,605 tiles |
+  | pairs per layer-chunk / per tile | 32,768 / 1,091 | 4,096 × top-8; 30.04 tiles |
+  | useful GFLOP per tile | 6.864 | 1,091 × 6 × 2048 × 512 |
+  | achieved on the useful rows | **1.160 TFLOPS** | 6.864 / 5.918 ms |
+  | the same kernel on a padding-free bench tile | **1.438 TFLOPS** | 6.442 GFLOP / 4.48 ms (P10, 78 % of the mini's same-run ceiling, `:453`) |
+
+  **L2 — the padding tax, and why two estimates of it disagree.**
+  `planExpertWaves` rounds each expert block up to a whole 64-row tile —
+  `cursor += (rows + tile - 1) / tile * tile`
+  (`sources/Shrike/Kernels/Prefill/MoE/PrefillGroupedRoutedMoE.swift:129`) — and
+  the wave close at `:121` truncates an expert at the 1,024-row staging boundary
+  (`sources/Shrike/Runtime/Prefill/PrefillChunkScratch.swift:130-139`), adding
+  another partial tile. The padded rows are **zero-filled** by the gather
+  (`sources/Shrike/Metal/Prefill/prefill.metal:924`), computed in full by
+  `matmul2d` — `kMPPAffineTileM` is 64 and the store guard is the only mask
+  (`globalM < rowEnd`, `sources/Shrike/Metal/TensorCore/tensorops.metal:244`,
+  with `rowEnd = b.staging_row + b.rows` at `:326`) — and also carried by the
+  activation, which runs over `wave.paddedRows * f`
+  (`PrefillGroupedRoutedMoE.swift:919`). So a padded row costs a real row in
+  three of the six dispatches per wave.
+
+  Two estimates of how much:
+
+  - **By the uniform-remainder model** (the audit's, `missed-levers-audit.md:71-77`):
+    ~237 expert blocks per layer-chunk plus ~30 wave-split blocks ≈ 267 blocks
+    over 32,768 pairs, ~123 rows each; a uniform remainder pads +31.5 rows per
+    block = 8,410 rows = **+26 %**.
+  - **By subtraction from the ledger**: the bench-equivalent GEMM time for the
+    tile's 1,091 real rows is 6.864 / 1.438 = 4.774 ms; the audit's bandwidth
+    model for the gather/activation/scatter passes is 12–18 ms per layer-chunk =
+    0.40–0.60 ms per tile; the residual is 0.544–0.744 ms per tile, which at the
+    bench rate buys 124–170 extra rows = **+11 to +16 %**.
+
+  The second is 1.96–2.68 s of the 12k wall = **0.16–0.22 ms/prompt-token**; the
+  first is nearly double that. They cannot both be right, and no line in the tree
+  prints the padded-row count. **Step 1 is one print.**
+
+  **L5 — why the prefill cache never hits.**
+  `PrefillMoEGrouping.groupTokenExpertPairs` sorts every chunk's pairs by
+  `expertSortKeys` = `model.routedExpertPhysicalOffsets(layer:)`
+  (`PrefillMoEGrouping.swift:140-149`; `RealForwardRunner.swift:4844`,
+  `ModelExpertIO.swift:94-96`), i.e. **ascending physical offset, the same
+  direction in every chunk**. Each layer has its own 128-slot streamer
+  (`ModelExpertIO.swift:100-103`; `--ram-budget 8G` snaps to 128,
+  `RuntimeConfiguration.swift:142`, `:204-214`), of which the tile scheduler
+  holds 16 for in-flight tiles (`maxInFlightTiles × tileExperts = 2 × 1 × 8`,
+  `PrefillRoutedTileScheduler.swift:55-58`, `:81-82`), leaving ~112 evictable
+  residents against the 236.6 experts a layer-chunk touches (28,387 / 120,
+  measured). The eviction policy is aging-LFU with an LRU tiebreak
+  (`PreadExpertStreamer.swift:293`, `:1137-1150`); under a uniform sweep every
+  expert's use count is equal, so the tiebreak decides and it is exactly LRU —
+  **the sequential-scan pathology**: the resident set is always the ~112 experts
+  the sweep will reach last, and the one it needs next was evicted a pass ago.
+  Measured: `runner.expert_hits_prefill=0 expert_misses_prefill=28387`
+  (`ServerInference.swift:1997-1999`). At an expert stride of 1,769,472 B
+  (3 × 512 × 2048 / 2 int4 bytes + 3 × 2 × 16,384 bf16 scales/biases) that is
+  **50.2 GB of `F_NOCACHE` reads per prompt**, ≈ 17.9 s at the doc's measured
+  2.8 GB/s, behind a 21.3 s routed GPU span at pipeline depth 2 — mostly hidden,
+  which is why it shows today only as the two gap rows and as the first tile of
+  each layer-chunk, planned and fetched with nothing pending
+  (`RealForwardRunner.swift:5153-5169`; `heldSlots` is empty, so `plan` is nil
+  and `fetchBindingForTile` plans and fetches inline).
+
+  Alternating the sort direction on odd chunks turns the pathology into its
+  best case: LRU with an alternating sweep hits on the previous pass's tail,
+  ≈ 112 of 237. At 12k there are three chunks — chunk 0 cold on a fresh server,
+  chunks 1 and 2 hitting ≈ 112 each — so the modelled counters are hits ≈ 8,960
+  and misses ≈ 19,400 (−31 %), bytes 50.2 → 34.4 GB, ≈ 5.6 s of reads removed of
+  which only the unhidden part shows in the wall. The realistic ceiling is the
+  two gap rows it feeds, 0.17 ms/token if they vanished entirely; the audit's
+  0.05–0.11 is the direct band. **The measurement is the result.**
+
+  **What does not change, from the code.** `routePartials` is written per
+  `(token, rank)` slot by the pair's own expert block
+  (`prefill.metal:946-947`) and the reduce folds the 8 ranks per token in rank
+  order (`prefill_moe_reduce_token_major`), so **the order tiles are issued in
+  cannot change any value**. The comparator flip touches only the expert key;
+  `$0.token`/`$0.rank` stay ascending within a group
+  (`PrefillMoEGrouping.swift:146-148`), so each expert block presents the same
+  rows in the same order to the same GEMM. Golden **IDENTICAL on both boxes and
+  both profiles is a hard bar for Step 2**, not an expectation.
+
+  **Step 1 — the L2 probe (instrumented build, reverted).** In
+  `encodeGroupedExpertGEMMs` (`PrefillGroupedRoutedMoE.swift:847-941`, the wave
+  loop at `:873-879`) accumulate four `inout UInt64` counters threaded out
+  through `encodeRoutedTileExperts` → `encodeRoutedMoEPrefill` alongside the
+  existing `prefillActiveExperts` (`RealForwardRunner.swift:5030`, `:5100`), and
+  print them in the existing per-chunk `SHRIKE_PHASES` block (`:2334-2343`):
+  `Σ pairCount` (the real rows), **`Σ paddedRows` today**, **`Σ ceil(rows/32)·32`**
+  and **`Σ ceil(rows/16)·16`** recomputed over the same blocks, plus the wave
+  count, the block count, and the number of blocks whose `pairStart` continues a
+  previous block (the wave splits). The three padded sums price the three tail
+  sizes directly and need no histogram. Build isolated —
+  `swift build -c release --scratch-path /Volumes/BuildSSD/SwiftPM/Shrike-probe`
+  (the path exists; the P5/P8 precedent) — deploy with `tools/mini-deploy.sh`,
+  launch manually with `SHRIKE_PHASES=1` added to the production env, one send
+  per prompt on a fresh server at 3.7k and 12k, then **revert the probe** and
+  redeploy the clean build before anything else runs.
+
+  **Step 1b — the bench control (lands).** `PrefillRoutedGEMMBenchmark.run`
+  already takes `experts`, `rowsPerExpert` and `stagingRows`
+  (`PrefillRoutedGEMMBenchmark.swift:25-31`); `runRoutedGEMM` calls it only at
+  the defaults (`sources/ShrikeBench/RoutedGEMMBench.swift:6-22`). Add a padding
+  sweep at `experts: 8, stagingRows: 1024` over `rowsPerExpert ∈ [128, 97, 65]`
+  — all three plan the **same 16 row tiles and the same 1,024 padded rows**,
+  with 1,024 / 776 / 520 real rows. If `per_tile_ms` is flat across the three,
+  a padded row costs exactly a real row and the tax is exactly the padded
+  fraction; if it falls, the model is wrong and Step 3 does not proceed. ~12
+  lines, no production path.
+
+  **Step 2 — the L5 knob (lands either way).** `SHRIKE_PREFILL_SWEEP=alternate`
+  (default `fixed` in this step; the repo's knobs read
+  `environment[...] != "<opt-out>"`, so the default flips to `alternate` in
+  Step 4 only if it wins — `RealForwardRunner.swift:465-468` is the pattern).
+  `buildPrefillRoutes` does not currently know the chunk index
+  (`:4806-4846`); `executePrefillChunk` has `startPosition`
+  (`:2101-2107`) and `PrefillChunkPlanner.spans` lays chunks out contiguously
+  from it, so the parity is `(startPosition / config.maxChunkTokens) % 2` —
+  pass it into `buildPrefillRoutes` and on to `groupTokenExpertPairs` as a
+  `descending: Bool`, flipping only the `expertSortKeys` comparison at
+  `PrefillMoEGrouping.swift:144`. Log it on the residency line beside the other
+  levers (`prefillGapLeversDescription`, `RealForwardRunner.swift:243-254`;
+  emitted at `ServerInference.swift:821-824`).
+
+  **Step 3 — the tail tile (only if L2 wins).** Three options, priced:
+
+  1. **A 32-row tail tile (the proposal).** Pack each wave body-first: full
+     64-row tiles in `[0, bodyRows)`, every block's remainder in a 32-aligned
+     tail region `[bodyRows, paddedRows)`, and issue **two** grouped dispatches
+     per GEMM — the existing 64-row kernel over `bodyRows / 64` row tiles and a
+     32-row instantiation over `tailRows / 32`, each skipped when its region is
+     empty. The tail is taken **only when the block's remainder is ≤ 32**: two
+     32-row tiles cost `2α` against one 64-row tile, so a remainder in
+     `[33, 63]` must stay on the 64-row path or the change is a regression at
+     any `α > 0.5`.
+  2. **Two experts' tails packed into one 64-row tile.** No arithmetic saving
+     over option 1 — a threadgroup dequants one weight tile and all 64 rows
+     multiply it, so two experts in one tile is two dequants and two half-height
+     matmuls, with `MPPGroupedBlockMSL` (`tensorops.metal:286-293`) growing a
+     second slot and the body a second accumulator. Its one advantage is that
+     the grid stays 64-row-granular. The fallback if option 1's descriptor does
+     not compile, not the first arm.
+  3. **Larger chunks (audit L9).** Out of scope — memory, and the design says so.
+
+  **How much option 1 is worth, as a formula over Step 1 and a measured `α`.**
+  Let `P64` = `Σ paddedRows` and `P32` = `Σ ceil(rows/32)·32` per layer-chunk
+  (Step 1), `G` = the GEMM ms per layer-chunk (177.8 minus the 12–18 ms of
+  gather/activation/scatter = 160–166), and `α` = the measured cost of a 32-row
+  tile as a fraction of a 64-row tile. Conversions are `(P64 − P32)/32`, tiles
+  today `P64/64`, so
+
+      Δ ms/prompt-token = G × (1 − α) × 2 × (P64 − P32) / P64 × 120 / 12,285
+
+  `α` is bounded below by 0.5 (nothing but the matmul scales with M) and above
+  by 1.0 (a measured null): the dequant of a `TILE_N × TILE_K` weight tile is
+  per threadgroup and does **not** shrink with M, and P8's mini split of the
+  tile's remainder above a plain GEMM was 7 % unpack + 20 % weight loads + 31 %
+  staged structure (`docs/v12-prefill-matrix-kernels.md:453`) — the first two
+  are M-independent. **Modelled `α` ≈ 0.55, but it is measured in Step 5's bench
+  before a line of production code is wired.** At `α = 0.55` the two anchors for
+  `(P64 − P32)/P64` give **0.083 ms/token** (the subtraction estimate, 0.0595)
+  and **0.149** (the uniform-remainder estimate, 0.104) — straddling the 0.10
+  threshold, which is the whole reason Step 1 comes first. At `α = 0.70` neither
+  anchor clears it. The 16-row rung's ceiling is the entire padding residual,
+  0.16–0.22 ms/token, reached only at `α₁₆ ≈ 0.25`; Step 1's `P16` prices it and
+  the bench decides, but the fixed dequant makes it unlikely.
+
+  **Numerics for option 1.** The K reduction per output element is unchanged: it
+  is the same `TILE_K`-wide loop over the same tiles with the same
+  `accumulator[e] += groupProduct[e]` fold (`tensorops.metal:210-236`), and
+  `TILE_M` is only the descriptor's first argument (`:166-168`) — it changes
+  which rows share a threadgroup, not what is summed or in what order for a
+  given (row, column). **Bit-identity is therefore expected but not provable
+  from source** (MPP's `run` is opaque), exactly as P13's draft argued for
+  `TILE_M 128`. Prove it as P9 proved lever A: `runPair`-style bit equality on
+  `irregular` inputs, here through
+  `PrefillGroupedRoutedMoETests+Execution.swift:603-634`
+  (`groupedPartialsAcrossWaves`) with the tail path on and off. If it fails,
+  fall back to 2e-2 against the fp32 reference and carry a golden recapture.
+
+  **Bars.** Mini-first, 12k unless stated, as ms per prompt token. They are
+  formulas; the numbers are those formulas at the anchors above.
+
+  - **L5 (Step 2).** `runner.expert_hits_prefill` **0 → ≥ 6,000** at 12k
+    (modelled 8,960; two of three chunks hitting ≈ 112 of 237 per layer);
+    `expert_misses_prefill` 28,387 → ≤ 22,500. `routed→routed` ≤ 0.09 and
+    `shared→routed` ≤ 0.065 ms/token; wall **70.76 → ≤ 70.0 s** (−1.0 %, the
+    proceed threshold) with the stretch at −2 % (69.3 s). **Control: at 3.7k
+    (3,756 tokens, one chunk) the arm must read within ±1 % of `fixed`** —
+    there is nothing to alternate, and a move there means the knob is doing
+    something it does not claim. Golden **identical, hard bar**.
+  - **L2 (Step 3, if it proceeds).** `prefill_routed_tile` = 1.737 − Δ with Δ
+    from the formula; at the mid anchor **1.737 → ≤ 1.62**, busy 5.337 → ≤ 5.22,
+    wall **70.76 → ≤ 69.3 s**; at 3.7k routed 1.79 → ≤ 1.68, wall 21.52 →
+    ≤ 21.1 s. Bench bar in `routed_gemm` on the mini: at `rowsPerExpert: 65`
+    (a 1-row remainder, so every block takes the tail) the arm is ≤ **0.85 ×**
+    the 64-row path — 2 tiles → 1 + α, i.e. −22 % at α = 0.55; and at
+    `rowsPerExpert: 128` (no remainder) and `97` (a 33-row remainder, which the
+    ≤ 32 rule leaves on the 64-row path) it is **within 1 %** — the tail path
+    must not touch a wave it cannot help.
+  - **Both.** Five gates green. M4 Pro 3.7k + 12k + 25k as the check; it decides
+    nothing.
+
+  **Files:**
+  - Step 1 (probe, **reverted before Step 2 lands**):
+    `sources/Shrike/Kernels/Prefill/MoE/PrefillGroupedRoutedMoE.swift:873-879`
+    (four counters in the wave loop),
+    `sources/Shrike/Runtime/Inference/RealForwardRunner.swift:5019-5030`,
+    `:5300-5350` (thread them through as `inout`), `:2334-2343` (the
+    `SHRIKE_PHASES` print).
+  - Step 1b (lands): `sources/ShrikeBench/RoutedGEMMBench.swift:6-22` — a
+    `rowsPerExpert` sweep; that file has no baseline entry, so keep
+    `runRoutedGEMM` under 120 lines.
+  - Step 2 (lands): `PrefillMoEGrouping.swift:91-149` (a
+    `descending: Bool = false` parameter, one comparison flipped at `:144`),
+    `RealForwardRunner.swift:465-468` (the knob), `:4806-4846`
+    (`buildPrefillRoutes` takes the chunk parity), `:5090` (the call site),
+    `:2101-2110` + the chunk loop at `:1949-1968` (the parity from
+    `startPosition`), `:243-254` (`sweep=` on the levers line).
+  - Step 3 (only if L2 wins):
+    `sources/Shrike/Metal/TensorCore/tensorops.metal:145-248` (`TILE_M` becomes a
+    template parameter of `mpp_prefill_affine_body`, replacing `kMPPAffineTileM`
+    at `:166`; `MPP_AFFINE_KERNEL` at `:250-269` passes 64, the plain path
+    unchanged), `:296-334` (`MPP_GROUPED_KERNEL` gains `TILE_M`; `rowOrigin` at
+    `:322-326` takes it), `:336-341` (six `…_m32` instantiations);
+    `prefill.metal:891` (`kPrefillRoutedGroupedRowTile` becomes a field of
+    `PrefillRoutedGroupedParamsMSL` at `:900-905`, read at `:920` and `:944`);
+    `PrefillGroupedRoutedMoE.swift:88-148` (body-then-tail packing;
+    `PrefillRoutedExpertWave` gains `bodyPaddedRows`; two tables), `:847-941`
+    (two dispatches per GEMM, each skipped when empty);
+    `MPPPrefillInt4QMM.swift:52` (`groupedMaxRowTiles` 32 → 64 — a 32-granular
+    table over 2,048 staging rows is 64 entries), `:222-317` (`encodeGrouped`
+    takes the row tile, picks the pipeline and the grid height).
+  - Tests: `tests/Shrike/Core/Kernels/Prefill/PrefillMoEGroupingTests.swift:84-116`
+    (the descending twin of
+    `groupingCanOrderTilesByExpertSortKeysWhileKeepingPairRangesContiguous`);
+    `.../PrefillGroupedRoutedMoETests+Execution.swift:510-560`
+    (`groupedWavePlannerSplitsAndPadsOnRowTiles` — the 40/32/5/3-pair fixture is
+    already the tail case: 256 padded rows today, 160 with a 32-row tail),
+    `:562-601`, `:603-634`, `:667-716` (the one-pair expert).
+  - Lint: `executePrefillChunk` (`:2101`) and `encodeRoutedMoEPrefill` (`:5019`)
+    both carry `function_body_length` baseline entries keyed by line **and**
+    span; every step here moves one or both, so regenerate with
+    `swiftlint lint --write-baseline .swiftlint-baseline.json` and commit it with
+    the change, or the strict gate fails on a stale entry.
+  - Unchanged deliberately: `MPPPrefillInt4QMM.tileK` and the six `TileVariant`
+    cases; the plain kernel's `kMPPAffineTileM = 64`; the eviction policy and
+    slot count; `PrefillRoutedTileSchedulerConfig`; the decode paths.
+
+  **Interfaces:** Step 2 produces
+  `PrefillMoEGrouping.groupTokenExpertPairs(..., descending: Bool = false)` and
+  a `sweep=alternate|fixed` token on the gap-levers line. Step 3 produces
+  `enum GroupedRowTile: Int { case m64 = 64, m32 = 32 }` on `MPPPrefillInt4QMM`
+  with `SHRIKE_PREFILL_TAIL_TILE=off|32` (default `off` until Step 6 clears the
+  bar), `encodeGrouped(..., rowTile: GroupedRowTile)`, and in Metal
+  `template <int TILE_M, int TILE_N, int TILE_K, int BUFFERS>
+  mpp_prefill_affine_body(...)` with `MPP_GROUPED_KERNEL(NAME, TILE_M, TILE_N,
+  TILE_K, BUFFERS)`. `PrefillRoutedExpertWave` gains `bodyPaddedRows: Int`;
+  `rowTileTable(for:)` becomes `rowTileTables(for:) -> (body: [UInt32], tail:
+  [UInt32])`. Comments: repo rule. One earns its place — why the tail is a
+  second dispatch rather than a second row height inside one grid (the pipeline
+  is fixed per dispatch). Nothing else.
+
+  Steps (TDD; the measurement precedes any kernel decision):
+
+  - [ ] Step 1: the L2 probe. Isolated build
+        (`swift build -c release --scratch-path /Volumes/BuildSSD/SwiftPM/Shrike-probe`),
+        `pgrep -fl 'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI'` first,
+        `tools/mini-deploy.sh` (copy only), stop the server, relaunch manually
+        with `SHRIKE_PHASES=1` beside the production env, one send per prompt on
+        a fresh server at 3.7k and 12k
+        (`tools/prefill-measure.sh macmini 8081 <promptdir> <outdir> p15-probe-mini 2k 6k`
+        — the labels `2k`/`6k` are the 3,756- and 12,285-token prompts,
+        `tools/prefill-prompts.py:9-11`). **Revert the probe**, rebuild clean,
+        redeploy.
+  - [ ] Step 2: the Step 1b bench sweep and the Step 2 knob, both landing. Five
+        gates. `swift run -c release ShrikeBench routed_gemm 20` on both boxes.
+        Then the mini A/B on one binary: `tools/mini-deploy.sh --restart` for the
+        `fixed` arm, a manual relaunch with `SHRIKE_PREFILL_SWEEP=alternate` for
+        the other (the `--restart` launch command is fixed, so the knob arm is
+        launched by hand), 3.7k + 12k on a fresh server per arm, roles via
+        `tools/prefill-ledger.py` with a **distinct log tag per box** (P10's
+        lesson: `resp-<tag>-<label>.json` collides otherwise). Read
+        `expert_hits_prefill` / `expert_misses_prefill`, both gap rows, busy and
+        the wall.
+  - [ ] Step 3 (the gate): fill the ledger — `Σ pairCount`, `P64`, `P32`, `P16`,
+        waves, blocks and splits per layer-chunk at both prompt sizes; the bench
+        sweep's flatness; L5's measured deltas. Apply the decision rule, re-derive
+        L2's bar from `P64`/`P32`, and **record the verdict in the design doc
+        whichever way it goes**. Commit
+        `prefill: alternate the prefill expert sweep and bench the padding tax (v12 P15)`.
+  - [ ] Step 4: if L5 cleared its bar, flip `SHRIKE_PREFILL_SWEEP`'s default to
+        `alternate` with `=fixed` as the A/B, in the same commit as Step 3's
+        verdict. If it did not, leave the default at `fixed` and say so.
+  - [ ] Step 5 (only if L2 proceeds): failing tests first —
+        `tailTilePlannerPacksRemaindersIntoThirtyTwoRowTiles` on the
+        40/32/5/3-pair ranges (256 → 160 padded rows, two tables);
+        `thirtyTwoRowTailIsBitIdenticalToTheSixtyFourRowTile` over
+        `MPPPrefillInt4QMM.TileVariant.allCases` through
+        `groupedPartialsAcrossWaves`, `irregular` inputs, plus a one-pair expert
+        and a ragged `d`/`f`; `tailTileIsSkippedWhenNoBlockHasARemainder`.
+        `swift test --no-parallel --filter "PrefillGroupedRoutedMoE|PrefillMoEGrouping"`
+        → FAIL. Then implement, and **before wiring production** measure `α` in
+        `routed_gemm` on the mini; if `α` puts Δ under 0.10 ms/token, land the
+        kernel behind `SHRIKE_PREFILL_TAIL_TILE=32` with the default `off` and
+        stop (P8's precedent).
+  - [ ] Step 6 (the spike, the second gate): re-run `routed_gemm` on both boxes.
+        **Accept rule: the mini clears the bench bar, or beats its Step 2 control
+        by ≥ 5 % with no shape regressing more than 3 %.** Arms within 3 % are a
+        tie, broken toward the 64-row path.
+  - [ ] Step 7: five gates —
+        `swift build -c release 2>&1 | grep -E "warning:|error:"` (empty),
+        `swiftlint lint --strict --baseline .swiftlint-baseline.json`,
+        `python3 tools/check-md-links.py`, `swift test --no-parallel`, and
+        `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test
+        --no-parallel --sanitize=thread`. Then `tools/golden-baseline.sh --check`
+        on both boxes: **short and long IDENTICAL** (M4 Pro long
+        `e04d4e8ee7f1590d`, M1 long `899a25e60a365e60`, unchanged since P10) —
+        a difference is a defect, not a recapture, for both arms.
+  - [ ] Step 8: ledger on both boxes. `tools/prefill-measure.sh <host> <port>
+        <promptdir> <outdir> <tag> 2k 6k` against a **fresh server, one send per
+        prompt per server lifetime**; **mini 3.7k + 12k is the verdict**, M4 Pro
+        `2k 6k 12k` (3.7k + 12k + 25k tokens) the check.
+        `tools/mini-deploy.sh --restart`, mini golden check, scp into
+        `baselines/` only if Step 7 established a deliberate change (it should
+        not).
+  - [ ] Step 9: design doc — a landed section carrying Step 1's padded-row table
+        (it closes L2's band whichever way the task goes) and Step 2's counter
+        table, an "**After P15**" ledger block, and the "Where the time goes"
+        routed row gaining the measured padding split. Follow-ons recorded: the
+        arm not taken with its measured size; the 16-row rung; audit L10's
+        per-tile host work, which the `routed→routed` row will still hold. Plan:
+        Task 15 `[x]` with the landed paragraph. Task review by a fresh reviewer;
+        fixes folded into the commit (rebase and amend, never a fixup commit).
+
+  **Verdict line template** (the controller fills in the measured values):
+
+  > **LANDED `<sha>` (`<date>`): measured on the mini `prefill_routed_tile`
+  > 1.79 → `<x>` ms/prompt-token (3.7k; 1.737 → `<x>` at 12k),
+  > `prefill_gdn_router` 1.786 → `<x>` / 1.775 → `<x>`, `prefill_attn_router`
+  > 0.757 → `<x>` / 1.565 → `<x>`, `prefill_shared_expert` 0.169 → `<x>`, GPU
+  > busy 4.665 → `<x>` and 5.337 → `<x>`, gaps 0.493 → `<x>` and 0.273 → `<x>`
+  > (`routed→routed` `<x>`, `shared→routed` `<x>`), wall 21.52 → `<x>` s and
+  > 70.76 → `<x>` s = `<x>` ms/prompt-token.** Step 1 measured the padding at
+  > `P64` = `<x>` rows against `<x>` real per layer-chunk (`<x>` %; the two
+  > models said +11–16 % and +26 %), `P32` = `<x>`, `P16` = `<x>`, over `<x>`
+  > blocks in `<x>` waves with `<x>` wave splits. Step 1b: `per_tile_ms` at
+  > 128 / 97 / 65 rows per expert = `<x>` / `<x>` / `<x>` — a padded row
+  > `<does | does not>` cost a real row. Step 2 measured
+  > `expert_hits_prefill` 0 → `<x>`, `expert_misses_prefill` 28,387 → `<x>`,
+  > 12k wall `<x>` s against `<x>` s on the same binary with
+  > `SHRIKE_PREFILL_SWEEP=fixed`; the 3.7k control moved `<x>` %. The rule took
+  > **`<L2 | L5 | both | neither>`** (L2 modelled `<x>` ms/token at a measured
+  > α = `<x>`, L5 measured `<x>`). Bars `<cleared | missed>`. M4 Pro check:
+  > `<x>`. Numerics: `<the bit-identity outcome>`. Golden identical on both
+  > boxes and both profiles (digests unchanged: M4 Pro long `e04d4e8ee7f1590d`,
+  > M1 long `899a25e60a365e60`). Five gates green (`<n>` tests, TSAN 0 reports).
+
+  **Risks:**
+  - **The 32-row `matmul2d` descriptor may not compile, or may not be
+    supported.** `matmul2d_descriptor(kMPPAffineTileM, TILE_N, TILE_K, ...)`
+    (`tensorops.metal:165-168`) has only ever been instantiated at M = 64, and
+    MPP's legal shapes are not visible in this tree. **Step 5's first action is
+    to compile a 32-row instantiation and run one `runPair` through it** —
+    before the planner, the tables or the encoder change. If it does not
+    compile, option 2 (two tails inside one 64-row tile) is the fallback and the
+    task's size estimate does not change.
+  - **`α` is the whole lever and it is unmeasured.** The dequant of a weight
+    tile does not shrink with M, so a 32-row tile can cost anywhere from half a
+    64-row tile to all of one. At `α ≥ 0.70` neither anchor clears the
+    threshold. This is why the bench precedes the production wiring, and why the
+    abandon rule is written before the work.
+  - **Two dispatches per GEMM is more host work, and `routed→routed` is already
+    a gap.** Three extra encoders per wave × ~60 waves per layer-chunk × 120 is
+    ~21,600 extra encoders per prompt, landing in the same `routed→routed` gap
+    audit L10 owns. Mitigation: skip each region's dispatch when it is empty
+    (a padding-free wave issues exactly today's six). If the ledger shows the
+    gap growing by more than the GEMM saving, that is the null.
+  - **The row tile is a constant in three places.** `tensorops.metal:9`,
+    `prefill.metal:891` (separately compiled modules; the comment at `:887-890`
+    says so) and the Swift mirror `PrefillGroupedRoutedMoE.swift:92`. A
+    32-granular table over the bench's 2,048 staging rows is 64 entries against
+    a cap of 32 (`MPPPrefillInt4QMM.swift:52`) — raise the cap in the same
+    change or the bench throws `invalidArguments`.
+  - **The tile scheduler's slot reservations may not behave as L5's model
+    predicts.** `makeExpertCachePlan` reserves loading slots, the caller's
+    `avoidingSlots` and every hit before selecting victims
+    (`PreadExpertStreamer.swift:620-655`), and the policy is aging-LFU with a
+    halving every 1,024 plans (`:622-629`), not plain LRU. Under a uniform sweep
+    the counts are equal and the tiebreak is LRU, but a real routing trace is
+    not uniform. The counters are the arbiter, not the model: if
+    `expert_hits_prefill` does not move, the sweep order was not the binding
+    constraint and the knob lands defaulted `fixed`.
+  - **The alternation changes which experts are resident when decode starts.**
+    The measure prompts decode 8 tokens (`tools/prefill-prompts.py:44`), so the
+    effect on the wall is negligible, but read `expert_hits_decode` /
+    `expert_misses_decode` in the same runs and record them; a long generation
+    after a long prompt is a different regime and belongs in the follow-ons if
+    the numbers move.
+  - **Descending physical offsets may read worse than ascending.** Expert reads
+    are `F_NOCACHE` pread (`PreadExpertStreamer.swift:234`) and nothing in the
+    reader sorts or coalesces, but the device's own readahead is not modelled
+    here. If the alternate arm's hit rate rises while the wall does not, this is
+    the first thing to check — `io_ms` is decode-only
+    (`RealForwardRunner.swift:5595`, `:6130`), so the evidence is the gap rows,
+    not the I/O counters.
+  - **The probe must not be left in the tree.** It threads `inout` counters
+    through two hot encoders; Step 1 ends with a revert and a clean redeploy,
+    verified by `prefill_projection_path=` on the relaunched server's log
+    (`tools/mini-deploy.sh:79`).
+  - **The mini is production.** Every step here stops the server on 8081 and
+    relaunches it; Turbo on 8080 is a different project and is never touched.
+    One model process at a time — `pgrep` first, every time.
+
 ## Follow-ons (not scheduled)
 
 - The mini's SSD term (v10 P3 follow-on: batched miss loads, deeper queue
