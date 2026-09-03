@@ -441,6 +441,25 @@ chapter's 6.3 target for the first time** (3.7k 24.3 → 21.5 s). The M4 Pro's
 12k wall 27.6 → 25.7 s on the same A/B, 25k 64.0 → 59.0 s. Golden identical on
 both boxes and both profiles, as the exact-order design requires.
 
+**After P15** (commit dd78c27, 2026-09-03; the prefill expert sweep alternated
+on odd chunks — `SHRIKE_PREFILL_SWEEP=fixed` keeps every chunk ascending; the
+roles are unchanged, the gap rows fall; the M4 Pro 3.7k column is P14's — one
+chunk, nothing to alternate):
+
+| role | M4 Pro 3.7k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `prefill_attn_router` | 0.17 | 0.29 | 0.49 | 0.76 | 1.56 |
+| `prefill_routed_tile` | 0.46 | 0.44 | 0.46 | 1.79 | 1.73 |
+| `prefill_gdn_router` | 0.41 | 0.40 | 0.40 | 1.79 | 1.78 |
+| `prefill_shared_expert` | 0.04 | 0.04 | 0.04 | 0.17 | 0.17 |
+| **GPU busy** | 1.11 | 1.21 | 1.41 | 4.68 | 5.33 |
+| gaps (span − busy) | 1.05 | **0.51** | **0.47** | 0.49 | **0.22** |
+| **wall** | 2.48 | **1.85** | **1.94** | 5.74 | **5.70** |
+| wall, seconds | 9.3 | **22.7** | **49.1** | 21.6 | **70.0** |
+
+`expert_hits_prefill` 0 → 9,549 of 28,404 on the M1 at 12k; 0 → 28,909 of
+65,776 on the M4 Pro at 25k. Golden identical on both boxes and both profiles.
+
 ## Where the time goes
 
 Every dense projection in prefill (attention Q/K/V/O, GDN in/out) already runs
@@ -451,7 +470,7 @@ all scalar kernels:
 | role | kernel | structure | roofline gap (M4 Pro) |
 | --- | --- | --- | ---: |
 | attention core | `attention_prefill_causal_tiled` | one threadgroup per (query, head), 256 threads over head-dim, a serial walk over every key with a two-barrier threadgroup reduction per key. The decode kernel's shape, run once per prompt token: no K/V reuse across queries, none across the 8 query heads that share a KV head. | 30× at 3.7k, 60× at 25k |
-| routed experts | `prefill_grouped_routed_moe_batched_phase1` / `_down` | each thread computes one or two 2048-long scalar dot products; 32-pair microbatches; a command buffer per 8-expert tile | 7×; 2.6× after P6 (`mpp_prefill_affine_grouped_f16`, one dispatch per phase over the tile's experts: 0.69 ms/token at 12k against 0.27 at the 7.46 TFLOPS ceiling); P8's bench puts the tile at 67 % of the M4 Pro's same-run ceiling and 42 % of the M1's, the M1's remainder split 7 % unpack / 20 % weight loads / 31 % staged structure (Step 7); after P9 (vector loads + 128-wide K) 71 % of the M1's ceiling and 99 % of the M4 Pro's (Step 8); after P10 (256-wide K) 78 % of the M1's (Step 9) |
+| routed experts | `prefill_grouped_routed_moe_batched_phase1` / `_down` | each thread computes one or two 2048-long scalar dot products; 32-pair microbatches; a command buffer per 8-expert tile | 7×; 2.6× after P6 (`mpp_prefill_affine_grouped_f16`, one dispatch per phase over the tile's experts: 0.69 ms/token at 12k against 0.27 at the 7.46 TFLOPS ceiling); P8's bench puts the tile at 67 % of the M4 Pro's same-run ceiling and 42 % of the M1's, the M1's remainder split 7 % unpack / 20 % weight loads / 31 % staged structure (Step 7); after P9 (vector loads + 128-wide K) 71 % of the M1's ceiling and 99 % of the M4 Pro's (Step 8); after P10 (256-wide K) 78 % of the M1's (Step 9); after P15 the M1's tile carries +25.8 % padded rows (Step 13, a 32-row tail tile is Task 15b) and the expert sweep alternates per chunk |
 | shared expert | `PrefillSharedExpert.encodeBlock` | a `for row in 0..<queryCount` loop over the decode runtime: 4–6 M=1 GEMV dispatches per token | 25× |
 | GDN | `gdn_delta_step_prefill` | the delta-rule scan is a serial loop over the chunk inside one dispatch of 32×32 threadgroups; projections, conv and norms are fine | 3.6× (scan ≈ 0.6 of the 1.0 ms); after P12 the mini's 319 ms per layer-chunk is scan 56 + projections 166 (85–99 % of the MPS ceiling) + pre-scan chain 9 + router 83 → 10 after P14 (Steps 11–12) |
 
@@ -824,8 +843,82 @@ Token block on the mini: 4 → 11.5, 8 → 10.4, **12 → 10.0**, 16 → 14.9,
 `SHRIKE_PREFILL_ROUTER=block` keeps the old kernel on the same binary. Measured
 on the ledger: "After P14" above — the cut lands in full in both router roles.
 
+### Step 13 — the padding tax measured, and the prefill expert sweep alternated (−1.4 % of the M1's 12k wall, −15 % of the M4 Pro's; completions byte-identical on both arms, golden identical)
+
+Two levers the audit modelled and nothing had measured.
+
+**The padding.** The grouped routed GEMM rounds every expert block up to a
+whole 64-row tile, and the wave close at the 1,024-row staging boundary adds a
+partial tile more. One probe print in an instrumented build (reverted) counted
+the rows on the M1: per 12k prompt **3,931,200 real rows against 4,946,880
+padded (+25.8 %)**, 254 blocks and 55 waves per layer-chunk with 17.5 wave
+splits (3.7k: +29.6 %). A 32-row tail tile would hold the same rows in
+4,410,976 ((P64 − P32) / P64 = 10.8 %), a 16-row tail in 4,156,704 (16.0 %).
+The bench control — `ShrikeBench routed_gemm`, eight experts at 128 / 97 / 65
+rows each, the same 16 tiles and 1,024 padded rows with 1,024 / 776 / 520 real
+— reads 4.46 / 4.42 / 4.33 ms on the M1 and 1.086 / 1.074 / 1.066 on the M4
+Pro: **a padded row costs a real row within 3 %**, so the tax is the padded
+fraction, ≈ 0.36 ms/token of the M1's 1.73 routed row at 12k. A 32-row tail
+tile recovers 2 × 10.8 % × (1 − α) of the GEMM's share, α the cost of a 32-row
+tile relative to a 64-row one — 0.10–0.16 ms/token at α = 0.70–0.55, the
+kernel work of Task 15b. The two earlier estimates of this quantity (+11–16 %
+by subtraction from the ledger, +26 % by the audit's uniform-remainder model)
+are settled: the audit was right.
+
+| per 12k prompt on the M1 | rows | over the real rows |
+| --- | ---: | ---: |
+| real (`Σ pairCount`) | 3,931,200 | — |
+| padded to 64-row tiles (`P64`, today) | 4,946,880 | +25.8 % |
+| with a 32-row tail (`P32`) | 4,410,976 | +12.2 % |
+| with a 16-row tail (`P16`) | 4,156,704 | +5.7 % |
+
+**The sweep.** Every chunk sorted its (token, expert) pairs by ascending
+physical offset, so each layer's 128-slot expert cache — 112 evictable under
+the tile scheduler's 16 held — swept its ≈ 237 experts in the same direction
+every chunk: the sequential-scan pathology under the aging-LFU's LRU tiebreak,
+and `expert_hits_prefill` was **0** at every size on both boxes.
+`SHRIKE_PREFILL_SWEEP=alternate` (the default; `=fixed` is the A/B) reverses
+the expert key on odd chunks, parity from `startPosition / 4096`, and only the
+key: tokens and ranks stay ascending within a group, each expert block presents
+the same rows in the same order to the same GEMM, and `routePartials` is
+written per (token, rank) slot, so tile order cannot change a value —
+completions byte-identical between arms at 3.7k and 12k, golden identical on
+both boxes and both profiles. Measured on one binary, a fresh server per prompt
+(the 3.7k rows are one chunk: nothing to alternate, the control):
+
+| box, prompt | hits / misses, fixed → alternate | `routed→routed` | `shared→routed` | gaps | wall |
+| --- | --- | ---: | ---: | ---: | ---: |
+| M1 12k | 0 / 28,404 → **9,549** / 18,855 | 1,179 → 887 ms | 891 → 476 ms | 0.273 → 0.217 | 71.34 → **70.33 s** (−1.4 %) |
+| M1 3.7k | 0 / 9,568 → 0 / 9,568 | 490 → 486 | 324 → 329 | 0.492 → 0.490 | 21.49 → 21.49 s |
+| M4 Pro 12k | 0 / 28,401 → 9,558 / 18,843 | 8,501 → 5,306 | 580 → 242 | 0.814 → 0.511 | 26.61 → **22.71 s** (−14.6 %) |
+| M4 Pro 25k | 0 / 65,776 → 28,909 / 36,867 | 19,488 → 10,731 | 1,311 → 300 | 0.858 → 0.472 | 59.00 → **49.10 s** (−16.8 %) |
+
+The M1 hides most of each fetch behind its 5.9 ms tile, so the box that decides
+moved 1.4 %; the M4 Pro's 1.5 ms tile hid nothing and the check box moved 15 %.
+The decode counters are unchanged (the last chunk is even, ascending in both
+arms). At the default the M1 prefills 12k in 69.97 s = **5.70 ms/token**.
+
 ### Follow-ons, not scheduled
 
+- **The cache settle's re-prefill after a degenerate turn (not a
+  prefill-matrix lever; measured here).** A request that ends by `max_tokens`,
+  a stop string or an unclosed thought is normalised by dropping the emission,
+  and with no snapshot at the prompt boundary the drop is a reset and a full
+  re-prefill of the prompt: **66.8 s of M1 GPU after a 12k `finish=length`
+  response** (17.7 s after 3.7k), deferred on the session actor, and the next
+  request's first await joins or aborts it — abort is checked between layers
+  and between chunks. The measure prompts have exactly that shape; the fix (capture the
+  boundary snapshot at decode start; decouple the join) is the v10 plan's open
+  item ([v10-implementation-plan.md](v10-implementation-plan.md)), not this
+  chapter's. Measurement hygiene: one send per server lifetime.
+- **The 16-row tail rung.** `P16` prices it (the table in Step 13): the
+  whole padding residual is 0.225 ms/token at α₁₆ = 0.55, but a 16-row tile
+  carries the same fixed dequant as a 64-row one; Task 15b's measured α says
+  whether a second rung is worth a bench.
+- **The per-tile host work on the M4 Pro (the audit's L10).** After P15
+  `routed→routed` is 5.3 s of the M4 Pro's 22.7 s at 12k — `host_ms` 4.5 s
+  over 3,482 boundaries, ≈ 1.3 ms each — the largest item left on that box; on
+  the M1 it is 0.07 ms/token (887 ms over 3,485). An M4 Pro lever.
 - **Tile command-buffer batching — landed as a null result (P5, a7c8288 +
   bf469ad).** The boundary was never ≈ 1.3 ms of commit → wait → encode; it is
   the routed fetch's excess over the GPU tile, and batching removes the
@@ -845,7 +938,10 @@ on the ledger: "After P14" above — the cut lands in full in both router roles.
   host time between the shared expert and the routed tiles after P12
   (`shared→routed` `host_ms` 827 ms at 12k over 120): the tile metadata
   build plus the first tile's fetch, which nothing hides. The routed fetch
-  follow-on above is the same cost seen from the other box.
+  follow-on above is the same cost seen from the other box. After P15 the
+  alternating sweep leaves the modelled ≈ 112 (measured 119) of the layer's
+  experts resident from the previous chunk and the row reads 400 ms (3.3 ms
+  per layer-chunk).
 - **The MPP GEMM's byte-load fallback on the M1.** After P9 the dequant's
   byte-load body serves only weight bases that are not 16-byte aligned (and
   the `SHRIKE_MPP_WEIGHT_LOADS=byte` A/B), and inside the two-body kernel it
