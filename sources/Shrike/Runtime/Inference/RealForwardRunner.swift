@@ -236,7 +236,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             return "scalar"
         }
         guard prefillRoutedGEMMGrouped else { return "per-expert" }
-        return prefillGroupedMoE.groupedPathAvailable(for: mpp) ? "grouped" : "per-expert reason=grouped-unavailable"
+        guard prefillGroupedMoE.groupedPathAvailable(for: mpp) else { return "per-expert reason=grouped-unavailable" }
+        return "grouped tail_tile=\(tailTileInForce(for: mpp) == 0 ? "off" : "32")"
+    }
+
+    /// The tail tile in force for a GEMM instance: the knob, unless the
+    /// selected variant has no 32-row instantiation for this model's K's.
+    private func tailTileInForce(for mpp: MPPPrefillInt4QMM) -> Int {
+        guard prefillTailTile != 0,
+              mpp.groupedRowTile32Available(forK: cfg.hiddenSize),
+              mpp.groupedRowTile32Available(forK: cfg.moeIntermediateSize) else { return 0 }
+        return prefillTailTile
     }
 
     /// The P12 gap levers in force: the shared expert committed before the
@@ -397,6 +407,27 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// `prefillSweepAlternateDefault`.
     private let prefillSweepAlternate: Bool
     private static let prefillSweepAlternateDefault = true
+    /// `SHRIKE_PREFILL_TAIL_TILE=32` packs each expert block's remainder of
+    /// ≤ 32 rows into a 32-row tile instead of a padded 64-row one; `=off`
+    /// keeps every block on 64-row tiles; unset takes `prefillTailTileDefault`.
+    private let prefillTailTile: Int
+    private static let prefillTailTileDefault = 32
+
+    private static func environmentPrefillSweepAlternate() -> Bool {
+        switch ProcessInfo.processInfo.environment["SHRIKE_PREFILL_SWEEP"] {
+        case "alternate": return true
+        case "fixed": return false
+        default: return prefillSweepAlternateDefault
+        }
+    }
+
+    private static func environmentPrefillTailTile() -> Int {
+        switch ProcessInfo.processInfo.environment["SHRIKE_PREFILL_TAIL_TILE"] {
+        case "32": return 32
+        case "off": return 0
+        default: return prefillTailTileDefault
+        }
+    }
 
     private static func makePoolResidency(context: MetalContext)
         -> (holder: ExpertPoolResidency?, unavailableReason: String?) {
@@ -478,11 +509,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTED_GEMM"] != "per-expert"
         self.prefillRouteOverlap =
             ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTE_OVERLAP"] != "off"
-        switch ProcessInfo.processInfo.environment["SHRIKE_PREFILL_SWEEP"] {
-        case "alternate": self.prefillSweepAlternate = true
-        case "fixed": self.prefillSweepAlternate = false
-        default: self.prefillSweepAlternate = Self.prefillSweepAlternateDefault
-        }
+        self.prefillSweepAlternate = Self.environmentPrefillSweepAlternate()
+        self.prefillTailTile = Self.environmentPrefillTailTile()
         let residency = Self.makePoolResidency(context: context)
         self.poolResidency = residency.holder
         self.poolResidencyUnavailableReason = residency.unavailableReason
@@ -5354,10 +5382,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             return
         }
         if prefillRoutedGEMMGrouped, prefillGroupedMoE.groupedPathAvailable(for: mpp) {
+            let tailTile = tailTileInForce(for: mpp)
             let waves = try PrefillGroupedRoutedMoE.planExpertWaves(
                 ranges: ranges,
                 binding: binding,
-                stagingRows: scratch.routedExpertStaging.rowBlock)
+                stagingRows: scratch.routedExpertStaging.rowBlock,
+                tailTile: tailTile)
             try prefillGroupedMoE.encodeGroupedExpertGEMMs(
                 commandBuffer: tileCB,
                 mpp: mpp,
@@ -5368,7 +5398,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 argumentBuffer: argumentBuffer,
                 waves: waves,
                 staging: scratch.routedExpertStaging,
-                params: params)
+                params: params,
+                tailTile: tailTile)
             return
         }
         let leftovers = try prefillGroupedMoE.encodeExpertGEMMs(

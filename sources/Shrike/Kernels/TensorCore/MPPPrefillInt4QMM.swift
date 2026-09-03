@@ -23,6 +23,12 @@ final class MPPPrefillInt4QMM {
     }
 
     static let tileM = 64
+    /// The grouped kernel's row tile: 64 is every variant's; 32 exists for the
+    /// default variant only and is chosen per dispatch.
+    enum GroupedRowTile: Int, Sendable {
+        case m64 = 64
+        case m32 = 32
+    }
     /// The matrix path's admission unit (`PrefillSharedExpert` and
     /// `PrefillGroupedRoutedMoE` refuse a `d`/`intermediate` that is not a
     /// multiple of it), not the kernel's K tile: a wide-K variant carries the
@@ -48,8 +54,10 @@ final class MPPPrefillInt4QMM {
     let variant: TileVariant
     let weightLoads: WeightLoads
     var tileN: Int { variant.tileN }
-    /// A wave is at most 2,048 staging rows, twice the runtime's staging block.
-    static let groupedMaxRowTiles = 32
+    /// Bounds a grouped dispatch's grid height and its block count at 32-row
+    /// granularity over the bench's 2,048-row staging; the wave's real bound is
+    /// the caller's staging block.
+    static let groupedMaxRowTiles = 64
 
     private struct Rung {
         let tileK: Int
@@ -59,6 +67,8 @@ final class MPPPrefillInt4QMM {
 
     private var pipeline: MTLComputePipelineState?
     private var groupedPipeline: MTLComputePipelineState?
+    private let groupedPipelineM32: MTLComputePipelineState?
+    private let groupedM32UnavailableReason: String
     private let narrowRungs: [Rung]
     /// K6: the compile failure reason, recorded once at init so an explicit
     /// MPP request can throw the real cause instead of silently degrading.
@@ -107,6 +117,14 @@ final class MPPPrefillInt4QMM {
             self.groupedArgumentEncodedLength = 0
             self.groupedUnavailableReason = "\(error)"
         }
+        do {
+            self.groupedPipelineM32 = try Self.makePipeline(
+                library: library, name: variant.groupedKernelName + "_m32", constants: constants).pipeline
+            self.groupedM32UnavailableReason = ""
+        } catch {
+            self.groupedPipelineM32 = nil
+            self.groupedM32UnavailableReason = "\(error)"
+        }
         self.narrowRungs = variant.narrowerRungs.map { rung in
             Rung(tileK: rung.tileK,
                  pipeline: try? Self.makePipeline(
@@ -122,9 +140,20 @@ final class MPPPrefillInt4QMM {
         return narrowRungs.first { k.isMultiple(of: $0.tileK) && $0.pipeline != nil }?.pipeline
     }
 
-    private func groupedPipeline(forK k: Int) -> MTLComputePipelineState? {
-        if k.isMultiple(of: variant.tileK) { return groupedPipeline }
-        return narrowRungs.first { k.isMultiple(of: $0.tileK) && $0.grouped != nil }?.grouped
+    private func groupedPipeline(forK k: Int, rowTile: GroupedRowTile) -> MTLComputePipelineState? {
+        switch rowTile {
+        case .m64:
+            if k.isMultiple(of: variant.tileK) { return groupedPipeline }
+            return narrowRungs.first { k.isMultiple(of: $0.tileK) && $0.grouped != nil }?.grouped
+        case .m32:
+            return k.isMultiple(of: variant.tileK) ? groupedPipelineM32 : nil
+        }
+    }
+
+    /// The 32-row grouped instantiation exists for the variant's own K tile
+    /// only; a ragged K has no narrow rung at 32 rows.
+    func groupedRowTile32Available(forK k: Int) -> Bool {
+        groupedPipelineM32 != nil && k.isMultiple(of: variant.tileK)
     }
 
     private static func makePipeline(library: MTLLibrary?,
@@ -231,11 +260,19 @@ final class MPPPrefillInt4QMM {
                        paddedRows: Int,
                        n: Int,
                        k: Int,
-                       required: Bool = true) throws -> Path {
-        let rowTiles = paddedRows / Self.tileM
-        let tileM = UInt32(Self.tileM)
+                       rowTile: GroupedRowTile = .m64,
+                       regionOrigin: Int = 0,
+                       regionRows: Int? = nil,
+                       required: Bool = true,
+                       encoder existing: MTLComputeCommandEncoder? = nil) throws -> Path {
+        let regionRows = regionRows ?? paddedRows
+        let rowTiles = regionRows / rowTile.rawValue
+        let tileM = UInt32(rowTile.rawValue)
         guard paddedRows > 0,
-              paddedRows.isMultiple(of: Self.tileM),
+              regionRows > 0,
+              regionOrigin >= 0,
+              regionOrigin + regionRows <= paddedRows,
+              regionRows.isMultiple(of: rowTile.rawValue),
               rowTiles <= Self.groupedMaxRowTiles,
               rowTileBlock.count == rowTiles,
               !blocks.isEmpty,
@@ -244,9 +281,10 @@ final class MPPPrefillInt4QMM {
               blocks.allSatisfy({ block in
                   Int(block.slot) < expertViews.count
                       && block.rows > 0
-                      && block.stagingRow.isMultiple(of: tileM)
-                      && block.rowTileStart == block.stagingRow / tileM
-                      && Int(block.stagingRow) + Int(block.rows) <= paddedRows
+                      && Int(block.stagingRow) >= regionOrigin
+                      && (Int(block.stagingRow) - regionOrigin).isMultiple(of: Int(tileM))
+                      && Int(block.rowTileStart) == (Int(block.stagingRow) - regionOrigin) / Int(tileM)
+                      && Int(block.stagingRow) + Int(block.rows) <= regionOrigin + regionRows
               }),
               n > 0,
               k > 0,
@@ -258,21 +296,25 @@ final class MPPPrefillInt4QMM {
               yOffset.isMultiple(of: MemoryLayout<Float16>.stride) else {
             if required {
                 throw MPPPrefillInt4QMMError.invalidArguments(
-                    "grouped paddedRows=\(paddedRows) blocks=\(blocks.count) rowTiles=\(rowTileBlock.count)"
+                    "grouped paddedRows=\(paddedRows) region=\(regionOrigin)+\(regionRows)"
+                        + " tile=\(rowTile.rawValue) blocks=\(blocks.count) rowTiles=\(rowTileBlock.count)"
                         + " n=\(n) k=\(k) offsets \(weightsOffset)/\(scalesOffset)/\(biasesOffset)/\(xOffset)/\(yOffset)")
             }
             return .unavailable
         }
-        guard let groupedPipeline = groupedPipeline(forK: k) else {
+        guard let groupedPipeline = groupedPipeline(forK: k, rowTile: rowTile) else {
             if required {
                 throw MPPPrefillInt4QMMError.pipelineUnavailable(
-                    reason: groupedUnavailableReason.isEmpty
+                    reason: rowTile == .m32
+                        ? "no 32-row grouped instantiation for \(variant) at K \(k)"
+                            + (groupedM32UnavailableReason.isEmpty ? "" : ": \(groupedM32UnavailableReason)")
+                        : groupedUnavailableReason.isEmpty
                         ? "MPP grouped pipeline failed to compile"
                         : groupedUnavailableReason)
             }
             return .unavailable
         }
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+        guard let encoder = existing ?? commandBuffer.makeComputeCommandEncoder() else {
             if required { throw MetalError.commandEncoderFailed }
             return .unavailable
         }
@@ -289,6 +331,29 @@ final class MPPPrefillInt4QMM {
                              length: table.count * MemoryLayout<UInt32>.stride,
                              index: 2)
         }
+        try bindGroupedArguments(encoder: encoder, expertViews: expertViews,
+                                 x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                                 n: n, k: k, weightsOffset: weightsOffset,
+                                 scalesOffset: scalesOffset, biasesOffset: biasesOffset,
+                                 paddedRows: paddedRows)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (n + tileN - 1) / tileN,
+                    height: rowTiles,
+                    depth: 1),
+            threadsPerThreadgroup: MTLSize(width: groupedPipeline.threadExecutionWidth * 4,
+                                           height: 1,
+                                           depth: 1))
+        if existing == nil { encoder.endEncoding() }
+        return .affineGroupedF16
+    }
+
+    private func bindGroupedArguments(encoder: MTLComputeCommandEncoder,
+                                      expertViews: [TensorView],
+                                      x: MTLBuffer, xOffset: Int,
+                                      y: MTLBuffer, yOffset: Int,
+                                      n: Int, k: Int,
+                                      weightsOffset: Int, scalesOffset: Int, biasesOffset: Int,
+                                      paddedRows: Int) throws {
         encoder.setBuffer(x, offset: xOffset, index: 3)
         encoder.setBuffer(y, offset: yOffset, index: 4)
         var nValue = UInt32(n)
@@ -309,15 +374,6 @@ final class MPPPrefillInt4QMM {
         for view in expertViews {
             encoder.useResource(view.buffer, usage: .read)
         }
-        encoder.dispatchThreadgroups(
-            MTLSize(width: (n + tileN - 1) / tileN,
-                    height: rowTiles,
-                    depth: 1),
-            threadsPerThreadgroup: MTLSize(width: groupedPipeline.threadExecutionWidth * 4,
-                                           height: 1,
-                                           depth: 1))
-        encoder.endEncoding()
-        return .affineGroupedF16
     }
 
     /// The row stride is already a multiple of 16 (from the `k % 64` guard), so

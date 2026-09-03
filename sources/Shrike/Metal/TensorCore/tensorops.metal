@@ -142,7 +142,7 @@ static inline void mpp_affine_dequant_tile(
 // tiles the dequant of tile t+1 is issued before the matmul of tile t and
 // the barrier after the accumulate carries both edges: it publishes t+1's
 // tile and orders t's reads before that buffer is refilled at t+2.
-template <int TILE_N, int TILE_K, int BUFFERS>
+template <int TILE_M, int TILE_N, int TILE_K, int BUFFERS>
 static inline void mpp_prefill_affine_body(
     device const uint8_t* packedWeights,
     device const bfloat* scales,
@@ -164,7 +164,7 @@ static inline void mpp_prefill_affine_body(
     static_assert(TILE_K % int(kW4A8GroupSize) == 0, "a K tile is whole quant groups");
     static_assert(TILE_N * TILE_K * BUFFERS * 2 <= 32768, "threadgroup budget");
     constexpr auto descriptor = matmul2d_descriptor(
-        kMPPAffineTileM, TILE_N, TILE_K,
+        TILE_M, TILE_N, TILE_K,
         false, true, false);
     matmul2d<descriptor, execution_simdgroups<4>> operation;
 
@@ -262,7 +262,7 @@ kernel void NAME(                                                              \
     uint3 lid3                          [[thread_position_in_threadgroup]],     \
     uint3 threads3                      [[threads_per_threadgroup]]) {          \
     threadgroup half4 weightTile[TILE_N * TILE_K * BUFFERS / 4];                \
-    mpp_prefill_affine_body<TILE_N, TILE_K, BUFFERS>(                           \
+    mpp_prefill_affine_body<kMPPAffineTileM, TILE_N, TILE_K, BUFFERS>(          \
         packedWeights, scales, biases, activations, output, M, N, K,            \
         int32_t(tgid.y) * kMPPAffineTileM, M, tgid.x, vectorLoads != 0u,        \
         lid3.x, threads3.x, reinterpret_cast<threadgroup half*>(weightTile));   \
@@ -283,8 +283,10 @@ struct MPPGroupedExpertBlobsMSL {
     device const uint8_t* blob[16];
 };
 
-/// One expert's slice of the staging block, 64-row aligned; `row_tile_start`
-/// is `staging_row / 64`, the first grid row tile that belongs to it.
+/// One expert's slice of the staging block, row-tile aligned; `row_tile_start`
+/// is `(staging_row - regionOrigin) / TILE_M`, the first grid row tile of this
+/// dispatch's region that belongs to it (`regionOrigin` is 0 for a dispatch
+/// over the whole wave, the body's padded rows for a tail dispatch).
 struct MPPGroupedBlockMSL {
     uint slot;
     uint pair_start;
@@ -295,7 +297,7 @@ struct MPPGroupedBlockMSL {
 
 /// One dispatch over every expert's rows of a wave: the row tile's block
 /// picks the weight pointer, the rest is the plain kernel's body.
-#define MPP_GROUPED_KERNEL(NAME, TILE_N, TILE_K, BUFFERS)                       \
+#define MPP_GROUPED_KERNEL(NAME, TILE_M, TILE_N, TILE_K, BUFFERS)               \
 kernel void NAME(                                                              \
     device const MPPGroupedExpertBlobsMSL& experts [[buffer(0)]],               \
     constant MPPGroupedBlockMSL* blocks            [[buffer(1)]],               \
@@ -319,20 +321,21 @@ kernel void NAME(                                                              \
     device const bfloat* biases =                                               \
         reinterpret_cast<device const bfloat*>(experts.blob[b.slot] + bOff);   \
     const int32_t rowOrigin = int32_t(                                          \
-        b.staging_row + (tgid.y - b.row_tile_start) * uint(kMPPAffineTileM));   \
+        b.staging_row + (tgid.y - b.row_tile_start) * uint(TILE_M));            \
     threadgroup half4 weightTile[TILE_N * TILE_K * BUFFERS / 4];                \
-    mpp_prefill_affine_body<TILE_N, TILE_K, BUFFERS>(                           \
+    mpp_prefill_affine_body<TILE_M, TILE_N, TILE_K, BUFFERS>(                   \
         packedWeights, scales, biases, activations, output, M, N, K,            \
         rowOrigin, b.staging_row + b.rows, tgid.x, vectorLoads != 0u,           \
         lid3.x, threads3.x, reinterpret_cast<threadgroup half*>(weightTile));   \
 }
 
-MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16, 32, 64, 1)
-MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n32b2, 32, 64, 2)
-MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n64b1, 64, 64, 1)
-MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n64b2, 64, 64, 2)
-MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n32k128b1, 32, 128, 1)
-MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n32k256b1, 32, 256, 1)
+MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16, 64, 32, 64, 1)
+MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n32b2, 64, 32, 64, 2)
+MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n64b1, 64, 64, 64, 1)
+MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n64b2, 64, 64, 64, 2)
+MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n32k128b1, 64, 32, 128, 1)
+MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n32k256b1, 64, 32, 256, 1)
+MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n32k256b1_m32, 32, 32, 256, 1)
 
 #undef MPP_GROUPED_KERNEL
 

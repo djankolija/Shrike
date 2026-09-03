@@ -14,6 +14,8 @@ public enum PrefillRoutedGEMMBenchmark {
         public let groupedMillisPerTile: Double
         public let variant: String
         public let weightLoads: String
+        public let rowTile: Int
+        public let tailTile: Int
         public var gflopPerTile: Double {
             Double(experts) * 6.0 * Double(rowsPerExpert) * Double(d) * Double(f) / 1.0e9
         }
@@ -27,7 +29,12 @@ public enum PrefillRoutedGEMMBenchmark {
                            rowsPerExpert: Int = 128,
                            d: Int = 2048,
                            f: Int = 512,
-                           stagingRows: Int = 1024) throws -> Result {
+                           stagingRows: Int = 1024,
+                           rowTile rowTileRows: Int = 64,
+                           tailTile: Int = 0) throws -> Result {
+        guard let rowTile = MPPPrefillInt4QMM.GroupedRowTile(rawValue: rowTileRows) else {
+            throw MPPPrefillInt4QMMError.invalidArguments("row tile \(rowTileRows) is not 64 or 32")
+        }
         let device = context.device
         let mpp = MPPPrefillInt4QMM(context: context, weightBits: 4)
         guard mpp.isAvailable, mpp.groupedAvailable else {
@@ -86,7 +93,9 @@ public enum PrefillRoutedGEMMBenchmark {
         let ranges = try PrefillExpertPairRange.ranges(forTile: tile, routes: routes)
         let waves = try PrefillGroupedRoutedMoE.planExpertWaves(ranges: ranges,
                                                                 binding: binding,
-                                                                stagingRows: stagingRows)
+                                                                stagingRows: stagingRows,
+                                                                rowTile: rowTile.rawValue,
+                                                                tailTile: tailTile)
 
         func encodePerExpert(_ commandBuffer: MTLCommandBuffer) throws {
             let leftovers = try grouped.encodeExpertGEMMs(commandBuffer: commandBuffer,
@@ -113,30 +122,12 @@ public enum PrefillRoutedGEMMBenchmark {
                                                  argumentBuffer: argumentBuffer,
                                                  waves: waves,
                                                  staging: staging,
-                                                 params: params)
+                                                 params: params,
+                                                 rowTile: rowTile,
+                                                 tailTile: tailTile)
         }
-        func time(_ encode: (MTLCommandBuffer) throws -> Void) throws -> Double {
-            guard let warm = context.queue.makeCommandBuffer() else {
-                throw MetalError.commandEncoderFailed
-            }
-            try encode(warm)
-            warm.commit()
-            warm.waitUntilCompleted()
-            if let error = warm.error { throw error }
-            guard let timed = context.queue.makeCommandBuffer() else {
-                throw MetalError.commandEncoderFailed
-            }
-            for _ in 0..<iterations {
-                try encode(timed)
-            }
-            timed.commit()
-            timed.waitUntilCompleted()
-            if let error = timed.error { throw error }
-            return (timed.gpuEndTime - timed.gpuStartTime) * 1000 / Double(iterations)
-        }
-
-        let perExpert = try time(encodePerExpert)
-        let groupedMillis = try time(encodeGrouped)
+        let perExpert = try timeEncodes(context: context, iterations: iterations, encodePerExpert)
+        let groupedMillis = try timeEncodes(context: context, iterations: iterations, encodeGrouped)
         return Result(experts: experts,
                       rowsPerExpert: rowsPerExpert,
                       d: d,
@@ -146,7 +137,31 @@ public enum PrefillRoutedGEMMBenchmark {
                       perExpertMillisPerTile: perExpert,
                       groupedMillisPerTile: groupedMillis,
                       variant: mpp.variant.rawValue,
-                      weightLoads: mpp.weightLoads.rawValue)
+                      weightLoads: mpp.weightLoads.rawValue,
+                      rowTile: rowTile.rawValue,
+                      tailTile: tailTile)
+    }
+
+    private static func timeEncodes(context: MetalContext,
+                                    iterations: Int,
+                                    _ encode: (MTLCommandBuffer) throws -> Void) throws -> Double {
+        guard let warm = context.queue.makeCommandBuffer() else {
+            throw MetalError.commandEncoderFailed
+        }
+        try encode(warm)
+        warm.commit()
+        warm.waitUntilCompleted()
+        if let error = warm.error { throw error }
+        guard let timed = context.queue.makeCommandBuffer() else {
+            throw MetalError.commandEncoderFailed
+        }
+        for _ in 0..<iterations {
+            try encode(timed)
+        }
+        timed.commit()
+        timed.waitUntilCompleted()
+        if let error = timed.error { throw error }
+        return (timed.gpuEndTime - timed.gpuStartTime) * 1000 / Double(iterations)
     }
 
     /// Gate, up and down per expert, each as packed int4 rows then bf16 group

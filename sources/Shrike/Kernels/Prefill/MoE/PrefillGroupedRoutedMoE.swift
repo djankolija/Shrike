@@ -34,6 +34,7 @@ struct PrefillRoutedGroupedParams: Equatable, Sendable {
     var d: UInt32
     var topK: UInt32
     var hiddenStrideElements: UInt32
+    var rowTile: UInt32
 }
 
 /// One expert's `[pairStart, pairStart + pairCount)` window in `sortedPairs`.
@@ -83,20 +84,45 @@ struct PrefillRoutedExpertBlock: Equatable, Sendable {
     var rowTileStart: UInt32
 }
 
+/// `tailRows` is the 32-row tail region at the end of the wave (0 without the
+/// tail tile); the body region `[0, paddedRows - tailRows)` is 64-row tiles.
+/// A body block's `rowTileStart` is its 64-row tile; a tail block's is its
+/// 32-row tile counted from the tail region's start.
 struct PrefillRoutedExpertWave: Equatable, Sendable {
     var blocks: [PrefillRoutedExpertBlock]
     var paddedRows: Int
+    var tailRows: Int = 0
+
+    var bodyPaddedRows: Int { paddedRows - tailRows }
+}
+
+struct PrefillRoutedWaveTables: Equatable, Sendable {
+    var gather: [UInt32]
+    var body: [UInt32]
+    var tail: [UInt32]
 }
 
 extension PrefillGroupedRoutedMoE {
     static let groupedRowTile = MPPPrefillInt4QMM.tileM
+    static let groupedTailRowTile = groupedRowTile / 2
 
     /// An expert longer than a wave is split at row-tile boundaries; a 1-pair
-    /// expert takes one 64-row tile with 63 padded rows.
+    /// expert takes one `rowTile`-row tile, the rest padded — unless `tailTile`
+    /// packs remainders body-first (`planExpertWavesWithTail`).
     static func planExpertWaves(ranges: [PrefillExpertPairRange],
                                 binding: PrefillStreamedTileBinding,
-                                stagingRows: Int) throws -> [PrefillRoutedExpertWave] {
-        let tile = groupedRowTile
+                                stagingRows: Int,
+                                rowTile: Int = groupedRowTile,
+                                tailTile: Int = 0) throws -> [PrefillRoutedExpertWave] {
+        if tailTile != 0 {
+            guard rowTile == groupedRowTile else {
+                throw MPPPrefillInt4QMMError.invalidArguments(
+                    "a tail tile packs \(groupedRowTile)-row bodies; rowTile \(rowTile) cannot combine with it")
+            }
+            return try planExpertWavesWithTail(ranges: ranges, binding: binding,
+                                               stagingRows: stagingRows, tailTile: tailTile)
+        }
+        let tile = rowTile
         guard stagingRows >= tile, stagingRows.isMultiple(of: tile) else {
             throw PrefillGroupedRoutedMoEError.stagingTooSmall(
                 "\(stagingRows) staging rows is not a positive multiple of \(tile)")
@@ -134,12 +160,130 @@ extension PrefillGroupedRoutedMoE {
         return waves
     }
 
+    /// Body-first packing: a range piece of `r` rows is `64·⌊r/64⌋` body rows
+    /// plus a tail block of `r mod 64` rows when that remainder is ≤ 32 — a
+    /// larger remainder stays on a padded 64-row tile, since two 32-row tiles
+    /// cost more than one 64-row tile. Body blocks are laid out first, tail
+    /// blocks after `bodyPaddedRows`; a piece that does not fit the wave's
+    /// padded capacity is cut at the largest `64a + 32b` that does — `used` is
+    /// always a multiple of the tail tile, so that is the wave's remaining
+    /// capacity.
+    private static func planExpertWavesWithTail(ranges: [PrefillExpertPairRange],
+                                                binding: PrefillStreamedTileBinding,
+                                                stagingRows: Int,
+                                                tailTile: Int) throws -> [PrefillRoutedExpertWave] {
+        let body = groupedRowTile
+        guard tailTile == groupedTailRowTile else {
+            throw MPPPrefillInt4QMMError.invalidArguments(
+                "tail tile \(tailTile) is not \(groupedTailRowTile)")
+        }
+        guard stagingRows >= body, stagingRows.isMultiple(of: body) else {
+            throw PrefillGroupedRoutedMoEError.stagingTooSmall(
+                "\(stagingRows) staging rows is not a positive multiple of \(body)")
+        }
+        struct Piece { var slot: UInt32; var pairStart: Int; var rows: Int }
+        var waves: [PrefillRoutedExpertWave] = []
+        var bodyPieces: [Piece] = []
+        var tailPieces: [Piece] = []
+        var used = 0
+        func closeWave() {
+            guard !bodyPieces.isEmpty || !tailPieces.isEmpty else { return }
+            var blocks: [PrefillRoutedExpertBlock] = []
+            var cursor = 0
+            for piece in bodyPieces {
+                blocks.append(PrefillRoutedExpertBlock(
+                    slot: piece.slot, pairStart: UInt32(piece.pairStart), rows: UInt32(piece.rows),
+                    stagingRow: UInt32(cursor), rowTileStart: UInt32(cursor / body)))
+                cursor += (piece.rows + body - 1) / body * body
+            }
+            let bodyPadded = cursor
+            for (index, piece) in tailPieces.enumerated() {
+                blocks.append(PrefillRoutedExpertBlock(
+                    slot: piece.slot, pairStart: UInt32(piece.pairStart), rows: UInt32(piece.rows),
+                    stagingRow: UInt32(cursor), rowTileStart: UInt32(index)))
+                cursor += tailTile
+            }
+            waves.append(PrefillRoutedExpertWave(blocks: blocks, paddedRows: cursor,
+                                                 tailRows: cursor - bodyPadded))
+            bodyPieces.removeAll(keepingCapacity: true)
+            tailPieces.removeAll(keepingCapacity: true)
+            used = 0
+        }
+        func paddedCost(_ rows: Int) -> Int {
+            let remainder = rows % body
+            return rows - remainder + (remainder == 0 ? 0 : remainder <= tailTile ? tailTile : body)
+        }
+        func place(_ slot: UInt32, _ pairStart: Int, _ rows: Int) {
+            let remainder = rows % body
+            let bodyRows = remainder > tailTile ? rows : rows - remainder
+            if bodyRows > 0 { bodyPieces.append(Piece(slot: slot, pairStart: pairStart, rows: bodyRows)) }
+            if remainder > 0, remainder <= tailTile {
+                tailPieces.append(Piece(slot: slot, pairStart: pairStart + bodyRows, rows: remainder))
+            }
+            used += paddedCost(rows)
+        }
+        for range in ranges {
+            guard range.pairCount > 0 else { continue }
+            guard let slot = binding.localSlot(for: range.expert) else {
+                throw PrefillGroupedRoutedMoEError.invalidStreamedTileBinding(
+                    "expert \(range.expert) is not bound in the tile")
+            }
+            var consumed = 0
+            while consumed < range.pairCount {
+                let remaining = range.pairCount - consumed
+                let available = stagingRows - used
+                if used + paddedCost(remaining) <= stagingRows {
+                    place(UInt32(slot), range.pairStart + consumed, remaining)
+                    consumed += remaining
+                    continue
+                }
+                let cut = available / body * body + (available % body >= tailTile ? tailTile : 0)
+                if cut > 0 {
+                    place(UInt32(slot), range.pairStart + consumed, cut)
+                    consumed += cut
+                }
+                closeWave()
+            }
+        }
+        closeWave()
+        return waves
+    }
+
+    /// The three tables of a body/tail wave: `gather` at 32-row granularity
+    /// over every padded row (the gather and scatter kernels), `body` per
+    /// 64-row tile of the body region and `tail` per 32-row tile of the tail
+    /// region (the two GEMM dispatches), each indexing `wave.blocks`.
+    static func rowTileTables(for wave: PrefillRoutedExpertWave) -> PrefillRoutedWaveTables {
+        let body = groupedRowTile
+        let tail = groupedTailRowTile
+        var gather = [UInt32](repeating: 0, count: wave.paddedRows / tail)
+        var bodyTable = [UInt32](repeating: 0, count: wave.bodyPaddedRows / body)
+        var tailTable = [UInt32](repeating: 0, count: wave.tailRows / tail)
+        for (index, block) in wave.blocks.enumerated() {
+            let start = Int(block.stagingRow)
+            let isTail = start >= wave.bodyPaddedRows
+            let padded = isTail ? tail : (Int(block.rows) + body - 1) / body * body
+            for row in stride(from: start, to: start + padded, by: tail) {
+                gather[row / tail] = UInt32(index)
+            }
+            if isTail {
+                tailTable[Int(block.rowTileStart)] = UInt32(index)
+            } else {
+                for tileIndex in (start / body)..<((start + padded) / body) {
+                    bodyTable[tileIndex] = UInt32(index)
+                }
+            }
+        }
+        return PrefillRoutedWaveTables(gather: gather, body: bodyTable, tail: tailTable)
+    }
+
     /// `rowTileBlock[t]` is the index of the block that owns row tile `t`.
-    static func rowTileTable(for wave: PrefillRoutedExpertWave) -> [UInt32] {
-        var table = [UInt32](repeating: 0, count: wave.paddedRows / groupedRowTile)
+    static func rowTileTable(for wave: PrefillRoutedExpertWave,
+                             rowTile: Int = groupedRowTile) -> [UInt32] {
+        var table = [UInt32](repeating: 0, count: wave.paddedRows / rowTile)
         for (index, block) in wave.blocks.enumerated() {
             let first = Int(block.rowTileStart)
-            let count = (Int(block.rows) + groupedRowTile - 1) / groupedRowTile
+            let count = (Int(block.rows) + rowTile - 1) / rowTile
             for tile in first..<(first + count) {
                 table[tile] = UInt32(index)
             }
@@ -857,7 +1001,22 @@ final class PrefillGroupedRoutedMoE {
                                   argumentBuffer: PrefillStreamedTileArgumentBuffer,
                                   waves: [PrefillRoutedExpertWave],
                                   staging: PrefillExpertStaging,
-                                  params: PrefillGroupedRoutedMoEStreamedParams) throws {
+                                  params: PrefillGroupedRoutedMoEStreamedParams,
+                                  rowTile: MPPPrefillInt4QMM.GroupedRowTile = .m64,
+                                  tailTile: Int = 0) throws {
+        if tailTile != 0 {
+            guard rowTile == .m64 else {
+                throw MPPPrefillInt4QMMError.invalidArguments(
+                    "a tail tile packs 64-row bodies; rowTile \(rowTile.rawValue) cannot combine with it")
+            }
+            try encodeBodyTailExpertGEMMs(commandBuffer: commandBuffer, mpp: mpp,
+                                          hidden: hidden, hiddenOffset: hiddenOffset,
+                                          sortedPairs: sortedPairs, sortedPairsOffset: sortedPairsOffset,
+                                          routePartials: routePartials, routePartialsOffset: routePartialsOffset,
+                                          binding: binding, argumentBuffer: argumentBuffer,
+                                          waves: waves, staging: staging, params: params)
+            return
+        }
         guard groupedPathAvailable(for: mpp) else {
             throw MPPPrefillInt4QMMError.pipelineUnavailable(
                 reason: "grouped MPP path unavailable or its argument layout differs")
@@ -876,12 +1035,13 @@ final class PrefillGroupedRoutedMoE {
                 throw PrefillGroupedRoutedMoEError.stagingTooSmall(
                     "wave of \(wave.paddedRows) padded rows exceeds \(staging.rowBlock) staging rows")
             }
-            let rowTileBlock = Self.rowTileTable(for: wave)
+            let rowTileBlock = Self.rowTileTable(for: wave, rowTile: rowTile.rawValue)
             var groupedParams = PrefillRoutedGroupedParams(
                 paddedRows: UInt32(wave.paddedRows),
                 d: UInt32(d),
                 topK: params.topK,
-                hiddenStrideElements: params.hiddenStrideElements)
+                hiddenStrideElements: params.hiddenStrideElements,
+                rowTile: UInt32(rowTile.rawValue))
             try encodeGroupedRowCopy(pso: groupedGatherRowsPSO,
                                      commandBuffer: commandBuffer,
                                      source: hidden,
@@ -902,7 +1062,7 @@ final class PrefillGroupedRoutedMoE {
                                   scalesOffset: Int(params.gateSOff),
                                   biasesOffset: Int(params.gateBOff),
                                   x: staging.hidden, y: staging.gate,
-                                  paddedRows: wave.paddedRows, n: f, k: d)
+                                  paddedRows: wave.paddedRows, n: f, k: d, rowTile: rowTile)
             try mpp.encodeGrouped(commandBuffer: commandBuffer,
                                   experts: argumentBuffer.buffer,
                                   expertViews: binding.views,
@@ -912,7 +1072,7 @@ final class PrefillGroupedRoutedMoE {
                                   scalesOffset: Int(params.upSOff),
                                   biasesOffset: Int(params.upBOff),
                                   x: staging.hidden, y: staging.up,
-                                  paddedRows: wave.paddedRows, n: f, k: d)
+                                  paddedRows: wave.paddedRows, n: f, k: d, rowTile: rowTile)
             try encodeActivation(commandBuffer: commandBuffer,
                                  gate: staging.gate,
                                  up: staging.up,
@@ -926,7 +1086,7 @@ final class PrefillGroupedRoutedMoE {
                                   scalesOffset: Int(params.downSOff),
                                   biasesOffset: Int(params.downBOff),
                                   x: staging.gate, y: staging.down,
-                                  paddedRows: wave.paddedRows, n: d, k: f)
+                                  paddedRows: wave.paddedRows, n: d, k: f, rowTile: rowTile)
             try encodeGroupedRowCopy(pso: groupedScatterRowsPSO,
                                      commandBuffer: commandBuffer,
                                      source: staging.down,
@@ -938,6 +1098,97 @@ final class PrefillGroupedRoutedMoE {
                                      params: &groupedParams,
                                      blocks: wave.blocks,
                                      rowTileBlock: rowTileBlock)
+        }
+    }
+
+    /// The tail-tile path: the gather and scatter walk the wave at 32-row
+    /// granularity; each GEMM is one 64-row dispatch over the body region and
+    /// one 32-row dispatch over the tail region, either skipped when empty.
+    private func encodeBodyTailExpertGEMMs(commandBuffer: MTLCommandBuffer,
+                                           mpp: MPPPrefillInt4QMM,
+                                           hidden: MTLBuffer,
+                                           hiddenOffset: Int,
+                                           sortedPairs: MTLBuffer,
+                                           sortedPairsOffset: Int,
+                                           routePartials: MTLBuffer,
+                                           routePartialsOffset: Int,
+                                           binding: PrefillStreamedTileBinding,
+                                           argumentBuffer: PrefillStreamedTileArgumentBuffer,
+                                           waves: [PrefillRoutedExpertWave],
+                                           staging: PrefillExpertStaging,
+                                           params: PrefillGroupedRoutedMoEStreamedParams) throws {
+        guard groupedPathAvailable(for: mpp),
+              mpp.groupedRowTile32Available(forK: Int(params.d)),
+              mpp.groupedRowTile32Available(forK: Int(params.routedIntermediate)) else {
+            throw MPPPrefillInt4QMMError.pipelineUnavailable(
+                reason: "grouped MPP path or its 32-row instantiation unavailable for d \(params.d) / f \(params.routedIntermediate)")
+        }
+        guard staging.rowBlock > 0,
+              staging.hiddenSize >= Int(params.d),
+              staging.intermediate >= Int(params.routedIntermediate) else {
+            throw PrefillGroupedRoutedMoEError.stagingTooSmall(
+                "\(staging.rowBlock) rows of \(staging.hiddenSize)/\(staging.intermediate)"
+                    + " cannot hold \(params.d)/\(params.routedIntermediate)")
+        }
+        let d = Int(params.d)
+        let f = Int(params.routedIntermediate)
+        for wave in waves {
+            guard wave.paddedRows > 0, wave.paddedRows <= staging.rowBlock else {
+                throw PrefillGroupedRoutedMoEError.stagingTooSmall(
+                    "wave of \(wave.paddedRows) padded rows exceeds \(staging.rowBlock) staging rows")
+            }
+            let tables = Self.rowTileTables(for: wave)
+            let tailBlocks = Array(wave.blocks.suffix(wave.tailRows / Self.groupedTailRowTile))
+            let bodyBlocks = Array(wave.blocks.prefix(wave.blocks.count - tailBlocks.count))
+            let tailTable = tables.tail.map { $0 - UInt32(bodyBlocks.count) }
+            var groupedParams = PrefillRoutedGroupedParams(
+                paddedRows: UInt32(wave.paddedRows),
+                d: UInt32(d),
+                topK: params.topK,
+                hiddenStrideElements: params.hiddenStrideElements,
+                rowTile: UInt32(Self.groupedTailRowTile))
+            try encodeGroupedRowCopy(pso: groupedGatherRowsPSO, commandBuffer: commandBuffer,
+                                     source: hidden, sourceOffset: hiddenOffset,
+                                     sortedPairs: sortedPairs, sortedPairsOffset: sortedPairsOffset,
+                                     destination: staging.hidden, destinationOffset: 0,
+                                     params: &groupedParams, blocks: wave.blocks, rowTileBlock: tables.gather)
+            // Body and tail write disjoint rows, so both dispatches share one
+            // encoder: a tail wave issues the same six encoders as a plain one.
+            func gemm(_ wOff: UInt32, _ sOff: UInt32, _ bOff: UInt32,
+                      x: MTLBuffer, y: MTLBuffer, n: Int, k: Int) throws {
+                guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+                    throw MetalError.commandEncoderFailed
+                }
+                defer { encoder.endEncoding() }
+                if !bodyBlocks.isEmpty {
+                    try mpp.encodeGrouped(commandBuffer: commandBuffer, experts: argumentBuffer.buffer,
+                                          expertViews: binding.views, blocks: bodyBlocks,
+                                          rowTileBlock: tables.body,
+                                          weightsOffset: Int(wOff), scalesOffset: Int(sOff), biasesOffset: Int(bOff),
+                                          x: x, y: y, paddedRows: wave.paddedRows, n: n, k: k,
+                                          rowTile: .m64, regionOrigin: 0, regionRows: wave.bodyPaddedRows,
+                                          encoder: encoder)
+                }
+                if !tailBlocks.isEmpty {
+                    try mpp.encodeGrouped(commandBuffer: commandBuffer, experts: argumentBuffer.buffer,
+                                          expertViews: binding.views, blocks: tailBlocks,
+                                          rowTileBlock: tailTable,
+                                          weightsOffset: Int(wOff), scalesOffset: Int(sOff), biasesOffset: Int(bOff),
+                                          x: x, y: y, paddedRows: wave.paddedRows, n: n, k: k,
+                                          rowTile: .m32, regionOrigin: wave.bodyPaddedRows, regionRows: wave.tailRows,
+                                          encoder: encoder)
+                }
+            }
+            try gemm(params.gateWOff, params.gateSOff, params.gateBOff, x: staging.hidden, y: staging.gate, n: f, k: d)
+            try gemm(params.upWOff, params.upSOff, params.upBOff, x: staging.hidden, y: staging.up, n: f, k: d)
+            try encodeActivation(commandBuffer: commandBuffer, gate: staging.gate, up: staging.up,
+                                 count: wave.paddedRows * f)
+            try gemm(params.downWOff, params.downSOff, params.downBOff, x: staging.gate, y: staging.down, n: d, k: f)
+            try encodeGroupedRowCopy(pso: groupedScatterRowsPSO, commandBuffer: commandBuffer,
+                                     source: staging.down, sourceOffset: 0,
+                                     sortedPairs: sortedPairs, sortedPairsOffset: sortedPairsOffset,
+                                     destination: routePartials, destinationOffset: routePartialsOffset,
+                                     params: &groupedParams, blocks: wave.blocks, rowTileBlock: tables.gather)
         }
     }
 

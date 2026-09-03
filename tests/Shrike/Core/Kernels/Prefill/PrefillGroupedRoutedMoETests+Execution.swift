@@ -248,7 +248,8 @@ extension PrefillGroupedRoutedMoETests {
     init?(siluActivation: Bool,
           variant: MPPPrefillInt4QMM.TileVariant = MPPPrefillInt4QMM.tileVariant,
           d: Int = 512,
-          f: Int = 512) throws {
+          f: Int = 512,
+          irregularHidden: Bool = false) throws {
       self.d = d
       self.f = f
       var pairs: [PrefillTokenExpertPair] = []
@@ -271,7 +272,12 @@ extension PrefillGroupedRoutedMoETests {
         numExperts: 8,
         tileExpertCount: 16)
       let pool = PrefillGroupedRoutedMoETests.makeSyntheticExpertPool(numExperts: 8, d: d, f: f)
-      let hidden = (0..<(rows * d)).map { i in Float16(Float((i % 17) - 8)) }
+      var state: UInt64 = 0x9E37_79B9_7F4A_7C15
+      let hidden = (0..<(rows * d)).map { i -> Float16 in
+        guard irregularHidden else { return Float16(Float((i % 17) - 8)) }
+        state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+        return Float16(Float(Int64(state >> 40) - (1 << 23)) / Float(1 << 21))
+      }
 
       ctx = try MetalContext()
       mpp = MPPPrefillInt4QMM(context: ctx, weightBits: 4, variant: variant)
@@ -602,20 +608,27 @@ extension PrefillGroupedRoutedMoETests {
 
   private static func groupedPartialsAcrossWaves(variant: MPPPrefillInt4QMM.TileVariant,
                                                  d: Int = 512,
-                                                 f: Int = 512) throws -> [Float16]? {
-    guard let fixture = try FourExpertTile(siluActivation: true, variant: variant, d: d, f: f) else { return nil }
+                                                 f: Int = 512,
+                                                 rowTile: MPPPrefillInt4QMM.GroupedRowTile = .m64,
+                                                 tailTile: Int = 0,
+                                                 irregular: Bool = false,
+                                                 stagingRows: Int = 64) throws -> [Float16]? {
+    guard let fixture = try FourExpertTile(siluActivation: true, variant: variant, d: d, f: f,
+                                           irregularHidden: irregular) else { return nil }
     guard let groupedBuffer = fixture.sentinelPartials() else {
       Issue.record("allocation failed")
       return nil
     }
     let ranges = try PrefillExpertPairRange.ranges(forTile: fixture.tile, routes: fixture.routes)
     let staging = try PrefillExpertStaging.allocate(device: fixture.ctx.device,
-                                                    rowBlock: 64,
+                                                    rowBlock: stagingRows,
                                                     hiddenSize: fixture.d,
                                                     intermediate: fixture.f)
     let waves = try PrefillGroupedRoutedMoE.planExpertWaves(ranges: ranges,
                                                             binding: fixture.binding,
-                                                            stagingRows: 64)
+                                                            stagingRows: stagingRows,
+                                                            rowTile: rowTile.rawValue,
+                                                            tailTile: tailTile)
     try fixture.run { commandBuffer in
       try fixture.grouped.encodeGroupedExpertGEMMs(
         commandBuffer: commandBuffer,
@@ -627,9 +640,149 @@ extension PrefillGroupedRoutedMoETests {
         argumentBuffer: fixture.argumentBuffer,
         waves: waves,
         staging: staging,
-        params: fixture.params)
+        params: fixture.params,
+        rowTile: rowTile,
+        tailTile: tailTile)
     }
     return Fp16Buffer.readHalf(groupedBuffer, count: fixture.partialElements)
+  }
+
+  /// 64 staging rows split the fixture into body-only and tail-only waves;
+  /// 512 packs it into one wave with both regions on one encoder.
+  @Test(arguments: [64, 512])
+  func tailTileIsBitIdenticalToTheSixtyFourRowPath(stagingRows: Int) throws {
+    guard let plain = try Self.groupedPartialsAcrossWaves(variant: .n32k256b1, irregular: true,
+                                                          stagingRows: stagingRows),
+          let tailed = try Self.groupedPartialsAcrossWaves(variant: .n32k256b1, tailTile: 32,
+                                                           irregular: true,
+                                                           stagingRows: stagingRows) else { return }
+    let finite = tailed.allSatisfy(\.isFinite)
+    #expect(finite)
+    let firstMismatch = zip(plain, tailed).enumerated().first { $0.element.0 != $0.element.1 }?.offset
+    #expect(firstMismatch == nil, "first mismatch at \(firstMismatch ?? -1)")
+    let untouched = tailed.contains(-77)
+    #expect(!untouched)
+  }
+
+  @Test func tailTilePlannerPacksRemaindersIntoThirtyTwoRowTiles() throws {
+    let ctx = try MetalContext()
+    let binding = try PrefillStreamedTileBinding(
+      expertIDs: [0, 1, 2, 3],
+      views: Self.fakeTensorViews(device: ctx.device, count: 4))
+    let ranges = [PrefillExpertPairRange(expert: 0, pairStart: 0, pairCount: 40),
+                  PrefillExpertPairRange(expert: 1, pairStart: 40, pairCount: 32),
+                  PrefillExpertPairRange(expert: 2, pairStart: 72, pairCount: 5),
+                  PrefillExpertPairRange(expert: 3, pairStart: 77, pairCount: 3)]
+    func block(_ slot: UInt32, _ pairStart: UInt32, _ rows: UInt32,
+               _ stagingRow: UInt32, _ tileStart: UInt32) -> PrefillRoutedExpertBlock {
+      PrefillRoutedExpertBlock(slot: slot, pairStart: pairStart, rows: rows,
+                               stagingRow: stagingRow, rowTileStart: tileStart)
+    }
+    let waves = try PrefillGroupedRoutedMoE.planExpertWaves(ranges: ranges, binding: binding,
+                                                            stagingRows: 512, tailTile: 32)
+    #expect(waves == [PrefillRoutedExpertWave(
+      blocks: [block(0, 0, 40, 0, 0), block(1, 40, 32, 64, 0), block(2, 72, 5, 96, 1), block(3, 77, 3, 128, 2)],
+      paddedRows: 160,
+      tailRows: 96)])
+    let tables = PrefillGroupedRoutedMoE.rowTileTables(for: waves[0])
+    #expect(tables.gather == [0, 0, 1, 2, 3])
+    #expect(tables.body == [0])
+    #expect(tables.tail == [1, 2, 3])
+
+    let split = try PrefillGroupedRoutedMoE.planExpertWaves(ranges: ranges, binding: binding,
+                                                            stagingRows: 64, tailTile: 32)
+    #expect(split == [
+      PrefillRoutedExpertWave(blocks: [block(0, 0, 40, 0, 0)], paddedRows: 64, tailRows: 0),
+      PrefillRoutedExpertWave(blocks: [block(1, 40, 32, 0, 0), block(2, 72, 5, 32, 1)],
+                              paddedRows: 64, tailRows: 64),
+      PrefillRoutedExpertWave(blocks: [block(3, 77, 3, 0, 0)], paddedRows: 32, tailRows: 32),
+    ])
+
+    let long = try PrefillGroupedRoutedMoE.planExpertWaves(
+      ranges: [PrefillExpertPairRange(expert: 2, pairStart: 0, pairCount: 200)],
+      binding: binding, stagingRows: 128, tailTile: 32)
+    #expect(long == [
+      PrefillRoutedExpertWave(blocks: [block(2, 0, 128, 0, 0)], paddedRows: 128, tailRows: 0),
+      PrefillRoutedExpertWave(blocks: [block(2, 128, 64, 0, 0), block(2, 192, 8, 64, 0)],
+                              paddedRows: 96, tailRows: 32),
+    ])
+  }
+
+  @Test func tailTileRefusesARaggedK() throws {
+    guard let fixture = try FourExpertTile(siluActivation: true, variant: .n32k256b1, d: 192, f: 192) else { return }
+    #expect(fixture.mpp.groupedRowTile32Available(forK: 2048))
+    #expect(!fixture.mpp.groupedRowTile32Available(forK: 192))
+    let ranges = try PrefillExpertPairRange.ranges(forTile: fixture.tile, routes: fixture.routes)
+    let staging = try PrefillExpertStaging.allocate(device: fixture.ctx.device, rowBlock: 64,
+                                                    hiddenSize: fixture.d, intermediate: fixture.f)
+    let waves = try PrefillGroupedRoutedMoE.planExpertWaves(ranges: ranges, binding: fixture.binding,
+                                                            stagingRows: 64, tailTile: 32)
+    guard let commandBuffer = fixture.ctx.queue.makeCommandBuffer(),
+          let partials = fixture.sentinelPartials() else {
+      Issue.record("allocation failed")
+      return
+    }
+    let refusal = #expect(throws: MPPPrefillInt4QMMError.self) {
+      try fixture.grouped.encodeGroupedExpertGEMMs(
+        commandBuffer: commandBuffer, mpp: fixture.mpp, hidden: fixture.hiddenBuffer,
+        sortedPairs: fixture.pairBuffer, routePartials: partials, binding: fixture.binding,
+        argumentBuffer: fixture.argumentBuffer, waves: waves, staging: staging,
+        params: fixture.params, tailTile: 32)
+    }
+    #expect(String(describing: refusal).contains("32-row instantiation"), "\(String(describing: refusal))")
+  }
+
+  @Test func tailTileIsSkippedWhenNoBlockHasARemainder() throws {
+    let ctx = try MetalContext()
+    let binding = try PrefillStreamedTileBinding(
+      expertIDs: [0, 1, 2],
+      views: Self.fakeTensorViews(device: ctx.device, count: 3))
+    let ranges = [PrefillExpertPairRange(expert: 0, pairStart: 0, pairCount: 64),
+                  PrefillExpertPairRange(expert: 1, pairStart: 64, pairCount: 128),
+                  PrefillExpertPairRange(expert: 2, pairStart: 192, pairCount: 97)]
+    let waves = try PrefillGroupedRoutedMoE.planExpertWaves(ranges: ranges, binding: binding,
+                                                            stagingRows: 512, tailTile: 32)
+    #expect(waves.count == 1)
+    #expect(waves[0].tailRows == 0)
+    #expect(waves[0].paddedRows == 320)
+    #expect(waves[0].blocks.map(\.rows) == [64, 128, 97])
+    #expect(waves[0].blocks.map(\.stagingRow) == [0, 64, 192])
+    let tables = PrefillGroupedRoutedMoE.rowTileTables(for: waves[0])
+    #expect(tables.tail.isEmpty)
+    #expect(tables.body == [0, 1, 1, 2, 2])
+    #expect(tables.gather == [0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
+  }
+
+  @Test func thirtyTwoRowGroupedTileIsBitIdenticalToTheSixtyFourRowTile() throws {
+    guard let wide = try Self.groupedPartialsAcrossWaves(variant: .n32k256b1, irregular: true),
+          let narrow = try Self.groupedPartialsAcrossWaves(variant: .n32k256b1, rowTile: .m32,
+                                                           irregular: true) else { return }
+    let finite = narrow.allSatisfy(\.isFinite)
+    #expect(finite)
+    let firstMismatch = zip(wide, narrow).enumerated().first { $0.element.0 != $0.element.1 }?.offset
+    #expect(firstMismatch == nil, "first mismatch at \(firstMismatch ?? -1)")
+    let untouched = narrow.contains(-77)
+    #expect(!untouched)
+  }
+
+  @Test func thirtyTwoRowPlannerHalvesTheTailPadding() throws {
+    let ranges = [
+      PrefillExpertPairRange(expert: 0, pairStart: 0, pairCount: 40),
+      PrefillExpertPairRange(expert: 1, pairStart: 40, pairCount: 32),
+      PrefillExpertPairRange(expert: 2, pairStart: 72, pairCount: 5),
+      PrefillExpertPairRange(expert: 3, pairStart: 77, pairCount: 3),
+    ]
+    let ctx = try MetalContext()
+    let binding = try PrefillStreamedTileBinding(
+      expertIDs: [0, 1, 2, 3],
+      views: Self.fakeTensorViews(device: ctx.device, count: 4))
+    let waves = try PrefillGroupedRoutedMoE.planExpertWaves(ranges: ranges, binding: binding,
+                                                            stagingRows: 512, rowTile: 32)
+    #expect(waves.count == 1)
+    #expect(waves[0].paddedRows == 160)
+    #expect(waves[0].blocks.map(\.stagingRow) == [0, 64, 96, 128])
+    #expect(waves[0].blocks.map(\.rowTileStart) == [0, 2, 3, 4])
+    #expect(PrefillGroupedRoutedMoE.rowTileTable(for: waves[0], rowTile: 32) == [0, 0, 1, 2, 3])
   }
 
   @Test func groupedWideKInstanceFallsBackOnARaggedK() throws {

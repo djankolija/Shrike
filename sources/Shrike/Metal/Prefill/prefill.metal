@@ -884,11 +884,9 @@ kernel void prefill_routed_scatter_rows(
     route_partials[(pair.token * p.top_k + pair.rank) * p.D + d] = staging[row * p.D + d];
 }
 
-/// Mirror of `MPPGroupedBlockMSL` and `kMPPAffineTileM` in tensorops.metal: the
-/// two modules compile separately, and the Swift side hands both the same
-/// inline block table.
-constant constexpr uint kPrefillRoutedGroupedRowTile = 64;
-
+/// Mirror of `MPPGroupedBlockMSL` in tensorops.metal: the two modules compile
+/// separately, and the Swift side hands both the same inline block table and
+/// the row tile the table was built on.
 struct PrefillRoutedGroupedBlockMSL {
     uint slot;
     uint pair_start;
@@ -902,6 +900,7 @@ struct PrefillRoutedGroupedParamsMSL {
     uint D;
     uint top_k;
     uint hidden_stride_elements;
+    uint row_tile;
 };
 
 kernel void prefill_routed_gather_rows_grouped(
@@ -917,7 +916,7 @@ kernel void prefill_routed_gather_rows_grouped(
     const uint row = gid.y;
     if (d >= p.D || row >= p.padded_rows) return;
 
-    const PrefillRoutedGroupedBlockMSL b = blocks[row_tile_block[row / kPrefillRoutedGroupedRowTile]];
+    const PrefillRoutedGroupedBlockMSL b = blocks[row_tile_block[row / p.row_tile]];
     const uint local = row - b.staging_row;
     if (local >= b.rows) {
         staging[row * p.D + d] = half(0.0h);
@@ -940,7 +939,7 @@ kernel void prefill_routed_scatter_rows_grouped(
     const uint row = gid.y;
     if (d >= p.D || row >= p.padded_rows) return;
 
-    const PrefillRoutedGroupedBlockMSL b = blocks[row_tile_block[row / kPrefillRoutedGroupedRowTile]];
+    const PrefillRoutedGroupedBlockMSL b = blocks[row_tile_block[row / p.row_tile]];
     const uint local = row - b.staging_row;
     if (local >= b.rows) return;
     const PrefillTokenExpertPairMSL pair = sorted_pairs[b.pair_start + local];
