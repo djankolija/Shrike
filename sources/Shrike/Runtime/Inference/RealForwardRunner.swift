@@ -251,6 +251,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             residency = "none"
         }
         return "overlap=\(prefillRouteOverlap ? "on" : "off") residency=\(residency)"
+            + " sweep=\(prefillSweepAlternate ? "alternate" : "fixed")"
     }
 
     /// The prefill router kernel in force (`block` or `tiled tokens=N`) and its
@@ -391,6 +392,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// per-buffer residency for the same-binary A/B.
     private let poolResidency: ExpertPoolResidency?
     private let poolResidencyUnavailableReason: String?
+    /// `SHRIKE_PREFILL_SWEEP=alternate` reverses the expert sweep direction on
+    /// odd-parity chunks; `=fixed` keeps every chunk ascending; unset takes
+    /// `prefillSweepAlternateDefault`.
+    private let prefillSweepAlternate: Bool
+    private static let prefillSweepAlternateDefault = true
 
     private static func makePoolResidency(context: MetalContext)
         -> (holder: ExpertPoolResidency?, unavailableReason: String?) {
@@ -410,6 +416,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             return 1
         }
         return max(1, min(16, width))
+    }
+
+    /// `PrefillChunkPlanner.spans` lays chunks out contiguously from
+    /// `startPosition`, so this is the chunk index's parity within the prompt.
+    static func prefillChunkSweepIsDescending(startPosition: Int, chunkTokens: Int) -> Bool {
+        (startPosition / chunkTokens) % 2 == 1
     }
 
     /// Per-layer `router.scale * D^-0.5` pre-folded into one BF16 buffer
@@ -466,6 +478,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTED_GEMM"] != "per-expert"
         self.prefillRouteOverlap =
             ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTE_OVERLAP"] != "off"
+        switch ProcessInfo.processInfo.environment["SHRIKE_PREFILL_SWEEP"] {
+        case "alternate": self.prefillSweepAlternate = true
+        case "fixed": self.prefillSweepAlternate = false
+        default: self.prefillSweepAlternate = Self.prefillSweepAlternateDefault
+        }
         let residency = Self.makePoolResidency(context: context)
         self.poolResidency = residency.holder
         self.poolResidencyUnavailableReason = residency.unavailableReason
@@ -2231,6 +2248,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         var prefillTileNanos: UInt64 = 0
         var prefillTailNanos: UInt64 = 0
         var prefillActiveExperts: UInt64 = 0
+        let prefillDescendingSweep = prefillSweepAlternate
+            && Self.prefillChunkSweepIsDescending(startPosition: startPosition,
+                                                  chunkTokens: config.chunkTokens)
 
         for L in 0..<cfg.numLayers {
             try Task.checkCancellation()
@@ -2323,6 +2343,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 try await encodeRoutedMoEPrefill(
                     cb: &cb, layer: L, views: views, scratch: scratch,
                     tokenCount: t, hiddenSize: D,
+                    descendingSweep: prefillDescendingSweep,
                     layerStart: prefillLayerStart,
                     routeNanos: &prefillRouteNanos,
                     tileNanos: &prefillTileNanos,
@@ -4805,7 +4826,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// host work that runs while the shared expert's command buffer is on the GPU.
     private func buildPrefillRoutes(layer L: Int,
                                     tokenCount t: Int,
-                                    scratch: PrefillChunkScratchBuffers) throws -> PrefillRouting {
+                                    scratch: PrefillChunkScratchBuffers,
+                                    descendingSweep: Bool) throws -> PrefillRouting {
         let routeCount = t * cfg.topKExperts
         let idPtr = scratch.routeIDs.contents()
             .bindMemory(to: UInt32.self, capacity: routeCount)
@@ -4841,7 +4863,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             topK: cfg.topKExperts,
             numExperts: cfg.numExperts,
             tileExpertCount: schedulerConfig.tileExperts,
-            expertSortKeys: model.routedExpertPhysicalOffsets(layer: L))
+            expertSortKeys: model.routedExpertPhysicalOffsets(layer: L),
+            descending: descendingSweep)
         return PrefillRouting(routes: routes, schedulerConfig: schedulerConfig)
     }
 
@@ -5023,6 +5046,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         scratch: PrefillChunkScratchBuffers,
         tokenCount t: Int,
         hiddenSize D: Int,
+        descendingSweep: Bool,
         layerStart prefillLayerStart: UInt64,
         routeNanos prefillRouteNanos: inout UInt64,
         tileNanos prefillTileNanos: inout UInt64,
@@ -5087,7 +5111,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 recordKernelGPU(role: cfg.layerIsLinear(L) ? "prefill_gdn_router"
                                     : "prefill_attn_router", cb)
 
-                let routing = try buildPrefillRoutes(layer: L, tokenCount: t, scratch: scratch)
+                let routing = try buildPrefillRoutes(layer: L, tokenCount: t, scratch: scratch,
+                                                     descendingSweep: descendingSweep)
                 let routes = routing.routes
                 let schedulerConfig = routing.schedulerConfig
                 prefillRouteEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)

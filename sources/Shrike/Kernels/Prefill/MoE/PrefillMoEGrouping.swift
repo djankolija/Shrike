@@ -94,7 +94,8 @@ enum PrefillMoEGrouping {
         topK: Int,
         numExperts: Int,
         tileExpertCount: Int = 16,
-        expertSortKeys: [UInt64]? = nil
+        expertSortKeys: [UInt64]? = nil,
+        descending: Bool = false
     ) throws -> PrefillMoEGroupedRoutes {
         guard queryCount >= 0 else {
             throw PrefillMoEGroupingError.invalidQueryCount(queryCount)
@@ -141,9 +142,9 @@ enum PrefillMoEGrouping {
             if let expertSortKeys {
                 let lhsKey = expertSortKeys[Int($0.expert)]
                 let rhsKey = expertSortKeys[Int($1.expert)]
-                if lhsKey != rhsKey { return lhsKey < rhsKey }
+                if lhsKey != rhsKey { return descending ? lhsKey > rhsKey : lhsKey < rhsKey }
             }
-            if $0.expert != $1.expert { return $0.expert < $1.expert }
+            if $0.expert != $1.expert { return descending ? $0.expert > $1.expert : $0.expert < $1.expert }
             if $0.token != $1.token { return $0.token < $1.token }
             return $0.rank < $1.rank
         }

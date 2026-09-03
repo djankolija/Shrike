@@ -17,6 +17,18 @@ extension ShrikeBench {
                 + "achieved_tflops=\(String(format: "%.3f", result.groupedTFLOPS)) "
                 + "speedup=\(String(format: "%.2f", result.perExpertMillisPerTile / result.groupedMillisPerTile))x")
         }
+        // 128/97/65 rows-per-expert plan the same 16 tiles at stagingRows=1024, so a flat per_tile_ms means a padded row costs a real row.
+        for rowsPerExpert in [128, 97, 65] {
+            let padded = try PrefillRoutedGEMMBenchmark.run(context: context,
+                                                            iterations: iterations,
+                                                            experts: 8,
+                                                            rowsPerExpert: rowsPerExpert,
+                                                            stagingRows: 1024)
+            print("kernel=routed_gemm_padding_sweep rows_per_expert=\(padded.rowsPerExpert) "
+                + "real_rows=\(padded.experts * padded.rowsPerExpert) "
+                + "waves=\(padded.groupedWaves) padded_rows=\(padded.groupedWaves * padded.stagingRows) "
+                + "per_tile_ms=\(String(format: "%.4f", padded.groupedMillisPerTile))")
+        }
         try runGEMM(kernelName: "gemm_expert_gateup_128rows", iterations: iterations, context: context)
         try runGEMM(kernelName: "gemm_expert_down_128rows", iterations: iterations, context: context)
     }

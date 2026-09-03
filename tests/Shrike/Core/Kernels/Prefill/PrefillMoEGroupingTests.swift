@@ -114,6 +114,98 @@ import Testing
         }
     }
 
+    @Test func groupingCanOrderTilesByDescendingExpertSortKeysWhileKeepingPairRangesContiguous() throws {
+        let pairs = [
+            Self.pair(token: 0, expert: 1, rank: 0, weightBits: 10),
+            Self.pair(token: 0, expert: 2, rank: 1, weightBits: 20),
+            Self.pair(token: 1, expert: 3, rank: 0, weightBits: 30),
+            Self.pair(token: 1, expert: 1, rank: 1, weightBits: 11),
+            Self.pair(token: 2, expert: 2, rank: 0, weightBits: 21),
+            Self.pair(token: 2, expert: 3, rank: 1, weightBits: 31),
+        ]
+
+        let grouped = try PrefillMoEGrouping.groupTokenExpertPairs(
+            pairs,
+            queryCount: 3,
+            topK: 2,
+            numExperts: 4,
+            tileExpertCount: 2,
+            expertSortKeys: [0, 30, 10, 20],
+            descending: true)
+
+        #expect(grouped.groups.map(\.expert) == [1, 3, 2])
+        #expect(grouped.sortedPairs.map(\.expert) == [1, 1, 3, 3, 2, 2])
+        #expect(grouped.perExpertOffsets == [UInt32.max, 0, 4, 2])
+        #expect(grouped.tiles == [
+            PrefillMoETile(groupStart: 0, groupCount: 2, pairStart: 0, pairCount: 4),
+            PrefillMoETile(groupStart: 2, groupCount: 1, pairStart: 4, pairCount: 2),
+        ])
+        for tile in grouped.tiles {
+            let slice = grouped.sortedPairs[Int(tile.pairStart)..<Int(tile.pairStart + tile.pairCount)]
+            let tileExperts = grouped.groups[Int(tile.groupStart)..<Int(tile.groupStart + tile.groupCount)]
+                .map(\.expert)
+            #expect(Set(slice.map(\.expert)) == Set(tileExperts))
+        }
+        for group in grouped.groups {
+            let slice = grouped.sortedPairs[Int(group.pairStart)..<Int(group.pairStart + group.pairCount)]
+            var previous: (token: UInt32, rank: UInt32)?
+            for pair in slice {
+                if let previous {
+                    #expect(previous.token < pair.token
+                        || (previous.token == pair.token && previous.rank < pair.rank))
+                }
+                previous = (pair.token, pair.rank)
+            }
+        }
+    }
+
+    @Test func groupingWithDescendingFalseMatchesDefaultBehavior() throws {
+        let pairs = [
+            Self.pair(token: 0, expert: 1, rank: 0, weightBits: 10),
+            Self.pair(token: 0, expert: 2, rank: 1, weightBits: 20),
+            Self.pair(token: 1, expert: 3, rank: 0, weightBits: 30),
+            Self.pair(token: 1, expert: 1, rank: 1, weightBits: 11),
+            Self.pair(token: 2, expert: 2, rank: 0, weightBits: 21),
+            Self.pair(token: 2, expert: 3, rank: 1, weightBits: 31),
+        ]
+
+        let defaulted = try PrefillMoEGrouping.groupTokenExpertPairs(
+            pairs,
+            queryCount: 3,
+            topK: 2,
+            numExperts: 4,
+            tileExpertCount: 2,
+            expertSortKeys: [0, 30, 10, 20])
+        let explicit = try PrefillMoEGrouping.groupTokenExpertPairs(
+            pairs,
+            queryCount: 3,
+            topK: 2,
+            numExperts: 4,
+            tileExpertCount: 2,
+            expertSortKeys: [0, 30, 10, 20],
+            descending: false)
+
+        #expect(defaulted == explicit)
+    }
+
+    @Test func chunkSweepParityAlternatesByChunkIndex() throws {
+        let chunkTokens = 4_096
+        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
+            startPosition: 0, chunkTokens: chunkTokens) == false)
+        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
+            startPosition: 4_095, chunkTokens: chunkTokens) == false)
+        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
+            startPosition: 4_096, chunkTokens: chunkTokens) == true)
+        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
+            startPosition: 8_191, chunkTokens: chunkTokens) == true)
+        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
+            startPosition: 8_192, chunkTokens: chunkTokens) == false)
+        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
+            startPosition: 2_048, chunkTokens: 2_048) == true)
+        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
+            startPosition: 4_096, chunkTokens: 2_048) == false)
+    }
+
     @Test func groupingRejectsInvalidMetadataBeforeKernelUse() throws {
         #expect {
             _ = try PrefillMoEGrouping.groupTokenExpertPairs(
