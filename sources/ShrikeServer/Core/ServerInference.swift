@@ -529,6 +529,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     public nonisolated let prefillGDNScanPathDescription: String
     public nonisolated let prefillTileBatchDescription: String
     public nonisolated let prefillRoutedGEMMDescription: String
+    public nonisolated let prefillGapLeversDescription: String
     /// Routed-expert slots per layer actually in force, so the ready banner can
     /// report the streaming budget rather than leaving the user to infer it.
     public nonisolated let expertCacheSlots: Int
@@ -817,7 +818,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                                          concisePrompt: conciseModeEnabled()
                                            ? ConcisePrompt.prompt(for: model) : nil)
         ServerLog.residency("prefill_projection_path=\(session.prefillProjectionPath) prefill_attention_path="
-                            + "\(session.prefillAttentionPathDescription) prefill_gdn_scan=\(session.prefillGDNScanPathDescription) prefill_tile_batch=\(session.prefillTileBatchDescription) prefill_routed_gemm=\(session.prefillRoutedGEMMDescription)")
+                            + "\(session.prefillAttentionPathDescription) prefill_gdn_scan=\(session.prefillGDNScanPathDescription) prefill_tile_batch=\(session.prefillTileBatchDescription) prefill_routed_gemm=\(session.prefillRoutedGEMMDescription)"
+                            + " prefill_gap_levers=\(session.prefillGapLeversDescription)")
         return session
     }
 
@@ -852,6 +854,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.prefillAttentionPathDescription = runner.prefillAttentionPathDescription
         self.prefillGDNScanPathDescription = runner.prefillGDNScanPathDescription
         self.prefillTileBatchDescription = runner.prefillTileBatchDescription
+        self.prefillGapLeversDescription = runner.prefillGapLeversDescription
         self.prefillRoutedGEMMDescription = runner.prefillRoutedGEMMDescription
         self.expertCacheSlots = expertCacheSlots
         self.maxContext = maxContext

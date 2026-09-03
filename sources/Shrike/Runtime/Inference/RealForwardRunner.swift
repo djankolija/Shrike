@@ -239,6 +239,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return prefillGroupedMoE.groupedPathAvailable(for: mpp) ? "grouped" : "per-expert reason=grouped-unavailable"
     }
 
+    /// The P12 gap levers in force: the shared expert committed before the
+    /// router wait, and the expert pools held in a queue residency set.
+    public var prefillGapLeversDescription: String {
+        let residency: String
+        if poolResidency != nil {
+            residency = "set"
+        } else if let reason = poolResidencyUnavailableReason {
+            residency = "unavailable reason=\(reason)"
+        } else {
+            residency = "none"
+        }
+        return "overlap=\(prefillRouteOverlap ? "on" : "off") residency=\(residency)"
+    }
+
     // Scratch — preallocated per spec'd D / F / vocab.
     private let decodeScratch: DecodeScratchBuffers
     private var hidden: MTLBuffer { decodeScratch.hidden }          // [D] FP16
@@ -364,6 +378,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// `SHRIKE_PREFILL_ROUTED_GEMM=per-expert` keeps the P3 per-expert GEMMs
     /// for the same-binary A/B; anything else takes the grouped dispatch.
     private let prefillRoutedGEMMGrouped: Bool
+    /// `SHRIKE_PREFILL_ROUTE_OVERLAP=off` keeps the shared expert after the
+    /// host routing for the same-binary A/B; anything else commits it before.
+    private let prefillRouteOverlap: Bool
+    /// `SHRIKE_PREFILL_POOL_RESIDENCY=none` leaves the expert pools to
+    /// per-buffer residency for the same-binary A/B.
+    private let poolResidency: ExpertPoolResidency?
+    private let poolResidencyUnavailableReason: String?
+
+    private static func makePoolResidency(context: MetalContext)
+        -> (holder: ExpertPoolResidency?, unavailableReason: String?) {
+        guard ProcessInfo.processInfo.environment["SHRIKE_PREFILL_POOL_RESIDENCY"] != "none" else {
+            return (nil, nil)
+        }
+        do {
+            return (try ExpertPoolResidency(device: context.device, queue: context.queue), nil)
+        } catch {
+            return (nil, "\(error)")
+        }
+    }
 
     private static func environmentPrefillTileBatch() -> Int {
         guard let raw = ProcessInfo.processInfo.environment["SHRIKE_PREFILL_TILE_BATCH"],
@@ -425,6 +458,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             tilesPerCommandBuffer: Self.environmentPrefillTileBatch())
         self.prefillRoutedGEMMGrouped =
             ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTED_GEMM"] != "per-expert"
+        self.prefillRouteOverlap =
+            ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTE_OVERLAP"] != "off"
+        let residency = Self.makePoolResidency(context: context)
+        self.poolResidency = residency.holder
+        self.poolResidencyUnavailableReason = residency.unavailableReason
         self.decodeExpertExecution = runtimeConfiguration.decodeExpertExecution
         self.expertIOSynchronization = runtimeConfiguration.expertIOSynchronization
         self.expertIOSubmission = runtimeConfiguration.expertIOSubmission
@@ -4752,6 +4790,55 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
+    private struct PrefillRouting {
+        let routes: PrefillMoEGroupedRoutes
+        let schedulerConfig: PrefillRoutedTileSchedulerConfig
+    }
+
+    /// The router readback, pair building and grouping of one prefill chunk:
+    /// host work that runs while the shared expert's command buffer is on the GPU.
+    private func buildPrefillRoutes(layer L: Int,
+                                    tokenCount t: Int,
+                                    scratch: PrefillChunkScratchBuffers) throws -> PrefillRouting {
+        let routeCount = t * cfg.topKExperts
+        let idPtr = scratch.routeIDs.contents()
+            .bindMemory(to: UInt32.self, capacity: routeCount)
+        let weightPtr = scratch.routeWeights.contents()
+            .bindMemory(to: Float16.self, capacity: routeCount)
+        // Reused per-chunk host scratch (R38): cleared in place so
+        // the routed-tile planner never allocates per chunk.
+        routeIDScratch.removeAll(keepingCapacity: true)
+        routeWeightScratch.removeAll(keepingCapacity: true)
+        routeIDScratch.reserveCapacity(routeCount)
+        routeWeightScratch.reserveCapacity(routeCount)
+        for i in 0..<routeCount {
+            routeIDScratch.append(min(idPtr[i], UInt32(cfg.numExperts - 1)))
+            routeWeightScratch.append(weightPtr[i])
+        }
+        let pairs = PrefillRouter.makeTokenExpertPairs(indices: routeIDScratch,
+                                                       weights: routeWeightScratch,
+                                                       queryCount: t,
+                                                       topK: cfg.topKExperts)
+        let schedulerConfig: PrefillRoutedTileSchedulerConfig
+        if let slotCount = model.routedExpertCacheSlotCount() {
+            guard let fitted = prefillRoutedTileSchedulerConfig.fitting(slotCount: slotCount) else {
+                throw PrefillError.chunkedUnsupported(
+                    "prefill routed tiles cannot fit the \(slotCount)-slot expert cache")
+            }
+            schedulerConfig = fitted
+        } else {
+            schedulerConfig = prefillRoutedTileSchedulerConfig
+        }
+        let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
+            pairs,
+            queryCount: t,
+            topK: cfg.topKExperts,
+            numExperts: cfg.numExperts,
+            tileExpertCount: schedulerConfig.tileExperts,
+            expertSortKeys: model.routedExpertPhysicalOffsets(layer: L))
+        return PrefillRouting(routes: routes, schedulerConfig: schedulerConfig)
+    }
+
     /// The shared (dense) expert branch of one prefill chunk and its scalar
     /// gate, on whichever of the matrix and per-token paths this chunk earns.
     private func encodeSharedExpertBlock(commandBuffer sharedCB: MTLCommandBuffer,
@@ -4944,6 +5031,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             throw ModelError.internalInconsistency(
                 detail: "routed-MoE prefill on layer \(L) without a router view")
         }
+        if let poolResidency, let pool = try model.routedExpertResidency(layer: L).expertPool {
+            poolResidency.include(pool)
+        }
         try prefillRouter.encodeBlock(
                     commandBuffer: cb,
                     weights: router.buffer,
@@ -4967,6 +5057,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     hiddenStrideElements: UInt32(D))
 
                 cb.commit()
+                guard let sharedCB = ctx.queue.makeCommandBuffer() else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                try encodeSharedExpertBlock(commandBuffer: sharedCB,
+                                            layer: L,
+                                            scratch: scratch,
+                                            tokenCount: t,
+                                            hiddenSize: D)
+                // One queue runs buffers in commit order, so sharedCB's read of
+                // routedX is ordered after cb; committing it before the wait lets
+                // its GPU time cover the host routing below.
+                if prefillRouteOverlap { sharedCB.commit() }
                 try waitForCompletion(cb)
                 // Prefill had no occupancy instrumentation at all: these buffers
                 // never reached recordKernelGPU, so SHRIKE_KERNEL_STATS reported
@@ -4979,46 +5081,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 recordKernelGPU(role: cfg.layerIsLinear(L) ? "prefill_gdn_router"
                                     : "prefill_attn_router", cb)
 
-                let routeCount = t * cfg.topKExperts
-                let idPtr = scratch.routeIDs.contents()
-                    .bindMemory(to: UInt32.self, capacity: routeCount)
-                let weightPtr = scratch.routeWeights.contents()
-                    .bindMemory(to: Float16.self, capacity: routeCount)
-                // Reused per-chunk host scratch (R38): cleared in place so
-                // the routed-tile planner never allocates per chunk.
-                routeIDScratch.removeAll(keepingCapacity: true)
-                routeWeightScratch.removeAll(keepingCapacity: true)
-                routeIDScratch.reserveCapacity(routeCount)
-                routeWeightScratch.reserveCapacity(routeCount)
-                for i in 0..<routeCount {
-                    routeIDScratch.append(min(idPtr[i], UInt32(cfg.numExperts - 1)))
-                    routeWeightScratch.append(weightPtr[i])
-                }
-                let pairs = PrefillRouter.makeTokenExpertPairs(indices: routeIDScratch,
-                                                               weights: routeWeightScratch,
-                                                               queryCount: t,
-                                                               topK: cfg.topKExperts)
-                let schedulerConfig: PrefillRoutedTileSchedulerConfig
-                let routeTileExpertCount: Int
-                if let slotCount = model.routedExpertCacheSlotCount() {
-                    guard let fitted = prefillRoutedTileSchedulerConfig.fitting(
-                        slotCount: slotCount) else {
-                        throw PrefillError.chunkedUnsupported(
-                            "prefill routed tiles cannot fit the \(slotCount)-slot expert cache")
-                    }
-                    schedulerConfig = fitted
-                    routeTileExpertCount = fitted.tileExperts
-                } else {
-                    schedulerConfig = prefillRoutedTileSchedulerConfig
-                    routeTileExpertCount = schedulerConfig.tileExperts
-                }
-                let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
-                    pairs,
-                    queryCount: t,
-                    topK: cfg.topKExperts,
-                    numExperts: cfg.numExperts,
-                    tileExpertCount: routeTileExpertCount,
-                    expertSortKeys: model.routedExpertPhysicalOffsets(layer: L))
+                let routing = try buildPrefillRoutes(layer: L, tokenCount: t, scratch: scratch)
+                let routes = routing.routes
+                let schedulerConfig = routing.schedulerConfig
                 prefillRouteEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
                 prefillRouteNanos &+= prefillRouteEnd - prefillLayerStart
                 // One group per *distinct* expert this chunk touches. For a
@@ -5028,15 +5093,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 // first row already pulled in or pays for its own.
                 prefillActiveExperts &+= UInt64(routes.groups.count)
 
-                guard let sharedCB = ctx.queue.makeCommandBuffer() else {
-                    throw ModelError.residentBufferWrapFailed
-                }
-                try encodeSharedExpertBlock(commandBuffer: sharedCB,
-                                            layer: L,
-                                            scratch: scratch,
-                                            tokenCount: t,
-                                            hiddenSize: D)
-                sharedCB.commit()
+                if !prefillRouteOverlap { sharedCB.commit() }
                 try waitForCompletion(sharedCB)
                 recordKernelGPU(role: "prefill_shared_expert", sharedCB)
 
