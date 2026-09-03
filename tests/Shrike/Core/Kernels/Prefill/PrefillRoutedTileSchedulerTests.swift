@@ -263,6 +263,68 @@ import Testing
         #expect(narrow.fitting(slotCount: 16) == narrow)
     }
 
+    @Test func fittingKeepsTheDepthAndNarrowsTheTile() {
+        let config = PrefillRoutedTileSchedulerConfig(maxPendingDepth: 2)
+
+        #expect(config.fitting(slotCount: 128) == config)
+        #expect(config.fitting(slotCount: 16) == PrefillRoutedTileSchedulerConfig(
+            maxPendingDepth: 2, tileExperts: 5, tilesPerCommandBuffer: 1))
+        #expect(config.fitting(slotCount: 8) == PrefillRoutedTileSchedulerConfig(
+            maxPendingDepth: 2, tileExperts: 2, tilesPerCommandBuffer: 1))
+        #expect(config.fitting(slotCount: 2) == nil)
+    }
+
+    @Test func theSlotBudgetCeilingIsFifteenAtOneHundredTwentyEightSlots() {
+        let depthFifteen = PrefillRoutedTileSchedulerConfig(maxPendingDepth: 15)
+        let depthSixteen = PrefillRoutedTileSchedulerConfig(maxPendingDepth: 16)
+
+        #expect(depthFifteen.fitsSlotBudget(slotCount: 128))
+        #expect(!depthSixteen.fitsSlotBudget(slotCount: 128))
+    }
+
+    @Test func configFloorsTheDepth() {
+        #expect(PrefillRoutedTileSchedulerConfig(maxPendingDepth: 0).maxPendingDepth == 1)
+    }
+
+    @Test func depthThreeDrainsOnlyPastThreePending() {
+        let scheduler = PrefillRoutedTileScheduler(
+            config: PrefillRoutedTileSchedulerConfig(maxPendingDepth: 3, tileExperts: 4))
+
+        #expect(scheduler.decide(PrefillRoutedTileSchedulerInput(
+            hasPendingTile: true,
+            pendingDepth: 3,
+            pendingAssignedSlots: [1, 2, 3, 4],
+            avoidingSlotPlanAvailable: true))
+            == .prefetchNext(avoidingSlots: [1, 2, 3, 4]))
+        #expect(scheduler.decide(PrefillRoutedTileSchedulerInput(
+            hasPendingTile: true,
+            pendingDepth: 4,
+            pendingAssignedSlots: [1, 2, 3, 4],
+            avoidingSlotPlanAvailable: true))
+            == .drainBeforeIssue(reason: .maxPendingDepthReached))
+    }
+
+    @Test func parsePrefillTileDepthClampsToOneThroughEight() {
+        #expect(RealForwardRunner.parsePrefillTileDepth(nil) == 2)
+        #expect(RealForwardRunner.parsePrefillTileDepth("") == 2)
+        #expect(RealForwardRunner.parsePrefillTileDepth("not-a-number") == 2)
+        #expect(RealForwardRunner.parsePrefillTileDepth("0") == 1)
+        #expect(RealForwardRunner.parsePrefillTileDepth("-3") == 1)
+        #expect(RealForwardRunner.parsePrefillTileDepth("1") == 1)
+        #expect(RealForwardRunner.parsePrefillTileDepth(" 4 ") == 4)
+        #expect(RealForwardRunner.parsePrefillTileDepth("8") == 8)
+        #expect(RealForwardRunner.parsePrefillTileDepth("9") == 8)
+        #expect(RealForwardRunner.parsePrefillTileDepth("100") == 8)
+    }
+
+    @Test func prefillTileDepthDescriptionReportsTheRequestedValueOnly() {
+        #expect(RealForwardRunner.prefillTileDepthDescription(
+            PrefillRoutedTileSchedulerConfig(maxPendingDepth: 1)) == "depth=1")
+        #expect(RealForwardRunner.prefillTileDepthDescription(
+            PrefillRoutedTileSchedulerConfig(maxPendingDepth: 4, tileExperts: 2, tilesPerCommandBuffer: 3))
+            == "depth=4")
+    }
+
     @Test func slotLifetimeRejectsReuseInsideAnOpenBatch() throws {
         var lifetime = PrefillStreamedTileSlotLifetime()
         try lifetime.begin(tileIndex: 0, plannedSlots: [1, 2])

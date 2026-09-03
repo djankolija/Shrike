@@ -209,19 +209,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     /// Requested routed tiles per command buffer, the width actually in force
-    /// once the streamed cache is fitted, and the per-tile expert count that
-    /// fitting leaves (`width=0 experts=0` = the cache admits neither).
+    /// once the streamed cache is fitted, the per-tile expert count that
+    /// fitting leaves (`width=0 experts=0` = the cache admits neither), and the
+    /// requested pending-tile depth — `fitting` never narrows it, so one value
+    /// suffices.
     public var prefillTileBatchDescription: String {
         let requested = prefillRoutedTileSchedulerConfig
+        let depth = Self.prefillTileDepthDescription(requested)
         guard let slotCount = model.routedExpertCacheSlotCount() else {
             return "tiles=\(requested.tilesPerCommandBuffer)"
-                + " width=\(requested.tilesPerCommandBuffer) experts=\(requested.tileExperts)"
+                + " width=\(requested.tilesPerCommandBuffer) experts=\(requested.tileExperts) \(depth)"
         }
         guard let fitted = requested.fitting(slotCount: slotCount) else {
-            return "tiles=\(requested.tilesPerCommandBuffer) width=0 experts=0"
+            return "tiles=\(requested.tilesPerCommandBuffer) width=0 experts=0 \(depth)"
         }
         return "tiles=\(requested.tilesPerCommandBuffer)"
-            + " width=\(fitted.tilesPerCommandBuffer) experts=\(fitted.tileExperts)"
+            + " width=\(fitted.tilesPerCommandBuffer) experts=\(fitted.tileExperts) \(depth)"
+    }
+
+    static func prefillTileDepthDescription(_ config: PrefillRoutedTileSchedulerConfig) -> String {
+        "depth=\(config.maxPendingDepth)"
     }
 
     /// Which routed-expert GEMM a prefill chunk on the matrix path takes:
@@ -449,6 +456,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return max(1, min(16, width))
     }
 
+    /// `SHRIKE_PREFILL_TILE_DEPTH=<n>` (1…8) sets the routed tile pipeline's
+    /// pending-tile depth; unset or unparsable takes `prefillTileDepthDefault`
+    /// (P16 sweep: depth 2 beat depth 1 on the mini's 12k wall, hits unmoved).
+    static func parsePrefillTileDepth(_ raw: String?) -> Int {
+        guard let raw, let depth = Int(raw.trimmingCharacters(in: .whitespaces)) else {
+            return prefillTileDepthDefault
+        }
+        return max(1, min(8, depth))
+    }
+
+    private static let prefillTileDepthDefault = 2
+
+    private static func environmentPrefillTileDepth() -> Int {
+        parsePrefillTileDepth(ProcessInfo.processInfo.environment["SHRIKE_PREFILL_TILE_DEPTH"])
+    }
+
     /// `PrefillChunkPlanner.spans` lays chunks out contiguously from
     /// `startPosition`, so this is the chunk index's parity within the prompt.
     static func prefillChunkSweepIsDescending(startPosition: Int, chunkTokens: Int) -> Bool {
@@ -504,6 +527,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.gdnPrefillScanChunked =
             ProcessInfo.processInfo.environment["SHRIKE_GDN_PREFILL_SCAN"] != "serial"
         self.prefillRoutedTileSchedulerConfig = PrefillRoutedTileSchedulerConfig(
+            maxPendingDepth: Self.environmentPrefillTileDepth(),
             tilesPerCommandBuffer: Self.environmentPrefillTileBatch())
         self.prefillRoutedGEMMGrouped =
             ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTED_GEMM"] != "per-expert"
