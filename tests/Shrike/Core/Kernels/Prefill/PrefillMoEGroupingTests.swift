@@ -206,6 +206,80 @@ import Testing
             startPosition: 4_096, chunkTokens: 2_048) == false)
     }
 
+    @Test func carriedSweepStartsOppositeThePreviousRequestsLastChunk() throws {
+        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
+            mode: .carry, carried: true, startPosition: 0, chunkTokens: 4_096) == false)
+        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
+            mode: .carry, carried: false, startPosition: 0, chunkTokens: 4_096) == true)
+    }
+
+    @Test func carriedSweepAlternatesFromTheCarriedStart() throws {
+        // The runner reads back what it just wrote, so each chunk's result
+        // must feed forward as the next chunk's `carried`, not a fixed carry
+        // stepped across positions.
+        let chunkTokens = 4_096
+        let initialCarries: [Bool?] = [nil, true, false]
+        for initial in initialCarries {
+            let d0 = RealForwardRunner.prefillChunkSweepIsDescending(
+                mode: .carry, carried: initial, startPosition: 0, chunkTokens: chunkTokens)
+            let d1 = RealForwardRunner.prefillChunkSweepIsDescending(
+                mode: .carry, carried: d0, startPosition: chunkTokens, chunkTokens: chunkTokens)
+            #expect(d1 == !d0)
+            let d2 = RealForwardRunner.prefillChunkSweepIsDescending(
+                mode: .carry, carried: d1, startPosition: 2 * chunkTokens, chunkTokens: chunkTokens)
+            #expect(d2 == !d1)
+            #expect(d2 == d0)
+        }
+    }
+
+    @Test func nonParticipatingCallsAlwaysComputeAlternateBehaviour() throws {
+        let chunkTokens = 4_096
+        let modes: [PrefillSweepMode] = [.alternate, .fixed, .carry]
+        let carriedValues: [Bool?] = [nil, true, false]
+        for mode in modes {
+            for carried in carriedValues {
+                for startPosition in stride(from: 0, through: 3 * chunkTokens, by: chunkTokens) {
+                    #expect(RealForwardRunner.prefillChunkSweepIsDescending(
+                        mode: mode, carried: carried, startPosition: startPosition,
+                        chunkTokens: chunkTokens, participatesInCarry: false)
+                        == RealForwardRunner.prefillChunkSweepIsDescending(
+                            startPosition: startPosition, chunkTokens: chunkTokens))
+                }
+            }
+        }
+    }
+
+    @Test func carriedSweepWithNoHistoryIsAscending() throws {
+        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
+            mode: .carry, carried: nil, startPosition: 0, chunkTokens: 4_096) == false)
+    }
+
+    @Test func alternateModeIgnoresTheCarriedDirection() throws {
+        let chunkTokens = 4_096
+        let carriedValues: [Bool?] = [nil, true, false]
+        for carried in carriedValues {
+            for startPosition in stride(from: 0, through: 3 * chunkTokens, by: chunkTokens) {
+                #expect(RealForwardRunner.prefillChunkSweepIsDescending(
+                    mode: .alternate, carried: carried,
+                    startPosition: startPosition, chunkTokens: chunkTokens)
+                    == RealForwardRunner.prefillChunkSweepIsDescending(
+                        startPosition: startPosition, chunkTokens: chunkTokens))
+            }
+        }
+    }
+
+    @Test func fixedModeIsAscendingAtEveryChunkAndCarry() throws {
+        let chunkTokens = 4_096
+        let carriedValues: [Bool?] = [nil, true, false]
+        for carried in carriedValues {
+            for startPosition in stride(from: 0, through: 3 * chunkTokens, by: chunkTokens) {
+                #expect(RealForwardRunner.prefillChunkSweepIsDescending(
+                    mode: .fixed, carried: carried,
+                    startPosition: startPosition, chunkTokens: chunkTokens) == false)
+            }
+        }
+    }
+
     @Test func groupingRejectsInvalidMetadataBeforeKernelUse() throws {
         #expect {
             _ = try PrefillMoEGrouping.groupTokenExpertPairs(

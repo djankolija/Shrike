@@ -328,20 +328,36 @@ import Testing
     @Test func prefillGapLeversDescriptionReportsResidencyAllocationsAndCacheLayout() {
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepAlternate: false, cacheLayout: .pool)
+            sweepMode: .fixed, cacheLayout: .pool)
             == "overlap=on residency=set allocations=24 sweep=fixed cache_layout=pool")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: false, residencyAllocationCount: 0, poolResidencyUnavailableReason: nil,
-            sweepAlternate: true, cacheLayout: .perSlot)
+            sweepMode: .alternate, cacheLayout: .perSlot)
             == "overlap=off residency=set allocations=0 sweep=alternate cache_layout=per-slot")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: "boom",
-            sweepAlternate: true, cacheLayout: .pool)
+            sweepMode: .alternate, cacheLayout: .pool)
             == "overlap=on residency=unavailable reason=boom sweep=alternate cache_layout=pool")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
-            sweepAlternate: false, cacheLayout: .pool)
+            sweepMode: .fixed, cacheLayout: .pool)
             == "overlap=on residency=none sweep=fixed cache_layout=pool")
+    }
+
+    @Test func sweepModeParsesItsThreeValues() {
+        #expect(RealForwardRunner.parsePrefillSweepMode("alternate") == .alternate)
+        #expect(RealForwardRunner.parsePrefillSweepMode("fixed") == .fixed)
+        #expect(RealForwardRunner.parsePrefillSweepMode("carry") == .carry)
+        #expect(RealForwardRunner.parsePrefillSweepMode(nil) == .carry)
+        #expect(RealForwardRunner.parsePrefillSweepMode("") == .carry)
+        #expect(RealForwardRunner.parsePrefillSweepMode("bogus") == .carry)
+    }
+
+    @Test func prefillGapLeversDescriptionReportsTheSweepMode() {
+        #expect(RealForwardRunner.prefillGapLeversDescription(
+            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
+            sweepMode: .carry, cacheLayout: .pool)
+            == "overlap=on residency=set allocations=24 sweep=carry cache_layout=pool")
     }
 
     @Test func slotLifetimeRejectsReuseInsideAnOpenBatch() throws {

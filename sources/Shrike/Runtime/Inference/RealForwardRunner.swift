@@ -125,6 +125,16 @@ internal enum PrefillProjectionDispatchPolicy {
     }
 }
 
+/// `SHRIKE_PREFILL_SWEEP` mode: `alternate` reverses the sweep on odd-parity
+/// chunks; `fixed` keeps every chunk ascending; `carry` starts each
+/// request's first chunk opposite the previous request's last chunk and
+/// alternates from there (v13 T0's mini A/B winner, today's default).
+internal enum PrefillSweepMode: String, Sendable, Equatable {
+    case alternate
+    case fixed
+    case carry
+}
+
 /// unchecked-invariant: exclusively owned by one caller for its lifetime and
 /// never shared. In the server it is a `private let` on the `ServerModelSession`
 /// actor, so every entry point is already actor-isolated; the CLI and the
@@ -266,7 +276,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             overlap: prefillRouteOverlap,
             residencyAllocationCount: poolResidency?.allocationCount,
             poolResidencyUnavailableReason: poolResidencyUnavailableReason,
-            sweepAlternate: prefillSweepAlternate,
+            sweepMode: prefillSweepMode,
             cacheLayout: (try? ExpertCacheLayout.environmentValue()) ?? .pool)
     }
 
@@ -274,7 +284,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         overlap: Bool,
         residencyAllocationCount: Int?,
         poolResidencyUnavailableReason: String?,
-        sweepAlternate: Bool,
+        sweepMode: PrefillSweepMode,
         cacheLayout: ExpertCacheLayout
     ) -> String {
         let residency: String
@@ -286,7 +296,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             residency = "none"
         }
         return "overlap=\(overlap ? "on" : "off") residency=\(residency)"
-            + " sweep=\(sweepAlternate ? "alternate" : "fixed") cache_layout=\(cacheLayout.rawValue)"
+            + " sweep=\(sweepMode.rawValue) cache_layout=\(cacheLayout.rawValue)"
     }
 
     /// The prefill router kernel in force (`block` or `tiled tokens=N`) and its
@@ -427,23 +437,32 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// per-buffer residency for the same-binary A/B.
     private let poolResidency: ExpertPoolResidency?
     private let poolResidencyUnavailableReason: String?
-    /// `SHRIKE_PREFILL_SWEEP=alternate` reverses the expert sweep direction on
-    /// odd-parity chunks; `=fixed` keeps every chunk ascending; unset takes
-    /// `prefillSweepAlternateDefault`.
-    private let prefillSweepAlternate: Bool
-    private static let prefillSweepAlternateDefault = true
+    /// `SHRIKE_PREFILL_SWEEP=alternate|fixed|carry` selects the `PrefillSweepMode`;
+    /// unset or unknown takes `prefillSweepModeDefault`.
+    private let prefillSweepMode: PrefillSweepMode
+    private static let prefillSweepModeDefault = PrefillSweepMode.carry
+    /// The last direction a carry-participating prefill chunk swept, read by
+    /// `carry` mode's next request; `reset()` must not clear it, since the
+    /// expert pool it describes lives on `ModelExpertIO`, not on this
+    /// runner. Written before the chunk executes, so a chunk that throws
+    /// still records its direction (a lost optimisation, never a wrong
+    /// result).
+    private var prefillLastChunkDescending: Bool?
     /// `SHRIKE_PREFILL_TAIL_TILE=32` packs each expert block's remainder of
     /// ≤ 32 rows into a 32-row tile instead of a padded 64-row one; `=off`
     /// keeps every block on 64-row tiles; unset takes `prefillTailTileDefault`.
     private let prefillTailTile: Int
     private static let prefillTailTileDefault = 32
 
-    private static func environmentPrefillSweepAlternate() -> Bool {
-        switch ProcessInfo.processInfo.environment["SHRIKE_PREFILL_SWEEP"] {
-        case "alternate": return true
-        case "fixed": return false
-        default: return prefillSweepAlternateDefault
+    static func parsePrefillSweepMode(_ raw: String?) -> PrefillSweepMode {
+        guard let raw, let mode = PrefillSweepMode(rawValue: raw) else {
+            return prefillSweepModeDefault
         }
+        return mode
+    }
+
+    private static func environmentPrefillSweepMode() -> PrefillSweepMode {
+        parsePrefillSweepMode(ProcessInfo.processInfo.environment["SHRIKE_PREFILL_SWEEP"])
     }
 
     private static func environmentPrefillTailTile() -> Int {
@@ -494,6 +513,30 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// `startPosition`, so this is the chunk index's parity within the prompt.
     static func prefillChunkSweepIsDescending(startPosition: Int, chunkTokens: Int) -> Bool {
         (startPosition / chunkTokens) % 2 == 1
+    }
+
+    /// `.fixed` is always ascending, `.alternate` ignores `carried` and
+    /// matches the two-argument overload above, and `.carry` flips the
+    /// previous chunk's direction (`nil` meaning ascending) — the per-chunk
+    /// write already tracks position, so no further parity term belongs
+    /// here; `participatesInCarry: false` forces `.alternate` behaviour
+    /// regardless of `mode`, for the verify and MTP sidecar paths whose
+    /// 32-token chunks must neither read nor influence the request-level
+    /// carry.
+    static func prefillChunkSweepIsDescending(mode: PrefillSweepMode, carried: Bool?,
+                                              startPosition: Int, chunkTokens: Int,
+                                              participatesInCarry: Bool = true) -> Bool {
+        guard participatesInCarry else {
+            return prefillChunkSweepIsDescending(startPosition: startPosition, chunkTokens: chunkTokens)
+        }
+        switch mode {
+        case .fixed:
+            return false
+        case .alternate:
+            return prefillChunkSweepIsDescending(startPosition: startPosition, chunkTokens: chunkTokens)
+        case .carry:
+            return carried == false
+        }
     }
 
     /// Per-layer `router.scale * D^-0.5` pre-folded into one BF16 buffer
@@ -551,7 +594,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTED_GEMM"] != "per-expert"
         self.prefillRouteOverlap =
             ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTE_OVERLAP"] != "off"
-        self.prefillSweepAlternate = Self.environmentPrefillSweepAlternate()
+        self.prefillSweepMode = Self.environmentPrefillSweepMode()
         self.prefillTailTile = Self.environmentPrefillTailTile()
         let residency = Self.makePoolResidency(context: context)
         self.poolResidency = residency.holder
@@ -1385,7 +1428,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                       writeFinalHead: false,
                                       snapshotGDNAfterFirstToken: true,
                                       useTwoRowProjection: true,
-                                      pairRoutedMoE: pairMoE)
+                                      pairRoutedMoE: pairMoE,
+                                      participatesInCarry: false)
         let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
 
         let finalNorm = try model.finalNorm()
@@ -1553,7 +1597,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                       scratch: scratch,
                                       config: runtime,
                                       writeFinalHead: predictNext,
-                                      preparedHidden: projected)
+                                      preparedHidden: projected,
+                                      participatesInCarry: false)
         guard predictNext else { return nil }
         if useFusedGreedyHead {
             return Int32(bitPattern: lastGreedyToken)
@@ -2198,7 +2243,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      preparedHidden: MTLBuffer? = nil,
                                      snapshotGDNAfterFirstToken: Bool = false,
                                      useTwoRowProjection: Bool = false,
-                                     pairRoutedMoE: Bool = false) async throws {
+                                     pairRoutedMoE: Bool = false,
+                                     participatesInCarry: Bool = true) async throws {
         guard !tokens.isEmpty else { return }
         guard kv != nil else {
             throw PrefillError.chunkedUnsupported("chunked prefill attention requires a KV cache")
@@ -2321,9 +2367,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         var prefillTileNanos: UInt64 = 0
         var prefillTailNanos: UInt64 = 0
         var prefillActiveExperts: UInt64 = 0
-        let prefillDescendingSweep = prefillSweepAlternate
-            && Self.prefillChunkSweepIsDescending(startPosition: startPosition,
-                                                  chunkTokens: config.chunkTokens)
+        let prefillDescendingSweep = Self.prefillChunkSweepIsDescending(
+            mode: prefillSweepMode,
+            carried: prefillLastChunkDescending,
+            startPosition: startPosition,
+            chunkTokens: config.chunkTokens,
+            participatesInCarry: participatesInCarry)
+        if participatesInCarry {
+            prefillLastChunkDescending = prefillDescendingSweep
+        }
 
         for L in 0..<cfg.numLayers {
             try Task.checkCancellation()
