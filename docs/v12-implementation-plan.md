@@ -5409,6 +5409,307 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
     it; Turbo on 8080 is never touched. One model process at a time — `pgrep`
     first, every time.
 
+### Task 17: P17 — the speculative-decode economics audit: acceptance, the verify pass, the draft depth
+
+- [ ] **P17: the shipped speculative path loses by 4×, and the reason the record
+  gives is not supported by any counter in it.** Measured on the mini at the P9
+  build (rig prompt, `--mtp-model ./models/ornith15-mtp.gturbo
+  --mtp-memory-mib 384`, 5 runs after a warmup): **6.31–6.51 tok/s against 25.2
+  plain**, 139 passes emitting 170 tokens, `acceptance=22.3%` (31/139)
+  **identical in all six runs** — the path is deterministic, so every number
+  here is a fixed point, not a sample. Per pass: proposal 17.5 + checkpoint
+  0.005 + verify 166.4–171.2 (backbone 154.8–159.5, head 9.5–10.1, argmax 2.0)
+  + commit 2.4 + rollback 2.6 = **188.9 ms**, reconciling with
+  `decode_s / passes` = 189.0 to 0.1 ms (leg-5 `mtp-p9-mtp-lines.txt`; plain arm
+  `mtp-p9-plain-runner.txt`: `body_ms` 39.65, `wait_ms` 38.4, 171 tok, digest
+  `494bab3edb62`). At P4 the same rig read 25.9 % and 6.6 tok/s
+  (`docs/v12-prefill-matrix-kernels.md:1207-1221`). A counting prompt at 22 %
+  agreement is not a weak head but the signature of a contract defect, and one
+  candidate survives the read below. **Reading and
+  measurement first**, at most one instrument built (an accept/reject trace or
+  an env-gated A/B arm), **no kernel**.
+
+  **The decision rule, in two lines.** Step 1's contract read plus Step 2's
+  three-prompt rig pick one of three exits: **(a)** a defect is found and fixed
+  → the bars become acceptance **≥ 90 %** on the counting prompt and **≥ 50 %**
+  on prose, the economics table is re-run, and a verify-pass follow-on is
+  drafted **only if** the re-run shows a path to **≥ 1.3× plain**; **(b)** no
+  defect, the head is weak → speculation is retired on this model, the
+  fetch-hiding work goes to plain decode, and the design's out-of-scope note is
+  rewritten with the measured economics; **(c)** prompt-dependent → Step 2's
+  per-shape scoreboard decides and the verdict names the shape class that would
+  pay. Every exit lands the ledger rows; a measured null is a result (P8, P11).
+
+  **The economics, corrected — the pass is first-order, acceptance second.**
+  With `k` drafted tokens per pass and per-token acceptance `p`, tokens per pass
+  is `T = 1 + Σ_{j=1..k} p^j` (modelled, independent acceptance along the
+  chain); break-even needs `T × 39.65 ≥ C` for a pass of `C` ms. Anchors:
+  `C(k=1) = 188.9` **measured**; `C(k=2) ≥ 212.1`, `C(k=4) ≥ 258.7` **modelled
+  lower bounds** — `k` proposals at the measured 17.5 ms, the width-2 backbone
+  held **flat** at 154.8 (it cannot shrink as width grows), head and argmax
+  scaled per row (4.77 and 1.00 ms/row), commit+rollback held at 5.0.
+
+  Each cell is `T · ×plain at that k's pass · ×plain at an 80 ms pass`; the
+  measured point sits on the grid at `k = 1, p = 0.223` → `T = 1.223`,
+  **0.257×** plain = 6.47 tok/s against a measured 6.31–6.51.
+
+  | k, pass | p = 0.25 | p = 0.50 | p = 0.80 | p = 0.90 |
+  | --- | --- | --- | --- | --- |
+  | **1**, 188.9 ms (measured) | 1.250 · 0.262 · 0.620 | 1.500 · 0.315 · 0.743 | 1.800 · 0.378 · 0.892 | 1.900 · 0.399 · 0.942 |
+  | **2**, ≥ 212.1 ms | 1.312 · 0.245 · 0.651 | 1.750 · 0.327 · 0.867 | 2.440 · 0.456 · 1.209 | 2.710 · 0.507 · 1.343 |
+  | **4**, ≥ 258.7 ms | 1.332 · 0.204 · 0.660 | 1.938 · 0.297 · 0.960 | 3.362 · 0.515 · 1.666 | 4.095 · 0.628 · 2.030 |
+
+  Two readings, and the second is new. **At the measured pass nothing pays:**
+  break-even needs `T ≥ 4.76`, out of reach at `k ≤ 3` even at `p = 1`. **At
+  `k = 1` nothing pays at any pass cost this runtime can plausibly reach:** the
+  ceiling is 2 tokens per pass, so the *whole* pass — proposal, width-2 verify,
+  head, argmax, commit — must cost under `2 × 39.65 = 79.3` ms merely to tie
+  (0.991× at 80 ms, `p = 1`), and under **48.5 ms** at the measured `p = 0.223`
+  — 1.22 plain steps for a two-row forward *plus* a one-layer sidecar pass. A
+  verify at the design's aspirational 1.5× a plain step (59.5 ms) plus the
+  measured proposal is 77.0 ms → 1.03× at `p = 1`, 0.63× at `p = 0.8`. **The
+  path needs both levers or neither:** `k ≥ 2` *and* a pass near 75–100 ms
+  (`k = 2, p = 0.8` needs ≤ 74.4 ms for 1.3×; `k = 4, p = 0.8` ≤ 102.5 ms).
+
+  **What "accepted" means, read.** Greedy top-1 equality and nothing else:
+  `accepted = verification.predictionAfterFirst == draftToken`
+  (`StreamingMTP.swift:393`), `predictionAfterFirst` a host argmax over row 0 of
+  the two-row fp16 logit block (`RealForwardRunner.swift:1410-1424`),
+  `draftToken` the sidecar's own argmax (`:1541-1556`). Sampling never reaches
+  here: `prepare` guards `config.isPureGreedy` (`StreamingMTP.swift:344`), so
+  does the loop (`RawCompletion.swift:318`), and the server selects the MTP
+  producer only for a pure-greedy request (`ServerInference.swift:1166-1173`).
+  `drafted` counts **passes** — `statistics.record` runs once per `advance`
+  (`StreamingMTP.swift:402`, `:426`), adding 1 to `draftedTokens` and 1 to
+  `targetBackbonePasses` (`:205-211`) — so drafted = passes = 139 is one draft
+  per pass by construction and `emitted_per_pass = 1 + p` exactly.
+
+  **The head's input contract — three of four candidates ruled out by the
+  tree.** The reference pairing is (final hidden at *i*, embedding of the token
+  at *i+1*) → predict *i+2*. Shrike feeds `advanceMTP(tokens: [boundaryToken],
+  targetHiddenRows: boundaryHidden, …)` (`:370-374`), right on **both**
+  branches: after an accept the next boundary is `predictionAfterSecond` with
+  `boundaryHidden` = hidden **row 1** (`:401`); after a reject it is
+  `predictionAfterFirst` with hidden **row 0** (`:392`, `:425`) — token and
+  hidden always from the same verify row. **Hidden state:** the pre-final-norm
+  rows blitted out of `scratch.hidden` *before* `encodeLogitsPair` applies
+  `finalNorm` (`RealForwardRunner.swift:1379-1384`, `:1387-1401`) — the
+  reference's `h_i`, since the sidecar applies its own `pre_fc_norm_hidden`
+  (`:1490-1508`). **Norms:** both pre-fc norms carry Qwen3.5's zero-centred
+  transform **baked in at conversion** (`w + 1`,
+  `tools/prepare_ornith_mtp.py:178-181`, `NORM_NAMES` `:35-43`), so the
+  runtime's plain weighted RMSNorm is right. **Sidecar state:** one
+  full-attention layer (`ModelTypes.swift:242-271`) — no GDN, its whole state
+  is a KV cache; the *target's* GDN is snapshotted after verify row 0 and
+  restored on reject (`:1272-1296`, `:1368`), and the target KV rewinds to
+  `checkpoint.position + 1`, right because row 0 is confirmed.
+
+  **The one candidate the code leaves open — and it compounds.** On a rejection
+  the loop trims the sidecar's newest KV row — `try draft.rewindMTP(to:
+  draft.continuationPosition - 1)` (`StreamingMTP.swift:417-423`), justified as
+  "it represented a prediction that the target rejected". But that row is not
+  the draft *token*'s row; the draft token never enters the sidecar's KV at all.
+  It is the row for the pair `(h_{n-1}, t_n)`, and **both inputs are
+  confirmed** — `t_n` the token the target already emitted, `h_{n-1}` the
+  target's own hidden. The accept branch keeps it and appends the next pair
+  (`:396-401`); the reject branch drops it and the next proposal writes the
+  *following* pair into the freed slot. Two things accumulate per rejection:
+  the context **loses one confirmed row**, and every later row sits one position
+  low, so relative distances across a rejection are short by the running
+  rejection count (RoPE is relative — a *uniform* offset is benign, a *drifting*
+  one is not). Over 139 passes at 22.3 % that is **108 dropped rows and 108
+  positions of compression**: not a weak head, a degrading input. **A
+  hypothesis, not a verdict** — the minimal repair (drop the rewind) is three
+  lines, and Step 3's A/B settles it.
+
+  **The 25.9 → 22.3 % shift.** Both figures are prose-only in the design doc
+  (`docs/v12-prefill-matrix-kernels.md:1207-1221`); the rig's emitted **text**
+  was never digested at P4, so "the same greedy prompt" is established and "the
+  same greedy trajectory" is not. Seven tasks landed between the builds and at
+  least P9's 128-wide K reduction is not bit-identical
+  (`docs/v12-implementation-plan.md:1830-1832`), so a last-ulp change can flip
+  one early acceptance — which under the drift model suffices by itself, since a
+  flipped accept changes the rejection count and so the sidecar's context for
+  every later pass. **What settles it costs nothing:** drift predicts acceptance
+  falls with pass count, so measure it at `max_tokens` 20 / 50 / 100 / 200 on
+  one binary. Monotone decay confirms drift and closes the question; a flat
+  curve refutes it and the shift stays open against the seven landed tasks.
+
+  **The verify pass's 155 ms backbone — the record's attribution is
+  unsupported.** The design doc calls it expert-miss I/O
+  (`docs/v12-prefill-matrix-kernels.md:1210-1213`). The union model in the code
+  (`RealForwardRunner.swift:1319-1338`: width 1 → 8.00 experts/layer, width 2 →
+  12.68, cost 1.585×) predicts **62.8 ms**; measured 154.8–159.5 — a **backbone
+  excess of ≈ 92 ms per pass, 2.30 ms per layer**, that the union does not
+  explain. Against I/O being that term: the plain arm's decode hit rate is
+  **0.9903** (526 misses over 6,800 layer-steps), and the second verify row is
+  the token adjacent to the first, so its extra ≈ 4.7 experts are as likely
+  resident as the first row's. The competing hypothesis is structural — the pair
+  path is **fully serialised host↔GPU per layer**: router encode, commit +
+  `waitForCompletion` (`:4672-4673`); host route readback and union build
+  (`:4677-4692`); plan + pin (`:4694-4695`); shared expert committed unwaited
+  (`:4702-4758`); **await the fetch** (`:4765-4766`); phase-1/phase-2/residual
+  per row, commit + `waitForCompletion` (`:4857-4858`) — **80 command-buffer
+  completions and 40 fetch awaits per pass**, against a decode step reporting
+  `io_host_waits=0` and `io_host_waits_avoided=6800`. **The instrument already
+  exists and was thrown away.** The session's `runner` *is* the MTP target
+  (`ServerInference.swift:723-741`), so under the leg-5 launch
+  (`SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1`) the MTP arm already emits
+  `Shrike runner …` (expert hits/misses, `io_fetch_ms`, `expert_read_mib`,
+  `expert_load_p99_ms` — model-level, so live during verify; the decode-step
+  timers `wait_ms`/`body_ms`/`io_ms` read 0, accumulating only in the decode
+  path, `:2755-2794`, `:6273-6279`) **and** `Shrike kernel role=…` plus
+  `Shrike gap … host_ms/driver_ms/queue_ms` and `busy_ms/span_ms`
+  (`ServerInference.swift:2039-2070`) for the router, shared-expert,
+  `verify_routed_pair` and `verify_head` roles — the leg-5 wrapper's
+  `grep -a -i 'mtp'` dropped every one. **Occupancy decides it in one number:**
+  low `busy/span` is host-bound; high, with high `io_fetch_ms`, is I/O-bound and
+  the doc's reading stands.
+
+  **Draft depth. `k > 1` is a runtime change, not a knob.** Four hard gates:
+  `verifyGreedyPair` requires exactly two tokens (`:1349-1351`); the pair MoE
+  path is selected only at `t == 2` (`:2390`); the GDN snapshot guard requires
+  `tokens.count == 2` (`:2201`); and `SpeculativeInferenceCheckpoint` restores
+  the GDN state to *after the first row only* (`:1284-1296`), so a width-3
+  verify accepting one of two drafts has no state to roll back to. `advanceMTP`
+  does admit 1…32 rows (`:1439-1450`, `mtpChunkCapacity` `:367`) but demands
+  **one real target hidden row per token** (`:1449-1455`), and the runtime never
+  reads the sidecar's own hidden back — recursive drafting has no input path.
+  Model side: the checkpoint carries a **single** MTP module
+  (`mtp_num_hidden_layers: 1`, `tools/prepare_ornith_mtp.py:93`), so `k > 1`
+  means self-feeding an off-distribution input; what that does to acceptance
+  along the chain is **unmeasured here and undocumented in this tree**. Cost if
+  built: `k = 2` is a second 17.5 ms proposal plus a width-3 verify, ≥ 212 ms.
+
+  **The instrument — smallest first, stop at the one that answers.** Under
+  greedy the runtime's acceptance **is** the head's top-1 agreement, so no
+  offline bench is warranted; what is needed is a separation of "fed wrong" from
+  "weak". **(i)** the `max_tokens` ladder (Step 2, zero code); **(ii)** an
+  env-gated `SHRIKE_MTP_REJECT_KEEP=1` arm skipping the reject rewind
+  (`StreamingMTP.swift:417-423` — three lines plus a parse beside `expertSlots`,
+  `:29-35`): if acceptance jumps, the defect is found and the default flips;
+  **(iii)** a per-pass trace (accept/reject, pass index, `draft` vs `target`
+  continuation position) behind `SHRIKE_RUNNER_STATS`, ≈ 10 lines, reverted
+  after the read (P15 Step 1's precedent). A host-only RED test ships with (ii):
+  `mtpDecodeLoopEmitsTokensAndReportsAcceptance`
+  (`tests/Shrike/Core/Runtime/Generation/StreamingMTPTests.swift:140-183`)
+  already drives the loop on the toy sidecar, and its last assertion is vacuous
+  (`decoder.targetPosition` *is* `target.continuationPosition`,
+  `StreamingMTP.swift:456`); the test to write asserts the draft position tracks
+  the target's across a mixed accept/reject sequence. **No offline agreement
+  bench, no new CLI mode.**
+
+  **Three prompts, one send per server lifetime.** (1) **Counting** —
+  `tools/decode-measure.sh:5`, `"Count from 1 to 60, one number per line."`,
+  `max_tokens 200`, `temperature 0`; 171 tokens, `finish=stop`. A sane head must
+  approach ≈ 100 % here; 22.3 % is the anomaly this task exists for.
+  (2) **Prose, tools off** — `keynes-bancor__ornith__tools-off.json` under
+  `/Users/davorjankolija/Developer/LLMBench/results/raw/cards-local-v1/`:
+  `system_prompt` a single space, turn 0 an 89-char user question, the recorded
+  answer 3,023 chars ≈ 750 tokens; send turn 0 at `max_tokens 1200`.
+  (3) **Tools on** — `einstein-bell__ornith__tools-on.json` under
+  `…/cards-ornith-tools-v1/`: replay turns 0–3 (user 48 chars, assistant 121,
+  two `toolResult` turns of 1,466 and 1,447) and let the model continue.
+  The export records `opening_input_tokens: 494` but **not** the tool schemas
+  that made up most of it, so record the response's own `prompt_tokens` rather
+  than asserting 495. A `finish=length` turn leaves a settle the next request's
+  wall absorbs (`docs/v12-implementation-plan.md:44-49`),
+  so size `max_tokens` to reach `stop`. MTP forces the prompt cache **off**
+  (`ServerInference.swift:561-569`); the plain control arm does not, so the
+  control still needs a fresh server per prompt.
+
+  **Bars.** Exit (a): counting acceptance **≥ 90 %**, prose **≥ 50 %**, table
+  re-run at the new `p`, follow-on drafted only at a modelled **≥ 1.3× plain**.
+  Exits (b)/(c): no numeric bar, but the ledger rows and a written verdict.
+  Every arm: `tools/golden-baseline.sh --check` **IDENTICAL on both boxes and
+  both profiles** — this task must not touch the plain path (digests to carry:
+  M4 Pro long `e04d4e8ee7f1590d`, M1 long `899a25e60a365e60`) — and the plain
+  rig digest **`494bab3edb62` at 171 tok** unchanged. The MTP arm's own digest
+  is **recorded for the first time**: verify runs the prefill kernels, the plain
+  step the decode kernels, so byte-identity between the arms is an assumption
+  nothing in the record tests. Memory: `--mtp-memory-mib 384` against a measured
+  `memory_required_mib=135.3`, `memory_pressure -Q` before and during every mini
+  arm (leg 5 read 26 % free). Five gates **only if code lands**.
+
+  **Files.** A fix or instrument would touch
+  `sources/Shrike/Runtime/Generation/StreamingMTP.swift:417-423` (the reject
+  rewind, plus a parsed knob beside `:29-35` if it lands as an A/B) and
+  `tests/Shrike/Core/Runtime/Generation/StreamingMTPTests.swift:140-183` (the
+  position invariant); a per-pass trace adds a `cacheDiag` beside
+  `ServerInference.swift:1913-1934` and a counter in `MTPStatistics`
+  (`StreamingMTP.swift:159-211`). **Unchanged:** every kernel and `.metal` file,
+  `RealForwardRunner`'s verify and adapter paths, the prefill matrix work, the
+  streamer, decode, and `tools/decode-measure.sh` (the three-prompt wrapper is
+  scratch, not a tracked tool).
+
+  Steps:
+
+  - [ ] Step 1: the contract read — **zero code**, a written finding with
+        `file:line` for each of: the accept comparison and what `drafted`
+        counts; the pairing on both branches; the hidden state, the norms, the
+        sidecar's state; the reject-rewind asymmetry and what it predicts
+        (dropped rows, position compression, decay with pass count); the four
+        gates blocking `k > 1`. Rule out or keep each candidate explicitly.
+  - [ ] Step 2 (the rig, **one binary, the P16 build**):
+        `pgrep -fl 'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI'`
+        first, then `mtp-measure.sh`'s shape — plain arm on production, restart
+        with the sidecar, MTP arm, restore production. Three prompts, plus the
+        `max_tokens` ladder (20/50/100/200) on the counting prompt; one send per
+        server lifetime; **capture `Shrike runner`, `Shrike kernel` and
+        `Shrike gap` from the MTP arm** (the leg-5 grep dropped them). Ledger
+        per prompt: acceptance, emitted per pass, the phase split, plain vs mtp
+        tok/s, **both** text digests, `expert_hit_rate_decode`,
+        `expert_misses_decode`, `io_fetch_ms`, `expert_read_mib`, per-role
+        `gpu_ms`, `busy_ms`/`span_ms`, and the `verify_routed_pair` gaps'
+        `host_ms`/`queue_ms`. Free control arm on one prompt:
+        `SHRIKE_MTP_VERIFY=tile` (`StreamingMTP.swift:231-245`).
+  - [ ] Step 3 (**only if Step 1 leaves a candidate open**): the smallest
+        instrument that separates fed-wrong from weak — (ii), then (iii); RED
+        test first, reverted if it was a probe. Five gates if anything lands.
+  - [ ] Step 4: the verify decomposition from Step 2's counters. Attribute the
+        ≈ 92 ms backbone excess — low occupancy → host serialisation (name the
+        per-layer round trips); high `io_fetch_ms` with misses ≫ the decode
+        arm's 0.077 per layer-step → I/O, and the doc's attribution stands.
+        Name the largest term you can support and what would move it.
+  - [ ] Step 5: the verdict and the economics table re-run at the measured `p`,
+        against exits (a)/(b)/(c). If (a), price a verify follow-on against the
+        75–100 ms window; if (b), say so plainly and hand the fetch-hiding work
+        to plain decode.
+  - [ ] Step 6: docs — a "Step 17" section in the design doc with the
+        three-prompt scoreboard and the economics table, and the out-of-scope
+        note (`docs/v12-prefill-matrix-kernels.md:1207-1221`) rewritten with the
+        measured economics in place of "viability hinges first on the acceptance
+        rate". Plan: Task 17 `[x]` with the landed paragraph, and the two
+        follow-on bullets at `docs/v12-implementation-plan.md:5414-5422` resolved
+        or restated. Task review by a fresh reviewer; fixes folded into the
+        owning commit (rebase and amend, never a fixup commit).
+
+  **Risks and what falsifies the model.**
+  - **Counting acceptance re-measures at ≈ 100 %.** Then 22.3 % was an artefact
+    of the P9 build or the launch, not the head — and the rig prompt is exactly
+    `"Count from 1 to 60, one number per line."` at `max_tokens 200`, 171
+    tokens, `finish=stop`, so the verdict must say which of the two moved.
+  - **The `max_tokens` ladder is flat.** Then the reject rewind degrades
+    nothing and the drift model is dead: candidate (ii) is dropped without
+    being built, and the head is weak or fed wrong in a way Step 1 missed. The
+    next instrument is (iii), never a kernel.
+  - **The verify backbone is host-bound, not I/O-bound.** Then the doc's
+    "expert-miss I/O" reading is wrong, the SSD follow-on at
+    `docs/v12-implementation-plan.md:5414-5418` is **not** the second lever for
+    this pass, and the lever is the per-layer serialisation — a decode-chapter
+    task, still gated on the economics table showing a path.
+  - **The head cannot draft deeper.** Then the ceiling is 2 tokens per pass and
+    the `k = 1` rows are the whole story: the pass must reach 48.5 ms at today's
+    acceptance or 79.3 ms at `p = 1`, neither reachable by hiding I/O alone.
+    Exit (b) is the honest verdict regardless of what the acceptance audit finds.
+  - **The two arms' text differs.** If the MTP digest ≠ `494bab3edb62`, the
+    verify path is not reproducing the plain path's trajectory and every
+    cross-build acceptance comparison in the record compares different
+    sequences. A correctness finding, not a perf one — report it and stop.
+  - **The mini is production.** Every arm stops the server on 8081, relaunches
+    it, and restores the production launch at the end; Turbo on 8080 is never
+    touched. One model process at a time — `pgrep` first, every time.
+
 ## Follow-ons (not scheduled)
 
 - The mini's SSD term (v10 P3 follow-on: batched miss loads, deeper queue
