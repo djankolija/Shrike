@@ -91,7 +91,20 @@ production server; the M4 Pro's through a fresh server with `--ram-budget 20G`
 | **wall** | 8.64 | 8.74 | 16.00 | 26.41 | 29.46 | 59.03 |
 
 The ledger closes: wall = busy + gaps + a per-request remainder (the first
-column's remainder is the fresh server's first request).
+column's remainder is the fresh server's first request). From P4 on the mini's
+rows also come through a fresh server per prompt, and that remainder was
+measured at the P10 build as `completed in` − (`prefill_s` + `decode_s`) from
+the server log: a server's **first** request pays 1.93 s at 3.7k and 2.05 s at
+12k (2.09 s with the prompt cache off) — the same at both lengths, so not the
+tokeniser: first-encode pipeline specialisation and first-touch work — while
+the **second** request on the same server pays 0.13 s at 12k with the cache off
+and 0.53 s at 4.3k with it on. Every fresh-server wall row from P4 on therefore
+carries ≈ 2 s the production server pays once per lifetime; the rows stay
+comparable with each other, and against production the 2 s comes off. The M4
+Pro's fresh-server rows carry the same shape of remainder, 1.62 s at 3.7k and
+1.60 s at 12k. (Task-10 ledger files: `server-p10-mini-{2k,6k}.log`,
+`server-l3-nocache-6k.log`, `server-outside-2k-2kb.log`,
+`server-outside-nocache-2k-6k.log`, `server-p10-local-{2k,6k}.log`.)
 
 **After P1** (commit 1450c1c, 2026-09-02, same protocol, fresh servers):
 
@@ -348,6 +361,32 @@ reorders the reduction (last-ulp differences on ≈ 0.15 % of elements, measured
 by `ShrikeBench mpp_compare` on both boxes) — and was recaptured once per box
 with that reason; the digests are in the plan's verdict.
 
+**After P10** (commit 3710611, 2026-09-03; the MPP GEMM stages four quant
+groups per K tile and picks the widest instantiated tile that divides `k`;
+`SHRIKE_MPP_TILE_K=128` keeps the P9 kernel):
+
+| role | M4 Pro 3.7k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `prefill_attn_router` | **0.21** | **0.33** | **0.52** | 0.95 | 1.75 |
+| `prefill_routed_tile` | **0.47** | **0.44** | **0.46** | **1.79** | **1.74** |
+| `prefill_gdn_router` | **0.54** | **0.52** | **0.52** | 2.36 | 2.34 |
+| `prefill_shared_expert` | 0.04 | 0.04 | 0.04 | 0.17 | 0.17 |
+| **GPU busy** | 1.32 | 1.35 | 1.56 | 5.47 | 6.10 |
+| gaps (span − busy) | 1.10 | 0.80 | 0.91 | 0.76 | 0.58 |
+| **wall** | 2.85 | 2.28 | 2.54 | 6.77 | 6.85 |
+| wall, seconds | 10.7 | 28.0 | 64.0 | 25.4 | 84.2 |
+
+On the M1 the routed role fell 7 % (its tile 4.93 → 4.48 ms on the bench,
+78 % of the same-run ceiling) and nothing else moved: the GDN role −1 %,
+attention flat — the 4,096-row dense projections do not respond to the wider
+tile there. On the M4 Pro they do: a paired A/B on one binary at 12k (K128 →
+K256, back to back) read routed 0.55 → 0.44, GDN 0.62 → 0.52, attention
+0.38 → 0.33, busy 1.66 → 1.35 (−19 %), wall 31.7 → 28.0 s (−12 %); at 25k the
+wall is fetch-bound and moved 64.7 → 64.0 s. The mini's 12k wall 86.0 →
+84.2 s (6.85 ms/token, 1.09× the target); 3.7k 25.7 → 25.4 s. Golden: the
+M4 Pro's long profile moved (recaptured once, the K256-vs-K128 reduction
+order); the M1's held on both profiles.
+
 ## Where the time goes
 
 Every dense projection in prefill (attention Q/K/V/O, GDN in/out) already runs
@@ -358,7 +397,7 @@ all scalar kernels:
 | role | kernel | structure | roofline gap (M4 Pro) |
 | --- | --- | --- | ---: |
 | attention core | `attention_prefill_causal_tiled` | one threadgroup per (query, head), 256 threads over head-dim, a serial walk over every key with a two-barrier threadgroup reduction per key. The decode kernel's shape, run once per prompt token: no K/V reuse across queries, none across the 8 query heads that share a KV head. | 30× at 3.7k, 60× at 25k |
-| routed experts | `prefill_grouped_routed_moe_batched_phase1` / `_down` | each thread computes one or two 2048-long scalar dot products; 32-pair microbatches; a command buffer per 8-expert tile | 7×; 2.6× after P6 (`mpp_prefill_affine_grouped_f16`, one dispatch per phase over the tile's experts: 0.69 ms/token at 12k against 0.27 at the 7.46 TFLOPS ceiling); P8's bench puts the tile at 67 % of the M4 Pro's same-run ceiling and 42 % of the M1's, the M1's remainder split 7 % unpack / 20 % weight loads / 31 % staged structure (Step 7); after P9 (vector loads + 128-wide K) 71 % of the M1's ceiling and 99 % of the M4 Pro's (Step 8) |
+| routed experts | `prefill_grouped_routed_moe_batched_phase1` / `_down` | each thread computes one or two 2048-long scalar dot products; 32-pair microbatches; a command buffer per 8-expert tile | 7×; 2.6× after P6 (`mpp_prefill_affine_grouped_f16`, one dispatch per phase over the tile's experts: 0.69 ms/token at 12k against 0.27 at the 7.46 TFLOPS ceiling); P8's bench puts the tile at 67 % of the M4 Pro's same-run ceiling and 42 % of the M1's, the M1's remainder split 7 % unpack / 20 % weight loads / 31 % staged structure (Step 7); after P9 (vector loads + 128-wide K) 71 % of the M1's ceiling and 99 % of the M4 Pro's (Step 8); after P10 (256-wide K) 78 % of the M1's (Step 9) |
 | shared expert | `PrefillSharedExpert.encodeBlock` | a `for row in 0..<queryCount` loop over the decode runtime: 4–6 M=1 GEMV dispatches per token | 25× |
 | GDN | `gdn_delta_step_prefill` | the delta-rule scan is a serial loop over the chunk inside one dispatch of 32×32 threadgroups; projections, conv and norms are fine | 3.6× (scan ≈ 0.6 of the 1.0 ms) |
 
@@ -594,6 +633,40 @@ a different order than two 64-wide runs summed in fp32, last-ulp differences
 on ≈ 0.15 % of elements (`ShrikeBench mpp_compare`, both boxes) — so golden
 moved on the long profile on both boxes and was recaptured once per box.
 
+### Step 9 — a 256-wide K tile (−9 % on the M1's routed tile; the dense projections did not follow)
+
+The structure half of what P9 left: `n32k256b1` stages four quant groups per
+tile (32 × 256 halves, 16 KB, half the threadgroup budget), halving the
+barriers, the `run` set-ups and the fp32 accumulates per row once more; the
+vector loader gains the 64-byte chunk an 8-bit 256-wide tile needs (four
+`uint4`), and the per-dispatch choice becomes a ladder — the widest
+instantiated tile that divides `k`: 256, else 128 (Kimi's 128-wide low-rank
+legs), else 64 (gpt-oss's 2880). 256 is the last width this chunk mapping
+supports: at E = 64 a chunk is one whole quant group and the
+`kW4A8GroupSize % E` assert is exact. `ShrikeBench routed_gemm 20`, grouped ms
+per ornith tile at staging 1024 / 2048, vector loads:
+
+| arm | M4 Pro | M1 |
+| --- | ---: | ---: |
+| K64 | 1.23 / 1.22 | 6.23 / 5.90 |
+| K128 (P9's default) | 1.13 / 1.13 | 4.93 / 4.83 |
+| **K256 — the default** | **1.09 / 1.10** | **4.48 / 4.49** |
+| same-run gate/up ceiling, TFLOPS | 5.4–5.8 | 1.83 |
+
+On the M1 the tile is 1.44 TFLOPS, 78 % of its same-run ceiling (71 % after
+P9), and the routed role followed (−7 % at 12k). The dense projections did
+not: the GDN role moved 1 % and attention 0.3 %, against a modelled 65 % GDN
+GEMM share inferred from P9's −31 % — P9's gain there was the load lever, and
+the structure lever does not carry to the 4,096-row dense shape. The dense
+kernel at the chunk shape has never been benched in isolation; that
+measurement, and the `kMPPAffineTileM` sweep it would inform, are the
+follow-on below. Not bit-identical to the 128-wide tile: `ShrikeBench
+mpp_compare` puts the K256-vs-K128 difference at 456 / 489 of 262,144
+elements at 4 / 8 bits (max abs 0.000488 / 0.0078, identical counts on both
+boxes); golden moved on the M4 Pro's long profile and was recaptured once;
+the mini's held on both profiles. Measured on the ledger: see "After P10"
+above.
+
 ### Follow-ons, not scheduled
 
 - **Tile command-buffer batching — landed as a null result (P5, a7c8288 +
@@ -627,12 +700,15 @@ moved on the long profile on both boxes and was recaptured once per box.
   8.25 ms per ornith tile, reproducible; the M4 Pro is unaffected). No
   production tensor of the six models takes it today; a byte-only
   instantiation would restore it if one ever does.
-- **The MPP GEMM's remaining third on the M1.** After P9 the routed tile
-  runs at 71 % of the mini's same-run ceiling. What is left is the staged
-  structure itself — the threadgroup tile round-trip and one barrier per
-  128-wide K tile — and the dequant arithmetic; a 256-wide K tile (16 KB,
-  fits) is the next mechanical step, then the FlashAttention-style question of
-  whether MPP can consume the weight tile from registers.
+- **The MPP GEMM's dense shape on the M1.** After P10 the routed tile runs at
+  78 % of the mini's same-run ceiling, and 256 is the last K width the chunk
+  mapping supports, so what is left of the staged structure needs the
+  register-resident weight tile, not a wider one. The dense projections
+  (M = 4,096 rows: the GDN in/out and the attention Q/K/V/O) did not follow
+  P10's tile gain and have never been benched in isolation — an m = 4,096
+  dense case beside `routed_gemm`, then a `kMPPAffineTileM` sweep (a 128-row
+  tile halves the per-threadgroup dequant, which at 4,096 rows is repeated 64×
+  per column tile, at the cost of a doubled accumulator).
 - **Per-layer host routing on the M1.** ≈ 15 ms per layer between the GDN or
   attention buffer and the shared expert (`host_ms` 1.38 + 0.48 s at 12k,
   ≈ 1.5 % of wall); 2.8 ms per layer on the M4 Pro. The router readback,
