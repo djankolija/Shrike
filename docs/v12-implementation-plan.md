@@ -5411,7 +5411,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
 ### Task 17: P17 — the speculative-decode economics audit: acceptance, the verify pass, the draft depth
 
-- [ ] **P17: the shipped speculative path loses by 4×, and the reason the record
+- [x] **P17: the shipped speculative path loses by 4×, and the reason the record
   gives is not supported by any counter in it.** Measured on the mini at the P9
   build (rig prompt, `--mtp-model ./models/ornith15-mtp.gturbo
   --mtp-memory-mib 384`, 5 runs after a warmup): **6.31–6.51 tok/s against 25.2
@@ -5428,6 +5428,45 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   candidate survives the read below. **Reading and
   measurement first**, at most one instrument built (an accept/reject trace or
   an env-gated A/B arm), **no kernel**.
+
+  **LANDED (2026-09-03, measurement only — no code): exit (c), speculation
+  retired as a lever for now.** Mini, the P16 build, one lifetime per arm, the
+  MTP arm's counters kept: counting rig acceptance **20.6 %** (ladder 11.8 /
+  25.0 / 17.9 / 20.6 % at `max_tokens` 20 / 50 / 100 / 200 — not monotone, 2 of
+  the first 17 passes accepted, so the reject-rewind drift candidate is
+  falsified as the cause and Step 3's A/B was not built), prose (keynes-bancor,
+  the first user turn) **31.7 %**, tool-call continuation (einstein-bell turns
+  0–3, 1,425 prompt tokens) **75.6 %**. Plain body 39.6 / 48.2 / 72.5 ms (hit
+  rate 0.990 / 0.956 / 0.880) = 22.0 / 18.4 / 12.5 tok/s end to end; MTP 5.7 /
+  5.7 / 5.6 tok/s at whole passes of 212 / 233 / 312 ms (`decode_s / passes`),
+  tokens per pass 1.21 / 1.32 / 1.76. Digests (`content` only): counting
+  identical between arms (`494bab3edb62`); prose diverged (`1a22a1f2773a` vs
+  `682f3da2f610`, 529 vs 520 tokens); tools-on identical on `content`
+  (`fe2d64126a6f`) but the second tool call's arguments differ (137 vs 139
+  completion tokens) — greedy speculation is not lossless on two of three
+  shapes, recorded as a follow-on. Step 2's control arm ran:
+  `SHRIKE_MTP_VERIFY=tile` on the counting prompt — 24.1 % on a 137-pass
+  trajectory with the same text, pass 257 ms, GPU ≈ 142 per pass (routed on
+  the grouped tile 42.3 vs the pair kernel's 30.5), worse gaps. Step 4: the
+  verify pass runs the prefill kernels at width 2 (`prefill_gdn_router`,
+  `prefill_shared_expert`, `prefill_attn_router` + `verify_routed_pair`,
+  `RealForwardRunner.swift:4641-4652`, `:4707`); per pass, decode only: GDN
+  57.9 ms, routed pair 30.5, attention 18.7, head 9.2, shared 7.8 = **GPU ≈ 124
+  ms (a plain step's 43)**, intra-pass host gaps ≈ 46, driver ≈ 17, turnaround
+  ≈ 26 = 213 against the measured 212; occupancy 57 %; verify hit rate 0.979 —
+  the I/O attribution is retracted, the GDN prefill path at width 2 is the
+  largest term. Step 5: at k = 1 the whole pass must come under 55 / 72 / 141
+  ms to tie on the three shapes (the plain per-token time × (1 + p)) and the
+  GPU alone is 124; ≈ 1.3× plain is reachable only on tool-heavy shapes with a
+  decode-width verify without round trips **and** k = 2 drafting (a second
+  proposal of 21.6 ms plus a width-3 verify against a ≈ 140 ms budget;
+  unmeasured), priced in the design doc's out-of-scope note, not scheduled;
+  the k × p table was not re-run because k = 1 is a hard gate. The
+  counting-prompt premise ("must approach 100 %") was wrong and is retracted;
+  the P4 → P9 shift stays open (neither build measured here); the 57.4 % /
+  2.25–2.59× figures asserted in code were measured on other runtimes and
+  models (Davor, 2026-09-03) and are not comparable. Golden untouched (no code
+  landed); production restored to the plain launch.**
 
   **The decision rule, in two lines.** Step 1's contract read plus Step 2's
   three-prompt rig pick one of three exits: **(a)** a defect is found and fixed
@@ -5644,13 +5683,13 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
   Steps:
 
-  - [ ] Step 1: the contract read — **zero code**, a written finding with
+  - [x] Step 1: the contract read — **zero code**, a written finding with
         `file:line` for each of: the accept comparison and what `drafted`
         counts; the pairing on both branches; the hidden state, the norms, the
         sidecar's state; the reject-rewind asymmetry and what it predicts
         (dropped rows, position compression, decay with pass count); the four
         gates blocking `k > 1`. Rule out or keep each candidate explicitly.
-  - [ ] Step 2 (the rig, **one binary, the P16 build**):
+  - [x] Step 2 (the rig, **one binary, the P16 build**):
         `pgrep -fl 'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI'`
         first, then `mtp-measure.sh`'s shape — plain arm on production, restart
         with the sidecar, MTP arm, restore production. Three prompts, plus the
@@ -5663,19 +5702,20 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         `gpu_ms`, `busy_ms`/`span_ms`, and the `verify_routed_pair` gaps'
         `host_ms`/`queue_ms`. Free control arm on one prompt:
         `SHRIKE_MTP_VERIFY=tile` (`StreamingMTP.swift:231-245`).
-  - [ ] Step 3 (**only if Step 1 leaves a candidate open**): the smallest
+  - [x] Step 3 (**only if Step 1 leaves a candidate open**; not triggered —
+        the ladder falsified the candidate): the smallest
         instrument that separates fed-wrong from weak — (ii), then (iii); RED
         test first, reverted if it was a probe. Five gates if anything lands.
-  - [ ] Step 4: the verify decomposition from Step 2's counters. Attribute the
+  - [x] Step 4: the verify decomposition from Step 2's counters. Attribute the
         ≈ 92 ms backbone excess — low occupancy → host serialisation (name the
         per-layer round trips); high `io_fetch_ms` with misses ≫ the decode
         arm's 0.077 per layer-step → I/O, and the doc's attribution stands.
         Name the largest term you can support and what would move it.
-  - [ ] Step 5: the verdict and the economics table re-run at the measured `p`,
+  - [x] Step 5: the verdict and the economics table re-run at the measured `p`,
         against exits (a)/(b)/(c). If (a), price a verify follow-on against the
         75–100 ms window; if (b), say so plainly and hand the fetch-hiding work
         to plain decode.
-  - [ ] Step 6: docs — a "Step 17" section in the design doc with the
+  - [x] Step 6: docs — a "Step 17" section in the design doc with the
         three-prompt scoreboard and the economics table, and the out-of-scope
         note (`docs/v12-prefill-matrix-kernels.md:1207-1221`) rewritten with the
         measured economics in place of "viability hinges first on the acceptance
@@ -5713,11 +5753,17 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 ## Follow-ons (not scheduled)
 
 - The mini's SSD term (v10 P3 follow-on: batched miss loads, deeper queue
-  depth) — also the second lever for speculative decode's verify pass
-  (measured at P4 on the mini: 6.6 tok/s against 25.5 plain, and again at P9:
-  6.3–6.5 tok/s with the verify backbone unchanged at 155–159 ms; see the design's
-  out-of-scope note).
-- Speculative decode's acceptance rate: 25.9 % (22.3 % at P9) on the counting rig prompt at
-  P4 — audit the draft/verify path before any kernel work on that track.
+  depth) — the lever for plain decode's hit-rate-bound steps (25 → 14 tok/s
+  from a counting prompt to a 1.4k tools context, Task 17); not the verify
+  pass's lever — that pass is structure-bound (Step 17).
+- Speculative decode: audited at Task 17 and retired as a lever for now —
+  acceptance is prompt-dependent (21 / 32 / 76 %), the verify pass runs the
+  prefill kernels at width 2; the priced path (a decode-width verify without
+  round trips **and** two-token drafting) is in the design's out-of-scope note.
+- Greedy speculation is not lossless on this runtime: the MTP arm's output
+  diverged from the plain arm's on two of three shapes at Task 17 (prose text;
+  a tool call's arguments), consistent with a last-ulp difference between the
+  pair path's kernels and the decode kernels — unmeasured; a correctness item
+  for whoever revives the path.
 - The `expert_hit_rate_prefill` counter that reads 0–14 % with every expert
   resident.

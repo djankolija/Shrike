@@ -1097,6 +1097,86 @@ is the A/B. Numerics cannot move (commit order and buffer contents are
 unchanged; the shared staging scratch relies on the queue's serial execution
 exactly as depth 1 did) and golden is identical on both boxes and both profiles.
 
+### Step 17 — the speculative-decode economics audit: a measured verdict, no code (Task 17)
+
+Measured on the mini on the P16 build, one server lifetime per arm, the MTP arm's
+own runner / kernel / gap counters kept this time. Three shapes, plain against
+`--mtp-model ornith15-mtp`. Conventions: "tok/s" is the server's end-to-end
+`decode_tok_s` on both arms; "plain body" is the decode step's `body_ms` (the
+per-token step, ≈ 6 ms under the end-to-end per-token time); "MTP pass" is
+`decode_s / passes`, the whole pass; the digest is sha256 of `message.content`
+only (it does not cover tool calls — see below):
+
+| shape | prompt / completion tokens (plain / MTP) | acceptance | plain body ms (hit rate) | plain tok/s | MTP tok/s | MTP pass ms | tokens per pass |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| counting rig (`max_tokens` 200) | 26 / 171 / 171 | 20.6 % | 39.6 (0.990) | 22.0 | 5.7 | 212 | 1.21 |
+| prose, tools-off, the first user turn | 48 / 520 / 529 | 31.7 % | 48.2 (0.956) | 18.4 | 5.7 | 233 | 1.32 |
+| tool-call continuation, tools on, 1.4k context | 1,425 / 139 / 137 | **75.6 %** | 72.5 (0.880) | 12.5 | 5.6 | 312 | 1.76 |
+
+The counting ladder (`max_tokens` 20 / 50 / 100 / 200 on one lifetime) read
+11.8 / 25.0 / 17.9 / 20.6 % — not monotone in pass count, 2 of the first 17
+passes accepted — so the candidate the contract read left open (the reject
+rewind compressing the sidecar's context, `StreamingMTP.swift:417-423`) is not
+the cause of the low rate; the head is wrong from the first passes and the
+three-line A/B was not built. **Acceptance is prompt-dependent, and the premise
+that a counting prompt must approach 100 % was wrong:** a one-layer head
+copying URLs and JSON out of context does well; incrementing a number across a
+newline is a reasoning step it does badly.
+
+**Greedy speculation is not lossless on this runtime, on two of the three
+shapes.** Counting matched the plain arm exactly (`494bab3edb62`, 171 tokens
+both). Prose diverged (`1a22a1f2773a` against `682f3da2f610`, 529 against 520
+tokens). Tools-on matched on the 61-character `content` (`fe2d64126a6f` both)
+but not on the tool calls: the second call's arguments differ, 137 against 139
+completion tokens. So the tools-on acceptance of 75.6 % is a valid measurement
+of the MTP path on that prompt, not a like-for-like comparison against the plain
+trajectory. The mechanism is not measured here; it is consistent with the pair
+path and the decode path differing in the last ulp and a near-tie argmax
+flipping. Recorded as a correctness finding (plan follow-ons), not chased.
+
+**Where the pass goes.** The verify runs the prefill path's kernels at width 2:
+the MTP arm's kernel roles are `prefill_gdn_router`, `prefill_shared_expert`,
+`prefill_attn_router` and one pair kernel, `verify_routed_pair`, for the routed
+experts (`RealForwardRunner.swift:4641-4652`, `:4707`). Per pass on the counting
+lifetime (141 passes; the request's own 26-token prefill excluded): **GDN 57.9
+ms** (the prefill GDN kernels at two rows — 47 % of the pass's GPU), the routed
+pair kernel 30.5, attention 18.7, the verify head 9.2, the shared expert 7.8 —
+**GPU ≈ 124 ms against a plain step's 43 ms of GPU**; intra-pass host gaps
+≈ 46 ms (≈ 1.16 ms per layer boundary across the router → shared → pair →
+next-layer round trips, ≈ 80 command-buffer completions per pass), driver
+≈ 17 ms, and the pass turnaround ≈ 26 ms (the proposal's 18 ms plus checkpoint
+and commit) = 213 against the measured 212; occupancy 57 %. The control arm
+(`SHRIKE_MTP_VERIFY=tile`, the older grouped-tile schedule, same prompt): 24.1 %
+acceptance on a 137-pass trajectory with the same text, pass 257 ms, GPU ≈ 142
+(routed on the grouped tile 42.3 against the pair kernel's 30.5; GDN 60.4,
+attention 19.6, shared 10.0), and worse gaps (`shared→routed` host 34 ms per
+pass) — the excess is outside the routed kernel on both schedules. The verify
+backbone is 3.7–4.5× a plain step's body (the full verify phase 3.8–4.8×). The
+MTP arm's decode hit rate is 0.979 and `io_fetch_ms` 12 ms, so the earlier
+attribution of this pass to expert-miss I/O does not hold: the excess is
+structure, and the GDN prefill path at width 2 is the largest single term.
+
+**A side finding: plain decode is hit-rate-bound and prompt-dependent** — body
+39.6 / 48.2 / 72.5 ms (22.0 / 18.4 / 12.5 tok/s end to end) across the three
+shapes as the expert hit rate falls from 0.99 to 0.88; the 25.5 tok/s of record
+is `1000 / body_ms` on the counting rig.
+
+**The economics.** With one drafted token per pass, tokens per pass is 1 + p and
+the whole pass must cost under (1 + p) × the plain per-token time to tie: 55 ms
+on counting, 72 on prose, **141 on the tools-on shape** — and the pass's GPU
+work alone is 124 today. A path to ≈ 1.3× plain exists on the tools-on shape
+only, and needs both a verify on decode-width kernels without the per-layer
+round trips (a k = 1 pass near 1.3–1.5× a plain step, ≈ 105–120 ms there) and
+two-token drafting at an acceptance that holds along the chain — and the two
+conditions compose tighter than they read: a k = 2 pass carries a second
+proposal (21.6 ms measured on that shape) and a width-3 verify, against a
+budget of ≈ 140 ms for 1.3× at p = 0.76 (T ≈ 2.3). The head is one-step by
+design and the second condition is unmeasured. The brief's k × p table was not
+re-run: k = 1 is a hard gate, so the three thresholds above are the useful
+object. Verdict: exit (c) — speculation is retired as a lever for now, the
+priced path is recorded below, and the decode fetch work goes to plain decode,
+where the hit-rate numbers say the prize is.
+
 ### Follow-ons, not scheduled
 
 - **The cache settle's re-prefill after a degenerate turn (not a
@@ -1204,22 +1284,24 @@ step are recorded in the plan.
   format, and the expert streamer.
 - Other model shapes (MLA/Kimi, gpt-oss sinks, sliding windows) keep the scalar
   kernels behind the same gates that select them today.
-- Speculative decoding's verify step. It is a width-2 forward on the decode
-  kernels (the `pair` schedule), bandwidth-bound like decode; on the mini its
-  cost is expert-miss I/O, not these kernels. Measured at the P4 build on the
-  mini (rig prompt, `--mtp-model ornith15-mtp`, 5 runs): 6.6 tok/s against
-  25.5 plain; per pass 17 ms proposal + 168 ms verify (156 of it the width-2
-  backbone, 4× a 39 ms decode step) at 25.9 % acceptance, 1.26 tokens per
-  pass. Break-even would need a pass under 49 ms at that acceptance, below
-  the two-row union's bandwidth floor, so viability hinges first on the
-  acceptance rate (26 % on a counting prompt is the thing to audit), then on
-  the verify pass's miss I/O — a decode-chapter follow-on, not a prefill one.
-  Re-measured at the P9 build (same launch, 5 runs): 6.3–6.5 tok/s, per pass
-  17.5 ms proposal + 166–171 ms verify (155–159 the backbone) at 22.3 %
-  acceptance, 1.22 tokens per pass — the prefill GEMM levers (P7, P9) moved
-  nothing here, as the width-2 reading predicts; the acceptance shift from
-  25.9 % on the same greedy prompt is unexplained and belongs to the audit.
-
+- Speculative decoding's verify step — audited at Step 17, retired as a lever
+  for now. It is a width-2 forward that runs the *prefill* kernels at two rows
+  (only the routed experts have a pair kernel); its verify backbone is 3.7–4.5×
+  a plain step's body on the mini, the GDN prefill kernels at width 2 the
+  largest term, and its cost is structure, not expert-miss I/O (verify hit rate
+  0.98). Acceptance is prompt-dependent: 21 % on the counting rig, 32 % on
+  prose, 76 % on a tool-call continuation. The P4 → P9 shift on the counting
+  prompt (25.9 → 22.3 %; 20.6 % at P16) stays open: the audit measured neither
+  build, and the ladder was not monotone; it is consistent with a trajectory
+  change (at P9 the MTP arm emitted 170 tokens against the plain arm's 171, at
+  P16 it emits 171 with the plain digest), which is not a measured mechanism.
+  With one drafted token the path cannot beat plain at any acceptance while
+  the pass exceeds (1 + p) × the plain per-token time. The priced path, not
+  scheduled: a verify on decode-width kernels without the per-layer round
+  trips **and** two-token drafting — ≈ 1.3× plain on tool-heavy shapes only,
+  the two conditions composing tightly and the second unmeasured. The decode
+  fetch work goes to plain decode instead, where decode is hit-rate-bound
+  (22 → 12.5 tok/s end to end from a counting prompt to a 1.4k tools context).
 ## Risks
 
 - Threadgroup memory at head-dim 256 caps the attention tile; if 40 % of the
