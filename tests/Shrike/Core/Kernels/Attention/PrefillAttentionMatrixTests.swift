@@ -12,6 +12,7 @@ import ShrikeValidationSupport
     private static let scale: Float = 0.0625
     private static let tolerance: Float = 2e-2
     private static let groupTiles: [PrefillAttention.MatrixTile] = [.g4k128d, .g2k256d]
+    private static let flashTiles: [PrefillAttention.MatrixTile] = [.f4k128, .f4k64, .f8k128]
     private static let fp16Cases: [(label: String, start: Int, chunk: Int)] = [
         (label: "single-tile", start: 0, chunk: 64),
         (label: "ragged-rows-three-key-tiles", start: 0, chunk: 130),
@@ -39,6 +40,21 @@ import ShrikeValidationSupport
                                     context: ctx)
     }
 
+    @Test(arguments: fp16Cases, flashTiles)
+    func flashMatrixMatchesReferenceOnFP16Cache(c: (label: String, start: Int, chunk: Int),
+                                                tile: PrefillAttention.MatrixTile) throws {
+        let ctx = try MetalContext()
+        try Self.checkFP16Reference(c, attention: PrefillAttention(context: ctx, matrixTile: tile),
+                                    context: ctx)
+    }
+
+    @Test(arguments: flashTiles)
+    func flashTilesBuildTheirPipelines(tile: PrefillAttention.MatrixTile) throws {
+        let ctx = try MetalContext()
+        let attention = try PrefillAttention(context: ctx, matrixTile: tile)
+        #expect(attention.matrixPathAvailable, "\(tile): \(attention.matrixUnavailableReason)")
+    }
+
     private static func checkFP16Reference(_ c: (label: String, start: Int, chunk: Int),
                                            attention: PrefillAttention,
                                            context ctx: MetalContext) throws {
@@ -62,6 +78,14 @@ import ShrikeValidationSupport
 
     @Test(arguments: quantizedCases, groupTiles)
     func groupMatrixMatchesTiledOnQuantizedCache(c: (label: String, start: Int, chunk: Int, bits: Int),
+                                                 tile: PrefillAttention.MatrixTile) throws {
+        let ctx = try MetalContext()
+        try Self.checkQuantizedAgainstTiled(c, attention: PrefillAttention(context: ctx, matrixTile: tile),
+                                            context: ctx)
+    }
+
+    @Test(arguments: quantizedCases, flashTiles)
+    func flashMatrixMatchesTiledOnQuantizedCache(c: (label: String, start: Int, chunk: Int, bits: Int),
                                                  tile: PrefillAttention.MatrixTile) throws {
         let ctx = try MetalContext()
         try Self.checkQuantizedAgainstTiled(c, attention: PrefillAttention(context: ctx, matrixTile: tile),
@@ -195,6 +219,13 @@ import ShrikeValidationSupport
         #expect(PrefillAttention.MatrixTile.g2k256d.queryRows == 2)
         #expect(PrefillAttention.MatrixTile.g2k256d.threadsPerThreadgroup == 128)
         #expect(PrefillAttention.MatrixTile.r64s8.threadsPerThreadgroup == 256)
+        let flashGrouped = Self.flashTiles.allSatisfy(\.groupsEightHeads)
+        #expect(flashGrouped)
+        #expect(PrefillAttention.MatrixTile.f4k128.queryRows == 4)
+        #expect(PrefillAttention.MatrixTile.f8k128.queryRows == 8)
+        #expect(PrefillAttention.MatrixTile.f4k64.threadsPerThreadgroup == 128)
+        #expect(PrefillAttention.MatrixTile.f8k128.threadsPerThreadgroup == 256)
+        #expect(PrefillAttention.MatrixTile.f4k128.kernelName == "attention_prefill_causal_matrix_f4k128")
         #expect(PrefillAttention.matrixTile == .g2k256d)
     }
 

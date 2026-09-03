@@ -448,4 +448,204 @@ ATTN_GROUP_MATRIX_KERNEL(attention_prefill_causal_matrix_g2k256d, 2, 256, 4)
 
 #undef ATTN_GROUP_MATRIX_KERNEL
 
+// One simdgroup owns one query position's eight heads (M = 8) and keeps Q, the
+// scores, the probabilities and O in cooperative tensors: input cooperative
+// tensors are only allowed under `execution_simdgroup` (the header's own
+// assert), which is why the scope is one simdgroup and why nothing here
+// touches threadgroup memory — no barrier exists in this body, so a simdgroup
+// past `queryCount` returns on its own.
+template <int SG, int KEYS>
+static inline void attention_prefill_causal_flash_body(
+    device half* qGroup,
+    device half* shadowK,
+    device half* shadowV,
+    device half* O,
+    constant PrefillAttentionParams& p,
+    uint3 tg,
+    uint sgid
+) {
+    constexpr int R = kAttnGroupHeads;
+    constexpr auto multiply = matmul2d_descriptor::mode::multiply;
+    constexpr auto accumulate = matmul2d_descriptor::mode::multiply_accumulate;
+    constexpr auto qk_desc = matmul2d_descriptor(
+        R, KEYS, kAttnMatrixHeadDim, false, true, false, multiply);
+    // PV runs as two 128-column halves: a single-simdgroup matmul with a
+    // cooperative left input writes only the first 128 columns of a 256-wide
+    // destination (measured on the M4 Pro, SDK 26.5), so N = 256 is off limits.
+    constexpr int kFlashHalfDim = kAttnMatrixHeadDim / 2;
+    constexpr auto pv_desc = matmul2d_descriptor(
+        R, kFlashHalfDim, KEYS, false, false, false, accumulate);
+    matmul2d<qk_desc, execution_simdgroup> qk_op;
+    matmul2d<pv_desc, execution_simdgroup> pv_op;
+
+    using device_half_tensor =
+        tensor<device half, dextents<int32_t, 2>, tensor_inline>;
+
+    const uint query = tg.x * uint(SG) + sgid;
+    const uint kvh = tg.y;
+    if (query >= p.queryCount) return;
+    const uint elements = p.numKVHeads * p.headDim;
+    const uint kv_column0 = kvh * uint(kAttnMatrixHeadDim);
+
+    device_half_tensor query_tensor(
+        qGroup + (kvh * p.queryCount * uint(kAttnGroupHeads)) * uint(kAttnMatrixHeadDim),
+        dextents<int32_t, 2>(kAttnMatrixHeadDim, int32_t(p.queryCount * uint(kAttnGroupHeads))),
+        array<int32_t, 2>({1, kAttnMatrixHeadDim}));
+    auto query_slice = query_tensor.slice(0, int32_t(query * uint(kAttnGroupHeads)));
+    device_half_tensor key_tensor(
+        shadowK + kv_column0,
+        dextents<int32_t, 2>(kAttnMatrixHeadDim, int32_t(p.kvValidCount)),
+        array<int32_t, 2>({1, int32_t(elements)}));
+    device_half_tensor value_tensor(
+        shadowV + kv_column0,
+        dextents<int32_t, 2>(kAttnMatrixHeadDim, int32_t(p.kvValidCount)),
+        array<int32_t, 2>({1, int32_t(elements)}));
+    auto first_key_slice = key_tensor.slice(0, 0);
+    auto first_value_slice = value_tensor.slice(0, 0);
+
+    auto qCT = qk_op.template get_left_input_cooperative_tensor<half, half, float>();
+    qCT.load(query_slice);
+    auto scoreCT = qk_op.template get_destination_cooperative_tensor<
+        decltype(qCT), decltype(first_key_slice), float>();
+    // The probabilities enter PV as a fresh left-input cooperative tensor per
+    // tile: a cooperative tensor cannot be assigned (the SDK's layout copy is
+    // not const-correct), only constructed.
+    using pv_left_tensor =
+        decltype(pv_op.template get_left_input_cooperative_tensor<float, half, float>());
+    auto outLo = pv_op.template get_destination_cooperative_tensor<
+        pv_left_tensor, decltype(first_value_slice), float>();
+    auto outHi = pv_op.template get_destination_cooperative_tensor<
+        pv_left_tensor, decltype(first_value_slice), float>();
+#pragma clang loop unroll(full)
+    for (int element = 0; element < outLo.get_capacity(); ++element) {
+        outLo[element] = 0.0f;
+        outHi[element] = 0.0f;
+    }
+
+    float run_max[R];
+    float run_sum[R];
+#pragma clang loop unroll(full)
+    for (int r = 0; r < R; ++r) {
+        run_max[r] = -INFINITY;
+        run_sum[r] = 0.0f;
+    }
+
+    const uint causal_last = min(p.kvValidCount, p.startPosition + query + 1u);
+    for (uint key_start = 0u; key_start < causal_last; key_start += uint(KEYS)) {
+        auto key_slice = key_tensor.slice(0, int32_t(key_start));
+        qk_op.run(qCT, key_slice, scoreCT);
+        const uint visible = min(uint(KEYS), causal_last - key_start);
+
+        // Per-row statistics are kept in constant-indexed register arrays: a
+        // row array indexed by an element's runtime row would live in thread
+        // memory, so each element contributes to every row through a select.
+        float tile_max[R];
+#pragma clang loop unroll(full)
+        for (int r = 0; r < R; ++r) tile_max[r] = -INFINITY;
+#pragma clang loop unroll(full)
+        for (int element = 0; element < scoreCT.get_capacity(); ++element) {
+            if (!scoreCT.is_valid_element(element)) continue;
+            const auto position = scoreCT.get_multidimensional_index(element);
+            const bool valid = uint(position[0]) < visible;
+            const float s = valid ? scoreCT[element] * p.scale : -INFINITY;
+            scoreCT[element] = s;
+            const int row = int(position[1]);
+#pragma clang loop unroll(full)
+            for (int r = 0; r < R; ++r) {
+                tile_max[r] = max(tile_max[r], row == r ? s : -INFINITY);
+            }
+        }
+        float next_max[R];
+        float old_scale[R];
+        float tile_sum[R];
+#pragma clang loop unroll(full)
+        for (int r = 0; r < R; ++r) {
+            tile_max[r] = simd_max(tile_max[r]);
+            next_max[r] = max(run_max[r], tile_max[r]);
+            old_scale[r] = run_sum[r] > 0.0f ? fast::exp(run_max[r] - next_max[r]) : 0.0f;
+            tile_sum[r] = 0.0f;
+        }
+#pragma clang loop unroll(full)
+        for (int element = 0; element < scoreCT.get_capacity(); ++element) {
+            if (!scoreCT.is_valid_element(element)) continue;
+            const auto position = scoreCT.get_multidimensional_index(element);
+            const int row = int(position[1]);
+            float row_max = next_max[0];
+#pragma clang loop unroll(full)
+            for (int r = 1; r < R; ++r) {
+                row_max = row == r ? next_max[r] : row_max;
+            }
+            const float weight = uint(position[0]) < visible
+                ? fast::exp(scoreCT[element] - row_max)
+                : 0.0f;
+            scoreCT[element] = weight;
+#pragma clang loop unroll(full)
+            for (int r = 0; r < R; ++r) {
+                tile_sum[r] += row == r ? weight : 0.0f;
+            }
+        }
+#pragma clang loop unroll(full)
+        for (int r = 0; r < R; ++r) {
+            tile_sum[r] = simd_sum(tile_sum[r]);
+            run_sum[r] = run_sum[r] * old_scale[r] + tile_sum[r];
+            run_max[r] = next_max[r];
+        }
+#pragma clang loop unroll(full)
+        for (int element = 0; element < outLo.get_capacity(); ++element) {
+            if (!outLo.is_valid_element(element)) continue;
+            const auto position = outLo.get_multidimensional_index(element);
+            const int row = int(position[1]);
+            float scale_row = old_scale[0];
+#pragma clang loop unroll(full)
+            for (int r = 1; r < R; ++r) {
+                scale_row = row == r ? old_scale[r] : scale_row;
+            }
+            outLo[element] *= scale_row;
+            outHi[element] *= scale_row;
+        }
+        auto pCT = pv_op.template get_left_input_cooperative_tensor<float, half, float>(scoreCT);
+        auto value_lo = value_tensor.slice(0, int32_t(key_start));
+        auto value_hi = value_tensor.slice(kFlashHalfDim, int32_t(key_start));
+        pv_op.run(pCT, value_lo, outLo);
+        pv_op.run(pCT, value_hi, outHi);
+    }
+
+#pragma clang loop unroll(full)
+    for (int element = 0; element < outLo.get_capacity(); ++element) {
+        if (!outLo.is_valid_element(element)) continue;
+        const auto position = outLo.get_multidimensional_index(element);
+        const uint d = uint(position[0]);
+        const int row = int(position[1]);
+        float denominator = run_sum[0];
+#pragma clang loop unroll(full)
+        for (int r = 1; r < R; ++r) {
+            denominator = row == r ? run_sum[r] : denominator;
+        }
+        const uint head = kvh * uint(kAttnGroupHeads) + uint(row);
+        device half* o_row = O + query * p.oTokenStrideElements + head * p.headDim;
+        o_row[d] = denominator > 0.0f ? half(outLo[element] / denominator) : half(0.0f);
+        o_row[d + uint(kFlashHalfDim)] = denominator > 0.0f ? half(outHi[element] / denominator) : half(0.0f);
+    }
+}
+
+#define ATTN_FLASH_KERNEL(NAME, SG, KEYS)                                       \
+[[kernel, max_total_threads_per_threadgroup(32 * SG)]]                          \
+kernel void NAME(                                                              \
+    device half* qGroup [[buffer(0)]],                                          \
+    device half* shadowK [[buffer(1)]],                                         \
+    device half* shadowV [[buffer(2)]],                                         \
+    device half* O [[buffer(3)]],                                               \
+    constant PrefillAttentionParams& p [[buffer(4)]],                           \
+    uint3 tg [[threadgroup_position_in_grid]],                                  \
+    uint sgid [[simdgroup_index_in_threadgroup]]                                \
+) {                                                                             \
+    attention_prefill_causal_flash_body<SG, KEYS>(                              \
+        qGroup, shadowK, shadowV, O, p, tg, sgid);                              \
+}
+
+ATTN_FLASH_KERNEL(attention_prefill_causal_matrix_f4k128, 4, 128)
+ATTN_FLASH_KERNEL(attention_prefill_causal_matrix_f4k64, 4, 64)
+ATTN_FLASH_KERNEL(attention_prefill_causal_matrix_f8k128, 8, 128)
+
+#undef ATTN_FLASH_KERNEL
 #endif

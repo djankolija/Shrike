@@ -26,6 +26,7 @@ import Shrike
 ///   dense_gemm: the dense MPP GEMM at the 4,096-row prefill shapes
 ///   router_block: the prefill router block at the ornith 256-expert shape
 ///   mpp_compare: each K-tile pair of the MPP kernel (64 vs 128, 128 vs 256), element for element
+///   attn <iterations> [tiles…]: the prefill matrix-path attention per MatrixTile at the ornith shape
 @main
 struct ShrikeBench {
     /// Shader-side `ExpertOffsets` mirror: 9 packed UInt32 in the same order.
@@ -71,8 +72,7 @@ struct ShrikeBench {
             return
         }
 
-        if kernelName == "routed_gemm" {
-            try runRoutedGEMM(iterations: iterations, context: context)
+        if try runPrefillMatrixMode(kernelName: kernelName, iterations: iterations, context: context) {
             return
         }
 

@@ -467,12 +467,17 @@ extension PrefillAttention {
     /// eight query heads of one KV head (v12 P7). The digits name the query
     /// rows and, for `g*`, the keys per tile; the `d` suffix is the spike's
     /// name for the device-operand form that landed (its staged twins lost).
+    /// `f*` variants give each simdgroup one query position's eight heads with
+    /// Q and the probabilities in cooperative tensors (v12 P11, a measured null
+    /// kept selectable); their digits are the simdgroups per threadgroup and
+    /// the keys per tile.
     /// `queryRows` and `threadsPerThreadgroup` restate the Metal
     /// instantiations' template arguments; the numeric tests are what ties
     /// them together.
     enum MatrixTile: String, CaseIterable, Sendable {
         case r32s4, r64s8
         case g4k128d, g2k256d
+        case f4k128, f4k64, f8k128
 
         var kernelName: String { "attention_prefill_causal_matrix_\(rawValue)" }
         var groupsEightHeads: Bool { self != .r32s4 && self != .r64s8 }
@@ -482,12 +487,14 @@ extension PrefillAttention {
             case .r64s8: 64
             case .g4k128d: 4
             case .g2k256d: 2
+            case .f4k128, .f4k64: 4
+            case .f8k128: 8
             }
         }
         var threadsPerThreadgroup: Int {
             switch self {
-            case .r32s4, .g4k128d, .g2k256d: 128
-            case .r64s8: 256
+            case .r32s4, .g4k128d, .g2k256d, .f4k128, .f4k64: 128
+            case .r64s8, .f8k128: 256
             }
         }
     }
