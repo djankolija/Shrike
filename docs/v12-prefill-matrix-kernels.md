@@ -321,6 +321,33 @@ differs (a near-tie logit at the thinking block's second sentence flips back
 to its pre-P3 wording) and was recaptured once; the M1's long profile is
 byte-identical.
 
+**After P9** (commit 560c888, 2026-09-03; the MPP GEMM's dequant issues one
+vector load per thread and stages two quant groups per K tile;
+`SHRIKE_MPP_WEIGHT_LOADS=byte SHRIKE_MPP_TILE_K=64` keeps the P8 kernel):
+
+| role | M4 Pro 3.7k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `prefill_attn_router` | 0.25 | 0.39 | 0.54 | **0.96** | **1.75** |
+| `prefill_routed_tile` | **0.59** | **0.53** | **0.50** | **1.92** | **1.87** |
+| `prefill_gdn_router` | 0.65 | **0.60** | **0.54** | **2.38** | **2.37** |
+| `prefill_shared_expert` | **0.05** | **0.05** | **0.04** | **0.17** | **0.17** |
+| **GPU busy** | 1.59 | 1.60 | 1.65 | 5.64 | 6.26 |
+| gaps (span − busy) | 0.90 | 0.71 | 0.85 | 0.72 | 0.56 |
+| **wall** | 2.90 | 2.41 | 2.56 | 6.84 | 7.00 |
+| wall, seconds | 10.9 | 29.6 | 64.7 | 25.7 | 86.0 |
+
+Every role with an MPP projection moved on the M1: routed −40 %, GDN −31 %
+(its first measured GEMM share), shared −41 %, attention −14 % (its
+Q/K/V/O). The mini's 12k wall fell 118.9 → 86.0 s (−28 %) and its 3.7k wall
+36.3 → 25.7 s; the mini now prefills at 7.0 ms/token, 1.1× the chapter's
+6.3 target. On the M4 Pro the GEMM was already near its ceiling, so the roles
+moved less and the fetch-bound loop turned part of the saving into
+routed→routed gap (12k gaps 0.57 → 0.71); its 25k wall fell 77.5 → 64.7 s.
+Golden differs on the long profile on both boxes — the 128-wide K tile
+reorders the reduction (last-ulp differences on ≈ 0.15 % of elements, measured
+by `ShrikeBench mpp_compare` on both boxes) — and was recaptured once per box
+with that reason; the digests are in the plan's verdict.
+
 ## Where the time goes
 
 Every dense projection in prefill (attention Q/K/V/O, GDN in/out) already runs
@@ -331,7 +358,7 @@ all scalar kernels:
 | role | kernel | structure | roofline gap (M4 Pro) |
 | --- | --- | --- | ---: |
 | attention core | `attention_prefill_causal_tiled` | one threadgroup per (query, head), 256 threads over head-dim, a serial walk over every key with a two-barrier threadgroup reduction per key. The decode kernel's shape, run once per prompt token: no K/V reuse across queries, none across the 8 query heads that share a KV head. | 30× at 3.7k, 60× at 25k |
-| routed experts | `prefill_grouped_routed_moe_batched_phase1` / `_down` | each thread computes one or two 2048-long scalar dot products; 32-pair microbatches; a command buffer per 8-expert tile | 7×; 2.6× after P6 (`mpp_prefill_affine_grouped_f16`, one dispatch per phase over the tile's experts: 0.69 ms/token at 12k against 0.27 at the 7.46 TFLOPS ceiling); P8's bench puts the tile at 67 % of the M4 Pro's same-run ceiling and 42 % of the M1's, the M1's remainder split 7 % unpack / 20 % weight loads / 31 % staged structure (Step 7) |
+| routed experts | `prefill_grouped_routed_moe_batched_phase1` / `_down` | each thread computes one or two 2048-long scalar dot products; 32-pair microbatches; a command buffer per 8-expert tile | 7×; 2.6× after P6 (`mpp_prefill_affine_grouped_f16`, one dispatch per phase over the tile's experts: 0.69 ms/token at 12k against 0.27 at the 7.46 TFLOPS ceiling); P8's bench puts the tile at 67 % of the M4 Pro's same-run ceiling and 42 % of the M1's, the M1's remainder split 7 % unpack / 20 % weight loads / 31 % staged structure (Step 7); after P9 (vector loads + 128-wide K) 71 % of the M1's ceiling and 99 % of the M4 Pro's (Step 8) |
 | shared expert | `PrefillSharedExpert.encodeBlock` | a `for row in 0..<queryCount` loop over the decode runtime: 4–6 M=1 GEMV dispatches per token | 25× |
 | GDN | `gdn_delta_step_prefill` | the delta-rule scan is a serial loop over the chunk inside one dispatch of 32×32 threadgroups; projections, conv and norms are fine | 3.6× (scan ≈ 0.6 of the 1.0 ms) |
 
@@ -529,6 +556,44 @@ read 1.15 TFLOPS that run and 1.84 today with the grouped tile unchanged). The
 two levers this leaves are in the follow-ons: vectorised weight loads and a
 128-wide K tile.
 
+### Step 8 — vectorised int4 weight loads and a 128-wide K tile (−40 % on the M1's routed role)
+
+The two levers P8's probe named: the first bit-identical to the kernel P6
+shipped, the second a reduction-order change inside the 2e-2 bar.
+The dequant of the staged weight tile issued one byte load, a scale and a bias
+read and a fused multiply-add per element; it now issues one vector load per
+thread — a `uint2` or `uint4` carrying 16 or 32 consecutive values of one row,
+never straddling a row or a quant group — reads the (scale, bias) pair once per
+chunk and stores `half4`s. The byte body stays as the fallback for a weight
+base that is not 16-byte aligned: the `.gturbo` offset spaces are unpadded
+running cursors, so alignment is a per-dispatch fact the host passes as a
+uniform, not a pipeline property. The K tile gains a template axis:
+`n32k128b1` stages two quant groups per tile (32 × 128 halves, 8 KB), halving
+the barriers and the `matmul2d` runs per row; an instance carrying it also
+builds the 64-wide pair and picks per dispatch on `k % 128`, which keeps
+gpt-oss's K = 2880 on the matrix path. The static admission unit stays 64.
+`ShrikeBench routed_gemm 20`, grouped ms per ornith tile:
+
+| arm | M4 Pro | M1 |
+| --- | ---: | ---: |
+| byte loads, K 64 (P8's default) | 1.70 | 9.37 (8.25 in P8's run) |
+| vector loads, K 64 | 1.22 | 6.19 |
+| byte loads, K 128 | 1.70 | 8.83 |
+| **vector loads, K 128 — the default** | **1.13** | **4.92** |
+| same-run gate/up ceiling, TFLOPS | 5.4–5.8 | 1.84 |
+
+On the M1 the vector path takes a third off the tile — far more than the
+probe's 1.65 ms load term, because the per-element loop, its address
+arithmetic and the scale/bias re-reads go with the loads — and the wider K
+tile, a null on its own, takes a further fifth once the dequant no longer
+dominates: 4.92 ms is 1.31 TFLOPS, 71 % of the mini's same-run ceiling, from
+42 %. The M4 Pro lands at 99 % of its ceiling. Measured on the ledger: see
+"After P9" above. The vector loads are bit-identical (the tests assert it on
+regular and full-mantissa inputs); the 128-wide run is not — MPP reduces K in
+a different order than two 64-wide runs summed in fp32, last-ulp differences
+on ≈ 0.15 % of elements (`ShrikeBench mpp_compare`, both boxes) — so golden
+moved on the long profile on both boxes and was recaptured once per box.
+
 ### Follow-ons, not scheduled
 
 - **Tile command-buffer batching — landed as a null result (P5, a7c8288 +
@@ -555,20 +620,19 @@ two levers this leaves are in the follow-ons: vectorised weight loads and a
   that do not — suggests residency work proportional to the slab, which an
   `MTLResidencySet` on the queue would remove; that is a model, not a
   measurement.
-- **The MPP GEMM's int4 weight loads (M1: 20 % of the tile).** `mpp_affine_value`
-  loads one or two bytes per dequantized element; a `uint4` carries 32 int4
-  values, so the weight tile's 2,048 elements are 64 vector loads per K group
-  instead of ≈ 3,000 byte loads. Bit-identical (the values do not change);
-  the P8 probe bounds the win at 1.65 ms of the mini's 8.25 ms tile, 0.3 ms
-  of the M4 Pro's 1.66.
-- **A 128-wide K tile for the MPP GEMM (M1: up to 31 % of the tile).** Two
-  quant groups per staged tile halve the barriers and the `matmul2d` runs
-  (32 → 16 per gate/up GEMM at k = 2048); the weight tile is 8 KB at 32×128.
-  The dequant already applies each element's own scale and bias, so the
-  quant-group boundary inside the tile costs nothing. Not bit-identical —
-  MPP's in-run K order changes — so golden would move and the 2e-2 bar
-  applies; the P8 probe puts the whole staged structure at 2.53 ms of the
-  mini's tile, and this attacks half its barriers and runs.
+- **The MPP GEMM's byte-load fallback on the M1.** After P9 the dequant's
+  byte-load body serves only weight bases that are not 16-byte aligned (and
+  the `SHRIKE_MPP_WEIGHT_LOADS=byte` A/B), and inside the two-body kernel it
+  runs ≈ 13 % slower on the M1 than P8's single-body kernel did (9.35 vs
+  8.25 ms per ornith tile, reproducible; the M4 Pro is unaffected). No
+  production tensor of the six models takes it today; a byte-only
+  instantiation would restore it if one ever does.
+- **The MPP GEMM's remaining third on the M1.** After P9 the routed tile
+  runs at 71 % of the mini's same-run ceiling. What is left is the staged
+  structure itself — the threadgroup tile round-trip and one barrier per
+  128-wide K tile — and the dequant arithmetic; a 256-wide K tile (16 KB,
+  fits) is the next mechanical step, then the FlashAttention-style question of
+  whether MPP can consume the weight tile from registers.
 - **Per-layer host routing on the M1.** ≈ 15 ms per layer between the GDN or
   attention buffer and the shared expert (`host_ms` 1.38 + 0.48 s at 12k,
   ≈ 1.5 % of wall); 2.8 ms per layer on the M4 Pro. The router readback,

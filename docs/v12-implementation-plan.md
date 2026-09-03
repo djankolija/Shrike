@@ -1779,6 +1779,483 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         time goes" (`:334`) gains the new share. Task review by a fresh reviewer;
         fixes folded into the commit (rebase and amend, never a fixup commit).
 
+### Task 9: P9 — vectorised int4 weight loads and a 128-wide K tile in the MPP GEMM
+
+- [x] **P9: the two levers P8's probe exposed** — target on the mini at 12k:
+  `prefill_routed_tile` 3.13 → ≤ 2.60 ms/prompt-token, `prefill_shared_expert`
+  0.29 → ≤ 0.25, `prefill_gdn_router` 3.43 → ≤ 3.30 (a floor, see below); at
+  3.7k 3.24 → ≤ 2.70, 0.29 → ≤ 0.25, 3.46 → ≤ 3.33; GPU busy 9.01 → ≈ 8.3 at
+  12k and 8.44 → ≈ 7.7 at 3.7k. Bar: **`ShrikeBench routed_gemm 20` on the
+  ornith tile (8 experts × 128 rows, d 2048, f 512, 6.44 GFLOP, staging 1024),
+  grouped ms per tile on the mini — ≤ 6.6 ms (≥ 0.98 TFLOPS, 53 % of the
+  mini's 1.84 same-run gate/up ceiling) for an arm carrying both levers,
+  ≤ 7.3 ms (≥ 0.88 TFLOPS, 48 %) for a single lever** — against P8's control
+  of 8.25 ms / 0.78 TFLOPS / 42 % (`docs/v12-implementation-plan.md:1487-1490`,
+  `docs/v12-prefill-matrix-kernels.md:505-531`). Why those two numbers: the P8
+  probe splits the mini's 8.25 ms tile into unpack arithmetic 0.57 (7 %), int4
+  weight byte loads 1.65 (20 %), the staged-matmul structure 2.53 (31 %) and
+  the plain GEMM 3.50 (42 %). Lever A takes the load term plus the part of the
+  unpack term that is per-element address arithmetic; lever B halves the
+  barriers and the `matmul2d` runs but **not** the threadgroup tile writes, so
+  at most half of 2.53. Model: A ≈ 6.6–6.9, B ≈ 7.0, A+B ≈ 5.7. The 6.6 bar
+  claims 1.65 ms of a modelled 2.6 — the load lever in full and nothing from
+  the structure lever; the 7.3 bar claims 0.95 of a modelled 1.3.
+  **The mini decides.** M4 Pro iteration check only: bench 1.66 → ≈ 1.45 (A+B),
+  ≈ 1.55 (A), ≈ 1.60 (B); 12k roles routed 0.69 → ≈ 0.62, gdn 0.64 → ≈ 0.62,
+  shared 0.06 → 0.05 (noise floor), busy 1.78 → ≈ 1.70 — that box's *entire*
+  probe budget above a plain GEMM is 0.51 ms of a 1.66 ms tile (load 0.10,
+  unpack 0.30, structure 0.11), so a null there decides nothing, and its **wall
+  may not move**: the loop is fetch-bound at 3.9 ms per tile and P6's GPU saving
+  reappeared as routed→routed gap (`v12-prefill-matrix-kernels.md:277-283`).
+  **LANDED 560c888 (2026-09-03): measured on the mini `prefill_routed_tile` 3.24 →
+  1.92 ms/prompt-token (3.7k; 3.14 → 1.87 at 12k), `prefill_shared_expert`
+  0.29 → 0.17 (both), `prefill_gdn_router` 3.46 → 2.38 (3.7k; 3.43 → 2.37 at
+  12k), GPU busy 8.44 → 5.64 (3.7k) and 9.00 → 6.26 (12k), wall 36.3 → 25.7 s
+  and 118.9 → 86.0 s.** Every bar is cleared by a wide margin (routed ≤ 2.60,
+  shared ≤ 0.25, gdn ≤ 3.30; the 6.6 ms tile bar against a measured 4.92).
+  Bench, grouped ms per ornith tile on the mini: byte loads 9.37 (P8's run of
+  the same arm read 8.25 — the two-body kernel's byte fallback is ≈ 13 %
+  slower there and is now only the unaligned-base path) → vector 6.19 → vector
+  + 128-wide K 4.92, 1.31 TFLOPS = 71 % of the same-run 1.84 ceiling (42 %
+  before); the 128-wide tile alone 8.83. M4 Pro check: 1.70 → 1.22 → 1.13 ms
+  (99 % of its ceiling), 12k roles routed 0.69 → 0.53, gdn 0.64 →
+  0.60, shared 0.06 → 0.05, busy 1.78 → 1.60, wall 30.2 → 29.6 s
+  (3.7k busy 1.69 → 1.59, wall 10.8 → 10.9 s; 25k busy 2.32 → 1.65, wall 77.5 →
+  64.7 s — the loop is fetch-bound there, so the GPU saving reappears partly
+  as routed→routed gap). Winner `n32k128b1` with vector loads, the
+  default; every arm selectable (`SHRIKE_MPP_TILE_K`, `SHRIKE_MPP_WEIGHT_LOADS`).
+  The GDN role moved 31 %, the first bound this chapter has for its GEMM
+  share on the mini. Numerics: lever A is bit-identical (asserted on regular
+  and full-mantissa inputs, at an unaligned offset and at 8 bits); lever B is
+  not — MPP's 128-wide run reorders the K reduction, last-ulp differences on
+  ≈ 0.15 % of elements (`ShrikeBench mpp_compare`: 372 of 262,144 at 4 bits,
+  max abs 0.000488; 401 at 8 bits, max abs 0.0078; identical counts on both
+  boxes) — within the 2e-2 bar against the CPU reference. The Step 4
+  bit-equality probe passed and was wrong: the tests' inputs (integers over 64,
+  a few bf16 scales) have fp32-exact partial sums that no reduction order can
+  disturb; the probe now uses full-mantissa data and the wide-K tests assert
+  the 2e-2 bar. Golden: short identical on both boxes; long differs on both
+  and was recaptured once per box with that reason — sha256 M4 Pro
+  f24c61565618fdab → 6fc391949c998e66, M1 39c38734e8f9d22a → 899a25e60a365e60
+  (the mini's output returned to its pre-P6 text: the same near-tie sentence
+  P6 and P7 moved). One mini recapture had run before the cause was measured
+  (the leg-3 wrapper recaptures on mismatch) and was reverted; it was redone
+  after `mpp_compare` bounded the difference. Five gates green (1154 tests,
+  TSAN 0 reports); build + lint re-run on the final tree.
+
+  **What P8 left.** The probe ledger for the mini's 8.25 ms tile, and the same
+  split on the M4 Pro (`.superpowers/sdd/v12-implementation-plan/task-8-report.md`,
+  "The dequant probe"):
+
+  | term | mini ms | share | M4 Pro ms | share |
+  | --- | ---: | ---: | ---: | ---: |
+  | unpack arithmetic | 0.57 | 7 % | 0.30 | 18 % |
+  | int4 weight byte loads | 1.65 | 20 % | 0.10 | 6 % |
+  | staged-matmul structure | 2.53 | 31 % | 0.11 | 7 % |
+  | the GEMM itself (same-run ceiling) | 3.50 | 42 % | 1.15 | 69 % |
+  | **full tile** | **8.25** | | **1.66** | |
+
+  The weight traffic is not the constraint: one grouped tile reads each expert's
+  1.57 MB of packed int4 twice (128 rows = 2 row tiles of 64), 25 MB per tile,
+  3 GB/s at 8.25 ms — an order under the M1's bandwidth. The 1.65 ms is issue
+  slots and address arithmetic, not DRAM, which is why a wider load can take
+  most of it.
+
+  **Lever A — one vector load per thread per staged tile.** `mpp_affine_value`
+  (`tensorops.metal:13-26`) computes `bit_offset = element * bits` and loads one
+  byte (two only when a field straddles, which 4-bit at `bit_offset % 8 ∈ {0,4}`
+  and 8-bit never do), so the 4-bit path issues exactly one byte load per
+  dequantized element: 2,048 loads per 32×64 tile, 16 per thread at the 128
+  threads both kernels dispatch (`threadExecutionWidth * 4`,
+  `MPPPrefillInt4QMM.swift:162`, `:264`). Replace `mpp_affine_dequant_tile`'s
+  `linear` → (localN, localK) walk (`tensorops.metal:43-58`, K fastest) with a
+  **chunk** walk: thread `lid` takes chunk `c`, covering `E` consecutive
+  elements of one row's K range, `E = bytesPerLoad * 8 / bits`.
+  - `localN = c * E / TILE_K`, `localK0 = (c * E) % TILE_K`, and because `E`
+    divides `TILE_K` a chunk never straddles a row **or a quant group** — the
+    element's group is `(tileIndex * TILE_K + localK0) / kW4A8GroupSize`,
+    computed once per chunk instead of once per element, and the
+    `globalN < N` zero-fill guard (`:48`, `:56`) becomes one test per chunk.
+  - Picking the load width. At `TILE_N 32, TILE_K 64` the tile is 2,048
+    elements = 1,024 packed bytes at 4 bits, so a `uint4` (16 B = 32 int4
+    values) gives **64 loads over 128 threads — half the threads idle in the
+    dequant phase**, giving back exactly what the lever buys (P8: the dequant is
+    throughput work on the matmul's own threads). Two rows per thread does not
+    fix it — rows are `rowBytes` apart, never contiguous. The two mappings that
+    keep all 128 threads loading are a `uint2` (8 B = 16 values) at `TILE_K 64`,
+    or a `uint4` once the tile's K width doubles, which is lever B. **Take
+    both:** `bytesPerLoad = 8` for 4-bit at `TILE_K == 64`, `16` otherwise —
+    `E = 16` at `TILE_K 64` (both bit widths), `E = 32` at `TILE_K 128` (4-bit
+    one `uint4`, 8-bit two), and 2,048 loads per tile become 128 in every case.
+    `bits` is a function constant (`:11`), so the choice folds at pipeline
+    build; at 8 bits the `>> shift & mask` chain collapses to a byte extract
+    from the loaded word. Keep the loop strided
+    (`for c = lid; c < chunksPerTile; c += threads`) so a device whose
+    `threadExecutionWidth` is not 32 still covers the tile, and store each chunk
+    with vector `half` writes so the store count falls with the load count —
+    whether the compiler already vectorises today's scalar store is not
+    something the source can tell us, and Step 5 measures the pair, not halves.
+  - **Bit-identical.** Same integer `q`, same `scale`/`bias` from the same
+    indices, same `half(fma(...))`, same tile slot, same matmul, same
+    accumulate order. Only the addressing changes.
+
+  **Lever B — `TILE_K = 128`, two quant groups per staged tile.** The
+  descriptor's K doubles (`matmul2d_descriptor(kMPPAffineTileM, TILE_N, TILE_K,
+  false, true, false)`, `tensorops.metal:87-89`); `tilesPerRow` replaces
+  `groupsPerRow = K / kW4A8GroupSize` (`:120`) and halves — 32 → 16 iterations
+  per gate/up GEMM at k 2048, 8 → 4 for down — halving the barrier count
+  (`:156`) and the `run` count (`:148-152`) with it. The dequant already applies
+  each element's own scale and bias, and the chunk mapping above keeps one
+  (scale, bias) pair per chunk, so the group boundary inside the tile costs
+  nothing. The weight tile is 32×128 halves = 8 KB.
+  - **Not bit-identical.** MPP reduces K 128 in one run where today two 64-runs
+    are summed in fp32 through `accumulator[element] += groupProduct[element]`
+    (`:153-155`). P8's Step 4 probe established that the in-run K order does not
+    depend on the descriptor's **N**; it says nothing about K, and there is no
+    reason it should carry over. Expect a difference; Step 4 measures it.
+
+  **Threadgroup memory and registers**, against the 32,768-byte budget at 4
+  simdgroups / 128 threads (`tensorops.metal:90`, `:183`, `:239`):
+
+  | variant | weight tile (fp16) | bytes | of 32 KB | elems/thread | loads/thread (4-bit / 8-bit) | fp32 accum. regs/thread |
+  | --- | --- | ---: | ---: | ---: | --- | ---: |
+  | `n32b1` (default) | 32×64 | 4,096 | 12.5 % | 16 | 1×`uint2` / 1×`uint4` | 2 × (64·32/128) = 32 |
+  | `n32k128b1` (new) | 32×128 | 8,192 | 25 % | 32 | 1×`uint4` / 2×`uint4` | 32 |
+  | `n32b2` (P8) | 2 × 32×64 | 8,192 | 25 % | 16 | 1×`uint2` / 1×`uint4` | 32 |
+  | `n64b1` / `n64b2` (P8) | 64×64 / 2 × 64×64 | 8,192 / 16,384 | 25 % / 50 % | 32 | 1×`uint4` / 2×`uint4` | 64 |
+
+  The row that matters: **`TILE_K` does not touch the accumulator footprint.**
+  The destination cooperative tensors are M×N (`:109-113`), so doubling K leaves
+  32 fp32 registers per thread where `TILE_N = 64` doubled them to 64 — and P8's
+  reading of why `n64*` lost was exactly that occupancy cost. What B does add is
+  4 KB of threadgroup memory and whatever MPP stages internally for a 64×128 A
+  fragment, which the source cannot tell us. `static_assert` becomes
+  `TILE_N * TILE_K * BUFFERS * 2 <= 32768`.
+
+  **Alignment — what the code guarantees, and the fallback.** A vector load of
+  W bytes needs the thread's address `base + globalN * rowBytes + chunkBytes`
+  aligned to W.
+  - `rowBytes = K * bits / 8` (`tensorops.metal:119`) and `encode` already
+    requires `k.isMultiple(of: Self.tileK)` with `tileK = Quantization.groupSize
+    = 64` (`MPPPrefillInt4QMM.swift:26`, `:120`, `:204`;
+    `Quantization.swift:5`), so `rowBytes` is a multiple of 32 at 4 bits and of
+    64 at 8 bits — **always 16-byte aligned.**
+  - `chunkBytes` is a multiple of 8 (4-bit, `TILE_K 64`) or 16 (every other
+    case), from `E` dividing `TILE_K`.
+  - The **base** is the open question, and **it is not guaranteed**.
+    `weightsOffset >= 0` is the only weight guard in either encoder (`:121`,
+    `:205`); odd offsets are legal today and
+    `affineThreadgroupCandidateMatchesFP32AffineReference` exercises
+    `weightOffset: 13` (`MPPPrefillInt4QMMTests.swift:324`). Upstream the buffer
+    *bases* are page aligned — the expert pool is `posix_memalign`ed to 2 MiB
+    with a page-rounded slot stride (`PreadExpertStreamer.swift:220`, `:341-345`,
+    `:382`, `:403`) — but both offset spaces are running cursors with **no
+    padding**: `wOff` over per-expert sub-tensor sizes
+    (`RepackPlanner.swift:772-791`), resident attention/GDN tensors from a
+    16 KB-aligned `indexSize` (`RepackPlanner.swift:373-401`, read back at
+    `Model.swift:404-421`). For every shape the six models issue those running
+    sizes happen to be multiples of 16 (a packed int4 projection is
+    `rows * cols / 2` with `cols % 64 == 0`; bf16 scales/biases are
+    `rows * cols / 64 * 2`), but one odd-sized tensor would misalign everything
+    after it.
+  - So the vector path needs a **runtime-uniform fallback, not a function
+    constant**: alignment varies per *dispatch* (a different tensor, a different
+    `wOff`), while a function constant is fixed at pipeline build and would
+    double the pipeline count for something the host already knows. Add one
+    `constant uint&` (plain kernel index 8, grouped index 11) set from
+    `weightsOffset % 16 == 0`, branched on once outside the chunk loop —
+    threadgroup-uniform, no divergence, at the cost of both dequant bodies
+    staying in the binary. Keep `mpp_affine_value` as the fallback body; the
+    `weightOffset: 13` test becomes its coverage.
+
+  **K divisibility — which production GEMMs are `K % 128 == 0`.** Every GEMM on
+  the MPP path, from the arch configs (`ModelTypes.swift:197-235`, `:242-271`,
+  `:286-314`, `:319-357`) and the call sites:
+
+  | GEMM | K | `% 128` |
+  | --- | ---: | --- |
+  | routed gate/up then down, ornith & qwen36 (`PrefillGroupedRoutedMoE.swift:896-929`: `n: f, k: d` then `n: d, k: f`) | 2048, 512 | ✓ |
+  | shared expert gate/up, down (`PrefillSharedExpert.swift:135-140`, `:155-156`) | 2048, 512 | ✓ |
+  | attention q/kv then o, ornith (`RealForwardRunner.swift:3589-3619`, the MPP branch of `encodeAffineProjection`) | 2048, 4096 | ✓ |
+  | GDN in-proj / z / a / b (`:3908-3962`, `columns: D`), out-proj (`:4001-4011`, `columns: la.valueDim`) | 2048, 4096 | ✓ |
+  | kimi MLA q / kv-a and KDA in-proj (`:4033-4055`, `columns: D`); routed, shared and the layer-0 dense MLP | 2304, 1024, 9216 | ✓ |
+  | **gpt-oss-20b attention q/kv (`hiddenSize 2880`), routed gate/up and down (`moeIntermediateSize 2880`)** | **2880** | **✗** (45 K groups, odd) |
+
+  The test file's `selectedProductionAttentionShapesMatchCurrentPolicy`
+  (`MPPPrefillInt4QMMTests.swift:347-370`) pins K 2816 / 4096 / 8192, all
+  multiples of 128; those are a policy fixture, not this model's shapes.
+  **Rule: `MPPPrefillInt4QMM.tileK` stays the static 64 and the 128-wide tile is
+  picked per dispatch.** It has to stay 64 because it is also the *admission*
+  test for the whole matrix path — `PrefillSharedExpert.matrixPath` (`:34-35`)
+  and `PrefillGroupedRoutedMoE.matrixPath` (`:552-553`) refuse the path when
+  `d`/`intermediate` is not a multiple of it, so raising the static would drop
+  gpt-oss off the matrix path entirely and onto the scalar kernels. Instead an
+  instance whose variant carries `TILE_K 128` builds **both** pipeline pairs —
+  its own and the `n32b1` sibling's — and `encode`/`encodeGrouped` select
+  `k.isMultiple(of: 128) ? wide : narrow`. No masked K tail: the second half of a
+  ragged last tile would zero the B side, but the A tensor is
+  `activations + tile * TILE_K` with a K extent of `TILE_K` and a row stride of
+  `K` (`tensorops.metal:143-146`), so the run would read a following row — NaN or
+  Inf times zero is not zero, and the last row reads past the buffer. Falling
+  back to the 64-wide kernel costs nothing and is bit-identical.
+
+  **Variants and knobs.** Extend `TileVariant` rather than adding a parallel
+  enum: one new case `n32k128b1`, `tileK` a computed property (64 for the four
+  P8 cases, 128 for the new one), a third env var `SHRIKE_MPP_TILE_K=64|128`
+  folded into the existing `init?`, and `TILE_K = 128` accepted only with
+  `TILE_N 32` / one buffer (anything else rejects the whole selection, as an
+  unrecognised value already does). The four P8 raw values keep their spelling
+  so the P8 verdict's arm names stay quotable and `n32b1` keeps the bare kernel
+  names. Lever A is **not** a variant: it is the per-dispatch uniform above,
+  with `SHRIKE_MPP_WEIGHT_LOADS=byte|vector` forcing the flag off for the A/B —
+  P5's and P8's precedent of a same-binary override, and it costs **zero**
+  instantiations. Total: the template becomes
+  `<TILE_N, TILE_K, BUFFERS>` over `(32,64,1) (32,64,2) (64,64,1) (64,64,2)
+  (32,128,1)` — **5 combinations × 2 macros = 10 kernels**, up from eight. Two
+  more `matmul2d` instantiations is the whole cost of the count P8's review
+  flagged, and each test still builds one `MetalContext`; the spike needs no
+  more than this, because its four arms are the P8 default, A alone, B alone and
+  A+B, all at N 32 / one buffer.
+
+  **Numerics**, per lever — "never recapture for an unexplained mismatch" binds:
+  - **Lever A is bit-identical.** The tests assert fp16 element-for-element
+    equality against `n32b1` with byte loads, over the three P8 shapes plus the
+    odd-offset and the 8-bit cases, and `tools/golden-baseline.sh --check` is
+    expected **IDENTICAL** on both boxes and both profiles. A difference is a
+    bug: do not recapture.
+  - **Lever B is not.** The committed bar is the chapter's 2e-2 on `maxAbs` and
+    `rel` against `n32b1` *and* against `cpuReference` at `runShape`'s own bars
+    (`MPPPrefillInt4QMMTests.swift:184-203`), so a 128-wide tile cannot pass by
+    matching a broken neighbour. Golden is expected to differ on the **long**
+    profile only (the short prompt never reaches the matrix path,
+    `v12-prefill-matrix-kernels.md:320-322`) and is recaptured once per box with
+    the before/after greedy digests and the named reason — "MPP reduces K 128 in
+    one run where the 64-wide tile summed two runs in fp32". Digests to carry
+    forward: M4 Pro long `f24c61565618fdab`, M1 long `39c38734e8f9d22a`
+    (P7's, unchanged through P8).
+
+  **Files:**
+  - Modify: `sources/Shrike/Metal/TensorCore/tensorops.metal:13-26` (keep
+    `mpp_affine_value` as the unaligned fallback), `:28-59`
+    (`mpp_affine_dequant_tile<TILE_N>` becomes `<TILE_N, TILE_K>` with the chunk
+    walk and the two load bodies), `:60-168` (`mpp_prefill_affine_body` gains
+    `TILE_K` and the `vectorLoads` uniform; `groupsPerRow` at `:120` becomes
+    `tilesPerRow = K / TILE_K`; `:88`, `:98-103`, `:144-146` take `TILE_K`;
+    `:86`'s `static_assert` takes `TILE_K`), `:170-194` and `:215-250` (the two
+    macros gain the argument and the fifth instantiation each).
+  - Modify: `sources/Shrike/Kernels/TensorCore/MPPPrefillInt4QMM.swift:26`
+    (`tileK` stays 64 and gains a one-sentence why — it is the matrix path's
+    admission test at two call sites, not the kernel's tile width), `:29-34`
+    (the third env var), `:35-36`, `:54-90` (init builds the variant's pair plus
+    the `n32b1` pair when `variant.tileK == 128`), `:107-167` and `:172-269`
+    (pick the pipeline from `k.isMultiple(of: variant.tileK)`, set the alignment
+    uniform), `:276-327` (`TileVariant` gains `n32k128b1`, `tileK`, and a
+    `WeightLoads` enum with its static).
+  - Modify: `sources/Shrike/Runtime/Inference/RealForwardRunner.swift:185-188` —
+    `prefillProjectionPath` becomes
+    `affine-threadgroup-f16 tile_n=32 tile_k=128 buffers=1 loads=vector`. The
+    leading token is unchanged, so `ServerInference.swift:819` and
+    `tools/mini-deploy.sh:79`'s `prefill_projection_path=[a-z0-9-]*` grep keep
+    matching.
+  - Modify: `sources/Shrike/Kernels/Prefill/MoE/PrefillRoutedGEMMBenchmark.swift:15`,
+    `:147` (a `weightLoads` field beside `variant`) and
+    `sources/ShrikeBench/RoutedGEMMBench.swift:15-18` (print `loads=` beside
+    `variant=`) so every arm is self-labelling. `:180`'s
+    `MPPPrefillInt4QMM(context:weightBits:)` keeps taking both from the
+    environment through the statics.
+  - Test: `tests/.../TensorCore/MPPPrefillInt4QMMTests.swift` —
+    `makeInputs`/`makeBuffer`/`cpuReference`/`runShape` (`:28-205`) are the
+    oracle, `runPair` (`:213-244`) the pair harness, `:255-262` the fp16
+    byte-equality idiom; `tests/.../Prefill/PrefillSharedExpertTests.swift:184-187`,
+    `:362-461` (the real 2048/512 shapes, 32 K groups, ragged M);
+    `tests/.../Prefill/PrefillGroupedRoutedMoETests+Execution.swift:228-373`
+    (`FourExpertTile`), `:438-502`, `:558-594`, `:598-704`.
+  - Unchanged deliberately: `MPPPrefillInt4QMM.tileM` (64) and the static
+    `tileK` (64), so `PrefillGroupedRoutedMoE.groupedRowTile` (`:92`), the wave
+    planner and both `matrixPath` gates are untouched; the four P8 variants and
+    their two env knobs; the P3 per-expert path (`PrefillGroupedRoutedMoE.swift:816-834`)
+    with its `SHRIKE_PREFILL_ROUTED_GEMM=per-expert` A/B; `matrixPathMinimumRows`;
+    the scalar fallback; staging sizes; the inline `setBytes` block tables
+    (`MPPPrefillInt4QMM.swift:233-243`), which P6 ruled must not become a shared
+    buffer.
+
+  **Interfaces:**
+  - Consumes: `encode` / `encodeGrouped` signatures unchanged (`:107-118`,
+    `:172-185`); `MetalContext.moduleLibrary(device:module:"tensorops")`
+    (`:271-273`). The `globalM < rowEnd && globalN < N` store guard
+    (`tensorops.metal:159-167`) already covers a ragged M and N.
+  - Produces:
+
+    ```swift
+    extension MPPPrefillInt4QMM {
+        enum TileVariant: String, CaseIterable, Sendable {
+            case n32b1, n32b2, n64b1, n64b2, n32k128b1
+            var tileN: Int          // n32* 32, n64* 64
+            var tileK: Int          // n32k128b1 128, the rest 64
+            var dequantBuffers: Int
+            var kernelName: String  // n32b1 keeps the bare names
+            var groupedKernelName: String
+            /// `tileK == 128` is instantiated only at N 32 / one buffer; any
+            /// other combination rejects the selection, as an unrecognised
+            /// value already does.
+            init?(tileN: String?, tileK: String?, buffers: String?, fallback: TileVariant)
+        }
+        enum WeightLoads: String, CaseIterable, Sendable { case byte, vector }
+        /// `SHRIKE_MPP_TILE_N` (32|64), `SHRIKE_MPP_TILE_K` (64|128) and
+        /// `SHRIKE_MPP_DEQUANT_BUFFERS` (1|2) name the variant;
+        /// `SHRIKE_MPP_WEIGHT_LOADS` (byte|vector) is a per-dispatch override.
+        static let tileVariant: TileVariant
+        static let weightLoads: WeightLoads
+        // init(context:weightBits:variant:weightLoads:) with the statics as
+        // defaults, so a test pins both without a process-wide env var.
+    }
+    ```
+
+    Metal:
+
+    ```metal
+    template <int TILE_N, int TILE_K>
+    static inline void mpp_affine_dequant_tile(
+        threadgroup half* tile, device const uint8_t* packedWeights,
+        device const bfloat* scales, device const bfloat* biases,
+        uint tileIndex, uint columnTile, uint N, uint rowBytes,
+        uint groupsPerRow, uint bits, bool vectorLoads, uint lid, uint threads);
+    template <int TILE_N, int TILE_K, int BUFFERS>
+    static inline void mpp_prefill_affine_body(/* … , bool vectorLoads, … */);
+    // MPP_AFFINE_KERNEL(NAME, TILE_N, TILE_K, BUFFERS) and
+    // MPP_GROUPED_KERNEL(...) instantiate
+    // mpp_prefill_affine_{threadgroup,grouped}_f16{,_n32b2,_n64b1,_n64b2,_n32k128b1},
+    // the bare names being (32, 64, 1).
+    ```
+
+    Lint: `MPPPrefillInt4QMM.swift` has no `function_body_length` baseline entry,
+    so a new violation fails the strict gate. `encode` is 61 lines (`:107-167`)
+    and has room; `encodeGrouped` is 98 (`:172-269`) and the pipeline pick plus
+    the uniform add ~6 — if it crosses 120, extract the guard block (`:186-216`)
+    into a private validator rather than growing the body. Comments: the repo
+    rule holds. Two earn their place — why the static `tileK` stays 64 (it gates
+    two `matrixPath` call sites, not the kernel's tile), and why `% 16` is a
+    sufficient alignment test (the row stride is already a multiple of 16 from
+    the `k % 64` guard). Nothing else.
+
+  Steps (TDD; lever A's bit-identity is proved before any perf work):
+
+  - [ ] Step 1: failing test `vectorWeightLoadsAreBitIdenticalToByteLoads` in
+        `MPPPrefillInt4QMMTests.swift`, `runPair` (`:213-244`) over
+        `variantShapes` (`:207-211`: `(64, 32, 128)`, `(33, 512, 2048)`,
+        `(128, 2048, 512)`) with `.byte` against `.vector` on `.n32b1`,
+        asserting fp16 equality element-for-element and finiteness; plus the
+        8-bit instance at `(33, 35, 128)` and the unaligned case — a
+        `runPair` variant taking `weightOffset: 13` so the vector instance
+        provably falls back to the byte body and still matches. FAIL:
+        `WeightLoads` and `init(context:weightBits:variant:weightLoads:)`
+        undefined.
+  - [ ] Step 2: failing test `wideKTileMatchesTheNarrowTile` — `.n32k128b1`
+        against `.n32b1` over the same three shapes (all `K % 128 == 0`) at
+        `RelError.maxAbsDiff ≤ 2e-2` and `RelError.compute ≤ 2e-2`, plus
+        `runShape(compareCPUReference: true)` at its own bars (`maxAbs ≤ 0.03`,
+        `rel ≤ 1e-3`); and `wideKTileFallsBackOnARaggedK` — `(64, 32, 192)` and
+        the gpt-oss shape `(33, 128, 2880)`, both `% 64` but not `% 128`,
+        asserting the `.n32k128b1` instance still returns
+        `.affineThreadgroupF16` and is **bit-identical** to `.n32b1` because it
+        took the narrow pipeline. FAIL: no `n32k128b1` kernel.
+  - [ ] Step 3: failing tests at the call sites.
+        `PrefillSharedExpertTests.chunkSharedExpertMatchesRowLoop(rows:variant:)`
+        (`:184-187`) picks up the fifth variant through `allCases` (2 rows × 5 =
+        10 cases); add one non-crossed case pinning `.vector` on `.n32b1` rather
+        than crossing the two axes — the cross product belongs in
+        `MPPPrefillInt4QMMTests`, where the kernels are compared directly.
+        `PrefillGroupedRoutedMoETests+Execution`: **the fixture cannot run this
+        task as written** — `FourExpertTile`'s `d = f = 64` (`:229-230`) is one K
+        group at `TILE_K 64` and not a multiple of 128 at all, so a
+        `.n32k128b1` arm would silently take the narrow fallback and prove
+        nothing. Raise it to `d = f = 256` (4 K groups narrow, 2 wide, both loops
+        exercised) — `makeSyntheticExpertPool(numExperts:d:f:)`
+        (`PrefillGroupedRoutedMoETests.swift:115-119`) and every downstream size
+        are already parameterised on `d`/`f`, and this also closes P8 review item
+        #3, the grouped kernel's multi-group `BUFFERS == 2` loop having no test.
+        Do the same for `groupedGEMMsHandleASingleOnePairExpert`'s local
+        `d = f = 64` (`:601-602`). The three parameterised tests (`:438`, `:558`,
+        `:598`) then cover all five variants. Leave the file's other
+        `d = f = 64` fixtures (`:10-11`, `:112-113`, `:710`) alone — they are
+        scalar/streamed-batched paths below `matrixPathMinimumRows` and never
+        reach `encodeGrouped`. `swift test --no-parallel --filter
+        "MPPPrefillInt4QMM|PrefillSharedExpert|PrefillGroupedRoutedMoE"` → FAIL.
+  - [ ] Step 4: implement the chunk dequant with both load bodies, the
+        `TILE_K` template axis and its two instantiations, the alignment
+        uniform, the pipeline pick, `TileVariant.n32k128b1`, `WeightLoads` and
+        the env parsing; Steps 1–3 PASS. Then the probe: tighten
+        `wideKTileMatchesTheNarrowTile` to fp16 bit equality and run it. Passes →
+        land the assertion and golden stays IDENTICAL for every arm. Fails →
+        revert to the 2e-2 bar, record the first differing shape and element,
+        and carry "golden differs on the long profile, one recapture per box"
+        into Step 7.
+  - [ ] Step 5 (spike, the gate): `swift run -c release ShrikeBench routed_gemm 20`
+        per arm under `env SHRIKE_MPP_TILE_K=… SHRIKE_MPP_WEIGHT_LOADS=…` — four
+        arms (`n32b1`+byte = the P8 control, `n32b1`+vector = A, `n32k128b1`+byte
+        = B, `n32k128b1`+vector = A+B), all at N 32 / one buffer — on the M4 Pro
+        first, then on the **mini, which decides**. On the mini run
+        `tools/mini-deploy.sh` (copy only) **first**: it copies the `*.bundle`
+        directories that carry the shader sources, and P8's bench first failed
+        because only the `ShrikeBench` binary had been copied and the bundles
+        were stale. Then `scp .build/release/ShrikeBench macmini:shrike-runtime/bin/`
+        — `mini-deploy.sh:24`, `:36`, `:47` copy only ShrikeServer / ShrikeCLI /
+        ShrikeRepack — `pgrep` for a running server, stop production, run the
+        four arms at both staging sizes, and relaunch with
+        `tools/mini-deploy.sh --restart`. Record per-tile ms, TFLOPS and the
+        same-run `gemm_expert_gateup_128rows` / `gemm_expert_down_128rows`
+        ceilings per arm on both boxes. **Accept rule: the lowest mini per-tile
+        ms at staging 1024 among arms at or under their bar — ≤ 6.6 ms for an arm
+        carrying both levers, ≤ 7.3 ms for a single lever. Arms within 3 % are a
+        tie (P6 saw 4 % between nominally identical staging arms) and a tie
+        breaks toward the bit-identical arm — vector loads without the wide K
+        tile — because that keeps golden identical. If no arm reaches its bar but
+        one beats the 8.25 ms control by ≥ 3 %, land it as the default and record
+        the achieved share; if none beats the control, land the tests and the
+        template only and say so, as P8 did.** Verdict line: the five-row table
+        (four arms + ceiling) per box per staging size.
+  - [ ] Step 6: make the winner the default (`tileVariant` and/or
+        `weightLoads`), keep every arm selectable on the same binary, and extend
+        `prefillProjectionPath` (`RealForwardRunner.swift:185-188`) with
+        `tile_k=` / `loads=` so the residency line records which arm ran. Five
+        gates: release build 0 warnings,
+        `swiftlint lint --strict --baseline .swiftlint-baseline.json`, markdown
+        link check, `swift test --no-parallel`, the same under
+        `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test
+        --no-parallel --sanitize=thread`.
+  - [ ] Step 7: `tools/golden-baseline.sh --check` (M4 Pro, server stopped).
+        **Expected IDENTICAL, short and long, if the winner is lever A alone** —
+        the values and the reduction order are provably unchanged and no
+        recapture is allowed. Expected to differ on the long profile only if the
+        winner carries `TILE_K 128` *and* Step 4's probe showed the 128-wide run
+        reorders the K reduction, in which case recapture once per box and record
+        the before/after greedy digests (P7's, unchanged through P8: M4 Pro long
+        `f24c61565618fdab`, M1 long `39c38734e8f9d22a`). Commit
+        `prefill: vectorised int4 weight loads and a 128-wide K tile in the MPP
+        GEMM (v12 P9)`, baseline via `git commit --only` if there is one.
+  - [ ] Step 8: ledger on both boxes (fresh server, `tools/prefill-measure.sh`,
+        one send per prompt per server lifetime; **mini 3.7k + 12k is the
+        verdict**, M4 Pro 3.7k + 12k + 25k the check); `tools/mini-deploy.sh
+        --restart`, mini golden check (recapture only if Step 7 established a
+        deliberate change), scp into `baselines/`. Verdict line: the three roles
+        before → after at 3.7k and 12k on the mini with the M4 Pro's rows as the
+        check; the winning arm and the achieved bench share on both boxes; **the
+        implied GEMM share of `prefill_gdn_router` on the mini** — that role's
+        GEMM fraction is still unmeasured (the only split on record is the M4
+        Pro's after P4, ≈ 0.07 of 0.64 scan and ≈ 0.57 "projections, conv and
+        norms", `v12-prefill-matrix-kernels.md:172-177`), so the −4 % gdn bar is
+        a floor that holds only if the projections are ≳ 45 % of the role; if it
+        moves less, record the implied share rather than calling the task short.
+        Also: the golden outcome per box; wall on both boxes, noting that the M4
+        Pro's saving may sit in the routed→routed gap rather than the wall.
+        Design doc: the two follow-on bullets (`:558-563`, `:564-571`) are
+        removed and become a landed `### Step 8 — vectorised int4 weight loads
+        and a 128-wide K tile (…)` section after `:531`; an "**After P9**" ledger
+        block after the After P7 table (`:286-322`) if any role moves; the routed
+        row of "Where the time goes" (`:334`) gains the new share. Plan: Task 9
+        `[x]` with the landed paragraph. Task review by a fresh reviewer; fixes
+        folded into the commit (rebase and amend, never a fixup commit).
+
 ## Follow-ons (not scheduled)
 
 - The mini's SSD term (v10 P3 follow-on: batched miss loads, deeper queue
