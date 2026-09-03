@@ -20,8 +20,11 @@ import Shrike
 ///   qkv family: baseline (default), bandwidth, unroll2, ulong2
 ///   moe family: moe_phase1, moe_phase2, moe
 ///   gdn family: gdn_inproj (baseline), gdn_inproj_xsh, gdn_inproj_r16,
-///               gdn_scan (prefill delta-rule scan, serial vs chunked)
+///               gdn_scan (prefill delta-rule scan, serial vs chunked),
+///               gdn_pre (the prefill pre-scan chain, kernel by kernel)
 ///   routed_gemm: the prefill routed tile, per-expert GEMMs vs grouped
+///   dense_gemm: the dense MPP GEMM at the 4,096-row prefill shapes
+///   router_block: the prefill router block at the ornith 256-expert shape
 ///   mpp_compare: each K-tile pair of the MPP kernel (64 vs 128, 128 vs 256), element for element
 @main
 struct ShrikeBench {
@@ -58,6 +61,16 @@ struct ShrikeBench {
             return
         }
 
+        if kernelName == "gdn_pre" {
+            try runGDNPreScan(iterations: iterations, context: context)
+            return
+        }
+
+        if kernelName == "dense_gemm" {
+            try runDenseGEMM(iterations: iterations, context: context)
+            return
+        }
+
         if kernelName == "routed_gemm" {
             try runRoutedGEMM(iterations: iterations, context: context)
             return
@@ -70,6 +83,11 @@ struct ShrikeBench {
 
         if kernelName.hasPrefix("gdn") {
             try runGDN(kernelName: kernelName, iterations: iterations, context: context)
+            return
+        }
+
+        if kernelName == "router_block" {
+            try runRouterBlock(iterations: iterations, context: context)
             return
         }
 

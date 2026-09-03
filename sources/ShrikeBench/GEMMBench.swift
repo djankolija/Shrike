@@ -22,8 +22,10 @@ extension ShrikeBench {
         GEMMShape(label: "square4096", m: 4096, k: 4096, n: 4096),
         GEMMShape(label: "square2048", m: 2048, k: 2048, n: 2048),
         GEMMShape(label: "qproj_chunk4096", m: 4096, k: 2048, n: 8192),
+        GEMMShape(label: "gdn_zproj_chunk4096", m: 4096, k: 2048, n: 4096),
         GEMMShape(label: "oproj_chunk4096", m: 4096, k: 4096, n: 2048),
         GEMMShape(label: "gdn_inproj_chunk4096", m: 4096, k: 2048, n: 12288),
+        GEMMShape(label: "router_chunk4096", m: 4096, k: 2048, n: 256),
         GEMMShape(label: "expert_gateup_128rows", m: 128, k: 2048, n: 1024),
         GEMMShape(label: "expert_down_128rows", m: 128, k: 512, n: 2048),
         GEMMShape(label: "expert_gateup_512rows", m: 512, k: 2048, n: 1024),
@@ -48,10 +50,11 @@ extension ShrikeBench {
         }
     }
 
-    private static func runGEMMShape(_ shape: GEMMShape,
-                                     iterationCeiling: Int,
-                                     device: MTLDevice,
-                                     queue: MTLCommandQueue) throws {
+    @discardableResult
+    static func runGEMMShape(_ shape: GEMMShape,
+                             iterationCeiling: Int,
+                             device: MTLDevice,
+                             queue: MTLCommandQueue) throws -> Double {
         func matrix(rows: Int, columns: Int, fill: UInt8) -> MPSMatrix {
             let rowBytes = columns * MemoryLayout<Float16>.size
             guard let buffer = device.makeBuffer(length: rows * rowBytes,
@@ -94,7 +97,7 @@ extension ShrikeBench {
         timed.waitUntilCompleted()
         if let error = timed.error {
             print("COMMAND BUFFER ERROR: \(error)")
-            return
+            return 0
         }
 
         let seconds = timed.gpuEndTime - timed.gpuStartTime
@@ -103,5 +106,6 @@ extension ShrikeBench {
         print("kernel=gemm_\(shape.label) m=\(shape.m) k=\(shape.k) n=\(shape.n) "
             + "launches=\(launches) per_launch_ms=\(String(format: "%.4f", perLaunch * 1000)) "
             + "achieved_tflops=\(String(format: "%.3f", tflops))")
+        return tflops
     }
 }
