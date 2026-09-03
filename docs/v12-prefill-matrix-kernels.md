@@ -382,7 +382,12 @@ attention flat — the 4,096-row dense projections do not respond to the wider
 tile there. On the M4 Pro they do: a paired A/B on one binary at 12k (K128 →
 K256, back to back) read routed 0.55 → 0.44, GDN 0.62 → 0.52, attention
 0.38 → 0.33, busy 1.66 → 1.35 (−19 %), wall 31.7 → 28.0 s (−12 %); at 25k the
-wall is fetch-bound and moved 64.7 → 64.0 s. The mini's 12k wall 86.0 →
+wall is fetch-bound and moved 64.7 → 64.0 s. (Corrected by Step 11 for the
+dense rows — GDN, attention: the M4 Pro's dense shape reads 20.11 ms at K128
+and 20.22 at K256 with the arms interleaved in one process, so those rows of
+the paired A/B measured the box's state between two fresh servers, not the
+tile; the routed row is the grouped kernel, which the tile bench measured on
+its own.) The mini's 12k wall 86.0 →
 84.2 s (6.85 ms/token, 1.09× the target); 3.7k 25.7 → 25.4 s. Golden: the
 M4 Pro's long profile moved (recaptured once, the K256-vs-K128 reduction
 order); the M1's held on both profiles.
@@ -409,6 +414,9 @@ Pro the driver cost was ≈ 4.7 ms per layer-chunk (570 → 10 ms at 12k) and th
 routing 1.8 ms; its wall moved 28.0 → 27.5 s, the rest being the fetch-bound
 `routed→routed` gap. Golden identical on both boxes, short and long.
 
+**After P13** (commit 8692c3a, 2026-09-03): benches only, no production change;
+the rows are the After P12 rows. See Step 11 for what they measured.
+
 ## Where the time goes
 
 Every dense projection in prefill (attention Q/K/V/O, GDN in/out) already runs
@@ -421,7 +429,7 @@ all scalar kernels:
 | attention core | `attention_prefill_causal_tiled` | one threadgroup per (query, head), 256 threads over head-dim, a serial walk over every key with a two-barrier threadgroup reduction per key. The decode kernel's shape, run once per prompt token: no K/V reuse across queries, none across the 8 query heads that share a KV head. | 30× at 3.7k, 60× at 25k |
 | routed experts | `prefill_grouped_routed_moe_batched_phase1` / `_down` | each thread computes one or two 2048-long scalar dot products; 32-pair microbatches; a command buffer per 8-expert tile | 7×; 2.6× after P6 (`mpp_prefill_affine_grouped_f16`, one dispatch per phase over the tile's experts: 0.69 ms/token at 12k against 0.27 at the 7.46 TFLOPS ceiling); P8's bench puts the tile at 67 % of the M4 Pro's same-run ceiling and 42 % of the M1's, the M1's remainder split 7 % unpack / 20 % weight loads / 31 % staged structure (Step 7); after P9 (vector loads + 128-wide K) 71 % of the M1's ceiling and 99 % of the M4 Pro's (Step 8); after P10 (256-wide K) 78 % of the M1's (Step 9) |
 | shared expert | `PrefillSharedExpert.encodeBlock` | a `for row in 0..<queryCount` loop over the decode runtime: 4–6 M=1 GEMV dispatches per token | 25× |
-| GDN | `gdn_delta_step_prefill` | the delta-rule scan is a serial loop over the chunk inside one dispatch of 32×32 threadgroups; projections, conv and norms are fine | 3.6× (scan ≈ 0.6 of the 1.0 ms) |
+| GDN | `gdn_delta_step_prefill` | the delta-rule scan is a serial loop over the chunk inside one dispatch of 32×32 threadgroups; projections, conv and norms are fine | 3.6× (scan ≈ 0.6 of the 1.0 ms); after P12 the mini's 319 ms per layer-chunk is scan 56 + projections 166 (85–99 % of the MPS ceiling) + pre-scan chain 9 + router 83 (Step 11) |
 
 A matrix-path attention kernel exists in `prefill.metal`
 (`attention_prefill_full_tensorops_2d_validity_v2`, `matmul2d` over 64-key
@@ -679,10 +687,10 @@ On the M1 the tile is 1.44 TFLOPS, 78 % of its same-run ceiling (71 % after
 P9), and the routed role followed (−7 % at 12k). The dense projections did
 not: the GDN role moved 1 % and attention 0.3 %, against a modelled 65 % GDN
 GEMM share inferred from P9's −31 % — P9's gain there was the load lever, and
-the structure lever does not carry to the 4,096-row dense shape. The dense
-kernel at the chunk shape has never been benched in isolation; that
-measurement, and the `kMPPAffineTileM` sweep it would inform, are the
-follow-on below. Not bit-identical to the 128-wide tile: `ShrikeBench
+the structure lever does not carry to the 4,096-row dense shape. Step 11
+benched it: the dense projections already run at 85–99 % of the MPS ceiling
+on the M1, so there was nothing for the wider tile to take (on the M4 Pro the
+same bench reads K128 and K256 within 0.5 %). Not bit-identical to the 128-wide tile: `ShrikeBench
 mpp_compare` puts the K256-vs-K128 difference at 456 / 489 of 262,144
 elements at 4 / 8 bits (max abs 0.000488 / 0.0078, identical counts on both
 boxes); golden moved on the M4 Pro's long profile and was recaptured once;
@@ -716,6 +724,47 @@ executes (`vm_stat` at idle: 2.2 GB wired, the pools as active pages);
 ≈ 74 % without the set, and 83 % a minute later; `SHRIKE_PREFILL_POOL_RESIDENCY=none`
 is the one-env rollback. Measured on the ledger: "After P12" above.
 
+### Step 11 — measuring the GDN pre-scan chain, the dense GEMM and the router (two nulls, and the chapter's largest unclaimed cost)
+
+Three benches, no production change. `ShrikeBench gdn_pre` times the GDN
+pre-scan chain kernel by kernel at the 4,096-row shape; `dense_gemm` runs
+`MPPPrefillInt4QMM.encode` at the four dense projection shapes against the
+same-run MPS ceilings; `router_block` times `prefill_router_block` against an
+MPS GEMM of its shape. On the mini (M4 Pro in parentheses), per layer-chunk:
+
+| kernel | mini ms | GB/s or share | M4 Pro ms |
+| --- | ---: | ---: | ---: |
+| `gdn_conv_mix_prefill` | 4.40 | 30.5 GB/s | 1.13 |
+| `gdn_conv_tail_update` | 0.005 | 20.3 | 0.003 |
+| `gdn_qk_norm` | 1.19 | 56.6 | 0.39 |
+| `gdn_gated_norm` | 1.65 | 60.9 | 0.43 |
+| 2 × `prefill_rmsnorm_bf16w_block` | 1.12 | 59.7 | 0.25 |
+| `residual_add_fp16` | 0.84 | 59.9 | 0.41 |
+| **pre-scan chain** | **9.21** | 45.6 GB/s; floor 7.0 ms at 60 GB/s | 2.61 |
+| dense (4096, 2048, 8192), `n32k256b1`, vector loads | 83.2 | **0.99** of the 82.1 ms MPS ceiling | 20.2 (0.88) |
+| dense (4096, 2048, 4096), same arm | 41.5 | 0.85 of 35.5 | 10.1 |
+| dense (4096, 4096, 2048), same arm | 40.7 | 0.88 of 35.6 | 10.3 |
+| **`prefill_router_block`** | **83.4** | **0.029** of the 2.45 ms ceiling | 18.1 (0.057) |
+
+The audit's model for the chain (50–91 ms by subtraction) was wrong by an
+order of magnitude: the chain moves 419 MB at 46 GB/s, within 2.3 ms of the
+box's streaming floor, so fusing it is worth ≤ 0.02 ms per prompt token. The
+dense projections already run at 85–99 % of the MPS ceiling on the M1 — which
+is why P10's wider K tile moved the GDN role 1 % (the dense rows of the M4
+Pro's paired A/B in "After P10" were that box's state between two fresh
+servers: the bench's interleaved arms read K128 20.11 ms and K256 20.22 ms;
+the routed row stands on the tile bench) —
+and a taller row tile has at most half of ≈ 12 ms per layer-chunk to take,
+≈ 0.05 ms per token. Neither arm clears the task's 0.15 ms/token threshold,
+so neither proceeds. What the benches did find is the term nobody had
+measured: the router block, one threadgroup per token with 256 threads each
+walking the 2,048-long row serially and re-reading the 512 KB weight, then
+one thread doing the top-8 while the others wait — 83.4 ms per layer-chunk at
+one thirty-fifth of its ceiling, in every one of the 120 layer-chunks: 10.0 s
+of the mini's 80.4 s 12k wall. The GDN role's cost table closes with it
+(scan 56 + projections 166 + chain 9 + router 83 = 315 of 319 ms), and the
+router is the next task (Task 14).
+
 ### Follow-ons, not scheduled
 
 - **Tile command-buffer batching — landed as a null result (P5, a7c8288 +
@@ -745,15 +794,15 @@ is the one-env rollback. Measured on the ledger: "After P12" above.
   8.25 ms per ornith tile, reproducible; the M4 Pro is unaffected). No
   production tensor of the six models takes it today; a byte-only
   instantiation would restore it if one ever does.
-- **The MPP GEMM's dense shape on the M1.** After P10 the routed tile runs at
-  78 % of the mini's same-run ceiling, and 256 is the last K width the chunk
-  mapping supports, so what is left of the staged structure needs the
-  register-resident weight tile, not a wider one. The dense projections
-  (M = 4,096 rows: the GDN in/out and the attention Q/K/V/O) did not follow
-  P10's tile gain and have never been benched in isolation — an m = 4,096
-  dense case beside `routed_gemm`, then a `kMPPAffineTileM` sweep (a 128-row
-  tile halves the per-threadgroup dequant, which at 4,096 rows is repeated 64×
-  per column tile, at the cost of a doubled accumulator).
+- **The MPP GEMM's remaining fifth on the M1's routed tile.** After P10 the
+  routed tile runs at 78 % of the mini's same-run ceiling, and 256 is the last
+  K width the chunk mapping supports, so what is left of the staged structure
+  needs the register-resident weight tile, not a wider one. The dense
+  projections are at 85–99 % of the ceiling (Step 11) — a `kMPPAffineTileM`
+  sweep has ≈ 0.05 ms per token to take and is not scheduled.
+- **The GDN pre-scan chain** is within 2.3 ms per layer-chunk of its
+  streaming floor (Step 11); fusing conv → qk-norm and vectorising the norms
+  would take ≤ 0.02 ms per token and is not scheduled.
 - **Attention: Q and the probabilities in registers (the FlashAttention
   shape).** After P7 the matrix-path attention is bound by its per-tile fixed
   work, not by K/V traffic (see "After P7"). MPP's left-input cooperative

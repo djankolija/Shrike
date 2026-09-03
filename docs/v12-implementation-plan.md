@@ -3572,7 +3572,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
 ### Task 13: P13 — the GDN pre-scan chain and the dense GEMM shape: measure, then take the larger
 
-- [ ] **P13: two candidate levers, neither of them measured** — the audit's L1
+- [x] **P13: two candidate levers, neither of them measured** — the audit's L1
   (the GDN pre-scan chain, modelled 0.32–0.63 ms/prompt-token) and L8
   (`kMPPAffineTileM` fixed at 64, the dense MPP GEMM never benched, modelled
   0–0.25) are the largest unclaimed items on the mini, and **both bands are
@@ -3586,6 +3586,32 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   only — and for the dense arm it cannot even confirm the lever, because P10
   showed the boxes disagree about this exact shape (M1 dense −1 %, M4 Pro −17 %
   from the same 256-wide tile, `docs/v12-implementation-plan.md:2320-2325`).
+
+  **LANDED 8692c3a (2026-09-03) — benches only; neither drafted arm proceeds.**
+  Step 1 measured the chain at **C = 9.21 ms** per GDN layer-chunk on the mini
+  (2.9 % of the role's 319.4; the modelled band was 50–91): conv 4.40, tail
+  0.005, qk-norm 1.19, gated norm 1.65, 2 × rmsnorm 1.12, residual add 0.84,
+  419.5 MB at 45.6 GB/s against a 59.9 GB/s same-run floor (7.0 ms). Step 2
+  measured the dense headroom at **H ≈ 12.2 ms** per layer-chunk: (4096, 2048,
+  8192) 83.2 ms = 1.65 TFLOPS = 99 % of the same-run MPS ceiling, (4096, 2048,
+  4096) 85 %, (4096, 4096, 2048) 88 %, (4096, 2048, 32) 0.44 ms with no MPS
+  twin; the five projections 166.3 ms. The rule would take the dense arm
+  (0.40 × C = 3.7 vs 0.50 × H = 6.1), but neither clears the 0.15 ms/token
+  threshold (chain 0.027 by the rule, 0.017 by the floor gap; dense 0.045), so
+  Steps 4–9 were not run (P8's precedent). K256 vs K128 on the dense shape: −1…−3 % on the mini and
+  20.11 → 20.22 ms on the M4 Pro — P10's "the dense projections follow the
+  tile on the M4 Pro" was that box's state between two fresh servers (its
+  routed row stands), corrected in the design doc. Step 1b, added when the GDN ledger would not close
+  (56 + 166 + 9 = 231 of 319): **`prefill_router_block` 83.40 ms per
+  layer-chunk on the mini = 0.051 TFLOPS = 2.9 % of the same-run MPS ceiling
+  (2.45 ms); M4 Pro 18.10 ms = 5.7 %** — one threadgroup per token, 256 threads
+  each walking the 2,048-long row with three loads and a byte extraction, the
+  512 KB weight re-read per token, thread 0 doing the top-8 alone; in all 120
+  layer-chunks: 10.0 s of the 80.38 s 12k wall (12.4 %). The GDN role's table
+  closes at 315 of 319 ms. The router is Task 14. Gates on 8692c3a: release
+  build 0 warnings, lint 0, links 0, `swift test --no-parallel` (see the
+  ledger); TSAN folded into Task 14's run (bench-only code, no concurrency).
+  Golden untouched (no production change).
 
   **Where the 2.34 goes.** After P12 (HEAD 188d2b7) the mini's 12k prompt
   (12,285 tokens, `tools/prefill-prompts.py:10`; 3 chunks of 4,096 → 120
@@ -3996,6 +4022,391 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   - **The mini is production.** Both benches stop the server on 8081 and relaunch
     it; Turbo on 8080 is a different project and is never touched. One model
     process at a time — `pgrep` first, every time.
+
+### Task 14: P14 — the prefill router block on an operand-reusing kernel
+
+- [ ] **P14: the largest unclaimed cost in the chapter** — `prefill_router_block`
+  runs in every one of the 120 layer-chunks of a 12k prefill and costs
+  **83.40 ms each on the mini: 10.0 s of the 80.38 s wall, 12.4 %**, at
+  **2.9 % of the same-run MPS ceiling** at its own shape. It is one threadgroup
+  per token, 256 threads each walking a 2,048-long row with a byte extraction
+  and three loads per element, the whole 512 KB weight re-read by every one of
+  the 4,096 threadgroups, and the top-8 done by thread 0 while 255 lanes wait.
+  This task keeps the arithmetic exactly as it is and changes only where the
+  operands come from and which thread owns what. **Targets on the mini
+  (M1, 16 GB, the box that decides): `ShrikeBench router_block` per launch at
+  T 4,096 / D 2,048 / 256 experts / top-8 / int8 83.40 → ≤ 15.0 ms (5.6×,
+  0.286 TFLOPS, 16.3 % of the 1.751 TFLOPS ceiling); 12k wall 80.38 → ≤ 72.2 s
+  (6.54 → ≤ 5.88 ms/prompt-token — under the chapter's 6.3 target for the first
+  time); GPU busy 6.10 → ≤ 5.44; `prefill_gdn_router` 2.34 → ≤ 1.84 and
+  `prefill_attn_router` 1.75 → ≤ 1.59 ms/prompt-token; 3.7k wall 24.32 →
+  ≤ 21.9 s. Golden `--check` **IDENTICAL on both boxes and both profiles** is a
+  hard bar, not an expectation — the default arm is bit-identical by
+  construction and a difference is a defect, never a recapture.**
+
+  Derivation of the wall bars from the one measured number: 83.40 − 15.0 =
+  68.4 ms saved per layer-chunk × 120 layer-chunks = 8.21 s; 80.38 − 8.21 =
+  72.17 s ÷ 12,285 prompt tokens = 5.875 ms/token; busy 6.10 − 8210/12285 =
+  5.43. The two router roles carry the whole cut: the GDN role is 319.4 ms per
+  layer-chunk over 90 chunks (2.34 × 12,285 ÷ 90), 319.4 − 68.4 = 251.0 →
+  1.839 ms/token; the attention role is 716.6 ms over 30 chunks, 716.6 − 68.4 =
+  648.2 → 1.583 ms/token. At 3.7k the chunk is 3,756 rows, so the router scales
+  to 83.4 × 3756/4096 = 76.5 ms over 40 layer-chunks = 3.06 s of the 24.32 s
+  wall; at the bar it is 13.8 × 40 = 0.55 s, so −2.51 s → 21.81 s (5.81
+  ms/token). **Stretch: ≤ 10.0 ms** (8.3×, 24.5 % of the ceiling) → −8.81 s →
+  71.6 s / 5.83 ms/token. **Conservative floor** if only the most defensive
+  staging survives the bit-equality test (V3 below): ≤ 25 ms (3.3×) → −7.01 s →
+  73.4 s / 5.97 ms/token, still under the 6.3 target. **Abandon rule: if no arm
+  beats today's kernel by ≥ 3× on the mini (≤ 27.8 ms), land the tests and the
+  new kernel behind its knob, keep `prefill_router_block` as the default, and
+  say so in the verdict** — P8's precedent, a measured null is a result.
+
+  **What Task 13 measured.** `ShrikeBench router_block 20`, the production
+  encoder driving the production pipeline (`PrefillRouterBenchmark.run`, so the
+  function constant and threadgroup width cannot drift from the runner's):
+
+  | box | per launch | TFLOPS | MPS ceiling at (4096, 2048, 256) | share |
+  | --- | ---: | ---: | ---: | ---: |
+  | mini (M1) | **83.40 ms** | 0.051 | 2.45 ms / 1.751 TFLOPS | **0.029** |
+  | M4 Pro | 18.10 ms | 0.237 | 1.04 ms / 4.140 TFLOPS | 0.057 |
+
+  (mini: `p13-mini-router-block.log`, quoted in `progress.md:265`; M4 Pro:
+  `task-13-report.md:245-246`; the ceiling is `router_chunk4096` run in the same
+  process, `ShrikeBench.gemmShapes`.) The GDN role's cost table closes on the
+  mini with it — scan 56.1 + five projections 166.3 + pre-scan chain 9.2 +
+  router 83.4 = 315.0 of the measured 319.4 ms per layer-chunk, 98.6 %
+  (`progress.md:265`) — so there is no third term hiding behind this one. The
+  120 layer-chunks are the model's shape: 40 MoE layers (30 GDN + 10 attention)
+  × three 4,096-row chunks at 12,285 prompt tokens.
+
+  **Where the 83.4 ms goes** (modelled from `prefill.metal:372-486`; no
+  per-phase measurement exists — Step 4's `scores_only` arm gets one). Per
+  (token, expert, element) triple: `prefill_affine_value` (shift, `>>3`, `&7`,
+  byte load, conditional second byte, shift, mask ≈ 6 ALU + 1 load), `float(q)`,
+  `float(xg[k])` and `float(eg[k])` (2 loads + 2 widens), one multiply, one
+  `fma`, one add — **≈ 13 scalar ops and 3 loads per triple**; 2.147e9 triples
+  per layer-chunk = 2.8e10 ops in 83.4 ms = 335 Gops/s. The top-8 on thread 0
+  (`:424-486`) is 256 compares plus ≈ 40 insertions of up to 16 moves plus 8
+  `exp`s ≈ **2–3 k scalar ops per token on one lane while 255 idle** —
+  modelled at ≈ 8 % of the kernel, which Step 4 checks rather than assumes.
+
+  **The design constraint (a ruling, not a preference).** The default arm keeps
+  the router's exact per-(token, expert) fp32 arithmetic: the same byte
+  extraction producing the same integer `q`, the same
+  `xv = float(x[k]) * float(e[k])`, the same two accumulations per element in
+  the same ascending `k` order, the same per-group
+  `acc = fma(s, dot_qx, acc); acc = fma(b, sum_x, acc)`, the same tie rule
+  `s > top || (s == top && e < idx)` scanned over experts ascending, the same
+  softmax. Only **where the operands come from and which thread owns which
+  (token, expert)** changes, so logits, indices and route weights are
+  bit-identical by construction, routing cannot flip, and golden must not move.
+  The old kernel stays as the A/B reference under
+  `SHRIKE_PREFILL_ROUTER=block` and as the test's comparand.
+
+  **The kernel.** Thread mapping, in two lines: **one threadgroup owns a block
+  of `TOK` consecutive tokens and all 256 experts; thread `e` owns expert `e`
+  (the existing `for e = tid; e < NE; e += tg_size` stride is kept) and carries
+  `TOK` accumulator pairs, so one weight read serves `TOK` tokens from
+  registers.** The hidden row's contribution is staged in threadgroup memory
+  once per (token, group) and broadcast to all 256 experts. Grid =
+  `ceil(T / TOK)` threadgroups × the same `tgWidth` the encoder already
+  computes.
+
+  - **W is not staged.** Each thread reads its own expert's row, so there is no
+    inter-thread reuse for threadgroup memory to buy; the reuse is across tokens
+    and it lives in registers — a group's 64 bytes (int8) or 32 bytes (4-bit)
+    load once and serve all `TOK` tokens. That also settles "stage dequantised
+    values?": no. `q` is an integer either way so `float(q)` is exact and
+    staging it would be bit-identical, but it costs 4× the memory for a value
+    only one thread reads. **The byte extraction stays**,
+    `prefill_affine_value` unchanged, over a register-held chunk instead of
+    device memory. 4-bit keeps working untouched: a group is 32 bytes at byte
+    offset `g * 32` in a row of `D * bits / 8` = 1,024 bytes, always aligned.
+  - **`x ⊙ e` is staged**, fp32, `TOK × 64` per group = 4 KB at TOK 16. All 256
+    threads read the *same* address at a given `(t, k)` — a threadgroup
+    broadcast, no bank conflict — so the two device loads and two widenings per
+    element are paid once per (token, k) instead of 256 times.
+  - **`sum_x` is expert-independent.** `sum_x = Σ_k float(x[k]) * float(e[k])`
+    over a group does not depend on the expert, yet today it is recomputed 256
+    times per (token, group). Hoisting it — by one thread per token in the same
+    ascending `k` order, never a tree reduction — removes one add per triple.
+    **Whether that is bit-identical is a compiler question, not a reading
+    question**: Metal's fast math may already contract `sum_x += xv` into an
+    `fma` in today's kernel, in which case a hoist from a materialised `xv`
+    differs in the last ulp (MEMORY.md's "Metal half round-trip elision"
+    family). Step 3 therefore implements a ladder and the test picks the rung:
+    **V1** stages the product `xe[t][k]` and hoists `sum_x[t][g]` — inner loop
+    1 threadgroup load + 1 `fma` ≈ 2.4 ops/triple with the extract amortised
+    over `TOK`, modelled 5.4×; **V2** stages the product and keeps
+    `sum_x += xe[t][k]` inline, ≈ 3.4 ops, modelled 3.8×; **V3** stages `x` and
+    `e` separately as fp32 and reproduces today's three source lines verbatim
+    (`xv = xs[k] * es[k]; dot_qx = fma(q, xv, dot_qx); sum_x += xv;`) so
+    whatever the compiler does it does identically in both kernels, ≈ 5.4 ops,
+    modelled 2.4× on ALU count. Instruction-issue floors on the mini's 8-core
+    GPU (≈ 1.3e12 lane-ops/s, modelled): V1 3.3 ms, V2 5.0, V3 8.3, against
+    2.45 ms of matrix ceiling — so ≤ 15 ms is 3–4.5× off the floor of whichever
+    rung survives, which is where a scalar kernel with staged loads has landed
+    before (P1's shared expert, P9's vectorised loads).
+  - **The top-k is parallelised by token, not by expert.** After the score
+    barrier, thread `t` (for `t < TOK`) runs the *existing* scan over experts
+    `0…NE-1` ascending for its own token — identical insertion, tie rule and
+    softmax, writing `out_indices[row * top_k + i]` and `out_weights[…]` as
+    today. `TOK` scans run concurrently, so the serial cost divides by `TOK`;
+    the `256 − TOK` idle lanes are a bounded waste (at TOK 16, ≈ 6 % of the
+    lanes for ≈ 1/32 of the kernel's time). **A simdgroup-parallel top-k is
+    forbidden here** — it reorders the scan and breaks the `s == top` tie rule,
+    the one place a bit difference becomes a routing flip.
+  - **The sigmoid variant** (`cfg.routerUsesSigmoidScores`, true only for
+    `family == .kimiLinear48b`, `ModelTypes.swift:459-461`; ornith and qwen36
+    take the softmax path the bench measured) shares the same body through the
+    same `sigmoid_scores` literal and `scaling` argument, and gets the same
+    treatment and the same bit-equality test.
+
+  **Traffic and budget, before → after** (per layer-chunk, T 4,096, D 2,048,
+  256 experts, int8; modelled from the code):
+
+  | | today | TOK 8 | TOK 16 |
+  | --- | ---: | ---: | ---: |
+  | weight-read amplification | 4,096× | 512× | 256× |
+  | weight bytes read | 2.147 GB | 268 MB | 134 MB |
+  | hidden + `effective_scale` load issue | 8.59 GB | 33.6 MB | 17.8 MB |
+  | threadgroup memory / threadgroup | 1.0 KB | 10.1 KB | 20.1 KB |
+  | fp32 accumulators + W bytes per thread | ≈ 20 regs | ≈ 38 | ≈ 70 |
+
+  Threadgroup memory is `TOK × 256` fp32 scores + `TOK × 64` fp32 staged
+  products + `TOK` fp32 sums, against the 32 KB limit the repo already asserts
+  against (`attention_matrix.metal:278`, `tensorops.metal:165`). The hidden and
+  `effective_scale` rows are 4 KB each and were L1-resident, so their 480× cut
+  is instruction issue, not DRAM — the weight amplification is the DRAM/L2 one.
+  **The occupancy trade is the open question**: 20.1 KB at TOK 16 may leave one
+  threadgroup resident per core on the M1, and ≈ 70 registers may cost
+  occupancy again. That is why `TOK` is a function constant Step 4 sweeps
+  rather than a number this draft picks. The 8 tokens × 32 experts tile the
+  brief floats is rejected: it buys the same amplification (4,096 threadgroups
+  × 64 KB = 268 MB, identical to TOK 8) but no threadgroup then sees all 256 of
+  a token's scores, so it needs a `T × 256` fp32 logits buffer (4 MB of new
+  scratch) and a second top-k kernel. Same traffic, more surface.
+
+  **The second arm — the logits as an MPP GEMM — only if the exact-order kernel
+  misses the abandon bar.** `Σ_k (s_g q_k + b_g)(x_k e_k)` is exactly the int8
+  affine-dequant GEMM of `W` against `x ⊙ e`, and `MPPPrefillInt4QMM.encode`
+  already supports 8-bit weights (function constant 78,
+  `MPPPrefillInt4QMM.swift:78`) at m 4,096 × n 256 × k 2,048 through
+  `n32k256b1` (tileK 256, of which 2,048 is a multiple), producing fp16 `y`; a
+  top-k kernel then runs over the logits. **Its cost, plainly: it rounds
+  `x ⊙ e` to fp16 into a 16 MB staging buffer, reorders the K reduction, and
+  returns fp16 logits the top-k then compares — three routing-level numerics
+  changes. Near-tie experts can flip, the greedy text can change, and golden
+  moves on *every* profile including short, on both boxes.** A chapter-scale
+  numerics event for a kernel whose exact-order form is modelled to reach
+  16–25 % of the same ceiling — which is why it is second and conditional.
+
+  **Files:**
+  - Modify: `sources/Shrike/Metal/Prefill/prefill.metal` — add
+    `prefill_router_block_tiled_body` plus `prefill_router_block_tiled` and
+    `prefill_router_block_tiled_sigmoid` beside the existing pair, and
+    `constant uint FC_PREFILL_ROUTER_TOKENS [[function_constant(123)]]` (123 is
+    free; the highest index in use across `sources/Shrike/Metal/` is 122,
+    `prefill.metal:29`). **Leave `prefill_router_block_body` (`:372-486`),
+    `prefill_router_block` (`:488-513`) and `prefill_router_block_sigmoid`
+    (`:515-541`) byte-for-byte alone** — they are the test's reference and the
+    `=block` A/B arm. `prefill_affine_value` (`:43-57`), `kPrefillGroupSize`
+    (`:9`), `kPrefillRouterMaxExperts` (`:11`) and `kPrefillRouterMaxTopK`
+    (`:12`) are reused unchanged.
+  - Modify: `sources/Shrike/Kernels/Prefill/MoE/PrefillRouter.swift` — a `Kind`,
+    the pipeline choice, the new dispatch geometry, `description`. The
+    `encodeBlock(...)` signature and every buffer it binds stay as they are, so
+    neither runner call site changes.
+  - Modify: `sources/Shrike/Kernels/Prefill/MoE/PrefillRouterBenchmark.swift`
+    (`kind` parameter, carried on `Result`) and `sources/ShrikeBench/RouterBlockBench.swift`
+    (print `block`, `tiled` and the ceiling from one run, plus a `scores_only`
+    arm for the top-k split).
+  - Modify: `sources/Shrike/Runtime/Inference/RealForwardRunner.swift` — the env
+    knob beside `prefillRoutedGEMMGrouped` / `prefillRouteOverlap` (`:459-462`),
+    its stored property beside `:378-384`, `prefillRouterDescription` beside
+    `prefillGapLeversDescription` (`:244-253`), and the two `PrefillRouter`
+    constructions (`:709-718`, `:772-774`). Both `encodeBlock` call sites
+    (`:4572-4591`, `:5037-5056`) are untouched.
+  - Modify: `sources/ShrikeServer/Core/ServerInference.swift:820-822` (append
+    `prefill_router=` to the residency line — **do not touch the leading
+    `prefill_projection_path=` token**, which `tools/mini-deploy.sh:79` greps)
+    and `:853-858`. `ServerInference.load` sits in the lint baseline at 181
+    lines; if the added lines move it, regenerate the baseline in the same
+    commit or the strict gate fails on a stale entry.
+  - Test: `tests/Shrike/Core/Kernels/Prefill/PrefillRouterTests.swift` (346
+    lines; `:33` and `:100` the existing block-vs-scalar cases, `:150`
+    `makeBuffers`, `:245` `makeStableWeights`, `:299` `packWeights` — which
+    needs a 4-bit sibling using `Quantization.quantizeInt4Affine`,
+    `Quantization.swift:50`).
+  - Docs: `docs/v12-prefill-matrix-kernels.md` — a landed
+    `### Step 12 — the router block on an operand-reusing kernel` after
+    `### Step 11` (`:725`), the ledger's "**After P14**" block, and Step 11's
+    closing "the router is the next task (Task 14)" updated;
+    `docs/v12-implementation-plan.md` — Task 14 `[x]`.
+  - Unchanged deliberately: the decode router (`moe.metal` `router_gemv_body`
+    `:291`, `router_topk_select_body` `:359`) and `RouterTopKTests.swift`; the
+    routed tiles, the shared expert, the scratch layout (the new kernel needs
+    no new buffer); `effectiveScaleBuffers`, `onesPerExpertScale`,
+    `routerLogitBias`.
+
+  **Interfaces:**
+  - Consumes: `prefill_affine_value(packed:element:bits:)`,
+    `FC_PREFILL_ROUTER_BITS` (index 79, set from `model.routerWeightBits`,
+    `Model.swift:58`), `threadgroup_barrier(mem_flags::mem_threadgroup)`,
+    `MTLComputeCommandEncoder.dispatchThreadgroups`.
+  - Produces:
+
+    ```swift
+    extension PrefillRouter {
+        /// `block` is the P0-era kernel, kept as the reference and the A/B arm;
+        /// `tiled` is P14's TOK-token × all-experts kernel and the default.
+        enum Kind: String, Sendable { case block, tiled }
+        /// SHRIKE_PREFILL_ROUTER=block|tiled — anything else takes `tiled`.
+        static func environmentKind() -> Kind
+        init(context: MetalContext, weightBits: Int, sigmoidRouterScores: Bool,
+             routedScalingFactor: Float, kind: Kind, tokenBlock: Int)
+        /// "tiled tokens=16 bits=8" / "block bits=8"
+        var description: String { get }
+        static let defaultTokenBlock = 16   // SHRIKE_PREFILL_ROUTER_TOKENS overrides, 1...32
+    }
+    ```
+
+    Metal: the two tiled kernels take the identical buffer bindings 0…14 as
+    their `_block` counterparts, so only the pipeline and the threadgroup count
+    change in the encoder. `FC_PREFILL_ROUTER_TOKENS` (123) carries `TOK`; a
+    second internal constant selects the V1/V2/V3 rung so Step 3's ladder is one
+    binary. The knob defaults to the *new* behaviour and keeps the old kernel
+    reachable on that binary (`SHRIKE_MPP_WEIGHT_LOADS`'s precedent), so every
+    ledger row is a one-binary A/B.
+
+  Steps (TDD; the gate is Step 3's bit-equality result, which decides the rung
+  and therefore the bar):
+
+  - [ ] Step 1: the failing test, in `PrefillRouterTests.swift` —
+        `tiledRouterIsBitIdenticalToTheBlockRouter`. Run both `PrefillRouter`
+        kinds over one set of buffers; compare `outIndices` element-for-element
+        and `outWeights` **by bit pattern**, borrowing
+        `MPPPrefillInt4QMMTests.expectBitIdentical` (`:316-323`: assert finite,
+        report the first mismatching index) and its `makeInputs(irregular:)`
+        rationale (`:28-31`) — full-mantissa pseudo-random `x`, scales and
+        biases, because the suite's current fixtures are integers over 64 whose
+        partial sums are exact in fp32 and would compare equal under *any*
+        reduction order. Cases: T ∈ {1, 7, 17, 4096} (1 and 7 under-fill a
+        block, 17 leaves a one-token tail at TOK 16, 4096 is production),
+        `weightBits` ∈ {4, 8}, both score paths (the sigmoid arm at
+        `routedScalingFactor` 2.446, kimi's value), and one at
+        `hiddenStrideElements = d + 13` that re-asserts
+        `assertPaddingUnchanged` (`:329`).
+  - [ ] Step 2: `swift test --no-parallel --filter PrefillRouterTests` — expect
+        FAIL: `PrefillRouter.Kind` undefined.
+  - [ ] Step 3: implement the tiled kernel and walk the ladder. Start at **V1**
+        (staged product + hoisted `sum_x`); if any case is not bit-identical,
+        drop to **V2**, then to **V3**, and record in the verdict which rung
+        survived and what that says about Metal's contraction of
+        `sum_x += xv` — that is a reusable finding, not a footnote. Do not
+        "fix" a mismatch by loosening the test to a tolerance: the whole
+        argument for golden identity is bit equality against the current
+        kernel.
+  - [ ] Step 4 (the bench spike, both boxes, **the mini decides**):
+        `swift run -c release ShrikeBench router_block 20` prints, from one
+        process, the `router_chunk4096` MPS ceiling, `block`, `tiled` and
+        `scores_only` (the tiled kernel with the top-k compiled out — it prices
+        the top-k, only modelled today). Sweep
+        `SHRIKE_PREFILL_ROUTER_TOKENS` ∈ {4, 8, 16, 32} on both boxes, recording
+        threadgroup memory and TFLOPS per arm; the boxes have disagreed about
+        exactly this kind of tile before (P10), so the landed default is
+        whatever the **mini** picks. **Bar ≤ 15.0 ms on the mini; stretch
+        ≤ 10.0; abandon below 3× (> 27.8 ms) → land the tests and the kernel
+        behind `SHRIKE_PREFILL_ROUTER=tiled`, keep `block` as the default,
+        write the null into the verdict and the design doc, and stop — do not
+        open the MPP arm without the owner's call, because it moves golden on
+        every profile.**
+  - [ ] Step 5: the five gates — release build with zero warnings;
+        `swiftlint lint --strict --baseline .swiftlint-baseline.json`
+        (regenerate if `ServerInference.load`'s length moved); markdown link
+        check; `swift test --no-parallel`; the same under
+        `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test
+        --no-parallel --sanitize=thread`.
+  - [ ] Step 6: `tools/golden-baseline.sh --check` on this box with the server
+        stopped — **expected IDENTICAL, short and long; a difference is a kernel
+        bug, not a numerics change: debug it, never recapture**
+        (`docs/v12-implementation-plan.md:38-42`). Commit
+        `prefill: the router block on an operand-reusing kernel (v12 P14)`.
+  - [ ] Step 7: ledger on both boxes. `tools/mini-deploy.sh --restart`, then
+        `tools/prefill-measure.sh` with a fresh server per prompt and one send
+        per prompt per server lifetime (a repeat hits the multi-prefix prompt
+        cache), reading roles with `tools/prefill-ledger.py`. **The ledger's
+        column names are not the script's prompt labels**: the 12,285-token
+        prompt is written as `prompt-6k.json` and the 3,756-token one as
+        `prompt-2k.json` (`tools/prefill-prompts.py:10-11`), so the ledger's
+        "12k" column is the script's `6k` label. Mini 3.7k + 12k is the verdict,
+        M4 Pro 3.7k + 12k + 25k the check; same-binary A/B with
+        `SHRIKE_PREFILL_ROUTER=block`. Then the mini golden check — IDENTICAL.
+        Nothing here changes allocation, so a `memory_pressure -Q` move would
+        be a finding.
+  - [ ] Step 8: docs and review. Design doc gets the landed Step 12 section and
+        the "After P14" ledger block; the plan gets Task 14 `[x]`. Fresh
+        reviewer; fixes folded into the commit (rebase and amend, never a
+        fixup commit).
+
+  **Verdict template.** The bench first: mini and M4 Pro, `block` → `tiled` ms
+  per launch, TFLOPS, share of the same-run ceiling, the winning `TOK` with its
+  threadgroup memory, and the `scores_only` split that prices the top-k. Then
+  which rung (V1/V2/V3) proved bit-identical and what that says about
+  fast-math contraction of `sum_x += xv`. Then the ledger, mini 3.7k and 12k
+  before → after: `prefill_gdn_router` and `prefill_attn_router` in
+  ms/prompt-token, GPU busy, gaps (span − busy), wall in seconds and
+  ms/prompt-token; the M4 Pro's rows as the check. Then the golden outcome per
+  box and profile — **identical, else the task failed** — with the digests
+  recorded unchanged, and the other role rows unchanged within noise.
+
+  **Risks.**
+  - *The `sum_x` hoist is not bit-identical.* The likeliest single surprise, and
+    it is a compiler question no amount of reading settles — Metal's fast math
+    may already be contracting `sum_x += float(x[k]) * float(e[k])` into an
+    `fma` in today's kernel (MEMORY.md's "Metal half round-trip elision" family,
+    found the hard way in T2 `d89d172`). Step 3's ladder is the mitigation and
+    Step 1's test is the detector; the cost of landing on V3 is a lower bar
+    (≤ 25 ms, 3.3×, wall 73.4 s) not a failed task.
+  - *The `s == top_score[i]` tie rule.* The selection is identical **only
+    because** the scan still walks experts in ascending order on a single
+    thread per token. Any attempt to widen the top-k across a simdgroup breaks
+    it silently — the logits stay identical and the *chosen expert* changes on a
+    tie. The review must check this specifically; the near-tie case
+    (`blockRouterNearTieMatchesScalarPath`, `PrefillRouterTests.swift:100`,
+    whose fixture puts experts 7 and 8 within 1e-4) is the existing guard and
+    the new test must cover the tiled kernel with it.
+  - *Threadgroup memory and occupancy on the M1.* 20.1 KB at TOK 16 is inside
+    the 32 KB per-threadgroup limit but may leave one threadgroup resident per
+    core on an 8-core M1, and ≈ 70 registers may cost occupancy again — the
+    exact failure mode where a "more reuse" kernel gets slower. This is
+    modelled, not measured; Step 4's sweep is the answer, and TOK 8 (10.1 KB,
+    ≈ 38 regs, 512× amplification) is the fallback that still models at 4.5×.
+  - *`T` not a multiple of `TOK`.* The last block is partial in every real
+    request (the 3.7k chunk is 3,756 rows). Every staging write, every score
+    write, the accumulator loop and the top-k mask on `row0 + t < T`, and
+    **nothing may be written to `out_indices` / `out_weights` past `T`** — the
+    runner reads `t * topK` entries and a stray write lands in another token's
+    route. T ∈ {1, 7, 17} in Step 1 is the guard.
+  - *`hidden_stride` and 4-bit alignment.* Staging must read
+    `hidden + (row0 + t) * hidden_stride`, not a packed row (the suite already
+    asserts inter-row padding is untouched, `:329`; the new test reuses it at
+    `d + 13`). Groups are byte-aligned by construction at 4 bits, but a
+    vectorised uint4 register load of the row also needs
+    `weightsOffset % 16 == 0` and `router.offset` comes from the model view —
+    mirror P9: an alignment check with a scalar byte-load fallback, both
+    bit-identical, tested at a deliberately unaligned offset
+    (`MPPPrefillInt4QMMTests:340` does exactly this at `weightOffset 13`).
+  - *The sigmoid path is not the measured one.* Everything above is measured on
+    the softmax router; the kimi arm is covered by construction and the
+    bit-equality test and by nothing else. Say so in the verdict rather than
+    implying it was benched.
+  - *AGX trap, and two model processes.* The known driver crash is a
+    `.concurrent` encoder plus a later indirect dispatch on one command buffer
+    (MEMORY.md, T2); this task adds neither — one ordinary compute encoder, one
+    `dispatchThreadgroups` — but the check belongs in the review. Every bench
+    and ledger arm is a GPU run: `pgrep -fl 'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI|ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`
+    first, every time; never terminate a process this session did not start.
 
 ## Follow-ons (not scheduled)
 
