@@ -417,6 +417,30 @@ routing 1.8 ms; its wall moved 28.0 → 27.5 s, the rest being the fetch-bound
 **After P13** (commit 8692c3a, 2026-09-03): benches only, no production change;
 the rows are the After P12 rows. See Step 11 for what they measured.
 
+**After P14** (commit dfaa69e, 2026-09-03; the router block on the tiled
+kernel, 12 tokens per threadgroup; `SHRIKE_PREFILL_ROUTER=block` keeps the P13
+kernel; the routed and shared rows are unchanged within noise):
+
+| role | M4 Pro 3.7k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `prefill_attn_router` | **0.17** | **0.29** | **0.49** | **0.76** | **1.57** |
+| `prefill_routed_tile` | 0.46 | 0.44 | 0.46 | 1.79 | 1.74 |
+| `prefill_gdn_router` | **0.41** | **0.40** | **0.40** | **1.79** | **1.78** |
+| `prefill_shared_expert` | 0.04 | 0.04 | 0.04 | 0.17 | 0.17 |
+| **GPU busy** | 1.11 | 1.20 | 1.41 | 4.67 | 5.34 |
+| gaps (span − busy) | 1.05 | 0.76 | 0.86 | 0.49 | 0.27 |
+| **wall** | 2.48 | 2.09 | 2.34 | 5.73 | **5.76** |
+| wall, seconds | 9.3 | 25.7 | 59.0 | 21.5 | **70.8** |
+
+On the M1 the same binary with the block kernel reads 80.41 s at 12k (gdn 2.34,
+attention 1.75, busy 6.09); the tiled kernel takes 9.65 s off — the GDN role
+−0.57 ms/token and attention −0.19, 77 ms per layer-chunk over 90 and 30
+chunks against the bench's 73 (its fixture is on shared storage) — and the
+mini prefills at **5.76 ms/token, under the
+chapter's 6.3 target for the first time** (3.7k 24.3 → 21.5 s). The M4 Pro's
+12k wall 27.6 → 25.7 s on the same A/B, 25k 64.0 → 59.0 s. Golden identical on
+both boxes and both profiles, as the exact-order design requires.
+
 ## Where the time goes
 
 Every dense projection in prefill (attention Q/K/V/O, GDN in/out) already runs
@@ -429,7 +453,7 @@ all scalar kernels:
 | attention core | `attention_prefill_causal_tiled` | one threadgroup per (query, head), 256 threads over head-dim, a serial walk over every key with a two-barrier threadgroup reduction per key. The decode kernel's shape, run once per prompt token: no K/V reuse across queries, none across the 8 query heads that share a KV head. | 30× at 3.7k, 60× at 25k |
 | routed experts | `prefill_grouped_routed_moe_batched_phase1` / `_down` | each thread computes one or two 2048-long scalar dot products; 32-pair microbatches; a command buffer per 8-expert tile | 7×; 2.6× after P6 (`mpp_prefill_affine_grouped_f16`, one dispatch per phase over the tile's experts: 0.69 ms/token at 12k against 0.27 at the 7.46 TFLOPS ceiling); P8's bench puts the tile at 67 % of the M4 Pro's same-run ceiling and 42 % of the M1's, the M1's remainder split 7 % unpack / 20 % weight loads / 31 % staged structure (Step 7); after P9 (vector loads + 128-wide K) 71 % of the M1's ceiling and 99 % of the M4 Pro's (Step 8); after P10 (256-wide K) 78 % of the M1's (Step 9) |
 | shared expert | `PrefillSharedExpert.encodeBlock` | a `for row in 0..<queryCount` loop over the decode runtime: 4–6 M=1 GEMV dispatches per token | 25× |
-| GDN | `gdn_delta_step_prefill` | the delta-rule scan is a serial loop over the chunk inside one dispatch of 32×32 threadgroups; projections, conv and norms are fine | 3.6× (scan ≈ 0.6 of the 1.0 ms); after P12 the mini's 319 ms per layer-chunk is scan 56 + projections 166 (85–99 % of the MPS ceiling) + pre-scan chain 9 + router 83 (Step 11) |
+| GDN | `gdn_delta_step_prefill` | the delta-rule scan is a serial loop over the chunk inside one dispatch of 32×32 threadgroups; projections, conv and norms are fine | 3.6× (scan ≈ 0.6 of the 1.0 ms); after P12 the mini's 319 ms per layer-chunk is scan 56 + projections 166 (85–99 % of the MPS ceiling) + pre-scan chain 9 + router 83 → 10 after P14 (Steps 11–12) |
 
 A matrix-path attention kernel exists in `prefill.metal`
 (`attention_prefill_full_tensorops_2d_validity_v2`, `matmul2d` over 64-key
@@ -763,7 +787,42 @@ one thread doing the top-8 while the others wait — 83.4 ms per layer-chunk at
 one thirty-fifth of its ceiling, in every one of the 120 layer-chunks: 10.0 s
 of the mini's 80.4 s 12k wall. The GDN role's cost table closes with it
 (scan 56 + projections 166 + chain 9 + router 83 = 315 of 319 ms), and the
-router is the next task (Task 14).
+router became Task 14 (Step 12).
+
+### Step 12 — the router block on an operand-reusing kernel (−12 % of the M1's 12k wall, bit-identical)
+
+`prefill_router_block` was one threadgroup per token: 256 threads each walking a
+2,048-long row with a byte extraction and three loads per element, the 512 KB
+weight re-read by every one of the 4,096 threadgroups, the top-8 on one thread.
+`prefill_router_block_tiled` gives a threadgroup a block of 12 tokens against
+every expert: thread `e` keeps expert `e`'s row and 12 accumulators, so one
+weight read serves 12 tokens; a group's 64 weight bytes arrive as `uint4`s and
+are unpacked from registers (the byte path stays for an unaligned base); the
+pre-scaled activations `x ⊙ e` are staged token-minor in threadgroup memory,
+their per-token sums taken in k order by the token threads, and loaded as
+`float4`; each token's top-8 runs on its own thread over the experts in
+ascending order. The arithmetic per (token, expert, element) and its order are
+the block kernel's — the same `q`, the same `float(x) · float(e)`, the same two
+fmas, the same tie rule — so logits, indices and route weights are
+**bit-identical** (asserted on full-mantissa inputs at 8 and 4 bits, softmax and
+sigmoid, partial blocks, unaligned bases, the production shape) and golden is
+identical on both boxes and both profiles. Two things the ladder settled on the
+way: Metal does not contract the block kernel's `sum_x += xv` (the sum of the
+staged, rounded products is bit-identical), and the M1's limit was the
+per-thread byte walk of the weight row — 32 rows 2 KB apart per SIMD group,
+one cache line per element — which vector activations, parallel staging and a
+smaller threadgroup-memory footprint could not touch and the vector weight
+loads removed. `ShrikeBench router_block 20`, both kinds in one process:
+
+| box | block | tiled (12 tokens) | speedup | share of the same-run ceiling |
+| --- | ---: | ---: | ---: | ---: |
+| M1 | 83.4 ms | **10.0 ms** | 8.3× | 2.9 % → 24 % |
+| M4 Pro | 18.1 ms | 2.15 ms | 8.4× | 5.7 % → ≈ 50 % |
+
+Token block on the mini: 4 → 11.5, 8 → 10.4, **12 → 10.0**, 16 → 14.9,
+24 → 12.6 ms; `SHRIKE_PREFILL_ROUTER_TOKENS` sweeps it and
+`SHRIKE_PREFILL_ROUTER=block` keeps the old kernel on the same binary. Measured
+on the ledger: "After P14" above — the cut lands in full in both router roles.
 
 ### Follow-ons, not scheduled
 

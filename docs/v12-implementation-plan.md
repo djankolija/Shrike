@@ -4025,7 +4025,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
 ### Task 14: P14 — the prefill router block on an operand-reusing kernel
 
-- [ ] **P14: the largest unclaimed cost in the chapter** — `prefill_router_block`
+- [x] **P14: the largest unclaimed cost in the chapter** — `prefill_router_block`
   runs in every one of the 120 layer-chunks of a 12k prefill and costs
   **83.40 ms each on the mini: 10.0 s of the 80.38 s wall, 12.4 %**, at
   **2.9 % of the same-run MPS ceiling** at its own shape. It is one threadgroup
@@ -4060,6 +4060,42 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   beats today's kernel by ≥ 3× on the mini (≤ 27.8 ms), land the tests and the
   new kernel behind its knob, keep `prefill_router_block` as the default, and
   say so in the verdict** — P8's precedent, a measured null is a result.
+
+  **LANDED dfaa69e (2026-09-03): measured on the mini `prefill_gdn_router` 2.36
+  → 1.79 ms/prompt-token (3.7k; 2.34 → 1.78 at 12k), `prefill_attn_router`
+  0.95 → 0.76 / 1.75 → 1.57, `prefill_routed_tile` 1.79 → 1.79 / 1.74 → 1.74,
+  `prefill_shared_expert` 0.17 → 0.17, GPU busy 5.42 → 4.67 and 6.09 → 5.34
+  (the same-binary block arm at 12k: 6.09, wall 80.41 s), wall 24.32 → 21.52 s
+  and 80.41 → 70.76 s — 5.76 ms/prompt-token, under the chapter's 6.3 target
+  for the first time.** Every bar cleared: bench ≤ 15.0 → **10.0 ms** (8.3×,
+  0.429 TFLOPS, 24 % of the 1.75 TFLOPS same-run ceiling; the ≤ 10.0 stretch
+  met), wall ≤ 72.2, busy ≤ 5.44, gdn ≤ 1.84, attention ≤ 1.59, 3.7k ≤ 21.9.
+  Bench per box, block → tiled: mini 83.4 → 10.0 ms; M4 Pro 18.1 → 2.15 ms
+  (8.4×); token block on the mini 4 / 8 / 12 / 16 / 24 = 11.5 / 10.4 / 10.0 /
+  14.9 / 12.6 ms, 12 the default on both boxes (threadgroup memory 12 KB + 3 KB
+  at 12; 24 is the cap, 32 would need 40 KB). The ladder: V1 (every thread
+  stages the products, the token threads sum the staged products in k order)
+  proved bit-identical — **Metal does not contract `sum_x += xv` in the block
+  kernel** — and so did token-minor `float4` loads; neither moved the mini
+  (17 ms at 24 tokens), nor did an 8 KB chunked score transpose (worse, 21 ms,
+  reverted). The M1's limit was the per-thread byte walk of its weight row (32
+  rows 2 KB apart per SIMD group, a cache line per element); loading a group's
+  weight bytes as `uint4`s and unpacking from registers took it 16.8 → 10.0 ms,
+  with the byte path kept for an unaligned base (tested at a 13-byte offset,
+  bit-identical). The top-8 scan is one thread per token in the original
+  expert order (`prefill_router_select`, extracted verbatim and shared by both
+  kernels). The `scores_only` arm was not built — the rungs priced the phases
+  by elimination. M4 Pro check: 12k block → tiled gdn 0.517 → 0.403, attention
+  0.327 → 0.292, busy 1.353 → 1.204, wall 27.61 → 25.68 s; 3.7k wall 9.97 →
+  9.33 s; 25k wall 64.03 → 58.97 s. The ledger's cut per layer-chunk is 77.4 ms
+  from both roles (gdn −0.567 × 12,285 / 90, attention −0.189 × 12,285 / 30)
+  against the bench's 73.4 — the bench's fixture is on shared storage, the
+  production buffers private. Numerics: bit-identical by construction and
+  by test (eight cases incl. 4-bit, sigmoid, partial blocks, unaligned bases).
+  Golden IDENTICAL on both boxes, short and long (digests unchanged: M4 Pro
+  long `e04d4e8ee7f1590d`, M1 long `899a25e60a365e60`). Lint baseline
+  regenerated for `ServerInference.load` (181 → 182). Five gates green (1165
+  tests, TSAN 0 reports in 1,820 s).
 
   **What Task 13 measured.** `ShrikeBench router_block 20`, the production
   encoder driving the production pipeline (`PrefillRouterBenchmark.run`, so the
