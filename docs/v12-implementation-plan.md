@@ -3148,7 +3148,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
 ### Task 12: P12 — the prefill gap levers: first-routed-buffer driver cost and per-layer host routing
 
-- [ ] **P12: the two gaps P5 exposed and P9 left** — the mini's prefill GPU is
+- [x] **P12: the two gaps P5 exposed and P9 left** — the mini's prefill GPU is
   idle 0.56 ms per prompt token at 12k (8.9 % of the 6.26 ms it is busy), and
   91 % of that idle sits in four role transitions. This task takes the two that
   are host and driver work, not kernels. **Targets on the mini at 12k
@@ -3167,6 +3167,39 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   `v12-prefill-matrix-kernels.md:614-622`, `:636-639`, so a null there decides
   nothing — and it is fetch-bound, so a saving can reappear as routed→routed
   gap rather than wall, `:277-283`).
+  **LANDED 188d2b7 (2026-09-03): measured on the mini at 12k
+  `prefill_shared_expert->prefill_routed_tile` total 3,525 → 916 ms (host
+  820 → 827, driver 2,664 → 58, count 120), `prefill_gdn_router->prefill_shared_expert`
+  1,432 ms (host 1,388) and `prefill_attn_router->prefill_shared_expert` 486 ms
+  (host 465) no longer transitions at all, gaps 0.581 → 0.273 ms/prompt-token,
+  GPU busy 6.107 → 6.096, wall 84.41 → 80.38 s (6.87 → 6.54 ms/token, 1.04× the
+  6.3 target); at 3.7k gaps 0.759 → 0.488, busy 5.47 → 5.42, wall 25.42 →
+  24.32 s.** Bars: wall ≤ 82.5 cleared; driver 2.65 → ≤ 0.40 s cleared (0.058);
+  the `->shared` host 1.86 → ≤ 0.50 s cleared (the transitions are gone); gaps
+  ≤ 0.20 missed at 0.273 (`routed->routed` 1,182 ms of per-tile host work,
+  `shared->routed` 827 ms of metadata build plus the first tile's unhidden
+  fetch — the follow-on). Step 1's arms on the P10 binary: A1 (`--ram-budget
+  4G`) driver −51 %, A2 (per-slot) −91 % — residency of the referenced buffer,
+  proportional to its length (each layer's ≈ 226 MB pool, forty of them); the
+  queue residency set landed as lever A and no per-slot wrappers were needed.
+  Single-lever arms on one binary at 12k: overlap alone 82.15 s, residency
+  alone 82.46 s — the levers add. At 3.7k: driver ≤ 0.20 s cleared (0.022),
+  the `->shared` host cleared (gone), wall ≤ 24.4 s cleared (24.32), gaps
+  ≤ 0.30 missed at 0.488 — the same residue as at 12k. Steps 3, 4 and 6 (the `p12probe` split, the
+  counting sort and its tests) were not run: under the overlap the `->shared`
+  host transitions vanish entirely (17.4 ms of shared-expert GPU covers the
+  16 ms of routing), so nothing of the routing is left to shrink; the counting
+  sort stays a follow-on if a future change exposes it. The four role rows are
+  unchanged within noise. M4 Pro check: driver 570 → 10 ms, `gdn->shared` host
+  219 → gone, wall 28.01 → 27.52 s at 12k and 10.16 → 9.97 s at 3.7k, the rest
+  fetch-bound. Golden IDENTICAL on both boxes, short and long. Memory:
+  `memory_pressure -Q` on the mini 24–26 % free right after a 12k prefill with
+  the set vs 73–75 % without, 83 % a minute later; `vm_stat` at idle with the
+  set 2.2 GB wired and the pools as 11 GB of active pages — not pinned;
+  `SHRIKE_PREFILL_POOL_RESIDENCY=none` is the one-env rollback. Lint baseline
+  regenerated for `encodeRoutedMoEPrefill` (261 → 230 lines, the routing
+  extracted to `buildPrefillRoutes`) and `ServerInference.load` (180 → 181).
+  Five gates green (1163 tests, TSAN 0 reports in 1,866 s).
 
   **What P5 and P9 left.** P5 added the three-way gap split (`host_ms` =
   previous buffer's GPU end → this buffer's `kernelStartTime`, `driver_ms` =
@@ -3536,6 +3569,433 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   - *Two model processes.* Every arm is a server run: `pgrep -fl
     'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI|…'` first, every
     time; never terminate a process this session did not start.
+
+### Task 13: P13 — the GDN pre-scan chain and the dense GEMM shape: measure, then take the larger
+
+- [ ] **P13: two candidate levers, neither of them measured** — the audit's L1
+  (the GDN pre-scan chain, modelled 0.32–0.63 ms/prompt-token) and L8
+  (`kMPPAffineTileM` fixed at 64, the dense MPP GEMM never benched, modelled
+  0–0.25) are the largest unclaimed items on the mini, and **both bands are
+  arithmetic, not measurement**. Every earlier task in this chapter had a probe
+  before it had a lever (P8's tile split fed P9; P9's byte-load pair fed P10);
+  these two have nothing. So Step 1 is two bench-only additions at no production
+  risk, and the kernel work is chosen by what they measure. Bars are stated **as
+  formulas over Step 1's measurements**; the numbers below are those formulas at
+  the middle of each modelled band, re-derived from the measured values before a
+  line of kernel code is written. **The mini decides.** M4 Pro iteration check
+  only — and for the dense arm it cannot even confirm the lever, because P10
+  showed the boxes disagree about this exact shape (M1 dense −1 %, M4 Pro −17 %
+  from the same 256-wide tile, `docs/v12-implementation-plan.md:2320-2325`).
+
+  **Where the 2.34 goes.** After P12 (HEAD 188d2b7) the mini's 12k prompt
+  (12,285 tokens, `tools/prefill-prompts.py:10`; 3 chunks of 4,096 → 120
+  layer-chunks, 90 GDN + 30 attention) is 80.38 s wall = 6.54 ms/prompt token,
+  busy 6.10, gaps 0.273; roles (measured, After-P10, unchanged by P12) gdn 2.34 ·
+  routed tile 1.74 · attn 1.75 · shared expert 0.17. One `prefill_gdn_router`
+  layer-chunk is 2.34 × 12,285 / 90 = **319.4 ms**; the role is one command
+  buffer (`RealForwardRunner.swift:5058-5059`) holding, per the encode order:
+
+  | term | ms per GDN layer-chunk | source |
+  | --- | ---: | --- |
+  | `gdn_chunk_factors` + `gdn_chunk_scan` | 56.07 | **measured** — `ShrikeBench gdn_scan`, mini, 0.383 TFLOPS (serial 183.6) |
+  | 5 dense MPP projections, 275.95 GFLOP | 169–211 | **modelled** at 1.63–1.31 TFLOPS |
+  | `prefill_router` block (4.29 GFLOP + top-8) | ≈ 3 | **modelled**, never benched |
+  | conv mix + conv tail + qk norm + gated norm + 2 × `prefill_rmsnorm_bf16w_block` + 1 × `residual_add_fp16` | **50–91** | **modelled by subtraction** — this task's first arm |
+  | total | 319.4 | measured |
+
+  275.95 GFLOP = 2·4096·2048·(8192 + 4096 + 32 + 32) + 2·4096·4096·2048 — the five
+  `encodeAffineProjection` calls at `RealForwardRunner.swift:3930` (qkv, n 8192),
+  `:3951` (z, n 4096), `:3962` (a, n 32), `:3974` (b, n 32), `:4022` (out, k 4096
+  → n 2048), each landing in `MPPPrefillInt4QMM.encode` at m = 4,096
+  (`:3608-3637`); 1.31 TFLOPS is P9's measured grouped rate, 1.63 what
+  `prefill_shared_expert` implies (audit L1). **The 50–91 ms residual has never
+  been measured.** (The audit states 44–86 from the P9 role of 2.368; at 2.34
+  minus the router it is 50–91 — they do not reconcile, one more reason to
+  measure.)
+
+  **What is in the chain, and its floor.** Per GDN layer-chunk at T = 4,096,
+  C = `qkvDim` 8192, D 2048, `valueDim` 4096:
+
+  | kernel | where | shape | bytes |
+  | --- | --- | ---: | ---: |
+  | `gdn_conv_mix_prefill` | `gdn.metal:280`, `GDN.swift:224` | 33.6 M threads, one per (channel, row), 4 taps | 134.2 MB |
+  | `gdn_conv_tail_update` | `gdn.metal:314`, `GDN.swift:250` | 8192 × 3 | 0.1 MB |
+  | `gdn_qk_norm` | `gdn.metal:390`, `GDN.swift:295` | 2·16 × 4,096 = 131,072 groups × 128 threads, **one element per thread**, 2 barriers | 67.1 MB |
+  | `gdn_gated_norm` | `gdn.metal:744`, `GDN.swift:543` | 32 × 4,096 = 131,072 groups × 128 threads, same shape | 100.7 MB |
+  | 2 × `prefill_rmsnorm_bf16w_block` | `prefill.metal:158`; called `RealForwardRunner.swift:2220`, `:2261` | 4,096 groups each | 67.1 MB |
+  | 1 × `residual_add_fp16` | `utility.metal:95`; called `:2257` | 8.4 M threads | 50.3 MB |
+  | | | | **419.4 MB** |
+
+  419.4 MB is a **7.0 ms floor at 60 GB/s** (the audit's achieved M1 figure; the
+  bench measures it same-run rather than assuming it) against a modelled 50–91 ms
+  — **7–13× off bandwidth**, every kernel moving 2 bytes per thread.
+  `gdn_qk_norm` normalises `gdnConvOut` in place and both scan kernels read
+  `conv_out` again after it (`gdn_chunked.metal:45`, `:164`), so conv → qk-norm
+  is a 67 MB round trip inside one buffer. The layer's other two residual adds
+  (`:5230`, `:5234`) are in `tailCB` under `prefill_moe_reduce`, not here — the
+  audit's L1 and L11 counted two adds in this role; the encode order has one.
+
+  **What the dense shape dispatches.** Four of the five GDN projections and every
+  attention projection go through `MPPPrefillInt4QMM.encode`, whose grid is
+  `ceil(n/32)` × **64** at m = 4,096 (`MPPPrefillInt4QMM.swift:208-215`,
+  `tensorops.metal:9`). A threadgroup dequants one `TILE_N × TILE_K` weight tile
+  and multiplies it by `TILE_M` rows (`tensorops.metal:145-248`), so **every
+  column tile's dequant is repeated 64× at this shape**. `TILE_M` has never moved
+  — P8 swept `TILE_N` and the buffer count, P9 the loads and `TILE_K`, P10
+  `TILE_K` again — and nothing benches the dense path: `ShrikeBench gemm`
+  measures MPS fp16 (`GEMMBench.swift:22-30`), `routed_gemm` the *grouped* kernel
+  at m = 128. P10 is the evidence that this matters and that the model does not
+  carry: the 256-wide tile took the mini's grouped tile 4.93 → 4.48 ms (−9 %) and
+  the routed role −7 %, but the GDN role only −1 % and attention 0.3 %, where the
+  same binary moved GDN −17 % on the M4 Pro. **The 4,096-row dense kernel behaves
+  differently from the 128-row grouped tile on the M1 and nothing says why.**
+
+  **Out of scope, already claimed:** L2, L3, L4 (landed in P12), L5, L6, L7, L9,
+  L10, and the audit's own "Not levers" list. One thing Step 1 exposes but does
+  **not** take: production issues the GDN in-projection as **four** dispatches
+  (n 8192, 4096, 32, 32) where `GEMMBench`'s `gdn_inproj_chunk4096` models one
+  fused n = 12,288; fusing needs the four weight blocks contiguous in the
+  `.gturbo` — a follow-on, like L7.
+
+  **Step 1 — the two benches.** Bench-only code, no production path change.
+
+  - **`ShrikeBench gdn_pre <iters>`** — the chain at the ornith 4,096-row shape
+    (Hk 16, Hv 32, Dk = Dv 128, C 8192, D 2048, 4 taps), each kernel timed
+    **alone** over synthetic buffers, with its bytes moved and achieved GB/s,
+    plus the chain total. Mirrors `GDNScanBench.swift`: private fixture struct,
+    `XorShift` fill, two warm-ups then `iterations` runs, `cb.gpuEndTime -
+    cb.gpuStartTime`, one `print` per kernel. PSOs by name via
+    `context.pipeline(_:)` (public, `MetalContext.swift:169`) — `gdn_qk_norm` and
+    `gdn_gated_norm` **must** be built with `MetalFunctionConstant(index: 95,
+    value: .uint32(128))`, the pair `GDN.swift:68-71`, `:76-79` uses, or the
+    bench measures a different kernel. `residual_add_fp16` over the same 8.4 M
+    elements is pure streaming, so its GB/s **is** the box's same-run floor.
+  - **`ShrikeBench dense_gemm <iters>`** — `MPPPrefillInt4QMM.encode` at the four
+    production dense shapes, all m = 4,096: **(k 2048, n 8192)** = the GDN qkv
+    in-projection *and* the attention q-projection, one shape serving both,
+    137.44 GFLOP; **(k 2048, n 4096)** z, 68.72; **(k 4096, n 2048)** out, 68.72;
+    **(k 2048, n 32)** a/b, 0.537 each on a 64-threadgroup grid. Swept over
+    `.n32b1` / `.n32k128b1` / `.n32k256b1` × `.byte` / `.vector` **in one
+    process**, with the matching MPS ceilings (`qproj_chunk4096`,
+    `oproj_chunk4096`, a new `gdn_zproj_chunk4096`) from the same run. Per shape
+    and arm: ms, TFLOPS, and **share of the same-run ceiling** — the ratio P10's
+    risks require, because the mini's ceiling bench drifts between runs (1.15
+    TFLOPS at P6, 1.84 at P8/P9).
+
+  **The decision rule.** On the mini let `C` = the measured chain total in ms per
+  GDN layer-chunk and `H` = the measured dense headroom (over the five
+  projections, measured ms − ms at that shape's same-run MPS ceiling), also per
+  layer-chunk. **Take the chain arm if 0.40 × C > 0.50 × H, the dense arm
+  otherwise** — 0.40 is the chain fraction the three fusions below address, 0.50
+  the headroom fraction `TILE_M` reaches (P8's mini probe: unpack 7 % + weight
+  loads 20 % of a tile whose whole remainder above a plain GEMM is 29 %; `TILE_M`
+  halves both). **Proceed only if the winner's saving clears 0.15
+  ms/prompt-token** — 90 × saving / 12,285 ≥ 0.15, i.e. ≥ 20.5 ms per
+  layer-chunk, ≈ 1.8 s of the 80.38 s wall (2.3 %). If neither clears, land the
+  benches and the measured verdict and stop, as P8 did.
+
+  **Step 2a — the chain (if it wins).** Largest first:
+
+  1. **Fuse conv → qk-norm.** One kernel, threadgroup per (head-slot, row) over a
+     row's 64 slots (16 q + 16 k + 32 v, 128 channels each); 128 threads each
+     compute one channel's 4-tap conv + SiLU into `threadgroup half tile[128]`,
+     barrier, then q/k slots reduce and scale before the single device write.
+     Deletes `gdn_qk_norm`'s 131,072 launches and 67.1 MB of round trip. **The
+     fp16 rounding of the conv output before the sum of squares is
+     load-bearing** — the fp32 reference does it (`GDNReference.swift:74`,
+     `conv[ch] = Float(Float16(silu(acc)))`) and today the kernel gets it free
+     from the device store. Fast-math elides a rounding on a register-resident
+     value (T2, `d89d172`); a `threadgroup half` stage is a real memory round
+     trip and cannot be elided. That is why the tile is `half`.
+  2. **Vectorise `gdn_gated_norm`** (and `gdn_qk_norm`'s surviving decode form)
+     to `half4`: 128 threads covering **four** (head, row) pairs, one simdgroup
+     per pair, each thread a `half4`. 4× fewer threadgroups, `simd_sum` only —
+     both `threadgroup_barrier`s and the `partial[]` array disappear.
+  3. **A T-row `prefill_residual_add_rmsnorm_bf16w_block`** folding the
+     `residual_add_fp16` at `RealForwardRunner.swift:2257` into the
+     `prefill_rmsnorm_bf16w_block` at `:2261` — the fusion
+     `residual_add_rmsnorm_bf16w` (`rmsnorm.metal:103`) already does in decode,
+     one threadgroup per row. 16.8 MB × 120 fusions = 2.0 GB per prompt, and it
+     runs in the attention role too, so `prefill_attn_router` moves with it.
+  4. **Not doable, and why:** folding the gated norm into the scan epilogue. The
+     scan's threadgroup owns a 32-column block of Dv (`kGDNChunkValueBlock`,
+     `gdn_chunked.metal:23`; grid `valueHeadDim / 32` × Hv, `GDN.swift:519-521`)
+     and the norm reduces over all 128 — the fold needs a cross-threadgroup
+     reduction or a re-blocked scan. Dropped; item 2 takes that kernel instead.
+
+  Numerics: item 1 is **bit-identical if the staged rounding holds** (same taps,
+  same order, same fp16 rounding, same per-head reduction) and Step 5's probe
+  either proves it or names the first differing element. Item 2 **reorders the
+  sum of squares** (4 elements folded per thread before a 32-lane `simd_sum`
+  instead of 128 across 4 simdgroups) — not bit-identical. Item 3 **is**
+  bit-identical by the decode kernel's own argument (`rmsnorm.metal:95-101`): the
+  add rounds through fp16 storage before the sum of squares and the reduction is
+  the same `prefill_rms_block_inv` at the same `lsize`.
+
+  **Step 2b — the dense GEMM shape (if it wins).** A `TILE_M` template axis on
+  `mpp_prefill_affine_body` and one 128-row instantiation of the **plain** kernel,
+  selected per dispatch. **The grouped kernel keeps 64 and must**:
+  `MPPGroupedBlockMSL.row_tile_start` is `staging_row / 64`
+  (`tensorops.metal:285-293`) and `PrefillGroupedRoutedMoE.groupedRowTile =
+  MPPPrefillInt4QMM.tileM` (`:92`) — its row tiles *are* the expert blocks. So
+  the axis is **not** a new `TileVariant` case (that would name a grouped kernel
+  which must not exist) but a separate `PlainRowTile` enum with its own env
+  override, consulted only in `encode`. Selection: 128 rows when `m ≥ 128` **and**
+  `ceil(n/TILE_N) × ceil(m/128) ≥ 256` — admits n 8192 / 4096 / 2048, excludes
+  the n = 32 a/b pair whose grid would fall 64 → 32 threadgroups on an 8-core M1.
+  **Bit-identity is expected but not provable from source.** `TILE_M` is the
+  `matmul2d_descriptor`'s first argument (`tensorops.metal:166-168`); the K
+  reduction per output element is over the same `TILE_K` elements in the same
+  tile order with the same `accumulator[e] += groupProduct[e]` fold (`:234`), so
+  *which* values are summed *in what order* for a given (m, n) does not change —
+  what changes is which simdgroup owns which output element inside MPP's opaque
+  `run`. Prove it as P9 proved lever A: a `runPair` bit-equality assertion on
+  `irregular` inputs across `variantShapes`
+  (`MPPPrefillInt4QMMTests.swift:223-227`) plus m = 4,096 and a ragged m = 4,097,
+  where the `globalM < rowEnd` store guard (`tensorops.metal:244`) is the only
+  thing between the arms. If the probe fails, fall back to 2e-2 and carry a
+  golden recapture into Step 7.
+
+  **Bars.** Mini-first, 12k unless stated. **They are formulas**; the numbers are
+  those formulas at the middle of each modelled band (chain `C` = 70 ms, dense
+  `H` = 57 ms, i.e. 211 − 154 at the ceiling), re-derived from Step 1 measurements
+  before Step 4.
+
+  - Chain arm: `prefill_gdn_router` = 2.34 − 0.40 × C × 90 / 12,285 →
+    **2.34 → ≤ 2.15** (claims 0.19 of a modelled 0.205); at 3.7k 2.38 → ≤ 2.19.
+    `prefill_attn_router` **1.75 → ≤ 1.73** (item 3 only). Busy 6.10 → ≤ 5.93,
+    wall **80.38 → ≤ 78.5 s**; at 3.7k busy 5.42 → ≤ 5.27, wall 24.32 → ≤ 23.8 s.
+    Bench bars on the mini: fused conv+qk-norm ≤ **0.65 ×**
+    (`gdn_conv_mix_prefill` + `gdn_qk_norm`) measured separately in Step 1;
+    vectorised `gdn_gated_norm` ≤ **0.60 ×** its Step-1 ms; chain total
+    ≤ **0.65 ×** its Step-1 total.
+  - Dense arm: `prefill_gdn_router` = 2.34 − 0.50 × H × 90 / 12,285 →
+    **2.34 → ≤ 2.24** (claims 0.10 of a modelled 0.21 — deliberately half the
+    model, because the floor here is genuinely zero); `prefill_attn_router`
+    **1.75 → ≤ 1.69**; busy 6.10 → ≤ 5.98, wall **80.38 → ≤ 79.2 s**. Bench bar:
+    at (m 4096, k 2048, n 8192) on the mini, `TILE_M 128` ≤ **0.92 ×** `TILE_M 64`
+    at the same `TILE_K` and load body, same run, no shape regressing over 3 %.
+  - Both arms: golden **short identical on both boxes**; long may move only where
+    a listed change reorders a reduction, recaptured once per box with the
+    reason. Five gates green. The M4 Pro decides nothing — the chain arm should
+    move there too, and the dense arm will probably move *more* there than on the
+    mini, which P10's split says is not evidence.
+
+  **Files:**
+  - Add `sources/ShrikeBench/GDNPreScanBench.swift`
+    (`static func runGDNPreScan(iterations:context:)` in an `extension
+    ShrikeBench`, modelled on `GDNScanBench.swift`) and
+    `sources/ShrikeBench/DenseGEMMBench.swift` (`runDenseGEMM`, calling the
+    façade plus `runGEMMShape` for the same-run ceilings).
+  - Add `sources/Shrike/Kernels/TensorCore/MPPPrefillDenseBenchmark.swift` — the
+    public façade (`MPPPrefillInt4QMM` is internal), shaped like
+    `PrefillRoutedGEMMBenchmark`, taking the variant and load body as
+    **parameters** rather than through the process-wide statics so one process
+    sweeps every arm against one ceiling.
+  - Modify `sources/ShrikeBench/ShrikeBench.swift:79-93` (two `if kernelName ==`
+    blocks — **`gdn_pre` must come before the `hasPrefix("gdn")` block at `:95`**
+    or `runGDN` swallows it; `main` is ~100 lines against the 120 error bar and
+    has no baseline entry) and `sources/ShrikeBench/GEMMBench.swift:22-31` (add
+    `GEMMShape(label: "gdn_zproj_chunk4096", m: 4096, k: 2048, n: 4096)`).
+  - Step 2a modifies `sources/Shrike/Metal/GDN/gdn.metal` (a fused
+    `gdn_conv_mix_qknorm_prefill`; `gdn_gated_norm_body` `:696-742` gains the
+    `half4` walk), `prefill.metal:158` (a
+    `prefill_residual_add_rmsnorm_bf16w_block` beside it), `GDN.swift:224-247`,
+    `:295-322`, `:527-566`, `PrefillPrimitives.swift:50-83`, and
+    `RealForwardRunner.swift:3985-4011` (conv + tail + qk-norm becomes
+    conv-fused + tail) and `:2255-2267` (the pair becomes one call).
+    `encodeLinearAttentionPrefill` already carries `lint:allow-long`
+    (`:3894-3899`); `executePrefillChunk`'s `function_body_length` baseline entry
+    **shrinks** — regenerate the baseline if it goes stale.
+  - Step 2b modifies `tensorops.metal:145-248` (`mpp_prefill_affine_body` gains a
+    `TILE_M` template parameter replacing `kMPPAffineTileM` at `:166`),
+    `:250-269` (`MPP_AFFINE_KERNEL` gains the argument; `rowOrigin` takes
+    `TILE_M`), `:271-276` (one instantiation, `…_n32k256m128b1`) —
+    `MPP_GROUPED_KERNEL` (`:298-335`) passes 64, otherwise untouched; and
+    `MPPPrefillInt4QMM.swift:25` (`tileM` stays the grouped path's 64 with a
+    one-sentence why), `:86-116` (init builds the 128-row pipeline too),
+    `:208-215` (grid height and pipeline pick), a `PlainRowTile` enum + static
+    beside `weightLoads` at `:45-47`. Step 6 adds `row_tile=` to
+    `prefillProjectionPath` (`RealForwardRunner.swift:185-188`); the leading
+    token is unchanged, so `ServerInference.swift:819` and
+    `tools/mini-deploy.sh:79`'s `prefill_projection_path=[a-z0-9-]*` grep keep
+    matching.
+  - Tests: `tests/Shrike/Core/Kernels/GDN/GDNKernelTests.swift` — the oracle is
+    `GDNReference.normalize(qkvRaw:)` (conv + SiLU + qk-norm in fp32 with the
+    fp16 roundings, `GDNReference.swift:61-93`) and `.gatedNorm(y:z:)` (`:136`);
+    `prefillChunkMatchesSequentialDecode` (`:207`), its per-channel twin (`:466`)
+    and `shortChunkTailCarry` (`:713`) are the end-to-end guards.
+    `.../TensorCore/MPPPrefillInt4QMMTests.swift` — `runPair` (`:229`),
+    `expectBitIdentical` (`:316`), `variantShapes` (`:223`),
+    `runShape(compareCPUReference:)` (`:139`).
+  - Unchanged deliberately: `MPPPrefillInt4QMM.tileK` (the matrix path's
+    admission unit), the six `TileVariant` cases and their env knobs, the grouped
+    kernel and `groupedRowTile`, the scan and factors kernels,
+    `kGDNChunkValueBlock`, the decode `gdn_conv_mix_decode` and
+    `residual_add_rmsnorm_bf16w` paths.
+
+  **Interfaces:** consumes `MetalContext.pipeline(_:constants:)` (`:173`) and
+  `cb.gpuStartTime`/`gpuEndTime`; `GDN.encodeConvPrefill`/`encodeQKNorm`/
+  `encodeGatedNorm` keep their shapes, the fused encoder replacing the first two.
+  Produces `ShrikeBench.runGDNPreScan(iterations:context:)` and
+  `runDenseGEMM(iterations:context:)`; a `public enum MPPPrefillDenseBenchmark`
+  with `Result { m, k, n, variant, weightLoads, millisPerLaunch, gflop, tflops }`
+  and `run(context:iterations:m:k:n:variant:weightLoads:) throws -> Result`; and,
+  for Step 2b, `enum PlainRowTile: String { case m64, m128 }` with
+  `static let plainRowTile` from `SHRIKE_MPP_ROW_TILE` (64|128) plus
+  `init(context:weightBits:variant:weightLoads:rowTile:)` so a test pins it
+  without a process-wide env var — **a second axis, not a `TileVariant` case**.
+  In Metal, `template <int TILE_M, int TILE_N, int TILE_K, int BUFFERS>
+  mpp_prefill_affine_body(...)` and `MPP_AFFINE_KERNEL(NAME, TILE_M, TILE_N,
+  TILE_K, BUFFERS)`; `MPP_GROUPED_KERNEL` passes 64 and keeps its six names.
+  Lint: neither bench file has a baseline entry, so a `function_body_length`
+  violation fails the strict gate — keep each `run*` under 120 lines by
+  extracting the fixture into a private struct, as `GDNScanBench` does
+  (`runMoE`/`runGDN` carry `lint:allow-long` and are **not** the pattern for new
+  code). Comments: repo rule. Two earn their place — why the conv result stages
+  through `threadgroup half`, and why the grouped kernel cannot take a 128-row
+  tile. Nothing else.
+
+  Steps (TDD; the measurement precedes any kernel decision):
+
+  - [ ] Step 1: `ShrikeBench gdn_pre`. New file, no production change, no test —
+        a bench is not under test; its bar is that its PSOs and function
+        constants match `GDN.swift`, which the review checks. Five gates, then
+        `swift run -c release ShrikeBench gdn_pre 20` on the M4 Pro, then the
+        mini: `tools/mini-deploy.sh` (copy only — it also copies the `*.bundle`
+        directories carrying the shader sources; P8's bench first failed because
+        only the binary was copied), `scp .build/release/ShrikeBench
+        macmini:shrike-runtime/bin/` (`mini-deploy.sh:24`, `:36`, `:47` copy only
+        ShrikeServer / ShrikeCLI / ShrikeRepack), `ssh macmini 'pgrep -fl
+        ShrikeServer'`, stop production, run, relaunch with
+        `tools/mini-deploy.sh --restart`.
+  - [ ] Step 2: `ShrikeBench dense_gemm` and the façade. Five gates, same deploy
+        and run on both boxes: `swift run -c release ShrikeBench dense_gemm 20`.
+  - [ ] Step 3 (the gate): fill the ledger — per kernel ms, bytes, GB/s and the
+        chain total `C`; per dense shape ms, TFLOPS, ceiling share and the
+        headroom `H`. Apply the decision rule and re-derive the chosen arm's bars
+        from the measured value. **Record the Step 1/2 verdict in the design doc
+        whichever way it goes** — the benches are the durable deliverable even if
+        neither arm proceeds. Commit `prefill: bench the GDN pre-scan chain and
+        the dense MPP GEMM (v12 P13)`.
+  - [ ] Step 4: failing tests for the chosen arm.
+        **Chain:** `fusedConvQKNormMatchesTheReference` in `GDNKernelTests` —
+        against `GDNReference.normalize` at 2e-2 `maxAbs`/`rel`, **plus bit
+        equality against the unfused `gdn_conv_mix_prefill` + `gdn_qk_norm`
+        pair** (the elision probe: a 2e-2 assertion alone would pass while the
+        arithmetic silently changed); `vectorisedGatedNormMatchesTheReference` at
+        2e-2; `prefillResidualAddNormIsBitIdenticalToThePair` at T = 3 and 4,096.
+        **Dense:** `oneTwentyEightRowTileIsBitIdenticalToTheSixtyFourRowTile` —
+        `runPair` `.m128` against `.m64` over `variantShapes` plus
+        (4096, 8192, 2048) and a ragged (4097, 2048, 512), `irregular: true`,
+        `expectBitIdentical`; and `oneTwentyEightRowTileFallsBackOnANarrowGrid`,
+        asserting an n = 32 dispatch still returns `.affineThreadgroupF16` and is
+        bit-identical because it took the 64-row pipeline. `swift test
+        --no-parallel --filter
+        "GDNKernel|GDNChunkedScan|MPPPrefillInt4QMM|PrefillSharedExpert"` → FAIL.
+  - [ ] Step 5: implement; Step 4 PASS. Then the probe: for the chain, tighten
+        the fused conv+qk-norm to bit equality and run it — passes → land the
+        assertion, golden stays identical for that item; fails → record the first
+        differing element, keep 2e-2, carry "golden differs on the long profile"
+        into Step 7. For the dense arm the bit-equality assertion **is** Step 4,
+        and its failure means 2e-2 with the reason recorded.
+  - [ ] Step 6 (the spike, the second gate): re-run the Step 1/2 bench for the
+        chosen arm on both boxes; the mini decides. **Accept rule: the mini
+        clears every bench bar above, or beats its Step 1/2 control by ≥ 5 % with
+        no shape regressing more than 3 %.** Arms within 3 % are a tie (P6 saw
+        4 % between nominally identical staging arms), broken toward the
+        bit-identical arm. If the mini shows nothing, land the tests and the
+        kernel behind its env override with the default unchanged, and say so —
+        the P8 precedent.
+  - [ ] Step 7: five gates —
+        `swift build -c release 2>&1 | grep -E "warning:|error:"` (empty),
+        `swiftlint lint --strict --baseline .swiftlint-baseline.json`,
+        `python3 tools/check-md-links.py`, `swift test --no-parallel`, and
+        `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test
+        --no-parallel --sanitize=thread`. Then `tools/golden-baseline.sh --check`
+        (M4 Pro, server stopped): **short expected IDENTICAL on both boxes**;
+        long identical unless a listed change reordered a reduction, in which
+        case recapture once per box and record the before/after greedy digests
+        (P10's, unchanged through P12: M4 Pro long `e04d4e8ee7f1590d`, M1 long
+        `899a25e60a365e60`). Commit `prefill: <the chosen lever> (v12 P13)`,
+        baseline via `git commit --only` if there is one.
+  - [ ] Step 8: ledger on both boxes. `tools/prefill-measure.sh <host> <port>
+        <promptdir> <outdir> <tag> 3p7k 12k` against a **fresh server, one send
+        per prompt per server lifetime** (a repeat hits the multi-prefix prompt
+        cache and prefills only a suffix), roles via `tools/prefill-ledger.py` on
+        the server log with a distinct tag per box; **mini 3.7k + 12k is the
+        verdict**, M4 Pro 3.7k + 12k + 25k the check. `tools/mini-deploy.sh
+        --restart`, mini golden check (recapture only if Step 7 established a
+        deliberate change), scp into `baselines/`.
+  - [ ] Step 9: design doc — a landed section carrying the Step 1/2 bench tables
+        (they close L1's and L8's bands whichever arm won), an "**After P13**"
+        ledger block, and the GDN row of "Where the time goes" gaining the
+        measured split. Follow-ons recorded: the fused n = 12,352 in-projection;
+        the gated-norm-in-scan fold and what would make it possible; the arm this
+        task did **not** take, with its measured size. Plan: Task 13 `[x]` with
+        the landed paragraph. Task review by a fresh reviewer; fixes folded into
+        the commit (rebase and amend, never a fixup commit).
+
+  **Verdict line template** (the controller fills in the measured values):
+
+  > **LANDED `<sha>` (`<date>`): measured on the mini `prefill_gdn_router`
+  > 2.38 → `<x>` ms/prompt-token (3.7k; 2.34 → `<x>` at 12k),
+  > `prefill_attn_router` 0.95 → `<x>` / 1.75 → `<x>`, `prefill_routed_tile`
+  > 1.79 → `<x>` / 1.74 → `<x>`, `prefill_shared_expert` 0.17 → `<x>`, GPU busy
+  > 5.42 → `<x>` and 6.10 → `<x>`, wall 24.32 → `<x>` s and 80.38 → `<x>` s.**
+  > Step 1 measured the chain at `<C>` ms per GDN layer-chunk (`<x>` % of the
+  > role's 319.4; modelled 50–91) against a `<x>` GB/s same-run floor: conv
+  > `<x>`, tail `<x>`, qk-norm `<x>`, gated norm `<x>`, 2 × rmsnorm `<x>`,
+  > residual add `<x>`. Step 2 measured the dense headroom at `<H>` ms per
+  > layer-chunk: (4096, 2048, 8192) `<x>` ms = `<x>` TFLOPS = `<x>` % of the
+  > same-run MPS ceiling, (4096, 2048, 4096) `<x>` %, (4096, 4096, 2048) `<x>` %,
+  > (4096, 2048, 32) `<x>` %. The rule took the **`<chain | dense>`** arm
+  > (0.40 × C = `<x>` vs 0.50 × H = `<x>`). Bars `<cleared | missed>` (gdn
+  > ≤ `<x>`, attn ≤ `<x>`, wall ≤ `<x>` s; the bench bar against a measured
+  > `<x>`). M4 Pro check: `<x>`. Numerics: `<the bit-identity outcome per item>`.
+  > Golden: short identical on both boxes; long `<identical | recaptured once
+  > per box, sha256 M4 Pro e04d4e8ee7f1590d → <x>, M1 899a25e60a365e60 → <x>>`.
+  > Five gates green (`<n>` tests, TSAN 0 reports).
+
+  **Risks:**
+  - **The half round-trip elision — how the chain arm comes back wrong.**
+    Fast-math elides half roundings on register-resident values (T2, `d89d172`);
+    the fp32 reference and today's kernel both round the conv output to fp16
+    *before* the sum of squares. The `threadgroup half` staging tile is the fix,
+    and Step 4's bit-equality assertion against the unfused pair proves it took.
+  - **Occupancy on `TILE_M 128` — how the dense arm comes back a null, and there
+    is a measured prior that it will.** Both cooperative tensors are M × N
+    (`tensorops.metal:188-191`), so 128 rows takes them 32 → 64 fp32/thread.
+    P8's mini arms: `n32b1` 8.25 ms, `n64b1` 9.69, `n64b2` 10.21
+    (`docs/v12-prefill-matrix-kernels.md:599-601`) — doubling the accumulator
+    cost 17 % on the M1 and P8's verdict named it as the cause. `TILE_N 64` also
+    doubled the threadgroup weight tile, so it is not a clean isolate, but it is
+    the strongest evidence on record and it points at a regression. Only the
+    bench separates the two; Step 6 is the gate.
+  - **Grid fill.** `TILE_M 128` halves the grid height; the n = 32 a/b
+    projections fall 64 → 32 threadgroups on an 8-core M1. The guard excludes
+    them, but its threshold is unmeasured — Step 2's per-shape numbers set it.
+  - **`maxTotalThreadsPerThreadgroup`.** Both encoders dispatch
+    `threadExecutionWidth * 4` = 128 unconditionally
+    (`MPPPrefillInt4QMM.swift:211-215`, `:316-318`); a 128-row pipeline whose
+    register pressure drops its max below 128 produces an invalid dispatch. The
+    `#expect(commandBuffer.error == nil)` in `runPair` catches it on Step 4's
+    first run.
+  - **The bench sums kernels that production overlaps.** Each `gdn_pre` kernel
+    runs alone in its own command buffer; in production the seven run back to
+    back in one CB where the driver can overlap one's tail with the next's head.
+    `C` is therefore an **upper bound**, and the Step 8 ledger is the verdict —
+    the bench sizes the lever, it does not score it.
+  - **Same-run ceilings only.** The mini's ceiling bench drifts between runs
+    (1.15 TFLOPS at P6, 1.84 at P8/P9 with the tile unchanged), so `H` and every
+    dense bar is a *share* of the ceiling measured in the same process, never an
+    absolute ms.
+  - **Golden moves on the long profile.** The vectorised norms reorder a sum of
+    squares; that is expected and recaptured once per box with the measured
+    reason. **A short-profile change is a bug**, not a recapture.
+  - **The mini is production.** Both benches stop the server on 8081 and relaunch
+    it; Turbo on 8080 is a different project and is never touched. One model
+    process at a time — `pgrep` first, every time.
 
 ## Follow-ons (not scheduled)
 

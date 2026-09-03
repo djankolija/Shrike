@@ -387,6 +387,28 @@ wall is fetch-bound and moved 64.7 → 64.0 s. The mini's 12k wall 86.0 →
 M4 Pro's long profile moved (recaptured once, the K256-vs-K128 reduction
 order); the M1's held on both profiles.
 
+**After P12** (commit 188d2b7, 2026-09-03; every layer's expert pool held in a
+queue residency set and the shared expert committed before the router wait;
+`SHRIKE_PREFILL_POOL_RESIDENCY=none SHRIKE_PREFILL_ROUTE_OVERLAP=off` keep the
+P10 behaviour; no kernel moved, so the roles are the After P10 rows within
+noise and only the gaps and the wall are listed; the M4 Pro's 25k row was not
+taken):
+
+| | M4 Pro 3.7k | M4 Pro 12k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: |
+| **GPU busy** | 1.26 | 1.35 | 5.42 | 6.10 |
+| gaps (span − busy) | **1.05** | **0.76** | **0.49** | **0.27** |
+| **wall** | 2.65 | 2.24 | 6.47 | 6.54 |
+| wall, seconds | 10.0 | 27.5 | 24.3 | 80.4 |
+
+On the M1 at 12k the `shared→routed` transition's `driver_ms` fell 2,664 →
+58 ms and the two `->shared` transitions (1,388 + 465 ms of host routing)
+left the gap list; each lever alone is worth ≈ 2 s and together 4.0 s
+(84.4 → 80.4 s, 6.54 ms/token, 1.04× the chapter's 6.3 target). On the M4
+Pro the driver cost was ≈ 4.7 ms per layer-chunk (570 → 10 ms at 12k) and the
+routing 1.8 ms; its wall moved 28.0 → 27.5 s, the rest being the fetch-bound
+`routed→routed` gap. Golden identical on both boxes, short and long.
+
 ## Where the time goes
 
 Every dense projection in prefill (attention Q/K/V/O, GDN in/out) already runs
@@ -667,6 +689,33 @@ boxes); golden moved on the M4 Pro's long profile and was recaptured once;
 the mini's held on both profiles. Measured on the ledger: see "After P10"
 above.
 
+### Step 10 — the prefill gap levers (−4.0 s of the M1's 12k wall, no kernel touched)
+
+Two of the four gaps P5's instrumentation named were host and driver work,
+not kernels. The first routed command buffer of every layer paid ≈ 22 ms in
+the driver on the M1 (≈ 4.7 ms on the M4 Pro): a zero-code spike showed the
+cost is residency of the buffer it references — halving the expert slab
+halved it, a per-slot layout removed 91 % of it — so an `MTLResidencySet`
+attached to the queue now holds every layer's pool slab from the moment its
+streamer opens (`ExpertPoolResidency`), and the cost is 58 ms per 12k prompt
+instead of 2,664. The ≈ 16 ms of host routing per layer-chunk (the router
+readback, the pair build and the grouping) sat between the router buffer and
+the shared expert, which depends on none of it; the shared expert's command
+buffer is now committed before the router wait, so its ≈ 17 ms of GPU covers
+the routing and the two `->prefill_shared_expert` transitions disappear from
+the gap list. Each lever is worth ≈ 2 s at 12k on the mini and they add:
+84.4 → 82.2 s (overlap alone) / 82.5 s (residency alone) / 80.4 s (both), GPU
+busy unchanged, golden identical on both boxes. The counting sort the task
+held in reserve for the routing was not needed: nothing of the routing is
+left exposed. What remains of the gaps at 12k on the M1 (0.27 ms/token): the
+per-tile host work in `routed→routed` (≈ 0.10) and ≈ 6.9 ms per layer-chunk
+of metadata build plus the first tile's unhidden fetch in `shared→routed`
+(≈ 0.07). The residency set wires the pool pages only while the queue
+executes (`vm_stat` at idle: 2.2 GB wired, the pools as active pages);
+`memory_pressure -Q` reads ≈ 25 % free right after a 12k prefill against
+≈ 74 % without the set, and 83 % a minute later; `SHRIKE_PREFILL_POOL_RESIDENCY=none`
+is the one-env rollback. Measured on the ledger: "After P12" above.
+
 ### Follow-ons, not scheduled
 
 - **Tile command-buffer batching — landed as a null result (P5, a7c8288 +
@@ -684,15 +733,11 @@ above.
   hidden, so this is an M4 Pro lever; there P6 shrank the tile to 2.25 ms and
   the fetch is now the whole boundary (routed→routed 1.39 ms per boundary,
   4.5 s of 31.6 at 12k).
-- **The first routed buffer of each layer costs ≈ 11 ms (M4 Pro) / ≈ 22 ms
-  (M1) in the driver** — `prefill_shared_expert->prefill_routed_tile`
-  `driver_ms` 0.45 s / 1.02 s at 3.7k over 40 layers, 2.65 s at M1 12k over
-  120; the later tiles of a layer pay ≈ 0.01 ms. Worth ≈ 4 % of the M4
-  Pro's 12k wall and ≈ 2 % of the M1's. Unexplained. Its shape — once per
-  layer, on the first buffer that touches the expert slab after buffers
-  that do not — suggests residency work proportional to the slab, which an
-  `MTLResidencySet` on the queue would remove; that is a model, not a
-  measurement.
+- **The first tile of each layer-chunk on the M1** still pays ≈ 6.9 ms of
+  host time between the shared expert and the routed tiles after P12
+  (`shared→routed` `host_ms` 827 ms at 12k over 120): the tile metadata
+  build plus the first tile's fetch, which nothing hides. The routed fetch
+  follow-on above is the same cost seen from the other box.
 - **The MPP GEMM's byte-load fallback on the M1.** After P9 the dequant's
   byte-load body serves only weight bases that are not 16-byte aligned (and
   the `SHRIKE_MPP_WEIGHT_LOADS=byte` A/B), and inside the two-body kernel it
@@ -709,10 +754,6 @@ above.
   dense case beside `routed_gemm`, then a `kMPPAffineTileM` sweep (a 128-row
   tile halves the per-threadgroup dequant, which at 4,096 rows is repeated 64×
   per column tile, at the cost of a doubled accumulator).
-- **Per-layer host routing on the M1.** ≈ 15 ms per layer between the GDN or
-  attention buffer and the shared expert (`host_ms` 1.38 + 0.48 s at 12k,
-  ≈ 1.5 % of wall); 2.8 ms per layer on the M4 Pro. The router readback,
-  pair building and grouping over 4,096 rows on the CPU.
 - **Attention: Q and the probabilities in registers (the FlashAttention
   shape).** After P7 the matrix-path attention is bound by its per-tile fixed
   work, not by K/V traffic (see "After P7"). MPP's left-input cooperative
