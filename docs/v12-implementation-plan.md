@@ -5095,7 +5095,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
 ### Task 16: P16 — fetch-overlap depth on the routed prefill path
 
-- [ ] **P16: the tile pipeline is one tile deep, and what it leaves exposed is
+- [x] **P16: the tile pipeline is one tile deep, and what it leaves exposed is
   variance, not bandwidth.** P15b cut the routed tile 5.96 → 5.50 ms of GPU and
   a quarter of the cut resurfaced as `routed→routed` gap (861 → 1,239 ms at 12k
   on the mini, host term 586 → 941); three encode variants read the same host
@@ -5111,6 +5111,38 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   sweeps it. **The mini decides.** The M4 Pro is both check and control: its mean
   fetch is 1.80× its GPU tile, so the model says it must **not** move, and a gain
   there falsifies the model rather than confirming the lever.
+
+  **LANDED 1b13aed (2026-09-03): measured on the mini on one binary, fresh
+  server and one send per arm, `SHRIKE_PREFILL_TILE_DEPTH` 1 → 2: 12k wall
+  69.12 → 68.38 s (−1.08 %) = 5.57 ms/prompt-token, `routed→routed` 1,238 →
+  265 ms (host-late 942 → 94, banked queue 2.43 → 6.87 ms per boundary), gaps
+  0.242 → 0.158, `prefill_routed_tile` 1.613 → 1.612, busy 5.235 → 5.227,
+  `shared→routed` 473 → 463 (unmoved), `expert_hits_prefill` 9,549 → 9,546;
+  3.7k wall 21.18 → 20.64 s (−2.6 %), host-late 585 → 116 ms, gaps 0.537 →
+  0.393. The curve is a plateau: depth 3 68.27 / 20.59 s — −0.16 % at 12k,
+  inside the 0.2 % tie band the rule is scoped to; −0.25 % at 3.7k, outside it
+  and judged noise-level against eight more held slots — depth 4 68.46 s; hits
+  9,542 / 9,537. Default 2 by the rule, `=1` the A/B, 24 of 128 slots held.
+  Bars: `routed→routed` ≤ 0.07 ✓ (0.022); gaps ≤ 0.213 ✓ (0.158); wall ≤ 68.7
+  ✓ and the 68.4 stretch ✓
+  (68.38; the ceiling was 68.13); hits ≥ 9,072 ✓; `shared→routed` unmoved ✓;
+  **the 3.7k control moved (✗ as a prediction, −2.6 % as a result)** and the
+  verdict names why: with every tile a miss the host's per-tile time (F̄ 4.86 +
+  c 0.72 = 5.58 ms) exceeds the GPU's 5.10 on the mean, but a layer-chunk is
+  ≈ 29 tiles and its boundary resets the pipeline, so the accumulated deficit
+  per layer-chunk (≈ 14 ms) is of the bank's order and a bank absorbs it up to
+  its size — the steady-state argument does not hold at 30 tiles. The residual
+  at depth ≥ 2 (≈ 63 ms host + ≈ 190 ms driver at 12k; ≈ 107 ms at 3.7k) is
+  per-layer-chunk pipeline fill and turnaround, which no depth removes. M4 Pro
+  check (mean-bound, F̄ / G = 1.80): 12k 23.82 → 22.66 s (host −3 %; the
+  depth-1 arm ran under a decaying load), 25k re-measured on a quiet box 49.44
+  → 48.91 s (host −6 %, routed GPU identical) — one bank's worth per
+  layer-chunk, as the mechanism allows. Step 4's arm was not triggered (not a
+  null); it is priced in the design doc's follow-on. Golden IDENTICAL on both
+  boxes and both profiles (digests unchanged: M4 Pro long `e04d4e8ee7f1590d`,
+  M1 long `899a25e60a365e60`). Five gates green on 1b13aed's tree: build 0
+  warnings, lint 0 in 224 files, links 98 files 0 broken, tests 1,183 in 167
+  suites, TSAN 1,183 passed with 0 reports (2980 s).**
 
   **The decision rule, in two lines.** `SHRIKE_PREFILL_TILE_DEPTH=<n>` (1…8,
   parsed like `environmentPrefillTileBatch`, `RealForwardRunner.swift:444-450`)
@@ -5301,13 +5333,13 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
   Steps:
 
-  - [ ] Step 1: the four failing tests, then the knob, the config wiring and the
+  - [x] Step 1: the four failing tests, then the knob, the config wiring and the
         `depth=` field. `swift test --no-parallel --filter
         PrefillRoutedTileScheduler` → FAIL then PASS. Five gates (build 0
         warnings, `swiftlint --strict --baseline`, `check-md-links.py`,
         `swift test --no-parallel`, the same under TSAN with
         `TSAN_OPTIONS=suppressions=tsan-suppressions.txt`).
-  - [ ] Step 2 (the sweep, the gate): `pgrep -fl 'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI'`
+  - [x] Step 2 (the sweep, the gate): `pgrep -fl 'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI'`
         first; `tools/mini-deploy.sh --restart`; then four arms on **one binary**,
         each a fresh server, **one send per server lifetime** (the settle
         re-prefills after a `finish=length` turn): depth **1** (control), **2**,
@@ -5322,24 +5354,25 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         `tools/prefill-measure.sh macmini 8081 <promptdir> <outdir> p16-d<n>-mini
         2k 6k`, a **distinct tag per arm and per box** (P10's lesson:
         `resp-<tag>-<label>.json` collides).
-  - [ ] Step 3 (the rule): apply it to the mini's 12k walls; the winner becomes
+  - [x] Step 3 (the rule): apply it to the mini's 12k walls; the winner becomes
         the default with `=1` as the A/B, or the default stays 1. **Record the
         verdict either way**, with `queue_ms` per boundary at each depth — the
         direct read of how much bank was used, and what tells a null apart from an
         unused knob.
-  - [ ] Step 4 (only on a null, a follow-on decision and not a scope extension):
+  - [x] Step 4 (only on a null, a follow-on decision and not a scope extension;
+        not triggered — priced in the design doc's follow-on):
         the arm the mechanism points at is two fetches in flight —
         `beginFetchRoutedExperts` for tile N+1 issued before tile N's encode and
         awaited at the next iteration's head, which would raise the drive's
         *cross-tile* queue depth from 1 to 2 (v10 P3: +48 % aggregate at QD4) and
         take the ≈ 0.72 ms of non-read host cost off the critical path. Price it
         from Step 2's counters, record it in the design doc, stop.
-  - [ ] Step 5: five gates on the landed tree; `tools/golden-baseline.sh --check`
+  - [x] Step 5: five gates on the landed tree; `tools/golden-baseline.sh --check`
         on both boxes — short and long **IDENTICAL**, a difference is a defect and
         never a recapture. Then `tools/mini-deploy.sh --restart`, mini golden
         check, and the ledger: **mini 3.7k + 12k is the verdict**, M4 Pro
         `2k 6k 12k` the check, fresh server and one send per prompt.
-  - [ ] Step 6: design doc — a "Step 16" section with the F̄ / G / host-late table
+  - [x] Step 6: design doc — a "Step 16" section with the F̄ / G / host-late table
         at every depth, an "**After P16**" ledger block, the SSD-floor follow-on
         rewritten with what the sweep measured, and two follow-ons with their
         prices (the first-tile overlap before the shared-expert wait; two fetches

@@ -488,6 +488,29 @@ Golden identical on both boxes and both profiles.
 bench puts the M1's attention core at 1.155 ms/token of the role's 1.58 (the
 table above).
 
+**After P16** (commit 1b13aed, 2026-09-03; the routed tile pipeline two tiles
+deep — `SHRIKE_PREFILL_TILE_DEPTH=1` restores the one-tile bank. The rows were
+measured on ccac897's binary with `SHRIKE_PREFILL_TILE_DEPTH=2`, the value the
+flip in 1b13aed makes the default; golden on 1b13aed is identical on both
+boxes. Every role is read from the same arm's stats line; the M4 Pro 3.7k
+column is P14's):
+
+| role | M4 Pro 3.7k | M4 Pro 12k | M4 Pro 25k | M1 3.7k | M1 12k |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `prefill_attn_router` | 0.17 | 0.29 | 0.49 | 0.76 | 1.58 |
+| `prefill_routed_tile` | 0.46 | 0.44 | 0.45 | 1.65 | 1.61 |
+| `prefill_gdn_router` | 0.41 | 0.41 | 0.41 | 1.79 | 1.78 |
+| `prefill_shared_expert` | 0.04 | 0.04 | 0.04 | 0.17 | 0.17 |
+| **GPU busy** | 1.11 | 1.20 | 1.41 | 4.54 | 5.23 |
+| gaps (span − busy) | 1.05 | 0.51 | 0.47 | **0.39** | **0.16** |
+| **wall** | 2.48 | 1.84 | 1.94 | **5.50** | **5.57** |
+| wall, seconds | 9.3 | 22.7 | 48.9 | **20.6** | **68.4** |
+
+Same binary, depth 1: M1 12k 69.12 s (gaps 0.24), 3.7k 21.18 s (gaps 0.54);
+M4 Pro 25k 49.44 s on a quiet box, 12k 23.82 s under a decaying load (that
+pair's wall decides nothing; its host term moved −3 %). Golden identical on
+both boxes and both profiles.
+
 ## Where the time goes
 
 Every dense projection in prefill (attention Q/K/V/O, GDN in/out) already runs
@@ -1021,6 +1044,59 @@ Landed: the tests, the three variants (selectable by
 mode. `g2k256d` stays the default; golden identical on both boxes and both
 profiles, no ledger row moves.
 
+### Step 16 — the routed tile pipeline's depth: a knob and a sweep (−1.1 % of the M1's 12k wall, −2.6 % at 3.7k; scheduling only, golden identical; commit 1b13aed)
+
+The task was drafted as "fetch-overlap depth" and the draft's first finding
+inverted it: the runner awaits each tile's fetch in the expression that issues
+it (`PrefillStreamedTileBinding.fetchBindingForTile` →
+`model.fetchRoutedExperts(plan:)` = `beginFetchRoutedExperts(plan:).completion()`),
+so at most one tile's fetch is ever in flight. The drive sees queue depth ≈ 4
+inside a tile (`ParallelExpertReader(threads: 4)`) and 1 across tiles, and
+`PrefillRoutedTileSchedulerConfig.maxPendingDepth` changes neither: it sets how
+many committed tiles of GPU work are banked against the host's next
+plan → fetch → encode → commit. The knob is therefore `SHRIKE_PREFILL_TILE_DEPTH`
+(beside P5's `TILE_BATCH`, the width), clamped 1…8, printed as `depth=` in the
+projection-path line's tile field; the type and its slot budget
+((D + 1) × width × experts + hits ≤ slots) are unchanged, and `fitting` never
+narrows the depth.
+
+What the boundary costs was measured from counters already on the stats line
+(`io_fetch_ms` over the routed role's count; the P15b logs): fetch wall per tile
+F̄ against GPU per tile G — M1 12k **3.20 / 5.50 ms (0.58)**, M1 3.7k **4.86 /
+5.10 (0.95)**, M4 Pro 12k **2.67 / 1.49 (1.80)**; the marginal read 0.630 ms per
+expert (2.81 GB/s at four threads, intercept ≈ 0) and the non-read host cost per
+tile ≈ 0.72 ms (an upper bound). At 12k on the M1 the mean is hidden and the
+exposed 0.27 ms per boundary (host-late 942 ms over 3,485) is per-tile
+variance — the one regime a deeper bank can smooth. The sweep, one binary,
+fresh server and one send per arm:
+
+| M1, depth | 12k wall | host-late | banked / boundary | hits | 3.7k wall | host-late |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 (control) | 69.12 s | 942 ms | 2.43 ms | 9,549 | 21.18 s | 585 ms |
+| **2** | **68.38 s** | **94 ms** | 6.87 ms | 9,546 | **20.64 s** | **116 ms** |
+| 3 | 68.27 s | 63 ms | 11.5 ms | 9,542 | 20.59 s | 107 ms |
+| 4 | 68.46 s | 63 ms | 15.8 ms | 9,537 | — | — |
+
+The 12k row is the model's prediction: one banked tile takes ≈ 90 % of the
+host-late term, the second ≈ 3 % more, the third nothing, while the banked
+queue grows linearly — the residual (≈ 63 ms host + ≈ 190 ms driver) is
+turnaround, not fetch. The 3.7k row falsifies the model's null: with every tile
+a miss (hits 0) the host's per-tile time F̄ + c ≈ 5.58 ms exceeds the GPU's
+5.10 on the mean, which a steady-state pipeline cannot hide — but a layer-chunk
+is ≈ 29 tiles and its boundary resets the pipeline, so the accumulated deficit
+per layer-chunk (≈ 14 ms) is of the bank's order and a bank absorbs it up to
+its size; the ≈ 107 ms left at depth ≥ 2 is per-layer-chunk pipeline fill.
+The M4 Pro, mean-bound at 1.80, gains one bank's worth per layer-chunk: 12k
+host −3 %, 25k host −6 % (49.44 → 48.91 s on a quiet box, routed GPU identical).
+Depth 2 is the default by the rule (≥ 0.5 % on the M1's 12k; depth 3 a further
+−0.16 % there, within the 0.2 % tie band the rule is scoped to; at 3.7k a
+further −0.25 %, outside the band and judged noise-level against eight more
+held slots) — 24 of the M1's 128 slots held instead of 16,
+hits within 0.13 % across the sweep, memory unmoved; `SHRIKE_PREFILL_TILE_DEPTH=1`
+is the A/B. Numerics cannot move (commit order and buffer contents are
+unchanged; the shared staging scratch relies on the queue's serial execution
+exactly as depth 1 did) and golden is identical on both boxes and both profiles.
+
 ### Follow-ons, not scheduled
 
 - **The cache settle's re-prefill after a degenerate turn (not a
@@ -1090,12 +1166,25 @@ profiles, no ledger row moves.
   more rows per K/V read needs either the score round-trip gone (the register
   shape did that and lost the reuse) or a narrower staged tile; no cheap shape
   is left, and `ShrikeBench attn` is the instrument for whatever is proposed.
-- **The mini's SSD term surfaced at P15b (Step 14).** With the routed tile at
-  5.50 ms of GPU against ≈ 5.1 ms of fetch per tile, `routed→routed` grew by
-  ≈ 0.10 ms per boundary of exposed fetch (host 586 → 941 ms at 12k over
-  3,485 boundaries). The v10 P3 follow-on — batched miss
-  loads, a deeper fetch queue, two fetches in flight — is the lever; every
-  further routed-GEMM cut on the M1 lands there first.
+- **The mini's fetch term after Step 16.** The variance half went with the
+  two-tile bank (host-late 942 → 94 ms at 12k); what remains is the mean
+  regime — the host's per-tile time exceeds the GPU's wherever the hit rate
+  is low (M1 3.7k: 5.58 vs 5.10 ms; the M4 Pro at 12k, its one measured point:
+  3.4 vs 1.5) —
+  and the bank only absorbs one layer-chunk's deficit at a time. Three
+  unscheduled levers, priced from Step 16's counters: **two fetches in
+  flight** (issue tile N+1's `beginFetchRoutedExperts` before tile N's encode,
+  await it at the next head — cross-tile drive depth 1 → 2, and the ≈ 0.72 ms
+  of non-read host cost per tile off the critical path; ≈ 0.1 s at the M1's
+  12k, ≈ 0.1 s at 3.7k, up to ≈ 9 s of the M4 Pro's 49); **the first tile of
+  each layer-chunk issued before `waitForCompletion(sharedCB)`** — routes are
+  built before that wait, so tile 0's fetch could ride the shared expert's
+  ≈ 17 ms of GPU (`shared→routed` host ≈ 410 ms at 12k, 0.03 ms per token);
+  and **the reader's thread count** (a literal 4: production's marginal read is
+  2.81 GB/s against the v10 probe's 3.25 GB/s at queue depth 4 —
+  `docs/v10-implementation-plan.md`, P3 — and depth 8 is unmeasured). None
+  reaches the GPU roles; every further routed-GEMM cut on the M1 still lands in
+  the fetch term first.
 
 ## Numerics policy
 
