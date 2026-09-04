@@ -458,4 +458,58 @@ import Testing
             == "fetch=2")
     }
 
+    @Test func matrixPathAcceptsHonoursALoweredMinimum() {
+        let params = PrefillAttentionParams(
+            startPosition: 0, queryCount: 21, headDim: 256, numQHeads: 16, numKVHeads: 2,
+            kvValidCount: 21, slidingWindow: 0, kvTokenStrideElements: 261,
+            qTokenStrideElements: 259, oTokenStrideElements: 263, scale: 0.0625)
+        #expect(!PrefillAttention.matrixPathAccepts(params, kvRingCapacity: 0, hasSinks: false))
+        #expect(PrefillAttention.matrixPathAccepts(params, kvRingCapacity: 0, hasSinks: false, minimumQueries: 16))
+        #expect(!PrefillAttention.matrixPathAccepts(params, kvRingCapacity: 0, hasSinks: false, minimumQueries: 22))
+
+        var window = params
+        window.slidingWindow = 10
+        #expect(!PrefillAttention.matrixPathAccepts(window, kvRingCapacity: 0, hasSinks: false, minimumQueries: 16))
+        var wide = params
+        wide.headDim = 512
+        #expect(!PrefillAttention.matrixPathAccepts(wide, kvRingCapacity: 0, hasSinks: false, minimumQueries: 16))
+        #expect(!PrefillAttention.matrixPathAccepts(params, kvRingCapacity: 4096, hasSinks: false, minimumQueries: 16))
+        #expect(!PrefillAttention.matrixPathAccepts(params, kvRingCapacity: 0, hasSinks: true, minimumQueries: 16))
+    }
+
+    @Test func projectionDispatchPolicyHonoursALoweredMinimum() {
+        #expect(PrefillProjectionDispatchPolicy.selectedDispatch(
+            for: .kv, chunkTokens: 21) == .repeatedGEMV)
+        #expect(PrefillProjectionDispatchPolicy.selectedDispatch(
+            for: .kv, chunkTokens: 21, minimumRows: 16) == .qmm)
+        #expect(PrefillProjectionDispatchPolicy.selectedDispatch(
+            for: .o, chunkTokens: 21, minimumRows: 16) == .qmm)
+        #expect(PrefillProjectionDispatchPolicy.selectedDispatch(
+            for: .q, chunkTokens: 21, minimumRows: 16) == .repeatedGEMV)
+        #expect(PrefillProjectionDispatchPolicy.selectedDispatch(
+            for: .kv, chunkTokens: 15, minimumRows: 16) == .repeatedGEMV)
+        #expect(PrefillProjectionDispatchPolicy.selectedDispatch(
+            for: .o, chunkTokens: 15, minimumRows: 16) == .repeatedGEMV)
+        #expect(PrefillProjectionDispatchPolicy.selectedDispatch(
+            for: .q, chunkTokens: 15, minimumRows: 16) == .repeatedGEMV)
+    }
+
+    @Test func parsePrefillMatrixMinRowsClampsToTheSupportedRange() {
+        #expect(RealForwardRunner.parsePrefillMatrixMinRows(nil) == 16)
+        #expect(RealForwardRunner.parsePrefillMatrixMinRows("") == 16)
+        #expect(RealForwardRunner.parsePrefillMatrixMinRows("not-a-number") == 16)
+        #expect(RealForwardRunner.parsePrefillMatrixMinRows("16") == 16)
+        #expect(RealForwardRunner.parsePrefillMatrixMinRows("0") == 3)
+        #expect(RealForwardRunner.parsePrefillMatrixMinRows("2") == 3)
+        #expect(RealForwardRunner.parsePrefillMatrixMinRows("3") == 3)
+        #expect(RealForwardRunner.parsePrefillMatrixMinRows(" 16 ") == 16)
+        #expect(RealForwardRunner.parsePrefillMatrixMinRows("32") == 32)
+        #expect(RealForwardRunner.parsePrefillMatrixMinRows("99") == 32)
+    }
+
+    @Test func prefillMatrixMinRowsDescriptionReportsTheThreshold() {
+        #expect(RealForwardRunner.prefillMatrixMinRowsDescription(32) == "prefill_matrix_min_rows=32")
+        #expect(RealForwardRunner.prefillMatrixMinRowsDescription(16) == "prefill_matrix_min_rows=16")
+    }
+
 }

@@ -111,9 +111,14 @@ internal enum PrefillProjectionDispatch: Sendable, Equatable {
 }
 
 internal enum PrefillProjectionDispatchPolicy {
+    /// The fixed threshold the runner's parsed default (16) and the A/B
+    /// (`SHRIKE_PREFILL_MATRIX_MIN_ROWS=32`) both derive from.
+    static let fixedMinimumRows = 32
+
     static func selectedDispatch(for family: PrefillProjectionFamily,
-                                 chunkTokens: Int) -> PrefillProjectionDispatch {
-        guard chunkTokens >= 32 else {
+                                 chunkTokens: Int,
+                                 minimumRows: Int = fixedMinimumRows) -> PrefillProjectionDispatch {
+        guard chunkTokens >= minimumRows else {
             return .repeatedGEMV
         }
         switch family {
@@ -240,6 +245,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     static func prefillTileDepthDescription(_ config: PrefillRoutedTileSchedulerConfig) -> String {
         "depth=\(config.maxPendingDepth)"
+    }
+
+    public var prefillMatrixMinRowsDescription: String {
+        Self.prefillMatrixMinRowsDescription(prefillMatrixMinRows)
+    }
+
+    static func prefillMatrixMinRowsDescription(_ rows: Int) -> String {
+        "prefill_matrix_min_rows=\(rows)"
     }
 
     static func prefillFetchDepthDescription(_ config: PrefillRoutedTileSchedulerConfig) -> String {
@@ -470,6 +483,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// keeps every block on 64-row tiles; unset takes `prefillTailTileDefault`.
     private let prefillTailTile: Int
     private static let prefillTailTileDefault = 32
+    private let prefillMatrixMinRows: Int
 
     static func parsePrefillSweepMode(_ raw: String?) -> PrefillSweepMode {
         guard let raw, let mode = PrefillSweepMode(rawValue: raw) else {
@@ -488,6 +502,27 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         case "off": return 0
         default: return prefillTailTileDefault
         }
+    }
+
+    /// `SHRIKE_PREFILL_MATRIX_MIN_ROWS=<n>` (3…32) lowers the row-count floor
+    /// below which the attention, projection and shared-expert matrix kernels
+    /// fall back to their scalar paths; unset or unparsable takes
+    /// `prefillMatrixMinRowsDefault` (16 — the matrix attention, projection
+    /// and shared-expert paths down to 16 rows, so the 21-row follow-up turn
+    /// runs on them), and `=32` restores today's fixed thresholds as the A/B.
+    /// The floor of 3 keeps the MTP verify pair and the prompt cache's settle
+    /// on today's kernels.
+    private static let prefillMatrixMinRowsDefault = 16
+
+    static func parsePrefillMatrixMinRows(_ raw: String?) -> Int {
+        guard let raw, let rows = Int(raw.trimmingCharacters(in: .whitespaces)) else {
+            return prefillMatrixMinRowsDefault
+        }
+        return max(3, min(32, rows))
+    }
+
+    private static func environmentPrefillMatrixMinRows() -> Int {
+        parsePrefillMatrixMinRows(ProcessInfo.processInfo.environment["SHRIKE_PREFILL_MATRIX_MIN_ROWS"])
     }
 
     private static func makePoolResidency(context: MetalContext)
@@ -632,6 +667,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTE_OVERLAP"] != "off"
         self.prefillSweepMode = Self.environmentPrefillSweepMode()
         self.prefillTailTile = Self.environmentPrefillTailTile()
+        self.prefillMatrixMinRows = Self.environmentPrefillMatrixMinRows()
         let residency = Self.makePoolResidency(context: context)
         self.poolResidency = residency.holder
         self.poolResidencyUnavailableReason = residency.unavailableReason
@@ -3824,7 +3860,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                               xStrideElements: Int,
                               yStrideElements: Int,
                               useTwoRowProjection: Bool) throws {
-        if tokenCount >= 32,
+        if tokenCount >= prefillMatrixMinRows,
            family == .q || family == .kv || family == .o,
            let candidate = prefillMPPAffineInt4 {
             let path = try candidate.encode(
@@ -3877,7 +3913,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         if PrefillProjectionDispatchPolicy.selectedDispatch(
                 for: family,
-                chunkTokens: tokenCount) == .qmm {
+                chunkTokens: tokenCount,
+                minimumRows: prefillMatrixMinRows) == .qmm {
             try prefillQMM.encode(commandBuffer: commandBuffer,
                               weights: weights.buffer,
                               weightsOffset: Int(weights.offset),
@@ -4585,7 +4622,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                               kvRingCapacity: activeRingCapacity,
                                               sinks: sinks?.buffer,
                                               sinksOffset: sinks.map { Int($0.offset) } ?? 0,
-                                              path: prefillAttentionPath)
+                                              path: prefillAttentionPath,
+                                              minimumQueries: UInt32(prefillMatrixMinRows))
         } else {
             throw PrefillError.chunkedUnsupported(
                 "chunked prefill attention requires a KV cache")
@@ -5040,7 +5078,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ? prefillSharedExpert.matrixPath(for: prefillMPPAffineInt4,
                                              queryCount: t,
                                              d: D,
-                                             intermediate: cfg.intermediateSize)
+                                             intermediate: cfg.intermediateSize,
+                                             minimumRows: prefillMatrixMinRows)
             : nil
         if cfg.hasSharedExpert {
             let sharedProj = sharedExpertProjections[L]
@@ -5057,7 +5096,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     scratchUp: scratch.sharedUpScratch,
                     queryCount: t,
                     d: D,
-                    intermediate: cfg.intermediateSize)
+                    intermediate: cfg.intermediateSize,
+                    minimumRows: prefillMatrixMinRows)
             } else {
                 try prefillSharedExpert.encodeBlock(
                     commandBuffer: sharedCB,

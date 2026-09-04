@@ -11,7 +11,9 @@ final class PrefillSharedExpert {
     private let activationPSO: MTLComputePipelineState
 
     /// Below this the per-token GEMV loop still wins: the matrix path pays a
-    /// full 64-row tile whatever the chunk holds.
+    /// full 64-row tile whatever the chunk holds. The runner passes its own
+    /// parsed minimum to `matrixPath`/`encodeChunk`; this is the anchor that
+    /// parsed default derives from, not the shipped default itself.
     static let matrixPathMinimumRows = 32
 
     var weightBits: Int { shared.weightBits }
@@ -25,12 +27,13 @@ final class PrefillSharedExpert {
     func matrixPath(for mpp: MPPPrefillInt4QMM?,
                     queryCount: Int,
                     d: Int,
-                    intermediate: Int) -> MPPPrefillInt4QMM? {
+                    intermediate: Int,
+                    minimumRows: Int = matrixPathMinimumRows) -> MPPPrefillInt4QMM? {
         guard let mpp,
               mpp.isAvailable,
               weightBits == 4,
               mpp.weightBits == weightBits,
-              queryCount >= Self.matrixPathMinimumRows,
+              queryCount >= minimumRows,
               d.isMultiple(of: MPPPrefillInt4QMM.tileK),
               intermediate.isMultiple(of: MPPPrefillInt4QMM.tileK) else { return nil }
         return mpp
@@ -110,8 +113,9 @@ final class PrefillSharedExpert {
                      scratchUp: MTLBuffer,
                      queryCount: Int,
                      d: Int,
-                     intermediate: Int) throws {
-        guard queryCount >= Self.matrixPathMinimumRows else {
+                     intermediate: Int,
+                     minimumRows: Int = matrixPathMinimumRows) throws {
+        guard queryCount >= minimumRows else {
             throw PrefillSharedExpertError.chunkTooShort(queryCount)
         }
         guard mpp.weightBits == weightBits else {

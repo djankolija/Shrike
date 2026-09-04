@@ -190,6 +190,22 @@ import ShrikeValidationSupport
         try Self.runChunkSharedExpertMatchesRowLoop(rows: 33, variant: .n32b1, weightLoads: .vector)
     }
 
+    @Test func chunkSharedExpertMatchesRowLoopAtALoweredMinimum() throws {
+        try Self.runChunkSharedExpertMatchesRowLoop(rows: 21, variant: .n32b1, minimumRows: 16)
+    }
+
+    @Test func sharedExpertMatrixPathHonoursALoweredMinimum() throws {
+        let ctx = try MetalContext()
+        let int4 = try PrefillSharedExpert(context: ctx, weightBits: 4, siluActivation: true)
+        let mpp4 = MPPPrefillInt4QMM(context: ctx, weightBits: 4)
+
+        #expect(int4.matrixPath(for: mpp4, queryCount: 21, d: Self.d, intermediate: Self.f) == nil)
+        #expect((int4.matrixPath(for: mpp4, queryCount: 21, d: Self.d, intermediate: Self.f,
+                                 minimumRows: 16) != nil) == mpp4.isAvailable)
+        #expect(int4.matrixPath(for: mpp4, queryCount: 15, d: Self.d, intermediate: Self.f,
+                                minimumRows: 16) == nil)
+    }
+
     @Test func chunkSharedExpertRejectsShortChunks() throws {
         var rng = SeedTree(0xC0FFEE).key("prefill-shared-expert-short-chunk")
         let ctx = try MetalContext()
@@ -365,7 +381,8 @@ import ShrikeValidationSupport
 
     private static func runChunkSharedExpertMatchesRowLoop(rows: Int,
                                                            variant: MPPPrefillInt4QMM.TileVariant,
-                                                           weightLoads: MPPPrefillInt4QMM.WeightLoads = .byte) throws {
+                                                           weightLoads: MPPPrefillInt4QMM.WeightLoads = .byte,
+                                                           minimumRows: Int = PrefillSharedExpert.matrixPathMinimumRows) throws {
         var rng = SeedTree(0xC0FFEE).key("prefill-shared-expert-chunk-\(rows)")
         let ctx = try MetalContext()
         let prefill = try PrefillSharedExpert(context: ctx, weightBits: 4, siluActivation: true)
@@ -427,7 +444,8 @@ import ShrikeValidationSupport
                                 scratchUp: scratchUp,
                                 queryCount: rows,
                                 d: d,
-                                intermediate: f)
+                                intermediate: f,
+                                minimumRows: minimumRows)
         chunkCB.commit()
         chunkCB.waitUntilCompleted()
         #expect(chunkCB.error == nil)

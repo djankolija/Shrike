@@ -531,6 +531,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     public nonisolated let prefillRoutedGEMMDescription: String
     public nonisolated let prefillGapLeversDescription: String
     public nonisolated let prefillRouterDescription: String
+    public nonisolated let prefillMatrixMinRowsDescription: String
     /// Routed-expert slots per layer actually in force, so the ready banner can
     /// report the streaming budget rather than leaving the user to infer it.
     public nonisolated let expertCacheSlots: Int
@@ -821,6 +822,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         ServerLog.residency("prefill_projection_path=\(session.prefillProjectionPath) prefill_attention_path="
                             + "\(session.prefillAttentionPathDescription) prefill_gdn_scan=\(session.prefillGDNScanPathDescription) prefill_tile_batch=\(session.prefillTileBatchDescription) prefill_routed_gemm=\(session.prefillRoutedGEMMDescription)"
                             + " prefill_gap_levers=\(session.prefillGapLeversDescription)"
+                            + " \(session.prefillMatrixMinRowsDescription)"
                             + " prefill_router=\(session.prefillRouterDescription)")
         return session
     }
@@ -858,6 +860,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.prefillTileBatchDescription = runner.prefillTileBatchDescription
         self.prefillGapLeversDescription = runner.prefillGapLeversDescription
         self.prefillRouterDescription = runner.prefillRouterDescription
+        self.prefillMatrixMinRowsDescription = runner.prefillMatrixMinRowsDescription
         self.prefillRoutedGEMMDescription = runner.prefillRoutedGEMMDescription
         self.expertCacheSlots = expertCacheSlots
         self.maxContext = maxContext

@@ -154,11 +154,13 @@ final class PrefillAttention {
                              params: PrefillAttentionParams,
                              kvRingCapacity: UInt32 = 0,
                              sinks: MTLBuffer? = nil, sinksOffset: Int = 0,
-                             path: RuntimePrefillAttentionPath = .causalTiled) throws {
+                             path: RuntimePrefillAttentionPath = .causalTiled,
+                             minimumQueries: UInt32 = matrixPathMinimumQueries) throws {
         validate(params)
 
         if path == .causalMatrix, matrixPathAvailable,
-           Self.matrixPathAccepts(params, kvRingCapacity: kvRingCapacity, hasSinks: sinks != nil) {
+           Self.matrixPathAccepts(params, kvRingCapacity: kvRingCapacity, hasSinks: sinks != nil,
+                                  minimumQueries: minimumQueries) {
             try encodeMatrix(commandBuffer: commandBuffer,
                              q: q, qOffset: qOffset,
                              k: k, kOffset: kOffset,
@@ -289,7 +291,9 @@ final class PrefillAttention {
     }
 
     /// The matrix kernel is written for the 256-wide, 16/2-head, fully visible
-    /// causal shape; everything else keeps the scalar kernel.
+    /// causal shape; everything else keeps the scalar kernel. The runner
+    /// passes its own parsed minimum to `encodeCausal`; this is the anchor
+    /// that parsed default derives from, not the shipped default itself.
     static let matrixPathMinimumQueries: UInt32 = 32
     /// The KV shadow (see `ensureShadow`) grows with `kvValidCount` and is
     /// never released; this ceiling keeps a very long context off the matrix
@@ -298,14 +302,15 @@ final class PrefillAttention {
 
     static func matrixPathAccepts(_ params: PrefillAttentionParams,
                                   kvRingCapacity: UInt32,
-                                  hasSinks: Bool) -> Bool {
+                                  hasSinks: Bool,
+                                  minimumQueries: UInt32 = matrixPathMinimumQueries) -> Bool {
         params.headDim == matrixHeadDim
             && params.numKVHeads == 2
             && params.numQHeads == params.numKVHeads * matrixGroupHeads
             && kvRingCapacity == 0
             && !hasSinks
             && (params.slidingWindow == 0 || params.slidingWindow >= params.kvValidCount)
-            && params.queryCount >= matrixPathMinimumQueries
+            && params.queryCount >= minimumQueries
             && params.kvValidCount > 0
             && params.kvValidCount <= matrixPathMaxContext
     }

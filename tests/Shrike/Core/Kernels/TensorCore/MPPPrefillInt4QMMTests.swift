@@ -224,6 +224,8 @@ private let mppTensorOpsAvailable: Bool = {
         (m: 64, n: 32, k: 128),
         (m: 33, n: 512, k: 2048),
         (m: 128, n: 2048, k: 512),
+        (m: 21, n: 32, k: 128),
+        (m: 3, n: 32, k: 128),
     ]
 
     private static func runPair(context: MetalContext,

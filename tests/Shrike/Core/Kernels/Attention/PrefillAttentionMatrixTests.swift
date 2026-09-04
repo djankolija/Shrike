@@ -25,11 +25,31 @@ import ShrikeValidationSupport
         (label: "deep-history-short-block", start: 2048, chunk: 37, bits: 8),
         (label: "int4-history", start: 1024, chunk: 64, bits: 4),
     ]
+    /// 21 is the follow-up turn's own shape (v13 T3); 3 is the clamp's floor.
+    private static let loweredMinimumFP16Cases: [(label: String, start: Int, chunk: Int, minimumQueries: UInt32)] = [
+        (label: "lowered-minimum-21-rows", start: 512, chunk: 21, minimumQueries: 16),
+        (label: "lowered-minimum-floor-3-rows", start: 0, chunk: 3, minimumQueries: 3),
+    ]
+    private static let loweredMinimumQuantizedCases:
+        [(label: String, start: Int, chunk: Int, bits: Int, minimumQueries: UInt32)] = [
+        (label: "lowered-minimum-21-rows", start: 1024, chunk: 21, bits: 8, minimumQueries: 16),
+        (label: "lowered-minimum-floor-3-rows", start: 0, chunk: 3, bits: 8, minimumQueries: 3),
+    ]
 
     @Test(arguments: fp16Cases)
     func matrixMatchesReferenceOnFP16Cache(c: (label: String, start: Int, chunk: Int)) throws {
         let ctx = try MetalContext()
         try Self.checkFP16Reference(c, attention: PrefillAttention(context: ctx), context: ctx)
+    }
+
+    @Test(arguments: loweredMinimumFP16Cases)
+    func matrixMatchesReferenceOnFP16CacheAtALoweredMinimum(
+        c: (label: String, start: Int, chunk: Int, minimumQueries: UInt32)
+    ) throws {
+        let ctx = try MetalContext()
+        try Self.checkFP16Reference((label: c.label, start: c.start, chunk: c.chunk),
+                                    attention: PrefillAttention(context: ctx), context: ctx,
+                                    minimumQueries: c.minimumQueries)
     }
 
     @Test(arguments: fp16Cases, groupTiles)
@@ -57,10 +77,15 @@ import ShrikeValidationSupport
 
     private static func checkFP16Reference(_ c: (label: String, start: Int, chunk: Int),
                                            attention: PrefillAttention,
-                                           context ctx: MetalContext) throws {
+                                           context ctx: MetalContext,
+                                           minimumQueries: UInt32 = PrefillAttention.matrixPathMinimumQueries) throws {
         #expect(attention.matrixPathAvailable, "\(attention.matrixUnavailableReason)")
         let fixture = makeFixture(start: c.start, chunk: c.chunk, seed: 0xB120)
-        let actual = try runFP16(fixture, attention: attention, context: ctx, path: .causalMatrix)
+        #expect(PrefillAttention.matrixPathAccepts(params(fixture), kvRingCapacity: 0, hasSinks: false,
+                                                    minimumQueries: minimumQueries),
+                "\(c.label) chunk=\(c.chunk) rejected at minimum \(minimumQueries)")
+        let actual = try runFP16(fixture, attention: attention, context: ctx, path: .causalMatrix,
+                                 minimumQueries: minimumQueries)
         let reference = PrefillAttentionRef.apply(fixture)
         let finite = actual.allSatisfy(\.isFinite)
         #expect(finite, "\(c.label) \(attention.tile) produced a non-finite output")
@@ -74,6 +99,16 @@ import ShrikeValidationSupport
     func matrixMatchesTiledOnQuantizedCache(c: (label: String, start: Int, chunk: Int, bits: Int)) throws {
         let ctx = try MetalContext()
         try Self.checkQuantizedAgainstTiled(c, attention: PrefillAttention(context: ctx), context: ctx)
+    }
+
+    @Test(arguments: loweredMinimumQuantizedCases)
+    func matrixMatchesTiledOnQuantizedCacheAtALoweredMinimum(
+        c: (label: String, start: Int, chunk: Int, bits: Int, minimumQueries: UInt32)
+    ) throws {
+        let ctx = try MetalContext()
+        try Self.checkQuantizedAgainstTiled((label: c.label, start: c.start, chunk: c.chunk, bits: c.bits),
+                                            attention: PrefillAttention(context: ctx), context: ctx,
+                                            minimumQueries: c.minimumQueries)
     }
 
     @Test(arguments: quantizedCases, groupTiles)
@@ -94,7 +129,8 @@ import ShrikeValidationSupport
 
     private static func checkQuantizedAgainstTiled(_ c: (label: String, start: Int, chunk: Int, bits: Int),
                                                    attention: PrefillAttention,
-                                                   context ctx: MetalContext) throws {
+                                                   context ctx: MetalContext,
+                                                   minimumQueries: UInt32 = PrefillAttention.matrixPathMinimumQueries) throws {
         #expect(attention.matrixPathAvailable, "\(attention.matrixUnavailableReason)")
         let fixture = makeFixture(start: c.start, chunk: c.chunk, seed: 0xB121)
         let config = ArchConfig.qwen36_35B_A3B
@@ -129,12 +165,15 @@ import ShrikeValidationSupport
         params.kvValueBytes = UInt32(keyView.valueBytes)
         params.kvGroupSize = UInt32(keyView.groupSize)
         params.kvTokenStrideElements = UInt32(kvRow)
+        #expect(PrefillAttention.matrixPathAccepts(params, kvRingCapacity: 0, hasSinks: false,
+                                                    minimumQueries: minimumQueries),
+                "\(c.label) chunk=\(c.chunk) rejected at minimum \(minimumQueries)")
         let tiled = try run(fixture, attention: attention, context: ctx,
                             k: keyView.buffer, v: valueView.buffer,
                             params: params, path: .causalTiled)
         let matrix = try run(fixture, attention: attention, context: ctx,
                              k: keyView.buffer, v: valueView.buffer,
-                             params: params, path: .causalMatrix)
+                             params: params, path: .causalMatrix, minimumQueries: minimumQueries)
         let finite = matrix.allSatisfy(\.isFinite)
         #expect(finite, "\(c.label) \(attention.tile) produced a non-finite output")
         let maxAbs = RelError.maxAbsDiff(matrix, tiled)
@@ -250,6 +289,7 @@ import ShrikeValidationSupport
         var short = base
         short.queryCount = 8
         #expect(!PrefillAttention.matrixPathAccepts(short, kvRingCapacity: 0, hasSinks: false))
+        #expect(PrefillAttention.matrixPathAccepts(short, kvRingCapacity: 0, hasSinks: false, minimumQueries: 8))
 
         #expect(!PrefillAttention.matrixPathAccepts(base, kvRingCapacity: 4096, hasSinks: false))
         #expect(!PrefillAttention.matrixPathAccepts(base, kvRingCapacity: 0, hasSinks: true))
@@ -314,7 +354,8 @@ import ShrikeValidationSupport
     private static func runFP16(_ fixture: Fixture,
                                 attention: PrefillAttention,
                                 context: MetalContext,
-                                path: RuntimePrefillAttentionPath) throws -> [Float] {
+                                path: RuntimePrefillAttentionPath,
+                                minimumQueries: UInt32 = PrefillAttention.matrixPathMinimumQueries) throws -> [Float] {
         guard let kBuf = Fp16Buffer.make(context.device,
                                          values: [Float](repeating: 0, count: kPrefix) + fixture.k),
               let vBuf = Fp16Buffer.make(context.device,
@@ -326,7 +367,7 @@ import ShrikeValidationSupport
         return try run(fixture, attention: attention, context: context,
                        k: kBuf, kOffset: kPrefix * halfBytes,
                        v: vBuf, vOffset: vPrefix * halfBytes,
-                       params: params(fixture), path: path)
+                       params: params(fixture), path: path, minimumQueries: minimumQueries)
     }
 
     private static func run(_ fixture: Fixture,
@@ -335,7 +376,8 @@ import ShrikeValidationSupport
                             k: MTLBuffer, kOffset: Int = 0,
                             v: MTLBuffer, vOffset: Int = 0,
                             params: PrefillAttentionParams,
-                            path: RuntimePrefillAttentionPath) throws -> [Float] {
+                            path: RuntimePrefillAttentionPath,
+                            minimumQueries: UInt32 = PrefillAttention.matrixPathMinimumQueries) throws -> [Float] {
         let outCount = fixture.chunk * fixture.oStride
         let halfBytes = MemoryLayout<Float16>.size
         guard let qBuf = Fp16Buffer.make(context.device,
@@ -350,7 +392,7 @@ import ShrikeValidationSupport
                                    k: k, kOffset: kOffset,
                                    v: v, vOffset: vOffset,
                                    out: outBuf, outOffset: oPrefix * halfBytes,
-                                   params: params, path: path)
+                                   params: params, path: path, minimumQueries: minimumQueries)
         cb.commit()
         cb.waitUntilCompleted()
         #expect(cb.error == nil)
