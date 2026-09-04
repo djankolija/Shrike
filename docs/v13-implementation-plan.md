@@ -147,7 +147,11 @@ different kernels on a chunk.
 
   Fetch total is `io_fetch_ms × 8` (the P16 convention, `ServerInference.swift:2023`,
   divisor `result.newTokens` = 8 at `:1957`); ms/expert divides it by prefill +
-  decode misses. **Three lengths give 0.560 / 0.559 / 0.560 ms per 1.6875 MiB
+  decode misses. **Caveat found at Task 3:** `io_fetch_ms` sums each `executePlan`
+  call's elapsed window, and from Task 2 on two plans execute concurrently, so the
+  sum exceeds elapsed drive time — valid as a delta between cells on one shape,
+  not as elapsed time; the drive is priced from bytes ÷ the measured rate
+  thereafter. **Three lengths give 0.560 / 0.559 / 0.560 ms per 1.6875 MiB
   expert** (3.02 GB/s at the bounded reader's four threads) — an independent
   confirmation of P16's marginal 0.630 ms at 12k, and the price of every hit this
   task buys. Two facts fall out. **The exposed fetch is the fetch above the routed
@@ -1118,7 +1122,7 @@ different kernels on a chunk.
 
 ### Task 3: T3 — the follow-up turn below the matrix kernels' row minimum
 
-- [ ] **T3: a card's follow-up turn is 21 new tokens, and at 21 rows the chunk
+- [x] **T3: a card's follow-up turn is 21 new tokens, and at 21 rows the chunk
   falls off the matrix attention path, the matrix projection path and the matrix
   shared expert onto the scalar ones — the same chunk costs 43.2 ms per attention
   layer against 6.2 at 36 rows.** The design doc's lever entry reads the turn's
@@ -1137,6 +1141,26 @@ different kernels on a chunk.
   the mini's measured 21-row turn, after which the routed stage (591 ms, holding
   831 misses / 1.47 GB) is 65 % of what is left — T4's term, not this one's.
   **The mini decides.**
+
+  **LANDED a1158b6 (2026-09-04): measured on the mini on one binary (the knob as the
+  A/B; the flip folded by amend), the live answer chained (`turns-live`, REUSE on
+  every run after the first): the 21-row follow-up turn 2.088 / 2.083 / 2.128 →
+  1.406 / 1.423 / 1.411 s, paired 2.100 → 1.413 (−32.7 %), three pairs in both
+  orders, repeats ≤ 45 ms; per-role GPU attention 434 → 54 ms (modelled 54.2),
+  GDN 340 → 164 (162.6), shared 67 → 22 (22.0), routed unchanged; turn 3 (36 rows)
+  1.468 → 1.458, the 55-row turn 1.803 → 1.820, 300 / 1k / 2k 3.574 / 6.464 /
+  10.308 → 3.635 / 6.481 / 10.307 (one pair each; no gate reachable at ≥ 305 rows;
+  roles identical, the 2k hit counters ± 3 by jitter), 12k
+  68.277 → 68.173, decode tok/s 14.02 / 14.17 → 14.08 / 13.99; **every completion
+  byte-identical** (the three live pairs, the 55-row chain, the six whole-chunk
+  completions, 12k, both long answers); golden IDENTICAL both boxes both profiles
+  at 32 and at 16 (short is 13 rows — measured, Step 1; long one chunk); no
+  recapture. Cells 8 / 4 equal 16 on the engaging turn and cost turn 3 +6 / +12 %
+  (a chained turn's settle is a RESTORE of 14 / 29 rows, not the draft's 2 — that
+  is the rewind kind — and engages below 16). The engaging turn's expert traffic
+  moved by one tile (339 → 338, hits 1,737 → 1,734) as the router's top-k moved
+  within the tolerance, bytes unchanged — ruled the accepted numerics change, not
+  a planner defect. Real (−32.7 %, 15× the drift) and free → the default is 16.**
 
   **Step zero — the follow-up shape at three row counts** (mini, d3efdeb, the
   shipped defaults; a fresh server per chain, the answer chained live into the
@@ -1252,8 +1276,10 @@ different kernels on a chunk.
   ([v13-the-turn.md](v13-the-turn.md):420-426). **Changes:** every
   chunk of n…31 rows — the follow-up turn and short tool round (the target), the
   tail chunk of any prompt whose length mod 4,096 lands in [n, 31], the prompt
-  cache's settle re-prefill if its remainder lands there (2 rows measured, so
-  **not** at n ≥ 3), and golden `short` if its chunk is ≥ n. **Unchanged and
+  cache's settle re-prefill if its remainder lands there — a first request's
+  rewind settle is 2 rows (never); a chained turn's restore settle is 14 rows at
+  turn 2 (not at 16) and 29 at turn 3 (**engages at the default**, shaping an
+  unmeasured turn 4; corrected at the verdict), and golden `short` if its chunk is ≥ n. **Unchanged and
   byte-identical:** the 305 / 1,085 / 2,125 first turns, 6,381 (4,096 + 2,285),
   12k (4,096 + 4,096 + 4,093), turn 3 at 36, turn 2 at 55, golden `long` (≈ 2k in
   one chunk), decode, the MTP verify pair at 2 rows, and the routed GEMM at every
@@ -1400,7 +1426,7 @@ different kernels on a chunk.
 
   Steps:
 
-  - [ ] Step 1 (controller, **no code**, the two facts the design needs before an
+  - [x] Step 1 (controller, **no code**, the two facts the design needs before an
         implementer starts): `pgrep -fl
         'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI'` and
         `memory_pressure -Q` first. (a) The golden `short` profile's real chunk
@@ -1409,7 +1435,7 @@ different kernels on a chunk.
         recaptured. (b) The settle remainder (`settled` − `rewind`) across the
         archived turn logs, confirming the 2 rows the measured chain shows is the
         shape and not a coincidence. Neither is a model run on the mini.
-  - [ ] Step 2 (an implementer): the `turns-live` phase and its payload reuse in
+  - [x] Step 2 (an implementer): the `turns-live` phase and its payload reuse in
         `tools/turn-rig.sh` first — every later task on this shape needs it — then
         the failing tests, then the parser, the three thresholds' parameters, the
         printed field. `swift test --no-parallel --filter PrefillAttentionMatrix`,
@@ -1418,7 +1444,7 @@ different kernels on a chunk.
         lint --strict --baseline`, **regenerating it** for
         `encodeFullAttentionPrefill`; `tools/check-md-links.py`; `swift test
         --no-parallel`, the **full** suite).
-  - [ ] Step 3 (numerics qualification): on the M4 Pro, `tools/golden-baseline.sh
+  - [x] Step 3 (numerics qualification): on the M4 Pro, `tools/golden-baseline.sh
         --check` at `SHRIKE_PREFILL_MATRIX_MIN_ROWS=32` — short and long
         **IDENTICAL**, proving the knob at today's value is today's build. Then at
         each candidate n: **long IDENTICAL** always; **short** identical while
@@ -1426,7 +1452,7 @@ different kernels on a chunk.
         digests before and after kept for the verdict. Then `tools/mini-deploy.sh
         --restart` and the same pair on the mini. A long-profile difference is a
         defect, never a recapture.
-  - [ ] Step 4 (the arms, controller-run, **one binary**, the knob as the A/B
+  - [x] Step 4 (the arms, controller-run, **one binary**, the knob as the A/B
         through the rig's `SERVER_ENV`; a fresh server per phase, `settle_done`
         before each send, a distinct tag per cell / arm / order, `REUSE` set on
         every arm after the first): **A** n = 32 and **B** n = 16 via `turns-live`,
@@ -1439,14 +1465,14 @@ different kernels on a chunk.
         the winner for `decode_tok_s`. Read the **per-role GPU split**, not the
         wall alone: if the attention and GDN roles do not fall at B, the model is
         wrong and the task stops before the rule is applied.
-  - [ ] Step 5 (the rule): apply it to the 21-row turn-2 wall and every control
+  - [x] Step 5 (the rule): apply it to the 21-row turn-2 wall and every control
         row. The default moves to the winning n, or stays 32. **Record the verdict
         either way**, with the per-role split per arm and the crossover the C / D
         cells show, so the reader can see which threshold paid. Then the four
         per-commit gates on the landed tree, golden both boxes both profiles (long
         IDENTICAL, short at the recaptured digests where the policy said so),
         `tools/mini-deploy.sh --restart` and the mini golden check.
-  - [ ] Step 6: design doc — a "Task 3" section with the three-row-count table,
+  - [x] Step 6: design doc — a "Task 3" section with the three-row-count table,
         the four thresholds, the per-role attribution and an "**After T3**" ledger
         block; the "A small-row prefill path" lever entry
         ([v13-the-turn.md](v13-the-turn.md):390-393) rewritten with
@@ -1495,6 +1521,12 @@ different kernels on a chunk.
 
 ## Follow-ons (not scheduled)
 
+- The GDN chunked scan below its 64-row gate (`GDN.chunkTokens`): ≤ 33 ms on a
+  21-row turn, and a numerics change for every 32–63-row chunk (Task 3).
+- The routed experts' matrix gate reads the configured chunk and its strict
+  `> 32` protects the 32-token MTP draft scratch's memory budget; lowering it
+  needs that budget priced (Task 3; the routed path is already the matrix path at
+  21 rows in production).
 - The expert reader's publication signals `min(count, threads)` workers instead
   of broadcasting to all (Task 2 review): sound because every worker re-checks
   the claim predicate before parking; the shutdown path keeps its broadcast. The

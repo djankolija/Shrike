@@ -338,7 +338,8 @@ batch with unclaimed reads returns `ECANCELED`.
 **The model, checked.** The draft's conservative bracket (the hidden fraction of
 the drive's time constant behind the GPU bank) predicted 3.51 / 6.52 / 10.40;
 measured 3.54 / 6.47 / 10.30. The drive's own term (`io_fetch_ms × 8`, the parked
-wait included at both cells; (1, 4) → (2, 4), paired) fell 264 / 388 / 592 ms at
+wait included at both cells — a sum of overlapping windows from this task on, valid
+as a delta between cells, not as elapsed time; (1, 4) → (2, 4), paired) fell 264 / 388 / 592 ms at
 300 / 1k / 2k — the realized per-expert time, that term over the misses, 1.019 →
 0.937 ms, 1.019 → 0.930, 0.970 → 0.842 — and about half of it reached the wall
 at 300 and 1k, the rest staying hidden; at 2k the stage is GPU-bound and the gain
@@ -369,6 +370,89 @@ tile, so a third batch (and the two-tile lookahead to feed it) adds reads in
 flight only where the thread count would — and the thread count measured null;
 still ≤ 1 %, not scheduled.
 
+## Task 3 — the follow-up turn below the matrix kernels' row minimum (commit a1158b6)
+
+A card's follow-up turn, measured with the answer the model actually gave chained
+into the next request (the rig's `turns-live` phase, new in this task), is 21
+new tokens on a 2,345-token cached context. At 21 rows the chunk fell below
+three 32-row gates — the K/V and O projections' matrix dispatch, attention's
+matrix path, the shared expert's — and ran a GEMV per token, the tiled
+attention kernel and the per-row shared expert instead. The routed experts'
+gate reads the configured chunk (4,096) and was already on the matrix path;
+the GDN scan's 64-row gate is priced at ≤ 33 ms and left alone.
+`SHRIKE_PREFILL_MATRIX_MIN_ROWS=16` (the new default; 3…32; `=32` the A/B,
+today's fixed thresholds) lets the three matrix paths take a chunk of 16 rows
+or more. The kernels already mask a partial row tile — every chunk whose length
+is not a multiple of 64 runs one — so nothing new is computed; the switch moves.
+
+Measured on the mini, one binary (the knob as the A/B), a fresh server per
+chain, the live answer chained, every run after the first reusing its built
+payloads so an A/B sends identical bytes:
+
+| request | new / cached | n = 32 | n = 16 | Δ | per-role GPU at 32 → 16 (ms) |
+| --- | ---: | ---: | ---: | ---: | --- |
+| **turn 2 (live answer)** | **21 / 2,345** | **2.088 / 2.083 / 2.128 s (paired 2.100)** | **1.406 / 1.423 / 1.411 (1.413)** | **−32.7 %** | attention 434 → 54, GDN 340 → 164, shared 67 → 22, routed 406 → 412 |
+| turn 3 | 36 / 2,359 | 1.464 / 1.468 / 1.471 | 1.455 / 1.462 / 1.456 | −0.6 % | unchanged (62 / 187 / 22 / 538) |
+| turn 2, padded user turn | 55 / 2,345 | 1.803 | 1.820 | +0.9 % | unchanged (71 / 216 / 23 / 645) |
+| 300 / 1k / 2k first turns (one pair) | | 3.574 / 6.464 / 10.308 | 3.635 / 6.481 / 10.307 | drift (no gate reachable at ≥ 305 rows) | unchanged |
+| 12k, first request after launch | 12,285 / 0 | 68.277 | 68.173 | −0.15 % | unchanged |
+| long-decode arm, decode tok/s (314 / 405 tokens) | | 14.02 / 14.17 | 14.08 / 13.99 | noise | |
+
+Three pairs in both orders; repeats agree to ≤ 45 ms. **Every completion is
+byte-identical between the two values** — turn 2 and turn 3 in all three
+pairs, the 55-row chain, the six whole-chunk completions, the 12k control and
+both long answers (901 and 1,023 characters) — and golden is identical on both
+boxes and both profiles at 16 (the `short` profile is 13 rows, below the knob;
+`long` is one chunk). The engaging turn's routed tile count moved 339 → 338 and its expert lookups
+2,568 → 2,566, deterministically in all six runs at n ≤ 16 against all three
+at 32 — a planner output, so the router's top-k moved by one expert on one
+token as the chunk's projections and attention moved within the 2e-2
+tolerance: the accepted numerics change reaching the router's margin, output
+bytes unchanged. The hit counters alone are not that read: they move by ± 3
+between runs where nothing can engage (the 2k control 4,707 → 4,704 at 2,125
+rows, one chunk — counter jitter at fetch depth 2), and turn 3's residency
+shifted the same way downstream of the changed KV (2,673 / 724 → 2,676 / 721 in
+all three pairs, bytes identical). Device tests at 21 and 3 rows against the fp32
+reference: attention max abs 1.5e-5 / 2.2e-4, rel 5.0e-4 / 6.2e-4; matrix vs
+tiled 1.5e-5 / 2.4e-4; the shared expert (21 rows only) max abs 9.8e-4, rel 3.1e-4 — against 2e-2.
+
+**The model landed on every role.** The draft fit the two matrix-path rows (36
+and 55) per layer and predicted, for the 21-row turn at n ≤ 21: attention 54.2
+ms, GDN 162.6, shared 22.0; measured 54 / 164 / 22. The modelled wall was 1.48
+s and the measured 1.41: the gaps between stages shrank with the GPU, the
+optimistic variant. Cells n = 8 and n = 4 equal 16 on the 21-row turn (1.413 /
+1.420 s) and cost turn 3 +6 / +12 % because a chained turn's cache settle is a
+restore whose remainder is 14 rows at turn 2 (29 at turn 3) — below 16 it
+engages and changes the next turn's residency (hits 2,686 / 714 against 2,673 /
+724, bytes identical). So 16 is the cell; the knee below 14 rows is unmeasured
+(no shape exercises it). One engaging chunk at the shipped default is
+unmeasured: turn 3's own restore settle re-prefills 29 rows, in [16, 31], so it
+runs the matrix kernels and rewrites the stored KV within tolerance for
+whatever turn 4 would follow — the chain's byte-diff is the only coverage, and
+it ends at turn 3. The floor of 3 keeps the MTP verify pair (2 rows) and
+a first request's rewind settle (2 rows, nine of nine archived) on today's
+kernels.
+
+**After T3** (commit a1158b6, 2026-09-04; `SHRIKE_PREFILL_MATRIX_MIN_ROWS=16`
+the default, `=32` the A/B; mini, server walls):
+
+| shape | wall | prefill hit rate | experts fetched |
+| --- | ---: | ---: | ---: |
+| follow-up turn, 21 new on a 2,345 cached context (after a live 219-token answer) | **1.41 s** | 67.6 % | 832 |
+| turn 3, 36 new | 1.46 | 78.8 % | 721 |
+| follow-up turn, 55 new | 1.82 | 64.1 % | 1,428 |
+| 305 / 1,085 / 2,125 first turns | 3.54 / 6.47 / 10.30 (Task 2's paired rows; unchanged) | 58.4 / 51.6 / 50.3 % | |
+| 12k, first request after launch | 68.2 | 33.6 % | 18,864 |
+
+What is left of the 21-row turn: prefill ≈ 0.84 s = routed stage ≈ 0.48 (GPU
+0.41, holding 832 misses ≈ 1.47 GB at ≈ 0.45 s of drive underneath) + attention
+/ GDN / shared ≈ 0.24 + gaps ≈ 0.12; decode 0.52 for 8 tokens; outside 0.06.
+The routed stage is now the largest term and its drive is the miss count on a
+cached context — the pool at 67.6 % hits after a real answer, 78.8 % a turn
+later — T4. Scope: measured on a launch without an MTP sidecar; the GDN
+chunked scan's 64-row gate and the routed gate's MTP scratch constraint are
+follow-ons.
+
 ## Levers, ranked for these shapes (modelled from step zero)
 
 - **First-chunk hit rate — LANDED as Task 0** (`SHRIKE_PREFILL_SWEEP=carry`):
@@ -387,10 +471,13 @@ still ≤ 1 %, not scheduled.
   through publication's broadcast). Concurrency is retired for this chapter:
   what is left of the term is the per-read latency at 3–4 outstanding and the
   miss count itself (the pool's size and eviction on a cached context).
-- **A small-row prefill path** for follow-up turns (≤ 64 new rows): the matrix
-  kernels' per-dispatch floor costs 21–23 ms per new token over 40 layer-chunks;
-  a decode-style or scalar path for tiny chunks could take ≈ 0.5–1 s off a
-  1.4–2.1 s turn.
+- **The follow-up turn below the matrix kernels' row minimum — LANDED as Task 3**
+  (`SHRIKE_PREFILL_MATRIX_MIN_ROWS=16`): this entry first read the turn's cost as
+  "the matrix kernels' per-dispatch floor" and priced a scalar path for tiny
+  chunks. The sign was backwards: a 21-token follow-up already ran the scalar
+  paths, below three 32-row gates, and that was the cost — 2.10 → 1.41 s (−33 %)
+  with every completion byte-identical. What is left of the follow-up turn is
+  its routed stage: the miss count on a cached context (T4).
 - **Decode** (v12 Task 17: hit-rate-bound, 22 / 18 / 12.5 tok/s by shape):
   prefetch accuracy on a tools context, cross-layer miss queue depth, the
   drive's latency (an external NVMe on the mini is a copy-the-model experiment).
