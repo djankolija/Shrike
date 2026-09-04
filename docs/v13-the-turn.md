@@ -55,15 +55,106 @@ on a fresh server's first request, 0.02–0.08 s afterwards.
    second; follow-up-turn overhead (1–2 s) third; the fresh-server first request
    (+3.3 s) only after a restart.
 
+## Task 0 — the expert sweep's parity carried across requests (commit f3ede42)
+
+The first chunk of every request used to sweep the experts ascending, into a
+pool whose residents were the previous request's last-swept experts at the
+other end. `SHRIKE_PREFILL_SWEEP=carry` (the new default; `alternate` is the
+A/B, `fixed` P15's) remembers the direction the last chunk swept and starts the
+next request's first chunk in the opposite one, alternating from there. Order
+only: the comparator is the one thing the direction reaches, so golden is
+identical on both boxes and both profiles (measured).
+
+Measured on the mini, one binary (the pre-flip build with the knob as the A/B),
+a fresh server per pair, the warm arm a different prompt of the same length
+after `settle_done`:
+
+| shape | alternate warm wall (hits) | carry warm wall (hits) | Δ wall | misses, GB read | `routed→routed` host |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 305 new tokens | 5.47 s (11.0 %) | **3.80 s (58.6 %)** | **−30.6 %** | 6,875 → 3,200 (11.8 → 5.6 GB) | 1,994 → 853 ms |
+| 1,085 | 8.08 (9.2 %) | **6.88 (51.6 %)** | **−14.9 %** | 8,224 → 4,383 (14.1 → 7.6 GB) | 1,816 → 914 |
+| 2,125 | 11.24 (8.9 %) | 10.80 (50.4 %) | −3.9 % | 8,527 → 4,639 (14.6 → 8.0 GB) | 782 → 486 |
+| turn 2 on the 2k context (38 new) | 1.91 (52.0 %) | 1.70 (62.6 %) | −11 % | | |
+| turn 3 (36 new) | 1.40 (84.8 %) | 1.37 (86.3 %) | −2 % | | |
+| after a 314-token answer, 305 new | 3.77 (49.5 %) | 3.79 (49.5 %) | 0 | identical hit counts | |
+| after a 405-token answer, 1,085 new | 6.62 (43.8 %) | 6.63 (43.8 %) | 0 | identical hit counts | |
+| 12k, first request after launch (server wall) | 68.42 (33.6 %) | 68.58 (17.0 %) | +0.2 % | hits 9,546 → 4,817 — the C1 defect, see below | |
+| 12k after a 305-token request (server wall) | 65.62 (35.0 %) | 65.55 (34.8 %) | −0.1 % | hits 9,933 → 9,869 — two C1 effects cancelling | |
+| 12k, first request after launch, **after the fix** | 68.30 (33.6 %) | 68.30 (33.6 %) | 0 | hits 9,546 → 9,546 | |
+| 6k (two chunks, 6,381 tokens), cold / warm, after the fix | 34.63 / 31.47 (25.4 / 49.7 %) | 34.62 / 31.43 (25.4 / 49.7 %) | 0 | hits identical (4,778; 9,340) | |
+
+The cold first requests match across modes to ≤ 61 ms (the carry is nil on a
+fresh server's first request; the model loads lazily inside it). Walls are the
+server's `completed in` except where the table says curl. Walls repeat to ≤ 30
+ms between runs on the single-chunk rows (turn 2 drifted 2.13 → 1.91 s between
+step zero and the arms with byte-identical expert traffic), so the 5 % rule is
+≈ 9× the noise on the shortest wall and the measured 300-token delta ≈ 56×.
+
+| shape | modelled hits/layer (P = 104 / 128) | modelled warm wall | measured hit rate | measured warm wall |
+| --- | ---: | ---: | ---: | ---: |
+| 305 | 63.0 / 77.5 (32.6 → 40.1 %) | 4.59 → 4.29 s | **58.6 %** | **3.80 s** |
+| 1,085 | 82.5 / 101.5 (36.4 → 44.8 %) | 6.77 → 6.37 | **51.6 %** | **6.88** |
+| 2,125 | 87.5 / 107.7 (37.4 → 46.0 %) | 10.50 | **50.4 %** | **10.80** |
+
+The hit rates land above the model's P = 128 ceiling and the 300-token wall
+below its modelled floor; the 1k and 2k walls sit 0.5 / 0.3 s above theirs.
+`routed→routed` host: 853 / 914 / 486 ms against bars of ≤ 1,400 / 800 / 350 —
+✓ / ✗ / ✗ (the brief's baselines were the gap's totals; the verdict scores the
+host term, the exposed part, and says so).
+
+**Two shape facts.** After a card-length answer the pool holds decode's
+working set, not a sweep's tail, and the direction is moot: both modes hit
+49.5 / 43.8 % (3,824 / 3,824 and 3,964–3,966 hits) and both beat the
+short-decode control — the lever pays on short-decode shapes (tool rounds,
+follow-up turns) and is neutral after a long answer. Turn 2's −11 % is the
+size of its own control's drift, but its sign stands on the traffic: 348 fewer
+misses × 0.56 ms ≈ 195 ms against the measured 210.
+
+**The 12k rows were a defect's footprint, found by the task review.** The first
+landed `carry` re-read the carry on every chunk after overwriting it, so a
+multi-chunk prompt swept `d0, d0, !d0` instead of alternating: a two-chunk
+prompt got no reversal at all and a three-chunk prompt one. All four 12k rows
+decompose to within 0.5 % under that model (one chunk transition ≈ 4,773 hits;
+a fully aligned first chunk ≤ 5,120): alternate first request 0 + 4,773 +
+4,773; carry first request 0 + 0 + 4,773; alternate after a short request 387 +
+4,773 + 4,773; carry after it ≈ 5,096 + 0 + 4,773 — the lever earned ≈ 4,700
+hits at chunk 0 and the defect gave ≈ 4,773 back at chunk 1. The docs had
+published a readiness-prefill mechanism for the halving; the model loads lazily
+inside the first request and no prefill precedes it, so that mechanism is
+retracted. The fix (commit above) makes each chunk the opposite of the previous
+one, across requests and within a prompt, with the composition under test; the
+MTP verify path no longer participates in the carry. Re-measured after the fix:
+the 12k first request reads 68.30 s with 9,546 hits in both modes, and a
+two-chunk pair (6,381 tokens) reads 34.63 / 34.62 s cold and 31.47 / 31.43 s
+warm with identical hit counts (4,778; 9,340). Identical is right: on a first
+request the carry is nil, and a two-chunk request under `alternate` already ends
+descending, so its successor's first chunk hits either way. `carry` pays after
+requests with an odd chunk count — one, three — which is every short turn.
+
+**After T0** (commit f3ede42, 2026-09-04; `SHRIKE_PREFILL_SWEEP=carry` the
+default, `=alternate` the A/B; mini, warm arms, server walls):
+
+| shape | warm wall | prefill hit rate | experts fetched |
+| --- | ---: | ---: | ---: |
+| 305 new tokens | 3.80 s | 58.6 % | 3,200 (5.6 GB) |
+| 1,085 | 6.88 | 51.6 % | 4,383 (7.6 GB) |
+| 2,125 | 10.80 | 50.4 % | 4,639 (8.0 GB) |
+| turn 2 (38 new on a 2k context) | 1.70 | 62.6 % | |
+| turn 3 (36 new) | 1.37 | 86.3 % | |
+| 6,381 (two chunks), warm | 31.43 | 49.7 % | 9,454 |
+| 12k, first request after launch | 68.30 | 33.6 % | 18,858 |
+
+Same binary, `alternate`: 5.47 / 8.08 / 11.24 s, turn 2 1.91, turn 3 1.40.
+Golden identical on both boxes and both profiles. The rig: `tools/turn-prompts.py`,
+`tools/turn-rig.sh`, `tools/turn-summary.py`. Scope: measured on a launch without
+an MTP sidecar; the verify path does not carry.
+
 ## Levers, ranked for these shapes (modelled from step zero)
 
-- **First-chunk hit rate** (the 4.5 s intercept is 12–15 GB of expert reads):
-  carry the sweep parity ACROSS requests — a request's first chunk sweeps in the
-  reverse of the previous request's last chunk, so the pool's 128 slots per
-  layer serve the first tiles instead of missing them all. Modelled ≈ 50 % hits
-  on the first chunk → −1.5 to −2 s per first-turn prefill and per tool round.
-  Risk: decode between turns churns the pool (aging-LFU); a long answer between
-  requests is an arm of the measurement.
+- **First-chunk hit rate — LANDED as Task 0** (`SHRIKE_PREFILL_SWEEP=carry`):
+  −1.7 / −1.2 / −0.4 s at 300 / 1k / 2k, neutral after a long answer. What is
+  left of the intercept after it: ≈ 3.4 s at 300 tokens (3,200 misses, 5.6 GB)
+  — bytes per expert and the pool's size are the remaining levers on it.
 - **Bytes per expert** (the same term): the drive runs at ≈ 3 GB/s here (QD 4
   inside a tile; 3.25 measured at QD4 in v10 P3); the reader's thread count as a
   knob (QD 8 unmeasured); two fetches in flight helps this mean-bound regime.

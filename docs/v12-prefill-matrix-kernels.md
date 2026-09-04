@@ -928,7 +928,8 @@ physical offset, so each layer's 128-slot expert cache — 112 evictable under
 the tile scheduler's 16 held — swept its ≈ 237 experts in the same direction
 every chunk: the sequential-scan pathology under the aging-LFU's LRU tiebreak,
 and `expert_hits_prefill` was **0** at every size on both boxes.
-`SHRIKE_PREFILL_SWEEP=alternate` (the default; `=fixed` is the A/B) reverses
+`SHRIKE_PREFILL_SWEEP=alternate` (the default until v13 T0 made `carry` the
+default; `=fixed` is the A/B) reverses
 the expert key on odd chunks, parity from `startPosition / 4096`, and only the
 key: tokens and ranks stay ascending within a group, each expert block presents
 the same rows in the same order to the same GEMM, and `routePartials` is

@@ -55,7 +55,7 @@ different kernels on a chunk.
 
 ### Task 0: T0 — the expert sweep's parity carried across requests
 
-- [ ] **T0: below 4,096 tokens P15's alternating sweep never fires, so every
+- [x] **T0: below 4,096 tokens P15's alternating sweep never fires, so every
   request's expert sweep starts ascending into a pool the last request left at
   the other end.** The parity is the chunk index within one prompt —
   `prefillChunkSweepIsDescending(startPosition:chunkTokens:)` is `(startPosition /
@@ -78,6 +78,42 @@ different kernels on a chunk.
   swept, start the next request's first chunk in the opposite one. First because
   it is the largest term at these shapes, it is a comparator flip behind an
   existing knob, and it changes no arithmetic. **The mini decides.**
+
+  **LANDED f3ede42 (2026-09-04): measured on the mini on one binary (the pre-flip
+  build, the knob as the A/B; the flip folded by amend — the same value by a
+  different route), a fresh server per pair, `settle_done` before the warm send:
+  warm walls 300 tokens 5.47 → 3.80 s (−30.6 %; hits 11.0 → 58.6 %, misses 6,875
+  → 3,200, `routed→routed` host 1,994 → 853 ms), 1k 8.08 → 6.88 (−14.9 %; 9.2 →
+  51.6 %, 8,224 → 4,383, 1,816 → 914), 2k 11.24 → 10.80 (−3.9 %; 8.9 → 50.4 %,
+  8,527 → 4,639, 782 → 486); cold first requests identical across modes to ≤ 60
+  ms. Turn 2 1.91 → 1.70 s (52.0 → 62.6 %), turn 3 1.40 → 1.37. Long-decode arm
+  (a 314 / 405-token answer before the warm request): alternate 3.77 / 6.62 s,
+  carry 3.79 / 6.63, identical hit counts (49.5 / 43.8 %) — neutral, no
+  regression. 12k control on the FIRST landed code (server walls): as the first
+  request after launch 68.42 → 68.58 s (+0.23 %) with hits 9,546 → 4,817; after
+  a real 300-token request 65.62 → 65.55 s with hits 9,933 → 9,869 — **the task
+  review found the cause: that code re-read the carry per chunk after writing
+  it, so multi-chunk prompts swept d0, d0, !d0 (all four rows decompose to
+  within 0.5 %: one transition ≈ 4,773 hits); the readiness-prefill mechanism the
+  first docs gave is retracted (the model loads lazily inside the first request).
+  Fixed in the commit above (each chunk opposite the previous, the composition
+  under test; the MTP verify path excluded from the carry); re-measured:
+  the 12k first request 68.30 / 68.30 s with hits 9,546 in both modes; a
+  two-chunk pair (6,381 tokens) 34.63 / 34.62 s cold (4,778 hits both) and 31.47 /
+  31.43 s warm (9,340 both) — identical between modes, as they must be (a nil
+  carry on a first request; a two-chunk request ends descending under either
+  mode).** Bars: 300 and 1k ≥ 5 % ✓✓; 2k no regression ✓; hit
+  rates ≥ 30 / 34 / 35 % ✓ (58.6 / 51.6 / 50.4, above the P = 128 model);
+  `routed→routed` host ≤ 1,400 / 800 / 350 ms ✓ / ✗ / ✗ (853 / 914 / 486 — the
+  brief's baselines were the gap totals, the verdict scores the exposed host
+  term); turn 2/3 not regressed ✓ (turn 2 −11 %, the size of its control's own
+  drift; the sign stands on 348 fewer misses); 12k wall ± 1 % ✓; the 12k
+  hit-count clause: ✓ after the fix (9,546 in both modes; the first
+  landed code's ✗ is the defect's footprint above). Golden IDENTICAL on both boxes and both
+  profiles. Default `carry`; `=alternate` the A/B. The rig lives in `tools/`
+  (`turn-prompts.py`, `turn-rig.sh`, `turn-summary.py`); the turn-2/3 payloads are
+  hand-built from a saved answer (a follow-up: generate them). Gate counts on the
+  SDD ledger.**
 
   **The decision rule, in two lines.** `SHRIKE_PREFILL_SWEEP=alternate|fixed|carry`
   lands either way — a third value on the existing knob, not a second knob, so
@@ -220,7 +256,9 @@ different kernels on a chunk.
   construction** — on a fresh server with one send the carry is `nil`, so `carry`
   and `alternate` compute the same directions; wall **68.38 s** and
   `expert_hits_prefill` **9,546** (P16's landed rows) must not move, and a move
-  means carried state leaked into a first request. Golden **IDENTICAL** both
+  means carried state leaked into a first request. **FALSIFIED as written —
+  the move came from a defect in the direction rule, not from leaked state; see
+  the LANDED paragraph.** Golden **IDENTICAL** both
   boxes both profiles; `memory_pressure -Q` read before and during every mini
   arm. The M4 Pro is the check (its first-chunk hit rate is low too, so it should
   move the same way); it decides nothing.
@@ -264,7 +302,7 @@ different kernels on a chunk.
 
   Steps:
 
-  - [ ] Step 1 (an implementer): the seven failing tests, then the mode enum, the
+  - [x] Step 1 (an implementer): the seven failing tests, then the mode enum, the
         parser, the carried parity function, the runner var and the `sweep=`
         field. `swift test --no-parallel --filter PrefillMoEGrouping` and
         `--filter PrefillRoutedTileScheduler` → FAIL then PASS. Five gates
@@ -273,15 +311,16 @@ different kernels on a chunk.
         `tools/check-md-links.py`; `swift test --no-parallel`; the same under
         TSAN with `TSAN_OPTIONS=suppressions=tsan-suppressions.txt`). Move the
         three rig scripts under `tools/` in the same commit.
-  - [ ] Step 2: `tools/golden-baseline.sh --check` on the M4 Pro — short and long
+  - [x] Step 2: `tools/golden-baseline.sh --check` on the M4 Pro — short and long
         **IDENTICAL**; a difference is a defect and never a recapture. Then
         `tools/mini-deploy.sh --restart` and the mini's golden check.
-  - [ ] Step 3 (the arms, controller-run, **one binary**, `SHRIKE_PREFILL_SWEEP`
+  - [x] Step 3 (the arms, controller-run, **one binary**, `SHRIKE_PREFILL_SWEEP`
         as the A/B; `pgrep -fl 'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI'`
         before every launch; a fresh server per pair, `settle_done` before the
         warm send, a distinct tag per arm and per box — P10's
         `resp-<tag>-<label>.json` collision): **A** `alternate` and **B** `carry`,
-        `tools/turn-rig.sh pair 300|1k|2k`, tags `t0-alt-mini-<len>` /
+        `tools/turn-rig.sh <host> <port> <promptdir> <outdir> <tag> pair 300|1k|2k`
+        (the landed argument order), tags `t0-alt-mini-<len>` /
         `t0-carry-mini-<len>`. **C** the long-decode arm — the same pair with the
         cold request's `max_tokens` raised to 512, tags `t0-<mode>-mini-<len>-d512`:
         does the gain survive a card-length answer. **D** the turns arm
@@ -295,14 +334,14 @@ different kernels on a chunk.
         `expert_read_mib`, `io_fetch_ms`, `expert_evictions` / `expert_reloads`,
         the `prefill_routed_tile` role and count, `routed→routed` total / host /
         count, `shared→routed`, busy, span, and the decode counters.
-  - [ ] Step 4 (the rule): apply it to the three warm walls. `carry` becomes the
+  - [x] Step 4 (the rule): apply it to the three warm walls. `carry` becomes the
         default with `=alternate` as the A/B, or the default stays `alternate`.
         **Record the verdict either way**, with the first-chunk hit rate and the
         exposed-fetch term per arm — the direct read of whether the hits arrived
         and whether they were on the critical path. Then five gates on the landed
         tree, golden both boxes both profiles IDENTICAL, and
         `tools/mini-deploy.sh --restart` with the mini golden check.
-  - [ ] Step 5: design doc — a "Task 0 — the carried sweep parity" section with
+  - [x] Step 5: design doc — a "Task 0 — the carried sweep parity" section with
         the hit-rate model, its measured-against-modelled table and an "**After
         T0**" ledger block; the rig scripts linked. Plan: Task 0 `[x]` with the
         landed paragraph. Task review by a fresh reviewer; fixes folded into the
@@ -325,7 +364,9 @@ different kernels on a chunk.
     default follows the short-decode arms only if the long arm does not regress.
   - **The 12k control moves.** It cannot, on a fresh server with one send: the
     carry is `nil` and `carry` ≡ `alternate`. A move is carried state leaking into
-    a first request — a defect in where the var is written or reset.
+    a first request — a defect in where the var is written or reset. **It moved
+    (FALSIFIED): the defect was in the direction rule itself (the per-chunk
+    re-read), caught by the task review — see the LANDED paragraph.**
   - **Golden moves.** Then the comparator is not the only thing `descending`
     reaches. The default stays `alternate` until it is found; never a recapture.
   - **The mini is production.** Every arm stops the server on 8081 and relaunches
