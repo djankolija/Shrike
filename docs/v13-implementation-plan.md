@@ -448,7 +448,7 @@ different kernels on a chunk.
   layer**, `Model.swift:552`); `beginExpertCachePlan` hands the plan to
   `ExpertIOScheduler.shared` (4 workers, `ExpertLoadOperation.swift:168-169`;
   `PreadExpertStreamer.swift:837-845`), whose worker runs `executeBoundedReads`
-  (`:977-988`) → `submit_batch` (`Sources/ShrikeKernelsC/expert_io.c:237-277`).
+  (`:977-988`) → `submit_batch` (`sources/ShrikeKernelsC/expert_io.c:237-277`).
   **`submit_batch` publishes exactly one batch at a time**: a second caller waits
   on `batch_idle` until the first completed *and* cleared the published pointers
   (`:247-250`, `:270-274`; the predicate exists so a second caller cannot
@@ -719,6 +719,375 @@ different kernels on a chunk.
   - **Small-cache models.** `fitting` reserves one more tile, so a 16-slot cache
     drops `tileExperts` 5 → 4 and the `nil` threshold moves. Run the full suite
     (P15b's ragged-K gate failure came from this class of path).
+  - **The mini is production.** Every arm stops the server on 8081 and relaunches
+    it; Turbo on 8080 is never touched. One model process at a time.
+
+### Task 2: T2 — the expert reader publishing two batches at once
+
+- [ ] **T2: the C reader publishes exactly one batch at a time, so Task 1's two
+  tile fetches in flight are served batch-serially and bytes in flight never
+  exceed one tile's misses — 3.3–3.9 on the mean after T0.** `submit_batch`
+  (`sources/ShrikeKernelsC/expert_io.c:237-277`) parks a second caller on
+  `batch_idle` (`:248-250`) until the first batch has completed *and* cleared its
+  published pointers (`:264-275`); the struct holds exactly one batch — `count`,
+  `next_index`, `outstanding`, `first_errno`, `generation` and the three pointer
+  arrays, under "Current batch. Valid only while outstanding > 0" (`:27-36`) —
+  and `worker_main` claims reads from it by `next_index` (`:79-100`, claim at
+  `:80-86`). Production runs `ParallelExpertReader(threads: 4, bypassCache: true)`,
+  a literal with no knob, **one reader per layer**
+  (`PreadExpertStreamer.swift:451-454`; `Model.swift:552`), so a tile's 3–4 misses
+  are one wave that never fills its four threads, and the drive drains and refills
+  between tiles. Task 1 measured the cost: `io_fetch_ms × 8` at depth 1 is
+  1,863 / 2,485 / 2,680 ms against 3,200 / 4,383 / 4,639 misses
+  ([v13-the-turn.md](v13-the-turn.md):178-185) = **0.582 / 0.567 / 0.578 ms per
+  expert**, ≈ **3.08 GB/s** at a 1,769,472-byte stride, against the peer's mini
+  probes' **3.57–3.61 GB/s at four whole experts in flight, 3.76–3.83 at eight**
+  (`~/.claude/handoffs/archive/shrike-ssd-split-probe/mini-probe-run3.txt:11-12`,
+  `:26-27`). This task lets the reader hold **two published batches**: a second
+  caller's batch is accepted while the first is outstanding, workers claim from
+  the older batch first and spill into the newer only when the older has no
+  unclaimed read left, and each caller waits for its own batch. Tiles N and N+1
+  then read concurrently and the thread count becomes a live knob. Next because it
+  is the term Task 1 exposed and could not reach
+  ([v13-the-turn.md](v13-the-turn.md):205-212, `:266-277`), and because it is
+  scheduling only: the same bytes in the same slots, chosen by a planner this task
+  does not touch. **The mini decides.**
+
+  **The decision rule, under the chapter's real-and-free rule**
+  ([v13-the-turn.md](v13-the-turn.md):289-303). Two knobs land either way:
+  `SHRIKE_EXPERT_IO_BATCH_DEPTH=<1|2>` (1 = today) and `SHRIKE_EXPERT_IO_THREADS=<1…16>` (4 =
+  today). **No percentage bar.** The defaults move to the best measured cell only
+  if the effect is **real** — the sign holds across paired runs in both orders at
+  300 and 1k and the delta exceeds the rig's shown drift (11–66 ms on the
+  single-chunk walls, [v13-the-turn.md](v13-the-turn.md):176-177), a third pair if
+  it sits inside twice that — and **free**: no control row regresses. Those rows
+  are the other two shapes, turn 2 / turn 3 (± 5 %, their own drift), the 12k
+  control (± 1 % wall, `expert_hits_prefill` ≥ 9,070), `expert_hit_rate_prefill`
+  unmoved (this task changes no plan, so a move is a defect and not a cost),
+  **`decode_tok_s` on the long-decode arm not regressed**, `memory_pressure -Q`
+  acceptable before and during every arm, and golden **IDENTICAL** on both boxes
+  and both profiles at both cells. Otherwise the defaults stay at (1, 4) and the
+  rows are recorded (P8's precedent); a measured null is a result.
+
+  **What changes in the C reader.** One batch becomes a two-slot ring, `depth`
+  fixed at create and clamped 1…`SHRIKE_IO_MAX_BATCHES` (2) as `threads` is
+  clamped 1…`SHRIKE_IO_MAX_THREADS` (`:14`, `:119-120`). Each slot carries today's
+  `expert_ids` / `offsets` / `destinations` / `count` / `next_index` /
+  `outstanding` / `first_errno` (`:27-35`) plus an `active` flag (published, not
+  yet reaped) and a `sequence` stamped at publication. `work_done` (`:24`) becomes
+  **per slot**, so a completion never wakes the wrong submitter; `work_ready`
+  (`:23`) and `batch_idle` (`:25`) stay reader-wide — "some slot has claimable
+  work", "a slot was freed". **`generation` (`:36`) is deleted for `sequence`**:
+  today it is incremented at `:262` and read nowhere, while what stops a worker
+  re-running a finished batch is `next_index >= count` plus the cleared pointers;
+  `sequence` does a real job as the FIFO claim key. **Claim order**: the wait
+  predicate becomes "no slot is active with `next_index < count`", and the claim
+  takes the active slot with the **lowest `sequence` that still has an unclaimed
+  read** — so no read of N+1 is claimed while an unclaimed read of N exists and
+  **tile N's fetch is never delayed by N+1's**. Completion order can still invert
+  by one read's latency jitter; harmless, since each caller waits on its own slot
+  and the runner awaits tile N's own operation (`RealForwardRunner.swift:5568`). A
+  worker captures its slot index before unlocking for `read_one` and uses it after
+  re-locking; the slot cannot be reused underneath it (next paragraph). The claim
+  rule and the free-slot search are factored out as **pure functions over the slot
+  table** (no locks, no I/O) in the C header, used by `worker_main` and asserted
+  from Swift — that is how FIFO gets a deterministic test, not a timing race.
+
+  **Pointer ownership.** The comment at `:242-246` gives the reason one batch
+  exists: a second caller must not overwrite the published arrays while the first
+  waits. With two slots the rule holds per slot. A submitter finds a slot with
+  `active == 0`, fills it, publishes, and **owns that slot's arrays until its own
+  `outstanding` reaches zero**; only then does it read `first_errno`, clear the
+  count, index and three pointers, set `active = 0`, broadcast `batch_idle` and
+  return (today's `:267-276`, now per slot). A **third** caller parks exactly as a
+  second does today — `while (no free slot && !shutting_down) wait(batch_idle)` —
+  because the depth is 2. The Swift caller's arrays outlive the call for today's
+  reason: `fetch(offsets:into:)` holds them in `withUnsafeBufferPointer` for the
+  whole blocking call (`ParallelExpertReader.swift:122-140`).
+
+  **Errors and shutdown.** `first_errno` moves into the slot, so one batch's
+  failing read cannot fail the other caller — today's single field would leak an
+  `EIO` from tile N+1 into tile N's return. `shutting_down` stays reader-wide, and
+  `destroy` (`:216-234`) gains the accounting that fixes a latent hang: today a
+  shutdown raised while a batch has **unclaimed** reads leaves its submitter
+  waiting forever (workers break at `:83-85`, `outstanding` never reaches zero).
+  Under T2 `destroy` sets `shutting_down`, then per active slot sets `first_errno
+  = ECANCELED` if unset, subtracts the unclaimed reads (`outstanding -= count -
+  next_index; next_index = count`) and signals that slot — **both a published and
+  a parked caller return `ECANCELED`**, shutdown bounded by the reads already in
+  the kernel (claimed reads still decrement; each read counted once).
+
+  **The Swift side and the knobs.** `shrike_expert_reader_create` gains
+  `batch_depth` beside `threads` (header `:32-38`), with
+  `shrike_expert_reader_batch_depth` mirroring `shrike_expert_reader_threads`
+  (`:66-67`, `expert_io.c:302-304`). `ParallelExpertReader.init` (`:68-84`) takes
+  `batchDepth: Int = 1` and exposes it beside `threadCount` (`:45`);
+  `PreadExpertStreamer`'s bounded branch (`:448-460`) drops the literal `threads:
+  4` for a parser next to `ExpertCacheLayout.environmentValue` (`:185-198`) —
+  unset → the defaults, out of range or unparseable → a thrown
+  `ModelError.internalInconsistency` naming the range, as the layout knob throws.
+  **Nothing prints the reader's shape today**: `threadCount` is stored
+  (`ParallelExpertReader.swift:45`, `:83`) and read nowhere outside the class, and
+  the projection-path line (`ServerInference.swift:821-824`) carries
+  `prefill_tile_batch=` and `prefill_gap_levers=` (`RealForwardRunner.swift:226-247`,
+  `:288-305` — residency allocations, the sweep and `cache_layout` since v12's
+  close) but nothing about the reader. `prefill_gap_levers` gains
+  `expert_io=threads=N batch_depth=D`, from the **parsed configuration** and not a
+  live reader: that line is emitted at session construction, where reaching a
+  streamer would force a layer open ahead of the lazy load Task 0's review
+  documented.
+
+  **The runner needs no change, and the scheduler's four workers are enough.**
+  Task 1's lookahead loop begins tile N+1's fetch
+  (`RealForwardRunner.swift:5544-5555`) through
+  `PrefillStreamedTileBinding.beginFetchForTile`
+  (`PrefillGroupedRoutedMoE.swift:626`) → `beginFetchRoutedExperts`
+  (`ModelExpertIO.swift:212-224`) → `beginExpertCachePlan` →
+  `ExpertIOScheduler.shared.submit` (`PreadExpertStreamer.swift:837-845`), whose
+  worker runs `executeBoundedReads` (`:977-988`) → `reader.fetch(offsets:into:)`.
+  Today that worker parks inside `submit_batch`; at depth 2 it publishes instead
+  and returns when its own batch lands; the loop still awaits tile N's operation
+  at `:5568`. Nothing in the loop, `PrefillRoutedTileScheduler`, the planner
+  (`makeExpertCachePlan`, `:600-700`) or eviction (`selectVictimSlots`,
+  `:1111-1120`) moves. The scheduler runs 4 workers
+  (`ExpertLoadOperation.swift:168-169`) and prefill needs **2**: the loop holds at
+  most one `inFlight` begin (`:5513`, `:5550`) beside the tile being awaited,
+  requests do not overlap (`ServerModelSession` is an actor,
+  `ServerInference.swift:509`), and prefill precedes decode within one. The only
+  other user is the speculative prefetch (`PreadExpertStreamer.swift:1241`, via
+  `beginRoutedExpertPrefetch`, `ModelExpertIO.swift:186-194`), **off unless
+  `SHRIKE_PREDICTIVE_PREFETCH=1`** (`RealForwardRunner.swift:743-746`) and, when
+  on, targeting layer `L + prefetchProbeDistance` (`:6569-6575`) — a different
+  streamer, hence a different reader; demand runs ahead of speculative anyway
+  (`ExpertLoadOperation.swift:189-210`).
+
+  **Decode.** The same reader serves decode's demand fetches (≈ one miss per layer
+  at 128 slots; v12 Task 17 read decode as hit-rate-bound at 22 / 18 / 12.5 tok/s
+  by shape) and, when enabled, its prefetch. **Depth 2 changes nothing there by
+  construction** — one caller per reader at a time, verified above — and 8 threads
+  change nothing for a one-read batch, which uses one thread either way. The cost
+  is countable, which is why decode is a control row: readers are per layer and ≈
+  40 layers open, so `threads: 8` means **160 extra worker pthreads and 160 extra
+  descriptors** (160 → 320 for the process). No per-thread I/O buffer is added —
+  `read_one` writes into the caller's destination, the cache slot pointer
+  (`expert_io.c:40-58`, `PreadExpertStreamer.swift:977-987`), and `F_NOCACHE` is a
+  descriptor flag (`:139-150`) — so the cost is stack reservation: macOS's default
+  512 KiB per pthread, ≈ 80 MiB of address space, kilobytes of RSS while parked.
+  **Nothing in the tree calls `setrlimit`, and the mini's soft limit is 256**
+  (`ulimit -n`; hard unlimited; `launchctl limit maxfiles 256 unlimited`) against
+  ≈ 160 descriptors today and ≈ 320 at 8 threads — a bare launch at (2, 8) would
+  fail with `EMFILE`. So Step 1 raises the process's soft limit **once, at the
+  first reader's creation** (`setrlimit(RLIMIT_NOFILE)` to the hard limit, capped
+  at `OPEN_MAX`), and arm B's launch is the check that the production launch
+  works without a manual `ulimit` (`lsof -p <pid> | wc -l` the read).
+
+  **Bytes in flight per cell** — `(depth, threads)`; in flight is concurrent
+  `pread`s of one whole expert (1.6875 MiB). Arm D falsifies the whole model: if
+  it moves the wall, the effect was never batch size and Task 1's reading is wrong.
+
+  | cell | in flight | role |
+  | --- | --- | --- |
+  | (1, 4) today | ≤ min(tile misses, 4); mean **3.26 / 3.82 / 3.90**, draining between tiles | **verdict**, arm A |
+  | (2, 8) | ≤ 8 across two batches, the drive fed continuously | **verdict**, arm B |
+  | (2, 4) | ≤ 4, but never draining between tiles | attribution, arm C |
+  | (1, 8) | still ≤ min(tile misses, 8) = 3.3–3.9 — **predicted null** | attribution, arm D |
+
+  **The expected gain, modelled per shape.** All **modelled**; the measured inputs
+  are Task 1's rows ([v13-the-turn.md](v13-the-turn.md):178-189, `:213-219`,
+  `:231-241`). Write the routed stage as GPU + ΣF − hidden, ΣF = misses × the
+  realized per-expert time, `hidden` the part of the drive the two-tile GPU bank
+  already covers:
+
+  | shape | misses | per-expert (measured) | ΣF | routed GPU | measured stage | hidden | hidden / ΣF |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 305 | 3,218 | 0.582 ms | 1,874 ms | 1,413 | 2,281 | 1,006 | 54 % |
+  | 1,085 | 4,387 | 0.567 | 2,487 | 2,517 | 3,355 | 1,649 | 66 % |
+  | 2,125 | 4,643 | 0.578 | 2,682 | 3,907 | 4,150 | 2,439 | 91 % |
+
+  T2 lowers the per-expert time and nothing else. Two cases from probe run 3 (both
+  seeds): **(a)** the per-batch drain removed but the rate only reaching four in
+  flight, **0.493 ms**; **(b)** eight in flight, **0.466 ms**. ΔΣF = misses ×
+  (0.575 − rate): (a) **287 / 324 / 393 ms**, (b) **374 / 443 / 518**. Two
+  bracketing readings of how much of that reaches the wall — which one it lands
+  near is the task's real question:
+
+  | | 305 | 1,085 | 2,125 |
+  | --- | ---: | ---: | ---: |
+  | (b) optimistic — hidden ms constant, stage floored at GPU | −374 ms → **3.31 s** | −443 → **6.22** | −243 (floor) → **10.21** |
+  | (b) conservative — hidden *fraction* constant | −173 → 3.51 | −149 → 6.52 | −47 → 10.40 |
+  | (a) optimistic / conservative | −287 → 3.40 / −133 → 3.55 | −324 → 6.34 / −109 → 6.56 | −243 → 10.21 / −36 → 10.42 |
+  | (c) null — the probes' +5–6 % inside their own drift (four in flight read 2.88 / 2.93 / 3.30 GB/s in earlier runs) | 0 | 0 | 0 |
+
+  Optimistic assumes every millisecond off the drive comes straight off the stage;
+  conservative assumes the same fraction stays hidden. **2k is capped either way at
+  its exposed 243 ms** (stage 4,150 − GPU 3,907): its drive term is already under
+  its GPU, so a small 2k gain beside a larger 300 one is *predicted*, as at Task 1.
+  1k's cap is its exposed **838 ms**, which neither case reaches. **The
+  layer-boundary floor this lever cannot cross:** layer L+1's routes come from L's
+  output, so each layer's first tile has no predecessor to overlap with — 40
+  boundaries × F̄ (= ΣF ÷ tiles = 1.91 / 2.17 / 2.26 ms) = **76 / 87 / 90 ms per
+  request today**, ≈ 61 / 70 / 73 at (b); at 24.6 / 28.7 / 29.7 tiles per layer
+  (982 / 1,147 / 1,188 ÷ 40) the mechanism reaches ≈ 96 % of tiles and the other
+  4 % is that floor. **The Swift header's bench note is not evidence against this**
+  — `ParallelExpertReader.swift:9-11` ("4 threads 3.92 GB/s, 8 threads 3.92
+  (saturated)", "four readers is the knee") and `:21-23` (at batch 1 the pool
+  matches a plain `pread`) are **sustained full-batch** measurements over a 16.88
+  GiB working set, where every thread always has a read to take. At 3.3–3.9 misses
+  per batch it is **the batch size, not the thread count**, that starves the drive
+  — the pool's own table says so (batch 1 → 3.41 GB/s, batch 4 → 5.36, batch 8 →
+  5.95 there), which is why arm D is predicted null.
+
+  **Byte-identity — scheduling only.** Destinations come from the planner's
+  `assignedSlots`, untouched here; the reader only decides which thread reads which
+  offset when, so golden **IDENTICAL** on both boxes and both profiles at both cells
+  is the stop. **A slot's arrays reused before its batch completes is a correctness
+  bug, not a numerics change** — one tile's expert in another's slot, which golden
+  catches; the guard is `active` plus the ownership window above.
+
+  **Tests (RED first, host-only, against a temp file through
+  `ParallelExpertReader`)** in a new
+  `tests/…/Streaming/ParallelExpertReaderTests+BatchDepth.swift` beside the existing
+  suite (`ParallelExpertReaderTests.swift`: `makeFixture` / `withDestinations`
+  `:16-34`, `concurrentCallersCannotOverwritePublishedBatch` `:96-125`), so
+  `--filter ParallelExpertReader` picks up both:
+  - `twoConcurrentFetchesBothLandTheirOwnBytes` — depth 2, threads 4, two tasks ×
+    50 rounds, disjoint destinations, every byte checked (`:96-125` at depth 2).
+  - `claimTakesTheOlderBatchBeforeTheNewer` — the FIFO rule as a **pure function**
+    over a slot table: both active with unclaimed reads → the lower `sequence`; the
+    older exhausted → the newer; neither claimable → none; an inactive slot never
+    claimed. Deterministic by construction, no timing.
+  - `publishFindsNoSlotWhileBothAreActive` — the same table, the free-slot search:
+    both active → none (the third caller parks); one reaped → that index.
+  - `oneBatchsReadErrorDoesNotFailTheOtherCaller` — depth 2, threads 2; one task
+    reads valid ids, the other an id past EOF, 50 rounds: the first never throws
+    and its bytes are right, the second always throws `readFailed`.
+  - `cancellingAPublishedBatchAccountsOnlyItsUnclaimedReads` — the shutdown
+    accounting as a pure function: `first_errno` → `ECANCELED`, `outstanding` drops
+    by exactly `count − next_index`, `next_index == count`, a slot with no unclaimed
+    read untouched. (End to end it is unreachable from Swift — a caller inside
+    `fetch` retains the reader, `:86-88` — stated, not simulated.)
+  - `depthTwoReadsTheSameBytesAsDepthOne` — one out-of-order id list with a repeat
+    through (1, 4) and (2, 8), byte-identical (extends `:59-74`).
+  - `batchDepthIsClampedToTheSupportedRange` — 0 → 1, 9 → 2, mirroring
+    `threadCountIsClampedToTheSupportedRange` (`:157-166`).
+  - `boundedReaderConfigurationParsesThreadsAndBatchDepth` — unset → the defaults;
+    `"8"` / `"2"` → (8, 2); `"0"`, `"99"`, `"x"` → the thrown error naming the
+    range, via `setenv` / `unsetenv` as
+    `PreadExpertStreamerTests+CachePlanning.swift:143-144` does.
+  - `prefillGapLeversDescriptionReportsTheBoundedReaderShape` — the printed field,
+    asserted through the static description as `prefillTileDepthDescription` is
+    (`PrefillRoutedTileSchedulerTests.swift:320-327`).
+
+  **Files.** `sources/ShrikeKernelsC/expert_io.c`: the two-slot ring, the claim and
+  free-slot rules, per-slot `done` / `first_errno` / `sequence`, `depth` at create,
+  the shutdown accounting, and the `RLIMIT_NOFILE` raise (in `create`, or in
+  `ParallelExpertReader.init` under a static once — the implementer picks; one
+  call, before any reader opens its descriptors). `include/shrike_expert_io.h`: `batch_depth` on `create`,
+  `shrike_expert_reader_batch_depth`, `SHRIKE_IO_MAX_BATCHES`, the slot-table view
+  and the two pure rules, and the doc comment that today says four saturates the
+  device (`:32-38`). `ParallelExpertReader.swift`: the parameter and property, the
+  header note reconciled (`:4-36`, `:68-84`). `PreadExpertStreamer.swift`: the
+  parser beside `ExpertCacheLayout` (`:185-198`) and the bounded branch (`:448-460`).
+  `RealForwardRunner.swift`: `prefillGapLeversDescription` (`:279-305`) gains the
+  `expert_io=` field. Tests: the four files above. **Lint:**
+  `PreadExpertStreamer.init` is in `.swiftlint-baseline.json` at "currently spans
+  160 lines" (`:291`) — the reason string embeds the count, so **any** edit to that
+  body makes the entry stale and the baseline must be regenerated in Step 1 (T0 and
+  T1 both hit it). **Unchanged:** Task 1's two routed tile loops and
+  `PrefillRoutedTileScheduler`, `PrefillGroupedRoutedMoE`'s binding helpers, every
+  kernel and `.metal` file, `PreadExpertStreamer`'s planning and eviction,
+  `ExpertIOScheduler`, the prompt cache, `tools/`.
+
+  Steps:
+
+  - [ ] Step 1 (an implementer): the nine failing tests, then the C ring and its
+        two pure rules, the `batch_depth` plumbing, the one-time `RLIMIT_NOFILE`
+        raise at the first reader's creation, the two env knobs and the
+        `expert_io=` field. `swift test --no-parallel --filter ParallelExpertReader`
+        and `--filter PreadExpertStreamer` → FAIL then PASS. The four per-commit
+        gates (release build, 0 warnings; `swiftlint lint --strict --baseline`,
+        regenerating it for `PreadExpertStreamer.init`; `tools/check-md-links.py`;
+        `swift test --no-parallel`, the **full** suite) **plus a task-specific
+        ThreadSanitizer check**: `env
+        TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test --no-parallel
+        --sanitize=thread --filter ParallelExpertReader` — minutes, not the
+        chapter-close hour. Justified: this is the only pthread code the chapter
+        touches, the new tests run 2–3 callers against 8 threads, and TSAN
+        instruments the C target too. The full run stays the close gate, and a
+        report here is real (the suppressions file's family is swift-nio's future
+        bridge, unrelated to this mutex).
+  - [ ] Step 2: `tools/golden-baseline.sh --check` on the M4 Pro at **(1, 4)** and
+        **(2, 8)** — short and long **IDENTICAL** at both; a difference is a defect,
+        never a recapture. Then `tools/mini-deploy.sh --restart` and the mini's
+        golden check at both cells.
+  - [ ] Step 3 (the arms, controller-run, **one binary**, the two knobs as the A/B
+        through the rig's `SERVER_ENV`; Task 1's `t1-arms.sh` is the pattern — a
+        distinct tag per cell, arm and order; `pgrep -fl
+        'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI'` and
+        `memory_pressure -Q` before every launch (the process raises its own
+        descriptor limit — Step 1; arm B's launch is its check); a fresh server per pair, `settle_done` before the warm send):
+        **A** (1, 4) and **B** (2, 8) via `tools/turn-rig.sh macmini 8081
+        <promptdir> <outdir> t2-<cell>-mini-<len> pair 300|1k|2k`, **paired in both
+        orders** at 300 and 1k, one pair at 2k; **C** (2, 4) and **D** (1, 8) at
+        300, and at 1k if the 300 rows separate; **E** the turns arm at A and B;
+        **F** the 12k control (`tools/prefill-measure.sh macmini 8081 … 6k` after
+        the rig's `restore`; label `6k` = the 12,285-token prompt); **G** the
+        long-decode arm at A and B, `MAX_TOKENS=512` (`turn-rig.sh:24-26`), for
+        the completion count. Rows per arm exactly as Task 1 read them (`t1-rows.py`:
+        wall, `prefill_s`, hits / misses / rate, `expert_read_mib`, `io_fetch_ms × 8`,
+        the `prefill_routed_tile` role GPU and count, `routed→routed` total /
+        `host_ms` / `queue_ms` / count, `shared→routed`, busy, span) **plus `decode_s`
+        / `decode_tok_s`** from the `Shrike generation` line
+        (`ServerInference.swift:1936-1941`) and the new `expert_io=` field off the
+        projection line. **No new counter:** `io_fetch_ms × 8` ÷ misses is the
+        realized per-expert time and the row that decides the model — it should
+        **fall** at B, the parked wait Task 1 pushed inside it having disappeared.
+  - [ ] Step 4 (the rule): apply it to the three warm walls and every control row.
+        The defaults move to the winning cell, or stay at (1, 4). **Record the
+        verdict either way**, with the realized per-expert time per arm and the
+        arm-D null stated explicitly. Then the four per-commit gates on the landed
+        tree, golden both boxes both profiles IDENTICAL, `tools/mini-deploy.sh
+        --restart` and the mini golden check.
+  - [ ] Step 5: design doc — a "Task 2" section with the ΣF / hidden / stage table,
+        the cell table, the arms' rows and an "**After T2**" ledger block; the
+        "Bytes per expert" lever entry ([v13-the-turn.md](v13-the-turn.md):266-277)
+        rewritten with the measured per-expert time and whatever is left of the
+        term; the deeper-lookahead follow-on repriced now that batches overlap.
+        Plan: Task 2 `[x]` with the landed paragraph. Task review by a fresh
+        reviewer; fixes folded into the owning commit.
+
+  **Risks and what falsifies the model.**
+  - **The realized rate does not rise.** `io_fetch_ms × 8` ÷ misses stays at
+    0.57–0.58 ms with two batches published and eight threads. Then per-read latency
+    at 3–4 outstanding is the floor, the probes' 3.6–3.8 GB/s was a
+    synthetic-pattern number a real interleaved plan cannot reach, and the next
+    lever is the **miss count** itself (the pool's size, bytes per expert), not
+    concurrency — a null here retires concurrency for this chapter.
+  - **Decode regresses at 8 threads.** The read is `decode_tok_s` on the
+    long-decode arm; the fix is the split knobs — depth 2 with threads 4 (arm C),
+    costing no descriptors and no stacks. That is why the knobs are separate rather
+    than one "wider I/O" switch.
+  - **A completion inversion (tile N after N+1).** The FIFO claim order is the
+    guard, asserted as a pure function rather than measured. The residual race is
+    *publication* order: two `ExpertIOScheduler` workers can reach `submit_batch`'s
+    mutex out of submission order, as they can today. `host_ms` ÷ routed tile count
+    is the read — it fell 0.85 → 0.78 and 0.74 → 0.64 ms at Task 1
+    ([v13-the-turn.md](v13-the-turn.md):191-198); a rise at B with the wall flat is
+    the signature, and the fix is a submission sequence number from the scheduler —
+    recorded, not built here.
+  - **The scheduler's four workers become the cap.** Two are needed and four exist,
+    but a task raising the lookahead past one tile hits it — named so the next lever
+    prices it, not discovers it.
+  - **A batch's arrays reused before it completes.** Wrong expert bytes in a slot:
+    golden catches it and it is a **correctness stop**, not a numerics change. The
+    defaults stay at (1, 4) until it is found; never a recapture.
+  - **Descriptors or stacks.** 320 open descriptors at (2, 8) against the mini's
+    soft limit of 256: the process raises its own limit at the first reader's
+    creation (Step 1); a launch that still fails with `EMFILE` is a defect, and
+    `memory_pressure -Q` during arm B reads the stacks' cost.
+  - **The 12k control moves.** It is GPU-bound (F̄ / G = 0.58 at Task 1) and flat
+    is the prediction; a move means the reader's shape reaches something this model
+    does not describe, and `expert_hits_prefill` (≥ 9,070) is the read.
   - **The mini is production.** Every arm stops the server on 8081 and relaunches
     it; Turbo on 8080 is never touched. One model process at a time.
 

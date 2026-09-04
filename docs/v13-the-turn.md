@@ -161,7 +161,7 @@ expert lands in and when, never its bytes — golden identical on both boxes,
 both profiles, at both knob values (measured).
 
 **What the drive sees.** The drafter's reading, verified in the C reader:
-`submit_batch` (`Sources/ShrikeKernelsC/expert_io.c`) publishes one batch at a
+`submit_batch` (`sources/ShrikeKernelsC/expert_io.c`) publishes one batch at a
 time — a second caller parks on `batch_idle` until the first batch completes
 and clears its pointers, and the parked caller is an `ExpertIOScheduler`
 worker, not the runner. So two fetches in flight closes the inter-tile gap
