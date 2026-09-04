@@ -13,7 +13,7 @@ import Foundation
 
     /// Builds a file of `count` blocks where block `e` is filled with a byte
     /// pattern derived from `e`, so a misdirected read is detectable.
-    private static func makeFixture(count: Int) throws -> URL {
+    static func makeFixture(count: Int) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("shrike-io-\(UUID().uuidString).bin")
         var data = Data(capacity: count * stride)
@@ -24,7 +24,7 @@ import Foundation
         return url
     }
 
-    private static func withDestinations<T>(
+    static func withDestinations<T>(
         _ n: Int, _ body: ([UnsafeMutableRawPointer]) throws -> T) rethrows -> T {
         let bufs = (0..<n).map { _ in
             UnsafeMutableRawPointer.allocate(byteCount: stride, alignment: 16384)

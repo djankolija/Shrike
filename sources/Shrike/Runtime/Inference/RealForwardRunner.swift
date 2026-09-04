@@ -275,14 +275,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// router wait, and the expert pools held in a queue residency set. The
     /// set only gains an allocation under `SHRIKE_EXPERT_CACHE_LAYOUT=pool`,
     /// so `allocations=` and the cache layout are reported alongside it
-    /// rather than inferred from the holder's mere existence.
+    /// rather than inferred from the holder's mere existence. `expert_io=`
+    /// is the bounded reader's parsed thread count and batch depth (v13 T2).
     public var prefillGapLeversDescription: String {
-        Self.prefillGapLeversDescription(
+        // Parsed configuration, not the layer streamers' live readers -- reaching
+        // one would force a layer open ahead of the lazy load.
+        let boundedReader = (try? BoundedReaderConfiguration.environmentValue())
+            ?? BoundedReaderConfiguration(
+                threads: BoundedReaderConfiguration.defaultThreads,
+                batchDepth: BoundedReaderConfiguration.defaultBatchDepth)
+        return Self.prefillGapLeversDescription(
             overlap: prefillRouteOverlap,
             residencyAllocationCount: poolResidency?.allocationCount,
             poolResidencyUnavailableReason: poolResidencyUnavailableReason,
             sweepMode: prefillSweepMode,
-            cacheLayout: (try? ExpertCacheLayout.environmentValue()) ?? .pool)
+            cacheLayout: (try? ExpertCacheLayout.environmentValue()) ?? .pool,
+            expertIOThreads: boundedReader.threads,
+            expertIOBatchDepth: boundedReader.batchDepth)
     }
 
     static func prefillGapLeversDescription(
@@ -290,7 +299,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         residencyAllocationCount: Int?,
         poolResidencyUnavailableReason: String?,
         sweepMode: PrefillSweepMode,
-        cacheLayout: ExpertCacheLayout
+        cacheLayout: ExpertCacheLayout,
+        expertIOThreads: Int,
+        expertIOBatchDepth: Int
     ) -> String {
         let residency: String
         if let residencyAllocationCount {
@@ -302,6 +313,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         return "overlap=\(overlap ? "on" : "off") residency=\(residency)"
             + " sweep=\(sweepMode.rawValue) cache_layout=\(cacheLayout.rawValue)"
+            + " expert_io=threads=\(expertIOThreads) batch_depth=\(expertIOBatchDepth)"
     }
 
     /// The prefill router kernel in force (`block` or `tiled tokens=N`) and its

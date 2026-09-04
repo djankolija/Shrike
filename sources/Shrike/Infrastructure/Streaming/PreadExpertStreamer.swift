@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Metal
+import ShrikeKernelsC
 import Synchronization
 
 public struct ExpertIOAdviceResult: Sendable, Equatable {
@@ -195,6 +196,44 @@ public enum ExpertCacheLayout: String, Sendable {
                 detail: "unsupported SHRIKE_EXPERT_CACHE_LAYOUT '\(raw)'; allowed: per-slot, pool")
         }
         return layout
+    }
+}
+
+struct BoundedReaderConfiguration: Sendable, Equatable {
+    static let defaultThreads = 4
+    /// Unset `SHRIKE_EXPERT_IO_BATCH_DEPTH` takes 2 (two published batches,
+    /// the v13 T2 winner); `=1` restores the single-batch reader as the A/B.
+    static let defaultBatchDepth = 2
+
+    let threads: Int
+    let batchDepth: Int
+
+    static func environmentValue(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> BoundedReaderConfiguration {
+        BoundedReaderConfiguration(
+            threads: try parseThreads(environment["SHRIKE_EXPERT_IO_THREADS"]),
+            batchDepth: try parseBatchDepth(environment["SHRIKE_EXPERT_IO_BATCH_DEPTH"]))
+    }
+
+    private static func parseThreads(_ raw: String?) throws -> Int {
+        guard let raw else { return defaultThreads }
+        let range = 1...Int(SHRIKE_IO_MAX_THREADS)
+        guard let value = Int(raw), range.contains(value) else {
+            throw ModelError.internalInconsistency(
+                detail: "unsupported SHRIKE_EXPERT_IO_THREADS '\(raw)'; allowed: \(range.lowerBound)-\(range.upperBound)")
+        }
+        return value
+    }
+
+    private static func parseBatchDepth(_ raw: String?) throws -> Int {
+        guard let raw else { return defaultBatchDepth }
+        let range = 1...Int(SHRIKE_IO_MAX_BATCHES)
+        guard let value = Int(raw), range.contains(value) else {
+            throw ModelError.internalInconsistency(
+                detail: "unsupported SHRIKE_EXPERT_IO_BATCH_DEPTH '\(raw)'; allowed: \(range.lowerBound)-\(range.upperBound)")
+        }
+        return value
     }
 }
 
@@ -448,10 +487,12 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         } else if ProcessInfo.processInfo.environment["SHRIKE_BOUNDED_IO"] != "0" {
             self.metalReader = nil
             do {
+                let boundedReaderConfiguration = try BoundedReaderConfiguration.environmentValue()
                 self.boundedReader = try ParallelExpertReader(
                     path: layout.path,
                     expertStride: Int(layout.expertStride),
-                    threads: 4,
+                    threads: boundedReaderConfiguration.threads,
+                    batchDepth: boundedReaderConfiguration.batchDepth,
                     bypassCache: true)
             } catch {
                 unwind()

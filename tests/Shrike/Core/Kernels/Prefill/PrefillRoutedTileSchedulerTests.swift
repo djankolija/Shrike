@@ -328,20 +328,24 @@ import Testing
     @Test func prefillGapLeversDescriptionReportsResidencyAllocationsAndCacheLayout() {
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed, cacheLayout: .pool)
-            == "overlap=on residency=set allocations=24 sweep=fixed cache_layout=pool")
+            sweepMode: .fixed, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
+            == "overlap=on residency=set allocations=24 sweep=fixed cache_layout=pool"
+                + " expert_io=threads=4 batch_depth=1")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: false, residencyAllocationCount: 0, poolResidencyUnavailableReason: nil,
-            sweepMode: .alternate, cacheLayout: .perSlot)
-            == "overlap=off residency=set allocations=0 sweep=alternate cache_layout=per-slot")
+            sweepMode: .alternate, cacheLayout: .perSlot, expertIOThreads: 4, expertIOBatchDepth: 1)
+            == "overlap=off residency=set allocations=0 sweep=alternate cache_layout=per-slot"
+                + " expert_io=threads=4 batch_depth=1")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: "boom",
-            sweepMode: .alternate, cacheLayout: .pool)
-            == "overlap=on residency=unavailable reason=boom sweep=alternate cache_layout=pool")
+            sweepMode: .alternate, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
+            == "overlap=on residency=unavailable reason=boom sweep=alternate cache_layout=pool"
+                + " expert_io=threads=4 batch_depth=1")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed, cacheLayout: .pool)
-            == "overlap=on residency=none sweep=fixed cache_layout=pool")
+            sweepMode: .fixed, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
+            == "overlap=on residency=none sweep=fixed cache_layout=pool"
+                + " expert_io=threads=4 batch_depth=1")
     }
 
     @Test func sweepModeParsesItsThreeValues() {
@@ -356,8 +360,9 @@ import Testing
     @Test func prefillGapLeversDescriptionReportsTheSweepMode() {
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .carry, cacheLayout: .pool)
-            == "overlap=on residency=set allocations=24 sweep=carry cache_layout=pool")
+            sweepMode: .carry, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
+            == "overlap=on residency=set allocations=24 sweep=carry cache_layout=pool"
+                + " expert_io=threads=4 batch_depth=1")
     }
 
     @Test func slotLifetimeRejectsReuseInsideAnOpenBatch() throws {

@@ -128,7 +128,9 @@ let package = Package(
         ),
         .testTarget(
             name: "ShrikeTestsCore",
-            dependencies: ["Shrike", "ShrikeValidationSupport", "ShrikeRepackCore", "ShrikeCLICore"],
+            dependencies: [
+                "Shrike", "ShrikeKernelsC", "ShrikeValidationSupport", "ShrikeRepackCore", "ShrikeCLICore",
+            ],
             path: "tests/Shrike/Core",
             resources: [.copy("Tokenization/Fixtures")]
         ),

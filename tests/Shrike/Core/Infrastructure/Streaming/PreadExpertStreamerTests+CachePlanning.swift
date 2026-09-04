@@ -18,6 +18,53 @@ extension PreadExpertStreamerTests {
     }
   }
 
+  @Test func boundedReaderConfigurationParsesThreadsAndBatchDepth() throws {
+    defer {
+      unsetenv("SHRIKE_EXPERT_IO_THREADS")
+      unsetenv("SHRIKE_EXPERT_IO_BATCH_DEPTH")
+    }
+    unsetenv("SHRIKE_EXPERT_IO_THREADS")
+    unsetenv("SHRIKE_EXPERT_IO_BATCH_DEPTH")
+    #expect(try BoundedReaderConfiguration.environmentValue()
+      == BoundedReaderConfiguration(threads: 4, batchDepth: 2))
+
+    setenv("SHRIKE_EXPERT_IO_THREADS", "8", 1)
+    setenv("SHRIKE_EXPERT_IO_BATCH_DEPTH", "2", 1)
+    #expect(try BoundedReaderConfiguration.environmentValue()
+      == BoundedReaderConfiguration(threads: 8, batchDepth: 2))
+
+    setenv("SHRIKE_EXPERT_IO_BATCH_DEPTH", "1", 1)
+    #expect(try BoundedReaderConfiguration.environmentValue()
+      == BoundedReaderConfiguration(threads: 8, batchDepth: 1))
+    unsetenv("SHRIKE_EXPERT_IO_THREADS")
+    unsetenv("SHRIKE_EXPERT_IO_BATCH_DEPTH")
+
+    for invalid in ["0", "99", "x"] {
+      setenv("SHRIKE_EXPERT_IO_THREADS", invalid, 1)
+      #expect(throws: ModelError.internalInconsistency(
+        detail: "unsupported SHRIKE_EXPERT_IO_THREADS '\(invalid)'; allowed: 1-16")) {
+        try BoundedReaderConfiguration.environmentValue()
+      }
+    }
+    unsetenv("SHRIKE_EXPERT_IO_THREADS")
+
+    for invalid in ["0", "99", "x"] {
+      setenv("SHRIKE_EXPERT_IO_BATCH_DEPTH", invalid, 1)
+      #expect(throws: ModelError.internalInconsistency(
+        detail: "unsupported SHRIKE_EXPERT_IO_BATCH_DEPTH '\(invalid)'; allowed: 1-2")) {
+        try BoundedReaderConfiguration.environmentValue()
+      }
+    }
+  }
+
+  @Test func prefillGapLeversDescriptionReportsTheBoundedReaderShape() {
+    #expect(RealForwardRunner.prefillGapLeversDescription(
+      overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
+      sweepMode: .carry, cacheLayout: .pool, expertIOThreads: 8, expertIOBatchDepth: 2)
+      == "overlap=on residency=none sweep=carry cache_layout=pool"
+        + " expert_io=threads=8 batch_depth=2")
+  }
+
   @Test func cachedBatchWithoutExecutorLoadsTaggedBytes() throws {
     let url = try Self.writeSyntheticLayer()
     defer { try? FileManager.default.removeItem(at: url) }
