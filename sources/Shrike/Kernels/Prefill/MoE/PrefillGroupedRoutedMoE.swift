@@ -362,6 +362,20 @@ public struct PrefillStreamedTileFetchResult {
     }
 }
 
+/// A tile's fetch, begun but not yet awaited; `plan.assignedSlots` is valid
+/// immediately, before `operation` completes.
+public struct PrefillStreamedTileFetchBegin {
+    public let expertIDs: [Int]
+    public let plan: RoutedExpertFetchPlan
+    public let operation: RoutedExpertLoadOperation
+
+    public init(expertIDs: [Int], plan: RoutedExpertFetchPlan, operation: RoutedExpertLoadOperation) {
+        self.expertIDs = expertIDs
+        self.plan = plan
+        self.operation = operation
+    }
+}
+
 enum PrefillStreamedTileLifetimeError: Error, Equatable, CustomStringConvertible {
     case duplicateSlots(tileIndex: Int, slots: [Int])
     case slotReuseBeforeCompletion(tileIndex: Int, conflictingTileIndex: Int, slots: [Int])
@@ -603,6 +617,49 @@ public struct PrefillStreamedTileBinding: Sendable, Equatable {
                                              plannedMissIndices: plannedMissIndices,
                                              plannedAssignedSlots: plannedAssignedSlots,
                                              plannedMissSlots: plannedMissSlots)
+    }
+
+    /// The plan-and-begin half of `fetchBindingForTile`, split out so a
+    /// caller can begin tile N+1's fetch before awaiting tile N's: the plan
+    /// (and its `assignedSlots`) is available synchronously, before the I/O
+    /// this starts has completed.
+    public static func beginFetchForTile(model: Model,
+                                         layer: Int,
+                                         tileIndex: Int,
+                                         routes: PrefillMoEGroupedRoutes,
+                                         plannedFetch: RoutedExpertFetchPlan? = nil,
+                                         avoidingSlots: Set<Int> = []) throws
+        -> PrefillStreamedTileFetchBegin {
+        let expertIDs = try expertIDs(forTile: tileIndex, routes: routes)
+        guard let plan = try plannedFetch ?? model.planRoutedExperts(layer: layer,
+                                                                     experts: expertIDs,
+                                                                     avoidingSlots: avoidingSlots) else {
+            throw PrefillGroupedRoutedMoEError.invalidStreamedTileBinding(
+                "no routed expert plan available for tile \(tileIndex)")
+        }
+        guard plan.layer == layer, plan.experts == expertIDs else {
+            throw PrefillGroupedRoutedMoEError.invalidStreamedTileBinding(
+                "preplanned fetch does not match tile \(tileIndex)")
+        }
+        let operation = try model.beginFetchRoutedExperts(plan: plan)
+        return PrefillStreamedTileFetchBegin(expertIDs: expertIDs, plan: plan, operation: operation)
+    }
+
+    /// The binding-from-completed-views half of `fetchBindingForTile`: turns
+    /// a begun fetch's awaited views into the same result the unsplit call
+    /// produces.
+    public static func bindingForCompletedFetch(begin: PrefillStreamedTileFetchBegin,
+                                                views: [TensorView]) throws
+        -> PrefillStreamedTileFetchResult {
+        let binding = try PrefillStreamedTileBinding(expertIDs: begin.expertIDs, views: views)
+        return PrefillStreamedTileFetchResult(
+            expertIDs: begin.expertIDs,
+            binding: binding,
+            usedPlannedFetch: true,
+            plannedHits: begin.plan.hits,
+            plannedMissIndices: begin.plan.misses,
+            plannedAssignedSlots: begin.plan.assignedSlots,
+            plannedMissSlots: begin.plan.misses.map { begin.plan.assignedSlots[$0] })
     }
 
     public func validateCoversPairs(_ pairs: [PrefillTokenExpertPair],

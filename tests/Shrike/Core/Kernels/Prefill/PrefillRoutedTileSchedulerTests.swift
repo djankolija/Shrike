@@ -372,4 +372,85 @@ import Testing
         try lifetime.begin(tileIndex: 1, plannedSlots: [2, 3])
     }
 
+    @Test func slotLifetimeRejectsReuseWhileTheLookaheadTileIsInFlight() throws {
+        var lifetime = PrefillStreamedTileSlotLifetime()
+        try lifetime.begin(tileIndex: 0, plannedSlots: [1, 2])
+        try lifetime.begin(tileIndex: 1, plannedSlots: [3, 4])
+
+        #expect(throws: PrefillStreamedTileLifetimeError.self) {
+            try lifetime.begin(tileIndex: 2, plannedSlots: [2, 4])
+        }
+
+        try lifetime.complete(tileIndex: 0)
+        #expect(throws: PrefillStreamedTileLifetimeError.self) {
+            try lifetime.begin(tileIndex: 2, plannedSlots: [4, 5])
+        }
+
+        try lifetime.complete(tileIndex: 1)
+        try lifetime.begin(tileIndex: 2, plannedSlots: [4, 5])
+    }
+
+    @Test func theLookaheadCountsOneMoreTileInTheSlotBudget() {
+        let config = PrefillRoutedTileSchedulerConfig(maxPendingDepth: 2, tileExperts: 8, fetchLookahead: 1)
+
+        #expect(config.fitsSlotBudget(slotCount: 128))
+        #expect(!config.fitsSlotBudget(slotCount: 31))
+
+        let ceiling = PrefillRoutedTileSchedulerConfig(maxPendingDepth: 14, tileExperts: 8, fetchLookahead: 1)
+        let overCeiling = PrefillRoutedTileSchedulerConfig(maxPendingDepth: 15, tileExperts: 8, fetchLookahead: 1)
+        #expect(ceiling.fitsSlotBudget(slotCount: 128))
+        #expect(!overCeiling.fitsSlotBudget(slotCount: 128))
+    }
+
+    @Test func fittingKeepsTheLookaheadAndNarrowsTheTile() {
+        let config = PrefillRoutedTileSchedulerConfig(maxPendingDepth: 2, fetchLookahead: 1)
+
+        #expect(config.fitting(slotCount: 128) == config)
+        #expect(config.fitting(slotCount: 16) == PrefillRoutedTileSchedulerConfig(
+            maxPendingDepth: 2, tileExperts: 4, tilesPerCommandBuffer: 1, fetchLookahead: 1))
+        #expect(config.fitting(slotCount: 8) == PrefillRoutedTileSchedulerConfig(
+            maxPendingDepth: 2, tileExperts: 2, tilesPerCommandBuffer: 1, fetchLookahead: 1))
+        #expect(config.fitting(slotCount: 3) == nil)
+    }
+
+    @Test func shouldBeginLookaheadRequiresALookaheadAPlanAndASuccessor() {
+        let withLookahead = PrefillRoutedTileScheduler(
+            config: PrefillRoutedTileSchedulerConfig(fetchLookahead: 1))
+        let withoutLookahead = PrefillRoutedTileScheduler()
+
+        #expect(withLookahead.shouldBeginLookahead(
+            afterTileIndex: 0, tileCount: 3, avoidingSlotPlanAvailable: true))
+        #expect(!withoutLookahead.shouldBeginLookahead(
+            afterTileIndex: 0, tileCount: 3, avoidingSlotPlanAvailable: true))
+        #expect(!withLookahead.shouldBeginLookahead(
+            afterTileIndex: 0, tileCount: 3, avoidingSlotPlanAvailable: false))
+        #expect(!withLookahead.shouldBeginLookahead(
+            afterTileIndex: 2, tileCount: 3, avoidingSlotPlanAvailable: true))
+    }
+
+    @Test func parsePrefillFetchDepthClampsToOneThroughTwo() {
+        #expect(RealForwardRunner.parsePrefillFetchDepth(nil) == 2)
+        #expect(RealForwardRunner.parsePrefillFetchDepth("") == 2)
+        #expect(RealForwardRunner.parsePrefillFetchDepth("not-a-number") == 2)
+        #expect(RealForwardRunner.parsePrefillFetchDepth("0") == 1)
+        #expect(RealForwardRunner.parsePrefillFetchDepth("-3") == 1)
+        #expect(RealForwardRunner.parsePrefillFetchDepth("1") == 1)
+        #expect(RealForwardRunner.parsePrefillFetchDepth(" 2 ") == 2)
+        #expect(RealForwardRunner.parsePrefillFetchDepth("3") == 2)
+        #expect(RealForwardRunner.parsePrefillFetchDepth("9") == 2)
+        #expect(RealForwardRunner.parsePrefillFetchDepth("100") == 2)
+    }
+
+    @Test func prefillTileBatchDescriptionReportsTheFetchDepth() {
+        let single = PrefillRoutedTileSchedulerConfig(fetchLookahead: 0)
+        let lookahead = PrefillRoutedTileSchedulerConfig(fetchLookahead: 1)
+
+        #expect(RealForwardRunner.prefillFetchDepthDescription(single) == "fetch=1")
+        #expect(RealForwardRunner.prefillFetchDepthDescription(lookahead) == "fetch=2")
+        #expect(RealForwardRunner.prefillFetchDepthDescription(single.fitting(slotCount: 128) ?? single)
+            == "fetch=1")
+        #expect(RealForwardRunner.prefillFetchDepthDescription(lookahead.fitting(slotCount: 128) ?? lookahead)
+            == "fetch=2")
+    }
+
 }

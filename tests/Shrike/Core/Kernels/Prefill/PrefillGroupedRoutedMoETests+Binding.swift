@@ -204,26 +204,33 @@ extension PrefillGroupedRoutedMoETests {
       streamingMode: .pread(slotCount: 16))
     let routes = try Self.tileFetchRoutes()
 
-    let first = try await PrefillStreamedTileBinding.fetchBindingForTile(
+    let firstBegin = try PrefillStreamedTileBinding.beginFetchForTile(
       model: model,
       layer: 1,
       tileIndex: 0,
       routes: routes)
+
     let second = try await PrefillStreamedTileBinding.fetchBindingForTile(
       model: model,
       layer: 1,
       tileIndex: 0,
       routes: routes,
-      avoidingSlots: Set(first.plannedAssignedSlots))
+      avoidingSlots: Set(firstBegin.plan.assignedSlots))
+
+    let firstViews = try await firstBegin.operation.completion()
+    let first = try PrefillStreamedTileBinding.bindingForCompletedFetch(
+      begin: firstBegin,
+      views: firstViews)
 
     #expect(first.usedPlannedFetch)
     #expect(first.plannedAssignedSlots == [0, 1, 2])
     #expect(first.plannedMissSlots == [0, 1, 2])
     #expect(second.usedPlannedFetch)
-    #expect(second.plannedAssignedSlots == [0, 1, 2])
-    #expect(second.plannedHits == 3)
-    #expect(second.plannedMissIndices.isEmpty)
-    #expect(second.plannedMissSlots.isEmpty)
+    #expect(Set(second.plannedAssignedSlots).isDisjoint(with: first.plannedAssignedSlots))
+    try first.binding.validateCoversPairs(
+      routes.sortedPairs,
+      pairStart: 0,
+      pairCount: routes.sortedPairs.count)
     try second.binding.validateCoversPairs(
       routes.sortedPairs,
       pairStart: 0,

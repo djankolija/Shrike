@@ -43,15 +43,21 @@ struct PrefillRoutedTileSchedulerConfig: Sendable, Equatable {
     let maxPendingDepth: Int
     let tileExperts: Int
     let tilesPerCommandBuffer: Int
+    /// A tile fetched one ahead of the batch pipeline, held from plan time
+    /// until its own GPU work completes; 0 keeps today's single-fetch loop.
+    let fetchLookahead: Int
 
-    init(maxPendingDepth: Int = 1, tileExperts: Int = 8, tilesPerCommandBuffer: Int = 1) {
+    init(maxPendingDepth: Int = 1, tileExperts: Int = 8, tilesPerCommandBuffer: Int = 1,
+         fetchLookahead: Int = 0) {
         self.maxPendingDepth = max(1, maxPendingDepth)
         self.tileExperts = max(1, min(16, tileExperts))
         self.tilesPerCommandBuffer = max(1, min(16, tilesPerCommandBuffer))
+        self.fetchLookahead = max(0, min(1, fetchLookahead))
     }
 
     /// Every tile of the open batch and of each pending batch holds its slots
-    /// until that batch completes, so the budget multiplies by the batch width.
+    /// until that batch completes, so the budget multiplies by the batch
+    /// width; the lookahead tile is one further tile held the same way.
     func fitsSlotBudget(slotCount: Int, reservedHits: Int = 0) -> Bool {
         guard slotCount > 0, reservedHits >= 0 else { return false }
         return maxInFlightTiles * tileExperts + reservedHits <= slotCount
@@ -67,19 +73,22 @@ struct PrefillRoutedTileSchedulerConfig: Sendable, Equatable {
             maxPendingDepth: maxPendingDepth,
             tileExperts: tileExperts,
             tilesPerCommandBuffer: max(1, min(tilesPerCommandBuffer,
-                                              available / (inFlightBatches * tileExperts))))
+                                              (available - fetchLookahead * tileExperts)
+                                                  / (inFlightBatches * tileExperts))),
+            fetchLookahead: fetchLookahead)
         if narrowedWidth.fitsSlotBudget(slotCount: slotCount, reservedHits: reservedHits) {
             return narrowedWidth
         }
-        let availablePerTile = available / inFlightBatches
+        let availablePerTile = available / (inFlightBatches + fetchLookahead)
         guard availablePerTile > 0 else { return nil }
         return Self(maxPendingDepth: maxPendingDepth,
                     tileExperts: min(tileExperts, availablePerTile),
-                    tilesPerCommandBuffer: 1)
+                    tilesPerCommandBuffer: 1,
+                    fetchLookahead: fetchLookahead)
     }
 
     private var inFlightBatches: Int { maxPendingDepth + 1 }
-    private var maxInFlightTiles: Int { inFlightBatches * tilesPerCommandBuffer }
+    private var maxInFlightTiles: Int { inFlightBatches * tilesPerCommandBuffer + fetchLookahead }
 }
 
 struct PrefillRoutedTileScheduler: Sendable, Equatable {
@@ -106,6 +115,15 @@ struct PrefillRoutedTileScheduler: Sendable, Equatable {
             return .drainBeforeIssue(reason: .avoidingSlotPlanUnavailable)
         }
         return .prefetchNext(avoidingSlots: input.pendingAssignedSlots)
+    }
+
+    /// Whether to begin the next tile's fetch before awaiting the current
+    /// one's: only while the config asks for a lookahead, a successor tile
+    /// remains, and that successor's avoiding-slots plan actually resolved.
+    func shouldBeginLookahead(afterTileIndex index: Int,
+                              tileCount: Int,
+                              avoidingSlotPlanAvailable: Bool) -> Bool {
+        config.fetchLookahead > 0 && avoidingSlotPlanAvailable && index + 1 < tileCount
     }
 
     func batchAction(openBatchTiles: Int,
