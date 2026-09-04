@@ -40,21 +40,26 @@ moved or swapped directory; editing it forges the attestation instead of re-esta
 
 ## Gates that must pass before calling work done
 
-Five local gates. Nothing runs them for you — there is no CI — so run them yourself
+Five local gates, four per code commit and the fifth once per chapter at its close.
+Nothing runs them for you — there is no CI — so run them yourself
 before calling work done. All of them constrain how code gets written here:
 
 1. **Release build with zero warnings.** A new warning fails the build.
 2. **`swiftlint lint --strict --baseline .swiftlint-baseline.json`** — three rules:
    `force_cast`, `force_try`, and `function_body_length` (warn 120, error 400). A
    force cast or force try needs `// swiftlint:disable:next force_cast` (or
-   `force_try`) on the line above it, with the reason stated in a comment. The 20
+   `force_try`) on the line above it, with the reason stated in a comment. The 19
    functions already over 120 lines are recorded in the baseline; anything new fails.
    Regenerate with `swiftlint lint --write-baseline .swiftlint-baseline.json` when you
    legitimately fix one, or the gate fails on a stale entry. Decompose as you write.
 3. **Markdown link check** — globs every `*.md` in the repo, so it binds on any document
    you add. Relative links must resolve.
 4. **`swift test --no-parallel`** — serial, always. Pass `--filter` through as needed.
-5. **The same suite under ThreadSanitizer**, run as
+5. **The same suite under ThreadSanitizer — once per chapter, at its close before
+   the merge to main, not per commit** (owner's ruling, 2026-09-04: the per-commit
+   run cost ≈ 50 minutes, most of it the GPU-kernel reference suites that have no
+   threads to check, and it held the build lock; a report found at close is fixed
+   then). Run as
    `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test --no-parallel --sanitize=thread`
    from the repo root. The suppressions file silences only the known
    false-positive family from swift-nio's `EventLoopFuture.get()` continuation

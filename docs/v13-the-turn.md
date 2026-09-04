@@ -149,15 +149,132 @@ Golden identical on both boxes and both profiles. The rig: `tools/turn-prompts.p
 `tools/turn-rig.sh`, `tools/turn-summary.py`. Scope: measured on a launch without
 an MTP sidecar; the verify path does not carry.
 
+## Task 1 — two tile fetches in flight (commit 82608b4)
+
+The routed prefill loop awaited each tile's expert fetch in the expression that
+issued it, so between one tile's reads landing and the next tile's reads
+starting the drive idled through the host's plan → encode → commit step.
+`SHRIKE_PREFILL_FETCH_DEPTH=2` (the new default; `=1` the A/B) plans tile N+1
+avoiding tile N's slots and the held ones, begins its fetch, then awaits N;
+the next iteration awaits N+1 and begins N+2. Scheduling only: which slot an
+expert lands in and when, never its bytes — golden identical on both boxes,
+both profiles, at both knob values (measured).
+
+**What the drive sees.** The drafter's reading, verified in the C reader:
+`submit_batch` (`Sources/ShrikeKernelsC/expert_io.c`) publishes one batch at a
+time — a second caller parks on `batch_idle` until the first batch completes
+and clears its pointers, and the parked caller is an `ExpertIOScheduler`
+worker, not the runner. So two fetches in flight closes the inter-tile gap
+(the next batch is already parked when the current clears) and does **not**
+raise queue depth: bytes in flight stay capped at four experts, and after T0
+a tile carries only 3.3–3.9 misses on the mean. The reader's thread count is
+therefore not a lever until two batches can be published at once (T2 below).
+
+Measured on the mini, one binary (the knob as the A/B), a fresh server per
+pair, the warm arm after `settle_done`; 300 and 1k are paired means of two
+runs in opposite orders (repeats agree to 11–66 ms, hit counts identical run to
+run):
+
+| shape | depth 1 warm wall (hits) | depth 2 warm wall (hits) | Δ wall | `routed→routed` host | `io_fetch_ms × 8` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 305 new tokens | 3.777 s (58.6 %) | **3.683 s (58.4 %)** | **−2.5 %** | 806 → 745 ms | 1,863 → 3,274 |
+| 1,085 | 6.786 (51.6 %) | **6.667 (51.6 %)** | **−1.8 %** | 836 → 733 | 2,485 → 4,466 |
+| 2,125 (one run) | 10.676 (50.4 %) | 10.451 (50.4 %) | −2.1 % | 371 → 184 | 2,680 → 4,488 |
+| turn 2 on the 2k context (38 new) | 1.663 (62.5 %) | 1.656 (62.5 %) | −0.4 % | 277 → 230 | |
+| turn 3 (36 new) | 1.466 (86.3 %) | 1.344 (86.3 %) | −8 %, one run per arm | 18 → 4 | |
+| 12k, first request after launch | 68.342 (33.6 %) | 68.346 (33.6 %) | 0 | 73 → 33 | hits 9,546 → 9,540 |
+
+Routed GPU and tile counts unmoved (1,413 / 2,517 / 3,907 ms; 982 / 1,147 /
+1,188). Cold first requests are not verdict rows (the lazy model load sits
+inside them).
+
+**Three readings.** (1) The mechanism works as built: the fetch counter
+doubles because the parked batch's wait is now counted inside the fetch, the
+host term between tiles falls, and the wall falls by about the same amount.
+The pre-registered inversion read — `host_ms` ÷ routed tiles, which a
+batch-order inversion would raise — fell instead: 0.85 → 0.78 ms per tile at
+300, 0.74 → 0.64 at 1k; no inversion signal. (2) The eight extra held slots
+cost nothing measurable — hits −18 / −4 / −4 at 300 / 1k / 2k and −6 at 12k
+against a modelled −349 / −360 / −363; the
+`d·P/(2−d)` model's sensitivity to the readable window is wrong by an order of
+magnitude and is retired for slot budgeting. (3) The gap the lever closes was
+worth 61 / 103 ms per request at 300 / 1k (paired host deltas) and ≈ 190 ms
+at 2k, not the modelled Σc ≈ 700–850 ms: P16's 0.72 ms per tile was an upper bound, and most of the
+host's per-tile work already overlapped the drive through the GPU bank. The
+drive's own time is the floor. Under depth 2 the routed stage at 300 tokens is
+GPU 1,417 + gap 864 ≈ 2.28 s for 5.6 GB ≈ 2.5 GB/s effective, below the
+probe's 3.6 GB/s because a tile's 3–4 misses fill at most four reader threads
+for one wave and the batch ends at its slowest read. **The remaining fetch
+term lives in overlapping batches** — the C reader's one-batch predicate plus
+the thread count, T2 — worth up to ≈ 0.4–0.7 s at 300 tokens if the effective
+rate reaches the probe's 3.0–3.6. The draft's model against the measured
+routed stage (GPU + `routed→routed` total, first runs, ms), for the record:
+
+| shape | modelled stage, depth 2 (case a) | measured, depth 1 | measured, depth 2 |
+| --- | ---: | ---: | ---: |
+| 305 | 2,016 | 2,336 | 2,281 |
+| 1,085 | 2,685 | 3,461 | 3,355 |
+| 2,125 | 3,911 | 4,388 | 4,150 |
+
+The model expected the whole Σc to come out of the stage; a tenth of it did.
+
+**The rule, retracted and replaced.** The task pre-registered a 5 % bar on the
+300 and 1k walls. It was the controller's inherited default (Task 0's number,
+copied into the drafter brief, justified after the fact by the draft's model
+of a 7–8 % gain), never derived from the noise floor or the change's cost.
+Davor's ruling at the verdict (2026-09-04): the chapter has no size floor —
+ten real 1 % wins are a 10 % chapter — and a default flips when the effect is
+**real** (paired, both orders, above drift) and **free** (no control row
+regresses, golden identical). Task 1 is both. Recorded here so the bar is not
+read as quietly dropped; the Method section carries the rule forward.
+
+**After T1** (commit 82608b4, 2026-09-04; `SHRIKE_PREFILL_FETCH_DEPTH=2` the
+default, `=1` the A/B; mini, warm arms, server walls):
+
+| shape | warm wall | prefill hit rate | experts fetched |
+| --- | ---: | ---: | ---: |
+| 305 new tokens | 3.68 s | 58.4 % | 3,218 (5.6 GB) |
+| 1,085 | 6.67 | 51.6 % | 4,387 (7.6 GB) |
+| 2,125 | 10.45 | 50.4 % | 4,643 (8.0 GB) |
+| turn 2 (38 new on a 2k context) | 1.66 | 62.5 % | |
+| turn 3 (36 new) | 1.34 | 86.3 % | |
+| 12k, first request after launch | 68.35 | 33.6 % | 18,864 |
+
+Same binary, `=1`: 3.78 / 6.79 / 10.68 s, turn 2 1.66, turn 3 1.47. Golden
+identical on both boxes and both profiles at both values. Scope: measured on a
+launch without an MTP sidecar; the knob clamps to 2 (a deeper lookahead needs a
+FIFO of in-flight operations and, with one batch published at a time, is
+modelled at ≈ 0.8 % — deferred with T2). **The two loop paths are not the same
+loop:** the original at `=1` runs the scheduler's `decide` and its
+commit-before-append valve; the lookahead at `=2` runs neither — its bootstrap
+re-plans after draining one pending batch and throws `expertCacheUnplaceable`
+if the cache still has no room, which `fitting`'s budget makes unreachable at
+128 slots (at most three batches plus one in-flight tile are held when a plan
+is attempted, leaving 96 free for an 8-expert plan). The task review's
+judgment: collapse them into one loop as a follow-on before the chapter merges
+to main, in its own commit with its own golden pair, and first if any task
+edits the loop before then; the begin/await/drain sequencing is factored into a
+host-testable decision with it (today it lives only in the runner, covered by
+golden).
+
 ## Levers, ranked for these shapes (modelled from step zero)
 
 - **First-chunk hit rate — LANDED as Task 0** (`SHRIKE_PREFILL_SWEEP=carry`):
   −1.7 / −1.2 / −0.4 s at 300 / 1k / 2k, neutral after a long answer. What is
   left of the intercept after it: ≈ 3.4 s at 300 tokens (3,200 misses, 5.6 GB)
   — bytes per expert and the pool's size are the remaining levers on it.
-- **Bytes per expert** (the same term): the drive runs at ≈ 3 GB/s here (QD 4
-  inside a tile; 3.25 measured at QD4 in v10 P3); the reader's thread count as a
-  knob (QD 8 unmeasured); two fetches in flight helps this mean-bound regime.
+- **Bytes per expert** (the same term) — **two fetches in flight LANDED as
+  Task 1** (`SHRIKE_PREFILL_FETCH_DEPTH=2`): −2.5 / −1.8 / −2.1 % at 300 / 1k /
+  2k, the inter-tile gap closed, hits unmoved. The C reader publishes one batch
+  at a time (`submit_batch` parks a second caller on `batch_idle`), so queue
+  depth did not rise: the drive runs at ≈ 2.5 GB/s effective here because a
+  tile's 3–4 misses fill at most four threads for one wave. **T2, not
+  scheduled:** publish two batches at once in `expert_io.c` and raise the
+  reader's threads with it, so tiles N and N+1 read concurrently (the peer's
+  probes: 3.6 GB/s at four experts in flight, 3.8 at eight — a +5–6 % pair,
+  inside the probes' own run-to-run drift of 2.9–3.6 at four) — worth up to
+  ≈ 0.4–0.7 s at 300 tokens if the effective rate reaches 3.0–3.6; a deeper
+  lookahead rides on it (≈ 0.8 % alone).
 - **A small-row prefill path** for follow-up turns (≤ 64 new rows): the matrix
   kernels' per-dispatch floor costs 21–23 ms per new token over 40 layer-chunks;
   a decode-style or scalar path for tiny chunks could take ≈ 0.5–1 s off a
@@ -175,10 +292,18 @@ The v12 protocol carried over: mini-first verdicts (the M4 Pro is the check);
 one send per server lifetime for whole-chunk rows and `settle_done` before a
 warm second send; a distinct prompt per arm (no prompt a prefix of another);
 `SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1`; the gap split read before any gap
-is theorised about. Each task states its bars on this ledger's rows before it
-runs, lands its knob either way (a measured null is a result), and reports the
-same rows after. Scheduling-only changes are golden IDENTICAL on both boxes and
-both profiles; anything that reorders arithmetic is qualified as v12 did.
+is theorised about. Each task pre-registers its rule on this ledger's rows
+before it runs, lands its knob either way (a measured null is a result), and
+reports the same rows after. **The rule has no size floor** (Davor's ruling at
+Task 1: ten real 1 % wins are a 10 % chapter, and a floor drops every one of
+them). A default flips when the effect is **real** — the sign holds across
+paired runs in both orders and the delta exceeds the run-to-run drift, with
+more pairs for a smaller effect — and **free** — no control row regresses (the
+other shapes, the turns, the 12k control, hit rate, memory pressure) and golden
+is identical. A cost that does show is priced in the verdict, never hidden by a
+bar; the code a lever leaves behind is the review's judgment. Scheduling-only
+changes are golden IDENTICAL on both boxes and both profiles; anything that
+reorders arithmetic is qualified as v12 did.
 
 ## Numerics policy
 

@@ -18,7 +18,7 @@ the measured winner.
 routed GEMM, the two-tile pipeline, the alternating expert sweep, the prompt
 cache). Each task changes scheduling or policy behind a `SHRIKE_*` knob, is
 measured on the step-zero rig (a fresh server per pair, `settle_done` before a
-warm send), passes the five gates, and keeps golden identical unless it runs
+warm send), passes the four per-commit gates, and keeps golden identical unless it runs
 different kernels on a chunk.
 
 **Tech Stack:** Swift 6.3, Metal 4, swift-testing, the `SHRIKE_RUNNER_STATS` /
@@ -34,10 +34,13 @@ different kernels on a chunk.
   mini's server on 8081 is production. Restarts and deploy actions are
   approved; `tools/mini-deploy.sh` copies binaries + `*.bundle` directories by
   default and restarts the server only when passed `--restart`.
-- Five gates per code commit: release build with zero warnings; `swiftlint lint
+- Four gates per code commit: release build with zero warnings; `swiftlint lint
   --strict --baseline .swiftlint-baseline.json`; markdown link check;
-  `swift test --no-parallel`; the same under ThreadSanitizer with
-  `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt`.
+  `swift test --no-parallel`. The same suite under ThreadSanitizer
+  (`env TSAN_OPTIONS=suppressions=tsan-suppressions.txt`) runs **once per
+  chapter at its close**, before the merge to main (Davor's ruling at Task 1,
+  2026-09-04: ≈ 50 minutes per run, most of it kernel-reference suites with no
+  threads to check; a report found at close is fixed then).
 - Numerics: a scheduling or policy change is golden IDENTICAL on both boxes and
   both profiles (`tools/golden-baseline.sh --check`); a change that runs
   different kernels on a chunk follows v12's policy (2e-2 against the fp32
@@ -48,7 +51,9 @@ different kernels on a chunk.
   names as its risk (e.g. a long answer between requests); one send per server
   lifetime for whole-chunk rows, `settle_done` before a warm second send, a
   distinct prompt per arm. Rows appended to the design's ledger. The M4 Pro is
-  the check.
+  the check. **No size floor:** a task's rule tests only that the effect is
+  real (paired runs in both orders, above the run-to-run drift) and free (no
+  control row regresses, golden identical) — Davor's ruling at Task 1.
 - Comments: none unless a genuinely non-obvious why (repo rule).
 
 ## Tasks
@@ -375,7 +380,7 @@ different kernels on a chunk.
 
 ### Task 1: T1 — two tile fetches in flight
 
-- [ ] **T1: the routed prefill loop awaits each tile's fetch in the expression
+- [x] **T1: the routed prefill loop awaits each tile's fetch in the expression
   that issues it, so between one tile's reads landing and the next tile's reads
   starting the drive is idle for the host's whole plan → encode → commit step.**
   `PrefillStreamedTileBinding.fetchBindingForTile`
@@ -402,7 +407,30 @@ different kernels on a chunk.
   tiles = **707 / 826 / 855 ms** (P16's upper bound). Scheduling only. **The mini
   decides.**
 
-  **The decision rule, in two lines.** `SHRIKE_PREFILL_FETCH_DEPTH=<n>` (1…4,
+  **LANDED 82608b4 (2026-09-04): measured on the mini on one binary (the knob as the
+  A/B; the flip folded by amend), a fresh server per pair, `settle_done` before
+  the warm send; 300 and 1k as paired means of two runs in opposite orders:
+  warm walls 300 tokens 3.777 → 3.683 s (−2.5 %; hits 58.6 → 58.4 %, misses
+  3,200 → 3,218, `routed→routed` host 806 → 745 ms), 1k 6.786 → 6.667 (−1.8 %;
+  51.6 → 51.6, 4,383 → 4,387, 836 → 733), 2k 10.676 → 10.451 (−2.1 %; 50.4 →
+  50.4, 4,639 → 4,643, 371 → 184); turn 2 1.663 → 1.656, turn 3 1.466 → 1.344
+  (one run per arm; turn 2 hits 2,056 → 2,055, turn 3 identical); 12k control
+  68.342 → 68.346 s, hits 9,546
+  → 9,540; routed GPU and tile counts unmoved; golden IDENTICAL both boxes both
+  profiles at both values. `io_fetch_ms × 8` rose 1,863 → 3,274 / 2,485 → 4,466
+  / 2,680 → 4,488 — the parked batch's wait counted inside the fetch, the
+  predicted signature of the gap closing. The model's Σc ≈ 700–850 ms was wrong
+  by 8×: the exposed host gap was 61 / 103 ms at 300 / 1k (≈ 190 at 2k), and the
+  held slots cost no hits (modelled −349 / −360 / −363, measured −18 / −4 / −4).
+  The inversion read (`host_ms` ÷ routed tiles) fell 0.85 → 0.78 ms at 300 and
+  0.74 → 0.64 at 1k — no inversion signal.
+  The knob clamps to 2 (the loop looks exactly one tile ahead; arm C dropped by
+  ruling). The 5 % bar below is RETRACTED (an inherited default, never derived);
+  under the chapter's real-and-free rule the default is 2. The design doc's
+  Task 1 section carries the rows, the C-reader finding and T2.**
+
+  **The decision rule, in two lines (retracted at the verdict, see LANDED).**
+  `SHRIKE_PREFILL_FETCH_DEPTH=<n>` (1…4,
   parsed like `parsePrefillTileDepth`, `RealForwardRunner.swift:501-512`; 1 =
   today) lands either way, printed as `fetch=` beside `depth=` in the
   projection-path line's tile field (`prefillTileBatchDescription`, `:226-241`).
@@ -626,7 +654,7 @@ different kernels on a chunk.
 
   Steps:
 
-  - [ ] Step 1 (an implementer): the eight failing tests, then the config field
+  - [x] Step 1 (an implementer): the eight failing tests, then the config field
         and its budget arithmetic, the lookahead predicate, the knob and the
         `fetch=` field, and the loop restructure. `swift test --no-parallel
         --filter PrefillRoutedTileScheduler` and `--filter PrefillGroupedRoutedMoE`
@@ -635,10 +663,10 @@ different kernels on a chunk.
         `tools/check-md-links.py`; `swift test --no-parallel` — the **full**
         suite, since `fitting` now narrows small caches further; the same under
         TSAN).
-  - [ ] Step 2: `tools/golden-baseline.sh --check` on the M4 Pro — short and long
+  - [x] Step 2: `tools/golden-baseline.sh --check` on the M4 Pro — short and long
         **IDENTICAL**; a difference is a defect, never a recapture. Then
         `tools/mini-deploy.sh --restart` and the mini's golden check.
-  - [ ] Step 3 (the arms, controller-run, **one binary**,
+  - [x] Step 3 (the arms, controller-run, **one binary**,
         `SHRIKE_PREFILL_FETCH_DEPTH` as the A/B; `pgrep -fl
         'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI'` before every
         launch; a fresh server per pair, `settle_done` before the warm send, a
@@ -648,14 +676,14 @@ different kernels on a chunk.
         precedent) priced against eight more held slots; **D** the turns arm
         (`turn-rig.sh … turns`); **E** the 12k control
         (`tools/prefill-measure.sh macmini 8081 … t1-f<n>-mini-12k 6k`).
-  - [ ] Step 4 (the rule): apply it to the three warm walls; `2` becomes the
+  - [x] Step 4 (the rule): apply it to the three warm walls; `2` becomes the
         default with `=1` as the A/B, or the default stays 1. **Record the
         verdict either way**, with `host_ms` per boundary and `io_fetch_ms × 8`
         per arm — whether the gap closed, and whether the drive's busy time moved
-        inside the fetch measure. Then five gates on the landed tree, golden both
+        inside the fetch measure. Then the four per-commit gates on the landed tree, golden both
         boxes both profiles IDENTICAL, `tools/mini-deploy.sh --restart` and the
         mini golden check.
-  - [ ] Step 5: design doc — a "Task 1" section with the ΣF / Σc / stage table,
+  - [x] Step 5: design doc — a "Task 1" section with the ΣF / Σc / stage table,
         the arms' rows and an "**After T1**" ledger block; the "Bytes per expert"
         lever entry rewritten with the C reader finding (one batch published at a
         time, four threads, ≈ 3.3 misses per tile) and T2 named. Plan: Task 1
@@ -696,6 +724,12 @@ different kernels on a chunk.
 
 ## Follow-ons (not scheduled)
 
+- Collapse Task 1's two routed tile loops into one (the lookahead as a
+  predicate; the scheduler's `decide` and the commit-before-append valve
+  reconciled; the begin/await/drain sequencing factored into a host-testable
+  decision) — **before the chapter merges to main**, in its own commit with its
+  own golden pair, and first if any task edits `encodeRoutedMoEPrefill`'s loop
+  before then (Task 1 review).
 - The prompt cache's interior snapshots (a prompt that diverges inside a stored
   entry re-prefills in full; append-only turns are served).
 - v12's prefill kernel follow-ons stay in [v12-prefill-matrix-kernels.md](v12-prefill-matrix-kernels.md).
