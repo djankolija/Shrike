@@ -1116,6 +1116,383 @@ different kernels on a chunk.
   - **The mini is production.** Every arm stops the server on 8081 and relaunches
     it; Turbo on 8080 is never touched. One model process at a time.
 
+### Task 3: T3 — the follow-up turn below the matrix kernels' row minimum
+
+- [ ] **T3: a card's follow-up turn is 21 new tokens, and at 21 rows the chunk
+  falls off the matrix attention path, the matrix projection path and the matrix
+  shared expert onto the scalar ones — the same chunk costs 43.2 ms per attention
+  layer against 6.2 at 36 rows.** The design doc's lever entry reads the turn's
+  cost as "the matrix kernels' per-dispatch floor at tiny row counts, 21–23 ms per
+  new token over 40 layer-chunks" and prices "a decode-style or scalar path for
+  tiny chunks" at ≈ 0.5–1 s
+  ([v13-the-turn.md](v13-the-turn.md):390-393). **The sign is
+  backwards: the scalar path is what a small chunk gets today, and it is the
+  cost.** Three of the four thresholds are 32 rows, the fourth is 64, and a
+  21-token user turn is below all of them; a 36-token one is above three. The
+  lever is to keep the small chunk **on** the matrix kernels — they already
+  accept a partial row tile by masking, which every chunk whose length is not a
+  multiple of 64 already exercises — behind
+  `SHRIKE_PREFILL_MATRIX_MIN_ROWS=<n>` (32 = today; the default moves on the
+  verdict). Modelled at ≈ **0.60 s off a 1.50 s prefill and a 2.08 s wall** on
+  the mini's measured 21-row turn, after which the routed stage (591 ms, holding
+  831 misses / 1.47 GB) is 65 % of what is left — T4's term, not this one's.
+  **The mini decides.**
+
+  **Step zero — the follow-up shape at three row counts** (mini, d3efdeb, the
+  shipped defaults; a fresh server per chain, the answer chained live into the
+  next turn, `temperature: 0` so the chain repeats; logs
+  `~/.claude/handoffs/archive/shrike-v13-t0/t3-out/server-mini-t3-live-mini-turns-d512.log`
+  (A) and `…-d512-long.log` (B), also in the session scratchpad `t3-out/`;
+  `tools/turn-summary.py` prints the split, the `Shrike kernel role=` lines the
+  per-role GPU):
+
+  | request | new / cached | wall | `prefill_s` | prefill GPU | attn (10) | GDN (30) | shared (40) | routed GPU / tiles | hits / misses | `r→r` total (host) | `s→r` total (host) | source |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+  | tX (A), answered 219 tokens at 13.1 tok/s | 2,125 / 0 | 29.80 s | 10.970 | 9,616 | 1,322 | 3,905 | 373 | 3,930 / 1,187 | 0 / 9,370 | 581 (474) | 268 (244) | A:5-32 |
+  | **turn 2 (A)** | **21 / 2,345** | **2.077** | **1.500** | **1,244 (59 ms/tok)** | **432.1** | **335.8** | **66.4** | **408.5 / 339** | **1,737 / 831 (67.6 %)** | **76.5 (54.2)** | **106.4 (96.5)** | **A:40-66** |
+  | turn 3 (A) | 36 / 2,359 | 1.467 | 0.993 | 811 (22.5) | 61.7 | 186.1 | 22.5 | 539.0 / 443 | 2,673 / 724 (78.7 %) | 31.9 (13.2) | 70.4 (60.8) | A:74-100 |
+  | **turn 2 (B), user turn padded** | **55 / 2,345** | **1.804** | **1.222** | **955 (17.4)** | **71.2** | **215.9** | **22.9** | **642.7 / 515** | **2,546 / 1,428 (64.1 %)** | **140.0 (97.3)** | **93.8 (83.8)** | **B:40-66** |
+  | turn 3 (B) | 36 / 2,393 | 1.459 | 0.948 | 772 (21.4) | 61.7 | 186.4 | 22.3 | 500.1 / 413 | 2,524 / 647 (79.6 %) | 37.5 (19.1) | 59.5 (49.3) | B:74-100 |
+
+  **The discriminating row is B's turn 2: 2.6× the tokens of A's turn 2 and 0.27 s
+  faster.** Per layer the regime is unmistakable — attention **43.21** ms/layer at
+  21 rows against **6.17** at 36 and **7.12** at 55; GDN **11.19** against 6.20 /
+  7.20; the shared expert **1.660** ms/call against 0.561 / 0.573. The two
+  independent 36-row rows agree to ≤ 0.03 ms/layer, so the 21-row row is not
+  drift. **The routed GEMM does not switch**: 1.205 ms/tile at 21 rows against
+  1.211–1.217 at 36 and 1.248 at 55 — flat, because its gate reads the
+  *configured* chunk, not the rows (below).
+
+  **The four thresholds, verified in the tree.** Every gate is a bare literal 32
+  (the GDN scan's is 64); none has a knob today.
+
+  | # | stage (layers) | gate | site | takes 21 rows today? | this task |
+  | --- | --- | --- | --- | --- | --- |
+  | 1 | q / kv / o projections (40) | `tokenCount >= 32` → the MPP matrix dispatch; else `selectedDispatch`, `chunkTokens >= 32`, → `PrefillInt4QMM`; else **one GEMV per row** | `RealForwardRunner.swift:3827`; `:113-126` (`:116`); the loop `:3895-3896` | **yes, masked** — the MPP body declares the activation tensor with extent `M` (`tensorops.metal:182-186`) and bounds its stores by `globalM < rowEnd` (`:239-247`); `tileM = 64` (`MPPPrefillInt4QMM.swift:25`) and `encode` requires only `m > 0` (`:193-207`), so a 64-row tile holding 13 or 49 valid rows is what **every** chunk whose length is not a multiple of 64 already pays | **lowers** |
+  | 2 | full attention (10) | `queryCount >= matrixPathMinimumQueries` | `PrefillAttention.swift:293`, used at `:308` in `matrixPathAccepts`, gate at `:160-161` | **yes, masked** — `if (q0 >= p.queryCount) return;` and `queries_valid = min(Rq, queryCount − q0)` (`attention_matrix.metal:297-298`); `Rq = 2` for `g2k256d` (`:447`), so every odd-length chunk already runs a half tile | **lowers** |
+  | 3 | shared expert (40) | `queryCount >= matrixPathMinimumRows`, and `encodeChunk` throws `chunkTooShort` below it | `PrefillSharedExpert.swift:15`, `:33`, `:114-116` | **yes** — its three projections go straight to `mpp.encode` (`:159-180`), threshold 1's kernel and masking | **lowers** |
+  | 4 | routed experts (40) | `chunkTokens > matrixPathMinimumRows` on the **configured** chunk | `PrefillGroupedRoutedMoE.swift:735`; `PrefillChunkScratch.swift:124-130`; `RealForwardRunner.swift:5698` | **already on the matrix path at 21 rows** — the predicate reads the scratch layout's configured chunk (4,096 in production, `RuntimeConfiguration.swift:308`), not the rows the chunk carries; the strict `>` exists to keep the **32-token MTP draft scratch** off the matrix path for its hard memory budget (`PrefillChunkScratch.swift:124-127`), not to gate a short chunk. Measured above: 1.205 ms/tile at 21 rows | **untouched** |
+  | 5 | GDN delta scan (30) | `t >= GDN.chunkTokens` (64) | `GDN.swift:417`; `RealForwardRunner.swift:4076-4077` | **yes, by padding** — the chunked kernel computes `paddedRows = chunkCount × 64` and zeroes the pad rows itself (`GDN.swift:451-453`, `:471-472`), and the factors scratch is sized from the configured 4,096-token chunk (`PrefillChunkScratch.swift:68-73`), so it exists at any row count | **untouched, priced below** |
+
+  **What the rows attribute to which threshold.** Fit the two matrix-path rows
+  (36 and 55) per layer and read the intercept as the row-independent part:
+  attention 4.37 + 0.0500·rows, GDN 4.32 + 0.0524·rows, shared 0.534 +
+  0.00071·rows (all ms). At 21 rows that predicts **5.42 / 5.42 / 0.549** against
+  the measured **43.21 / 11.19 / 1.660**. A GDN layer has no attention kernel and
+  its scan does not switch, so its whole **+5.77 ms/layer** is the projections;
+  an attention layer's projections carry 0.77× a GDN layer's weight (0.055
+  against 0.0717 GFLOP/token/layer,
+  [v12-prefill-matrix-kernels.md](v12-prefill-matrix-kernels.md):32-35),
+  so ≈ 4.4 of its **+37.79** is projections and ≈ **33.4 ms/layer is the
+  attention kernel itself**. The split of the 596 ms: **attention kernel 334 ms,
+  projections 218 ms (44 in the attention layers, 174 in the GDN ones), shared
+  expert 44 ms.**
+
+  **Threshold 5 is not the lever, and the rows say so.** The GDN role's whole
+  row-proportional term is 0.0524 ms/row/layer, an upper bound on the serial
+  scan's share of it: **≤ 33 ms at 21 rows** and ≤ 86 at 55, against the ≈ 174 ms
+  its *projections* cost at 21. A free chunked scan below 64 rows would buy ≤ 33
+  ms and would change the numerics of every 32–63-row chunk on top. Priced,
+  recorded as a follow-on, not taken. Threshold 4 is not taken either: lowering
+  it would size `routedExpertStagingRows` on the 32-token MTP scratch and raise
+  the draft path's hard memory budget for no measured gain (the routed GEMM is
+  already flat per tile at 21 rows).
+
+  **The knob.** `SHRIKE_PREFILL_MATRIX_MIN_ROWS=<n>`, parsed beside
+  `environmentPrefillTailTile` (`RealForwardRunner.swift:484-490`) in the shape of
+  `parsePrefillFetchDepth` (`:529-545`), **clamped 3…32**, default 32 at land.
+  Thresholds 1–3 read it; nothing else does. Never above 32: raising it would push
+  chunks *off* the paths golden was captured with, which is a different change.
+  **Why the floor is 3, not 1:** the MTP verify pair prefills exactly two rows with
+  `useTwoRowProjection: true` (`RealForwardRunner.swift:1444-1466`, `:3847-3849`),
+  and the prompt cache's settle re-prefilled **two** rows on every measured turn
+  (`settled 2345 − rewind 2343`, A:31; `settleLiveRegion`,
+  `ServerInference.swift:1479-1540`). A floor of 3 leaves both on today's kernels
+  exactly, so neither the speculative path nor the cache's rewrite becomes a
+  numerics change. Printed as `prefill_matrix_min_rows=<n>` on the residency line
+  (`ServerInference.swift:821-824`) through a static description, asserted in a
+  host test as `prefillTileDepthDescription` is
+  (`PrefillRoutedTileSchedulerTests.swift:320-327`).
+
+  **Candidate values and the crossover.** **32** (today, the A/B), **16**, **8**,
+  **4**. n = 16 is the value that takes the 21-row turn onto the matrix paths
+  while leaving the golden `short` profile (≈ 12 rows) and the two-row settle
+  alone — golden IDENTICAL, no recapture. Lower values probe the crossover: the
+  tiled attention kernel dispatches `queryCount × numQHeads` threadgroups each
+  walking the whole KV (`PrefillAttention.swift:222-231`), so it is linear in
+  rows — 33.4 ms/layer at 21 rows = **1.59 ms per row per layer** — against the
+  matrix path's row-independent **4.37 ms/layer**, putting the crossover at
+  ≈ **2.7 rows** on a 2.3k KV (modelled; both terms scale with `kvValidCount`, so
+  it is roughly KV-independent). Cells C and D measure it.
+
+  **The decision rule, under the chapter's real-and-free rule**
+  ([v13-the-turn.md](v13-the-turn.md):401-418). The knob lands
+  either way. **No percentage bar.** The default moves to the best measured n only
+  if the effect is **real** — the 21-row turn-2 wall improves with the sign
+  holding across **paired runs in both orders**, three pairs at the leading
+  candidate against n = 32, a fourth if a shape sits inside twice its drift. The
+  drift on this rig: the two independently-run 36-row rows read 1.467 / 1.459 s,
+  the three archived post-T0 turn-2 rows repeat within 42 ms, and turn 3 spreads
+  122 ms across five archived rows; the modelled effect is ≈ 600 ms, 5–15× that.
+  And **free**: no control row regresses. Those rows are the **36-row turn 3 and
+  the 55-row turn 2 unmoved and their completions byte-identical** (both above
+  every candidate n — if either moves, the gate engaged where it must not), the
+  300 / 1k / 2k warm walls and completions **byte-identical**, the 12k control
+  ± 1 % with `expert_hits_prefill` ≥ 9,070, `expert_hit_rate_prefill` on the
+  engaging turn **unmoved** (this task changes no plan and fetches no expert
+  differently, so a move is a defect, not a cost), `decode_tok_s` on the
+  long-decode arm not regressed, `memory_pressure -Q` acceptable before every
+  launch, and the numerics qualification below passed with golden recaptured only
+  where the policy says. Otherwise the default stays 32 and the rows are recorded
+  (P8's precedent); a measured null is a result.
+
+  **Numerics — exactly what moves.** This runs different kernels on a chunk, so
+  v12's policy applies: the **2e-2** bar against the reference and golden
+  recaptured once per box with before/after digests in the verdict
+  ([v13-the-turn.md](v13-the-turn.md):420-426). **Changes:** every
+  chunk of n…31 rows — the follow-up turn and short tool round (the target), the
+  tail chunk of any prompt whose length mod 4,096 lands in [n, 31], the prompt
+  cache's settle re-prefill if its remainder lands there (2 rows measured, so
+  **not** at n ≥ 3), and golden `short` if its chunk is ≥ n. **Unchanged and
+  byte-identical:** the 305 / 1,085 / 2,125 first turns, 6,381 (4,096 + 2,285),
+  12k (4,096 + 4,096 + 4,093), turn 3 at 36, turn 2 at 55, golden `long` (≈ 2k in
+  one chunk), decode, the MTP verify pair at 2 rows, and the routed GEMM at every
+  size. **Golden `short` is a 51-byte prompt** run through `ShrikeCLI` with no
+  chat template (`tools/golden-baseline.sh:47`, `:81`, `:92-93`) — ≈ 12 rows,
+  **modelled, not measured**: Step 1 reads the real count off a non-`--quiet` run
+  before any n is chosen, and if it is ≥ n then `short` **will** move and is
+  recaptured with digests. A `long`-profile difference is a defect, never a
+  recapture. **One gap named, not discovered:** golden never exercises the
+  settle, because it runs the CLI and not the server — the settle's check is the
+  rig's byte-diff of the turn chain plus the `settled − rewind` remainder read
+  per arm.
+
+  **The qualification, extended to sub-32 rows.** Three existing suites already
+  compare these kernels against a reference; each gains small-row cases.
+  `PrefillAttentionMatrixTests.swift` holds an fp32 CPU reference with
+  `tolerance = 2e-2` on `RelError.maxAbsDiff` and `RelError.compute` (`:13`,
+  `:58-71`) over chunks 64 / 130 / 40 and 96 / 64 / 130 / 37 / 64 (`:16-27`),
+  **none below 32** — and **the trap**: `run` calls `encodeCausal(…, path:)`
+  (`:348-353`), which re-tests `matrixPathAccepts`, so a sub-32 case added
+  naively runs the *tiled* kernel and passes vacuously; the new cases must pass
+  the lowered minimum through and assert the gate accepted, and
+  `gateAcceptsOnlyTheMatrixShape`'s `queryCount = 8` rejection (`:250-252`)
+  becomes "rejected at 32, accepted at 8". `MPPPrefillInt4QMMTests.swift` has
+  `cpuReference` (`:104-137`) with the same bars (`:212-218`) over `variantShapes`
+  m = 64 / 33 / 128 (`:223-227`) — add m = 21 and m = 3.
+  `PrefillSharedExpertTests.swift`'s
+  `matrixPathSelectionRequiresAvailableMatchingMPP` (`:230-245`) uses `rows - 1`
+  as its reject case and takes the minimum as a parameter.
+
+  **The expected gain, modelled from the fits above.** Holding the routed stage
+  and every gap at their measured values:
+
+  | term (turn 2, 21 rows) | today | modelled at n ≤ 21 | source |
+  | --- | ---: | ---: | --- |
+  | attention role GPU (10) | 432.1 | 54.2 | A:42; fit |
+  | GDN role GPU (30) | 335.8 | 162.6 | A:44; fit |
+  | shared expert GPU (40) | 66.4 | 22.0 | A:47; fit |
+  | routed tile GPU (339) | 408.5 | 408.5 | A:43, untouched |
+  | `prefill_moe_reduce` (40) | 0.9 | 0.9 | A:53 |
+  | **prefill GPU** | **1,243.7** | **648.2** | sum |
+  | gaps (`r→r` 76.5, `s→r` 106.4, reduce→gdn 37.9, reduce→attn 11.4, routed→reduce 14.5) | 246.7 | 246.7 | A:57-62 |
+  | remainder (chunk setup) | 9.6 | 9.6 | `prefill_s` − the above |
+  | **`prefill_s`** | **1,500** | **≈ 905** | A:40 |
+  | **server wall** | **2.077 s** | **≈ 1.48 s** | A:66 |
+
+  **Then max(GPU, fetch), and the GPU still wins.** 831 misses × 1,769,472 bytes
+  = **1.470 GB**; at T2's realized 3.08 GB/s and the peer's mini probes' 3.57
+  GB/s that is **0.41–0.48 s** of drive
+  ([v13-implementation-plan.md](v13-implementation-plan.md):742-745).
+  All of it lives inside the routed stage (the speculative prefetch is off by
+  default, and no cross-stage prefetch runs), and that stage measures **591.4 ms**
+  — GPU 408.5 + `r→r` 76.5 + `s→r` 106.4 — which already covers it. So
+  max(648.2 GPU, ≈ 450 fetch) is the GPU, the cut reaches the wall, and the
+  optimistic variant is only that the `r→r` / `s→r` host terms shrink with the GPU
+  as they do between the 21- and 36-row rows (183 → 102 ms), taking the wall
+  toward ≈ **1.40 s**. **Cross-check:** the modelled 21-row turn (905 ms prefill,
+  1.48 s wall, 831 misses) sits between the two measured matrix-path rows — 36
+  rows at 948–993 ms / 1.459–1.467 s with 647–724 misses, and 55 rows at 1,222 ms
+  / 1.804 s with 1,428. A 21-row turn should cost no more than a 36-row one;
+  today it costs 42 % more. **What is left afterwards** is the routed stage,
+  ≈ 591 of ≈ 905 ms (**65 %**), holding 831 misses at 67.6 % hits against turn
+  3's 78.7–79.6 % on a nearly identical context — T4's term, not this one's.
+
+  **The rig.** The live-answer phase moves under `tools/`: `turn-rig.sh` gains
+  **`turns-live [answer_max_tokens]`** (the session's `t3-turns-live.sh` is the
+  prototype) — tX with the answer budget, `wait_settle 1`; turn 2 built from tX's
+  **actual response content** plus the last user message of `tXturn2.json`,
+  `max_tokens` 8, `wait_settle 2`; turn 3 built the same way from turn 2. **The
+  built payloads are written beside the responses in `<outdir>`, and a
+  `REUSE=<dir>` env sends the stored ones instead of rebuilding** — mandatory,
+  not a convenience: once the path engages, arm B's turn-2 completion differs from
+  arm A's, so a rebuilt turn 3 would send different bytes and the pair would not
+  be an A/B. (tX is unaffected by the knob at 2,125 rows, so turn 2's payload is
+  safe to rebuild.) A `USER_TURN2=<payload>` override selects the user turn and
+  therefore the row count — that is how the 55-row row above was produced.
+  **Rows** exactly as `t2-rows.py` reads them
+  (wall, `prefill_s`, new, hits / misses / rate, `expert_read_mib`,
+  `io_fetch_ms × 8`, routed tile GPU and count, `r→r` total / host / queue /
+  count, `s→r` host, busy / span, `decode_s` / `decode_tok_s` / completion) **plus
+  the `prefill_attn_router` / `prefill_gdn_router` / `prefill_shared_expert` /
+  `prefill_moe_reduce` role GPU** and the `settled` / `rewind` pair per request.
+  No new counter. **The `suffix` phase must not be used for threshold edges:**
+  `turn-prompts.py` inserts entries *before* the trailing "Summarize:" line
+  (`tools/turn-prompts.py:23-33`), so `tXp4` / `tXp16` diverge inside the stored
+  entry and re-prefill in full — `settle_reset reason=no_prefix_snapshot`,
+  `cached=0`, `new=2385` and `new=3165` at
+  `~/.claude/handoffs/archive/shrike-v13-t0/server-mini-turn-suffix.log:64-65`,
+  `:97-98`. The turns chain appends correctly (`settle_restore`, `cached=2345`).
+
+  **Tests (RED first, host-only unless noted).**
+  - `matrixPathAcceptsHonoursALoweredMinimum` — `PrefillAttention.matrixPathAccepts`
+    as a pure function: `queryCount = 21` rejected at 32, accepted at 16, rejected
+    at 22; every other clause of the gate (`:299-310`) still rejecting at the
+    lowered minimum.
+  - `sharedExpertMatrixPathHonoursALoweredMinimum` — the same for
+    `PrefillSharedExpert.matrixPath`, plus `encodeChunk` no longer throwing
+    `chunkTooShort` at a row count the lowered minimum admits.
+  - `projectionDispatchPolicyHonoursALoweredMinimum` — `selectedDispatch` as a
+    pure function over (family, chunkTokens, minimumRows): below the minimum
+    every family is `.repeatedGEMV`; at or above it `.kv` / `.o` are `.qmm` and
+    `.q` stays `.repeatedGEMV`.
+  - `parsePrefillMatrixMinRowsClampsToTheSupportedRange` — unset → 32, `"16"` →
+    16, `"0"` / `"2"` → 3, `"99"` → 32, garbage → 32 (mirroring
+    `parsePrefillFetchDepth`'s test shape).
+  - `prefillMatrixMinRowsDescriptionReportsTheThreshold` — the printed field,
+    through the static description.
+  - **Device, numerics:** the three suites above extended —
+    `matrixMatchesReferenceOnFP16Cache` and
+    `matrixMatchesTiledOnQuantizedCache` gaining chunks **21** and **3** with the
+    minimum passed through and the gate asserted; `MPPPrefillInt4QMM` gaining
+    m = 21 and m = 3 against `cpuReference`; the shared expert's chunk path at 21
+    rows against its own `encodeBlock` reference. `RelError.maxAbsDiff` and
+    `RelError.compute` ≤ 2e-2 on all of them.
+
+  **Files.** `sources/Shrike/Kernels/Attention/PrefillAttention.swift`:
+  `matrixPathAccepts` and `encodeCausal` gain a defaulted `minimumQueries:`
+  (default `matrixPathMinimumQueries`, which stays 32).
+  `sources/Shrike/Kernels/Prefill/MoE/PrefillSharedExpert.swift`: `matrixPath` and
+  `encodeChunk` gain a defaulted `minimumRows:`.
+  `sources/Shrike/Runtime/Inference/RealForwardRunner.swift`: the parser and its
+  default (`:484-490`), `PrefillProjectionDispatchPolicy.selectedDispatch`
+  (`:113-126`), the inline gate in `encodeAffineProjection` (`:3827`), the
+  attention call site in `encodeFullAttentionPrefill` (`:4401-4620`), the shared
+  expert's at `:5039-5044`, and the printed description beside
+  `prefillProjectionPath` (`:194-198`). `sources/ShrikeServer/Core/ServerInference.swift`:
+  the new field on the residency line (`:821-824`). `tools/turn-rig.sh` and
+  `tools/turn-prompts.py`: the `turns-live` phase and its payload reuse. Tests:
+  the five files above. **Lint:** `encodeFullAttentionPrefill` is in
+  `.swiftlint-baseline.json` at "currently spans 203 lines"
+  (`RealForwardRunner.swift:4401`) — the reason string embeds the count, so any
+  edit to that body makes the entry stale and the baseline must be regenerated
+  (T0, T1 and T2 each hit this on a different function). `encodeAffineProjection`
+  is 91 lines and not in the baseline; keep it there.
+  **Unchanged:** every `.metal` file and every kernel body; `PrefillGroupedRoutedMoE`,
+  `PrefillRoutedTileScheduler` and **both routed tile loops** — so the Task 1
+  collapse follow-on is *not* forced by this task and the baseline entry for
+  `encodeRoutedMoEPrefill` ("currently spans 244 lines", `:5203`) stays valid;
+  `GDN`; `PrefillChunkScratch`; `PreadExpertStreamer`; `expert_io.c`; the prompt
+  cache; decode; `PrefillInt4QMM` (the `selectedDispatch` fallback is unreachable
+  on both boxes today — both print
+  `prefill_projection_path=affine-threadgroup-f16`, A:3 — so it is covered by the
+  host test only).
+
+  Steps:
+
+  - [ ] Step 1 (controller, **no code**, the two facts the design needs before an
+        implementer starts): `pgrep -fl
+        'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI'` and
+        `memory_pressure -Q` first. (a) The golden `short` profile's real chunk
+        rows, from one non-`--quiet` `ShrikeCLI` run of `SHORT_PROMPT` on the M4
+        Pro — the ≈ 12 above is modelled, and it decides whether `short` is
+        recaptured. (b) The settle remainder (`settled` − `rewind`) across the
+        archived turn logs, confirming the 2 rows the measured chain shows is the
+        shape and not a coincidence. Neither is a model run on the mini.
+  - [ ] Step 2 (an implementer): the `turns-live` phase and its payload reuse in
+        `tools/turn-rig.sh` first — every later task on this shape needs it — then
+        the failing tests, then the parser, the three thresholds' parameters, the
+        printed field. `swift test --no-parallel --filter PrefillAttentionMatrix`,
+        `--filter MPPPrefillInt4QMM`, `--filter PrefillSharedExpert` → FAIL then
+        PASS. The four per-commit gates (release build, 0 warnings; `swiftlint
+        lint --strict --baseline`, **regenerating it** for
+        `encodeFullAttentionPrefill`; `tools/check-md-links.py`; `swift test
+        --no-parallel`, the **full** suite).
+  - [ ] Step 3 (numerics qualification): on the M4 Pro, `tools/golden-baseline.sh
+        --check` at `SHRIKE_PREFILL_MATRIX_MIN_ROWS=32` — short and long
+        **IDENTICAL**, proving the knob at today's value is today's build. Then at
+        each candidate n: **long IDENTICAL** always; **short** identical while
+        n > its measured rows, expected to differ once n ≤ them — recapture once,
+        digests before and after kept for the verdict. Then `tools/mini-deploy.sh
+        --restart` and the same pair on the mini. A long-profile difference is a
+        defect, never a recapture.
+  - [ ] Step 4 (the arms, controller-run, **one binary**, the knob as the A/B
+        through the rig's `SERVER_ENV`; a fresh server per phase, `settle_done`
+        before each send, a distinct tag per cell / arm / order, `REUSE` set on
+        every arm after the first): **A** n = 32 and **B** n = 16 via `turns-live`,
+        **paired in both orders, three pairs**; **C** n = 8 and **D** n = 4, one
+        pair each, for the crossover; **E** the 55-row control (`USER_TURN2` the
+        padded turn) at A and the winner, completions diffed byte for byte; **F**
+        the whole-chunk controls `pair 300|1k|2k` at A and the winner, completions
+        diffed byte for byte; **G** the 12k control (`tools/prefill-measure.sh
+        macmini 8081 … 6k`); **H** the long-decode arm (`MAX_TOKENS=512`) at A and
+        the winner for `decode_tok_s`. Read the **per-role GPU split**, not the
+        wall alone: if the attention and GDN roles do not fall at B, the model is
+        wrong and the task stops before the rule is applied.
+  - [ ] Step 5 (the rule): apply it to the 21-row turn-2 wall and every control
+        row. The default moves to the winning n, or stays 32. **Record the verdict
+        either way**, with the per-role split per arm and the crossover the C / D
+        cells show, so the reader can see which threshold paid. Then the four
+        per-commit gates on the landed tree, golden both boxes both profiles (long
+        IDENTICAL, short at the recaptured digests where the policy said so),
+        `tools/mini-deploy.sh --restart` and the mini golden check.
+  - [ ] Step 6: design doc — a "Task 3" section with the three-row-count table,
+        the four thresholds, the per-role attribution and an "**After T3**" ledger
+        block; the "A small-row prefill path" lever entry
+        ([v13-the-turn.md](v13-the-turn.md):390-393) rewritten with
+        the sign corrected and the measured mechanism; the GDN chunked scan below
+        64 rows and the routed gate's MTP memory constraint added to Follow-ons.
+        Plan: Task 3 `[x]` with the landed paragraph. Task review by a fresh
+        reviewer; fixes folded into the owning commit.
+
+  **Risks and what falsifies the model.**
+  - **The attention kernel is not the term.** The 334 ms attributed to it rests on
+    one modelled step: that an attention layer's scalar projections cost 0.77× a
+    GDN layer's, scaled by v12's per-layer GFLOP table. If arm B's **GDN** role
+    falls to ≈ 163 ms but its **attention** role does not fall to ≈ 54, the split
+    is wrong and the remaining term is the attention kernel's occupancy at 11
+    threadgroups (`queryCount / 2 × 2` KV heads), not its path — which no
+    threshold reaches and which would retire T3 with the projections' ≈ 218 ms
+    banked.
+  - **The scalar path is faster at some row count.** The crossover is modelled at
+    ≈ 2.7 rows from a two-point fit, so cells C and D exist to measure it. If
+    n = 4 is worse than n = 8, the clamp's floor of 3 is decoration and the
+    verdict records the measured knee.
+  - **The gate engages where it must not.** A prompt whose length mod 4,096 lands
+    in [n, 31] has a tail chunk that engages — a real widening of the blast
+    radius, named here rather than discovered. The 12k (4,093) and 6k (2,285)
+    controls do not have such a tail; the byte-diff of the 300 / 1k / 2k
+    completions and the 36- and 55-row turns is the check. The conservative
+    variant, if a control moves, is to gate on the request's uncached token count
+    rather than the chunk's rows, at the cost of leaving a long prompt's tail
+    chunk on the scalar path.
+  - **The settle changes and nothing catches it.** Golden runs the CLI, which
+    never settles, so a settle whose remainder lands in [n, 31] changes the stored
+    KV and therefore the *next* turn's output with no golden signal. The floor of
+    3 keeps the measured 2-row settle exact; the rig's byte-diff of the turn chain
+    and the `settled − rewind` row per arm are the only other checks, and they are
+    named as the coverage, not assumed.
+  - **Numerics drift beyond 2e-2 at small rows.** The device tests are the stop
+    before the arms. The masking is already exercised in production — a
+    2,125-token chunk's last projection tile carries 13 valid rows of 64, and
+    every odd chunk runs a half attention tile — so a failure at 21 rows would be
+    a bug in the *gate*, not a tolerance question.
+  - **`expert_hit_rate_prefill` moves on the engaging turn.** This task changes no
+    plan and fetches no expert differently; a move is a defect (a changed tile
+    composition or sweep parity), and the verdict does not proceed.
+  - **The mini is production.** Every arm stops the server on 8081 and relaunches
+    it; Turbo on 8080 is never touched. One model process at a time.
+
 ## Follow-ons (not scheduled)
 
 - The expert reader's publication signals `min(count, threads)` workers instead
