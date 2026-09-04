@@ -257,6 +257,118 @@ edits the loop before then; the begin/await/drain sequencing is factored into a
 host-testable decision with it (today it lives only in the runner, covered by
 golden).
 
+## Task 2 — the expert reader publishing two batches at once (commit d3efdeb)
+
+The C reader held one batch: `submit_batch` parked a second caller until the
+first batch had completed and cleared its pointers, so Task 1's two fetches in
+flight were served batch-serially and bytes in flight never exceeded one tile's
+misses. The reader now holds a two-slot ring — each slot its own counts, error,
+publication sequence and completion condvar — and workers claim from the older
+batch first, spilling into the newer only when the older has no unclaimed read
+left, so tile N's fetch is never delayed by N+1's. The FIFO claim and the
+free-slot search are pure functions in the header, asserted from Swift; the
+shutdown path now cancels a slot's unclaimed reads and signals its submitter (a
+latent hang in the one-batch code); the process raises its own `RLIMIT_NOFILE`
+once at the first reader's creation (the mini's soft limit is 256 against 160
+descriptors at four threads and 320 at eight). Two knobs:
+`SHRIKE_EXPERT_IO_BATCH_DEPTH=1|2` (**2 the new default**) and
+`SHRIKE_EXPERT_IO_THREADS=1…16` (4, unchanged). Scheduling only: the same bytes
+into the same planner-chosen slots — golden identical on both boxes, both
+profiles, at (1, 4), (2, 8) and the new default (measured).
+
+Measured on the mini, one binary (the two knobs as the A/B), a fresh server per
+pair, the warm arm after `settle_done`; 300 and 1k are paired means of runs in
+opposite orders (three runs of the baseline, two or three of each new cell;
+repeats agree to ≤ 30 ms; hit counts identical run to run):
+
+| shape | (1, 4) today | (2, 8) | **(2, 4)** | Δ at (2, 4) | `routed→routed` host (1, 4) → (2, 4) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 305 new tokens | 3.688 s (58.4 %) | 3.565 s | **3.537 s** (58.4 %) | **−4.1 %** | 756 → 630 ms |
+| 1,085 | 6.672 (51.6 %) | 6.517 | **6.468** (51.6 %) | **−3.1 %** | 737 → 551 |
+| 2,125 (one pair) | 10.460 (50.38 %) | 10.296 | 10.304 (50.33 %) | −1.5 % | 187 → 51 |
+| turn 2 on the 2k context (38 new) | 1.637 (62.5 %) | 1.655 | 1.600 | −2 % | 229 → 174 |
+| turn 3 (36 new) | 1.328 (86.3 %) | 1.354 | 1.332 | +0.3 % | 5 → 3 |
+| 12k, first request after launch | 68.304 (33.6 %) | 68.256 | 68.313 | 0 | 33 → 8 |
+| decode tok/s, long-decode arm, 300 / 1k | 14.09 / 14.22 | 14.01 / 14.06 | 14.17 / 14.19 | unmoved | |
+| warm after the 314 / 405-token answer | 3.734 / 6.559 | 3.422 / 6.247 | 3.402 / 6.237 | −8.9 / −4.9 % | |
+
+Cold all-miss first requests, `prefill_s`, paired means: 300 tokens 5.81 → 5.36 s
+(three runs → two), 1k 8.28 → 7.87 (three → two), 2k 11.25 → 10.82 (one pair) —
+the fetch term at 100 % misses gains ≈ 0.41–0.45 s at every shape. Routed GPU
+and tile counts unmoved.
+
+The four cells and what the drive sees in each — `(depth, threads)`; in flight is
+concurrent `pread`s of one whole expert:
+
+| cell | in flight | role | 300-token warm wall |
+| --- | --- | --- | ---: |
+| (1, 4) | ≤ min(tile misses, 4), draining between tiles | today, verdict A | 3.688 s (paired, three runs) |
+| (2, 8) | ≤ 8 across two batches | verdict B | 3.565 (paired) |
+| (2, 4) | ≤ 4, never draining between tiles | attribution → **the default** | 3.537 (paired) |
+| (1, 8) | ≤ min(tile misses, 8) = 3–4 | attribution, predicted null | 3.699 (one run) |
+
+**Attribution: the batch depth is the lever, the thread count is null.** At 300
+tokens (2, 4) read 3.531 / 3.542 s and (2, 8) 3.550 / 3.580, while (1, 8) read
+3.699 against (1, 4)'s 3.678–3.702. A tile carries 3–4 misses, so two published
+batches keep four threads busy across the tile boundary and a second four buy
+nothing — the probes' +5–6 % at eight in flight did not show, as their drift
+qualifier allowed. Eight threads also cost a measurable tax on the hit-heavy
+turn 3: +26 ms across both runs, absent at four. The reading is publication's
+broadcast to every parked worker of the layer's reader — ≈ 400 one-read batches
+× seven idle wakeups is the arithmetic that lands near 30 ms — and it is equally
+consistent with plain mutex contention among eight workers on a one-read batch;
+neither was measured directly. The refinement recorded either way: signal
+`min(count, threads)` workers instead of all (sound because every worker
+re-checks the claim predicate before parking; the shutdown path keeps its
+broadcast) — not built here. So the default moved to (2, 4): no
+extra descriptors, no extra stacks, no decode exposure.
+
+**One control row did move.** Hits are identical to the expert at 300, 1k, the
+turns, the 12k control and the long-decode arm, but the 2k warm request hit
+4,709 experts at (2, 4) against 4,714 at (1, 4) (4,706 at (2, 8)) on an identical
+demand of 9,357 — five experts, 0.05 points, ≈ 3 ms of residency against a 156
+ms gain. The task changes no line of the planner, but it changes the planner's
+inputs: a tile's plan is built at begin time against the slots then in flight,
+and a second published batch changes which slots those are when the next
+tile's victims are chosen. Recorded as explained, not re-measured (the 2k rows
+are one pair per cell). Shutdown semantics, for the record: a batch whose reads
+were all claimed before `destroy` returns success (its bytes landed); only a
+batch with unclaimed reads returns `ECANCELED`.
+
+**The model, checked.** The draft's conservative bracket (the hidden fraction of
+the drive's time constant behind the GPU bank) predicted 3.51 / 6.52 / 10.40;
+measured 3.54 / 6.47 / 10.30. The drive's own term (`io_fetch_ms × 8`, the parked
+wait included at both cells; (1, 4) → (2, 4), paired) fell 264 / 388 / 592 ms at
+300 / 1k / 2k — the realized per-expert time, that term over the misses, 1.019 →
+0.937 ms, 1.019 → 0.930, 0.970 → 0.842 — and about half of it reached the wall
+at 300 and 1k, the rest staying hidden; at 2k the stage is GPU-bound and the gain
+is its exposed remainder. The effective rate on
+the routed stage at 300 rose from ≈ 2.5 to ≈ 2.65 GB/s. What is left of the fetch
+term is the per-read latency at 3–4 outstanding and the miss count itself — the
+pool's size and eviction on a cached context (Task 3's re-pricing found a 38-token
+turn fetching 2 GB) — not concurrency, which this task retires for the chapter.
+
+**After T2** (commit d3efdeb, 2026-09-04; `SHRIKE_EXPERT_IO_BATCH_DEPTH=2` the
+default, `=1` the A/B; mini, warm arms, server walls, paired):
+
+| shape | warm wall | prefill hit rate | experts fetched |
+| --- | ---: | ---: | ---: |
+| 305 new tokens | 3.54 s | 58.4 % | 3,218 (5.6 GB) |
+| 1,085 | 6.468 | 51.6 % | 4,387 (7.6 GB) |
+| 2,125 | 10.30 | 50.3 % | 4,648 (8.0 GB) |
+| turn 2 (38 new on a 2k context) | 1.60 | 62.5 % | 1,232 |
+| turn 3 (36 new) | 1.33 | 86.3 % | 416 |
+| 12k, first request after launch | 68.31 | 33.6 % | 18,864 |
+
+Same binary, `=1`: 3.69 / 6.67 / 10.46 s, turn 2 1.64, turn 3 1.33. Golden
+identical on both boxes and both profiles at every cell. Scope: measured on a
+launch without an MTP sidecar; the speculative prefetch off (its default). The
+deeper-lookahead follow-on, repriced now that batches overlap: two published
+batches already keep four threads busy across the tile boundary at 3–4 misses per
+tile, so a third batch (and the two-tile lookahead to feed it) adds reads in
+flight only where the thread count would — and the thread count measured null;
+still ≤ 1 %, not scheduled.
+
 ## Levers, ranked for these shapes (modelled from step zero)
 
 - **First-chunk hit rate — LANDED as Task 0** (`SHRIKE_PREFILL_SWEEP=carry`):
@@ -268,13 +380,13 @@ golden).
   2k, the inter-tile gap closed, hits unmoved. The C reader publishes one batch
   at a time (`submit_batch` parks a second caller on `batch_idle`), so queue
   depth did not rise: the drive runs at ≈ 2.5 GB/s effective here because a
-  tile's 3–4 misses fill at most four threads for one wave. **T2, not
-  scheduled:** publish two batches at once in `expert_io.c` and raise the
-  reader's threads with it, so tiles N and N+1 read concurrently (the peer's
-  probes: 3.6 GB/s at four experts in flight, 3.8 at eight — a +5–6 % pair,
-  inside the probes' own run-to-run drift of 2.9–3.6 at four) — worth up to
-  ≈ 0.4–0.7 s at 300 tokens if the effective rate reaches 3.0–3.6; a deeper
-  lookahead rides on it (≈ 0.8 % alone).
+  tile's 3–4 misses fill at most four threads for one wave. **The reader publishing two batches at once LANDED as Task 2**
+  (`SHRIKE_EXPERT_IO_BATCH_DEPTH=2`): −4.1 / −3.1 / −1.5 % at 300 / 1k / 2k,
+  hits identical except five experts at 2k (plan-time inputs), decode unmoved; the batch depth is the lever and the thread
+  count is null at 3–4 misses per tile (eight threads also tax hit-heavy turns
+  through publication's broadcast). Concurrency is retired for this chapter:
+  what is left of the term is the per-read latency at 3–4 outstanding and the
+  miss count itself (the pool's size and eviction on a cached context).
 - **A small-row prefill path** for follow-up turns (≤ 64 new rows): the matrix
   kernels' per-dispatch floor costs 21–23 ms per new token over 40 layer-chunks;
   a decode-style or scalar path for tiny chunks could take ≈ 0.5–1 s off a

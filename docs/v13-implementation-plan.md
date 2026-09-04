@@ -724,7 +724,7 @@ different kernels on a chunk.
 
 ### Task 2: T2 — the expert reader publishing two batches at once
 
-- [ ] **T2: the C reader publishes exactly one batch at a time, so Task 1's two
+- [x] **T2: the C reader publishes exactly one batch at a time, so Task 1's two
   tile fetches in flight are served batch-serially and bytes in flight never
   exceed one tile's misses — 3.3–3.9 on the mean after T0.** `submit_batch`
   (`sources/ShrikeKernelsC/expert_io.c:237-277`) parks a second caller on
@@ -752,6 +752,31 @@ different kernels on a chunk.
   ([v13-the-turn.md](v13-the-turn.md):205-212, `:266-277`), and because it is
   scheduling only: the same bytes in the same slots, chosen by a planner this task
   does not touch. **The mini decides.**
+
+  **LANDED d3efdeb (2026-09-04): measured on the mini on one binary (the two knobs
+  as the A/B; the flip folded by amend), a fresh server per pair, `settle_done`
+  before the warm send; 300 and 1k as paired means in opposite orders (three
+  baseline runs): warm walls 300 tokens 3.688 → 3.537 s at (2, 4) (−4.1 %;
+  hits 58.4 → 58.4 %, `routed→routed` host 756 → 630 ms), 1k 6.672 → 6.468
+  (−3.1 %; 51.6 → 51.6; 737 → 551), 2k 10.460 → 10.304 (−1.5 %; 50.4 → 50.3;
+  187 → 51); turn 2 1.637 → 1.600, turn 3 1.328 → 1.332; 12k control 68.304 →
+  68.313, hits 9,540 both; decode tok/s on the long-decode arm 14.09 / 14.22 →
+  14.17 / 14.19 (unmoved); memory pressure 83–91 % free before every launch;
+  golden IDENTICAL both boxes both profiles at (1, 4), (2, 8) and (2, 4). **The
+  verdict cell moved from (2, 8) to (2, 4) on the attribution arms:** at 300
+  (2, 8) 3.550 / 3.580, (2, 4) 3.531 / 3.542, (1, 8) 3.699 vs (1, 4) 3.678–3.702
+  — the batch depth is the lever, the thread count null (arm D's predicted
+  null held), and eight threads cost turn 3 +26 ms across two runs (absent at
+  four; publication's broadcast to every parked worker — a per-read signal
+  recorded as a refinement). Real (the sign held in every pair, deltas 5–7× the
+  drift) and free (no control row regressed beyond five experts of residency at
+  2k, 50.38 → 50.33 %, a plan-time-input effect worth ≈ 3 ms — the design doc
+  names it) → the default is batch depth 2 with four threads. The realized
+  drive term (`io_fetch_ms × 8`, the parked wait included; (1, 4) → (2, 4)
+  paired) fell 264 / 388 / 592 ms — per expert 1.019 → 0.937, 1.019 → 0.930,
+  0.970 → 0.842 ms — and about half reached the wall at 300 / 1k, the model's
+  conservative bracket. The design doc's Task 2 section
+  carries the rows, the attribution and the herd reading.**
 
   **The decision rule, under the chapter's real-and-free rule**
   ([v13-the-turn.md](v13-the-turn.md):289-303). Two knobs land either way:
@@ -1000,7 +1025,7 @@ different kernels on a chunk.
 
   Steps:
 
-  - [ ] Step 1 (an implementer): the nine failing tests, then the C ring and its
+  - [x] Step 1 (an implementer): the nine failing tests, then the C ring and its
         two pure rules, the `batch_depth` plumbing, the one-time `RLIMIT_NOFILE`
         raise at the first reader's creation, the two env knobs and the
         `expert_io=` field. `swift test --no-parallel --filter ParallelExpertReader`
@@ -1016,11 +1041,11 @@ different kernels on a chunk.
         instruments the C target too. The full run stays the close gate, and a
         report here is real (the suppressions file's family is swift-nio's future
         bridge, unrelated to this mutex).
-  - [ ] Step 2: `tools/golden-baseline.sh --check` on the M4 Pro at **(1, 4)** and
+  - [x] Step 2: `tools/golden-baseline.sh --check` on the M4 Pro at **(1, 4)** and
         **(2, 8)** — short and long **IDENTICAL** at both; a difference is a defect,
         never a recapture. Then `tools/mini-deploy.sh --restart` and the mini's
         golden check at both cells.
-  - [ ] Step 3 (the arms, controller-run, **one binary**, the two knobs as the A/B
+  - [x] Step 3 (the arms, controller-run, **one binary**, the two knobs as the A/B
         through the rig's `SERVER_ENV`; Task 1's `t1-arms.sh` is the pattern — a
         distinct tag per cell, arm and order; `pgrep -fl
         'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI'` and
@@ -1042,13 +1067,13 @@ different kernels on a chunk.
         projection line. **No new counter:** `io_fetch_ms × 8` ÷ misses is the
         realized per-expert time and the row that decides the model — it should
         **fall** at B, the parked wait Task 1 pushed inside it having disappeared.
-  - [ ] Step 4 (the rule): apply it to the three warm walls and every control row.
+  - [x] Step 4 (the rule): apply it to the three warm walls and every control row.
         The defaults move to the winning cell, or stay at (1, 4). **Record the
         verdict either way**, with the realized per-expert time per arm and the
         arm-D null stated explicitly. Then the four per-commit gates on the landed
         tree, golden both boxes both profiles IDENTICAL, `tools/mini-deploy.sh
         --restart` and the mini golden check.
-  - [ ] Step 5: design doc — a "Task 2" section with the ΣF / hidden / stage table,
+  - [x] Step 5: design doc — a "Task 2" section with the ΣF / hidden / stage table,
         the cell table, the arms' rows and an "**After T2**" ledger block; the
         "Bytes per expert" lever entry ([v13-the-turn.md](v13-the-turn.md):266-277)
         rewritten with the measured per-expert time and whatever is left of the
@@ -1093,6 +1118,11 @@ different kernels on a chunk.
 
 ## Follow-ons (not scheduled)
 
+- The expert reader's publication signals `min(count, threads)` workers instead
+  of broadcasting to all (Task 2 review): sound because every worker re-checks
+  the claim predicate before parking; the shutdown path keeps its broadcast. The
+  read is turn 3's +26 ms at eight threads; at the default four it is inside
+  noise, so this rides on any task that raises the thread count.
 - Collapse Task 1's two routed tile loops into one (the lookahead as a
   predicate; the scheduler's `decide` and the commit-before-append valve
   reconciled; the begin/await/drain sequencing factored into a host-testable
