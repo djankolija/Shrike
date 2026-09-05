@@ -348,14 +348,15 @@ import Testing
                 + " expert_io=threads=4 batch_depth=1 protect=chunk")
     }
 
-    @Test func sweepModeParsesItsFourValues() {
+    @Test func sweepModeParsesItsFiveValues() {
         #expect(RealForwardRunner.parsePrefillSweepMode("alternate") == .alternate)
         #expect(RealForwardRunner.parsePrefillSweepMode("fixed") == .fixed)
         #expect(RealForwardRunner.parsePrefillSweepMode("carry") == .carry)
         #expect(RealForwardRunner.parsePrefillSweepMode("recency") == .recency)
-        #expect(RealForwardRunner.parsePrefillSweepMode(nil) == .carry)
-        #expect(RealForwardRunner.parsePrefillSweepMode("") == .carry)
-        #expect(RealForwardRunner.parsePrefillSweepMode("bogus") == .carry)
+        #expect(RealForwardRunner.parsePrefillSweepMode("resident") == .resident)
+        #expect(RealForwardRunner.parsePrefillSweepMode(nil) == .resident)
+        #expect(RealForwardRunner.parsePrefillSweepMode("") == .resident)
+        #expect(RealForwardRunner.parsePrefillSweepMode("bogus") == .resident)
     }
 
     @Test func prefillGapLeversDescriptionReportsTheSweepMode() {
@@ -378,6 +379,11 @@ import Testing
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
             sweepMode: .fixed, sweepTail: 48, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
             == "overlap=on residency=set allocations=24 sweep=fixed cache_layout=pool"
+                + " expert_io=threads=4 batch_depth=1 protect=chunk")
+        #expect(RealForwardRunner.prefillGapLeversDescription(
+            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
+            sweepMode: .resident, sweepTail: 96, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
+            == "overlap=on residency=set allocations=24 sweep=resident cache_layout=pool"
                 + " expert_io=threads=4 batch_depth=1 protect=chunk")
     }
 

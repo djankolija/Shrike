@@ -173,8 +173,9 @@ extension Model {
     }
 
     /// Returns only fully valid routed experts immediately before cache
-    /// planning. This is used by the optional v4.3 trace probe and never
-    /// changes cache state or inference behavior.
+    /// planning; never changes cache state. Used by the optional v4.3 trace
+    /// probe and predictive prefetch, and by `.resident`'s hot-path sweep
+    /// (v13 T5 step 2).
     public func routedExpertResidentIDs(layer: Int) throws -> [Int] {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }

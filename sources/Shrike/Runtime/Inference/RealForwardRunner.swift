@@ -133,18 +133,29 @@ internal enum PrefillProjectionDispatchPolicy {
 /// `SHRIKE_PREFILL_SWEEP` mode: `alternate` reverses the sweep on odd-parity
 /// chunks; `fixed` keeps every chunk ascending; `carry` starts each
 /// request's first chunk opposite the previous request's last chunk and
-/// alternates from there (v13 T0's mini A/B winner, today's default);
+/// alternates from there (v13 T0's mini A/B winner, kept as the A/B);
 /// `recency` splits the chunk's experts into a head and a tail of the last
 /// `SHRIKE_PREFILL_SWEEP_TAIL` by last-row-in-chunk, then packs each
 /// group's own tiles by row weight; it consults neither the direction nor
 /// the carry state, and honours `participatesInCarry: false` the same as
 /// the direction switch, so the verify / MTP sidecar's chunks keep index
-/// tiling under the knob (v13 T4 step 2, fix-up 1; fix round 1).
+/// tiling under the knob (v13 T4 step 2, fix-up 1; fix round 1); `resident`
+/// sweeps the chunk's pool-resident experts first, then the absent ones by
+/// the same recency split, all three groups packed by row weight and tiled
+/// flat (v13 T5 step 2, today's default).
 internal enum PrefillSweepMode: String, Sendable, Equatable {
     case alternate
     case fixed
     case carry
     case recency
+    case resident
+
+    /// `.recency` and `.resident` build their own per-layer order in
+    /// `buildPrefillRoutes`, never reading the direction switch or the
+    /// carry state.
+    var usesComputedOrder: Bool {
+        self == .recency || self == .resident
+    }
 }
 
 /// `SHRIKE_EXPERT_CACHE_PROTECT=chunk`'s still-needed set: a per-layer
@@ -496,6 +507,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// never alias concurrent work.
     private var routeIDScratch: [UInt32] = []
     private var routeWeightScratch: [Float16] = []
+    private var prefillResidentExpertScratch: [Bool] = []
     private var decodeExpertsScratch: [Int] = []
     private var decodeHitSlotsScratch: [UInt32] = []
     private var decodeMissSlotsScratch: [UInt32] = []
@@ -520,10 +532,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// per-buffer residency for the same-binary A/B.
     private let poolResidency: ExpertPoolResidency?
     private let poolResidencyUnavailableReason: String?
-    /// `SHRIKE_PREFILL_SWEEP=alternate|fixed|carry|recency` selects the `PrefillSweepMode`;
-    /// unset or unknown takes `prefillSweepModeDefault`.
+    /// `SHRIKE_PREFILL_SWEEP=alternate|fixed|carry|recency|resident` selects the
+    /// `PrefillSweepMode`; unset or unknown takes `prefillSweepModeDefault`,
+    /// `resident`, v13 T5's measured winner, with `carry` kept as the A/B.
     private let prefillSweepMode: PrefillSweepMode
-    private static let prefillSweepModeDefault = PrefillSweepMode.carry
+    private static let prefillSweepModeDefault = PrefillSweepMode.resident
     /// `SHRIKE_PREFILL_SWEEP_TAIL=<n>` sizes `recency`'s tail group, clamped
     /// to 8 ... the layer's expert count; unset or unparsable takes
     /// `prefillSweepTailDefault` (96), itself clamped the same way.
@@ -679,20 +692,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             return prefillChunkSweepIsDescending(startPosition: startPosition, chunkTokens: chunkTokens)
         case .carry:
             return carried == false
-        case .recency:
-            // `recency` builds its own per-layer order in `buildPrefillRoutes`
-            // and never reads this value; kept only for exhaustiveness.
+        case .recency, .resident:
+            // Both build their own per-layer order in `buildPrefillRoutes`
+            // and never read this value; kept only for exhaustiveness.
             return false
         }
     }
 
-    /// Whether a chunk should sweep by recency-balanced order: `.recency`
-    /// mode, and (matching the direction switch's own isolation) only when
-    /// the chunk participates in carry, so the verify / MTP sidecar's
-    /// chunks keep index tiling under the knob.
-    static func prefillChunkUsesRecencyBalance(mode: PrefillSweepMode,
-                                               participatesInCarry: Bool) -> Bool {
-        mode == .recency && participatesInCarry
+    /// Whether a chunk should sweep by a computed order: `.recency` or
+    /// `.resident`, and (matching the direction switch's own isolation)
+    /// only when the chunk participates in carry, so the verify / MTP
+    /// sidecar's chunks keep index tiling under the knob.
+    static func prefillChunkUsesComputedSweepOrder(mode: PrefillSweepMode,
+                                                   participatesInCarry: Bool) -> Bool {
+        mode.usesComputedOrder && participatesInCarry
     }
 
     /// Per-layer `router.scale * D^-0.5` pre-folded into one BF16 buffer
@@ -2590,7 +2603,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             startPosition: startPosition,
             chunkTokens: config.chunkTokens,
             participatesInCarry: participatesInCarry)
-        if participatesInCarry, prefillSweepMode != .recency {
+        if participatesInCarry, !prefillSweepMode.usesComputedOrder {
             prefillLastChunkDescending = prefillDescendingSweep
         }
 
@@ -5207,8 +5220,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         var expertTileCounts: [Int]?
         var sortKeys = model.routedExpertPhysicalOffsets(layer: L)
         var sortDescending = descendingSweep
-        if Self.prefillChunkUsesRecencyBalance(mode: prefillSweepMode,
-                                               participatesInCarry: participatesInCarry) {
+        if Self.prefillChunkUsesComputedSweepOrder(mode: prefillSweepMode,
+                                                   participatesInCarry: participatesInCarry) {
             var lastRowByExpert: [UInt32: Int] = [:]
             var rowsByExpert: [UInt32: Int] = [:]
             lastRowByExpert.reserveCapacity(min(pairs.count, cfg.numExperts))
@@ -5218,17 +5231,27 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 lastRowByExpert[pair.expert] = max(lastRowByExpert[pair.expert] ?? row, row)
                 rowsByExpert[pair.expert, default: 0] += 1
             }
-            let balanced = PrefillSweepOrder.recencyBalanced(
-                rowsByExpert: rowsByExpert,
-                lastRowByExpert: lastRowByExpert,
-                tail: prefillSweepTail,
-                tileWidth: schedulerConfig.tileExperts)
-            // The array path `groupTokenExpertPairs` already takes for
-            // `alternate`/`fixed`/`carry`: one sort key per expert id, no
-            // per-comparison dictionary lookup.
-            sortKeys = PrefillSweepOrder.expertSortKeys(forOrder: balanced.order, numExperts: cfg.numExperts)
+            if prefillSweepMode == .recency {
+                let balanced = PrefillSweepOrder.recencyBalanced(
+                    rowsByExpert: rowsByExpert,
+                    lastRowByExpert: lastRowByExpert,
+                    tail: prefillSweepTail,
+                    tileWidth: schedulerConfig.tileExperts)
+                // The array path `groupTokenExpertPairs` already takes for
+                // `alternate`/`fixed`/`carry`: one sort key per expert id, no
+                // per-comparison dictionary lookup.
+                sortKeys = PrefillSweepOrder.expertSortKeys(forOrder: balanced.order, numExperts: cfg.numExperts)
+                expertTileCounts = balanced.tileExpertCounts
+            } else {
+                let order = PrefillSweepOrder.residentFirstBalanced(
+                    rowsByExpert: rowsByExpert,
+                    lastRowByExpert: lastRowByExpert,
+                    resident: try residentExpertMask(layer: L),
+                    slots: model.routedExpertCacheSlotCount() ?? 0,
+                    tileWidth: schedulerConfig.tileExperts)
+                sortKeys = PrefillSweepOrder.expertSortKeys(forOrder: order, numExperts: cfg.numExperts)
+            }
             sortDescending = false
-            expertTileCounts = balanced.tileExpertCounts
         }
         let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
             pairs,
@@ -5240,6 +5263,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             descending: sortDescending,
             expertTileCounts: expertTileCounts)
         return PrefillRouting(routes: routes, schedulerConfig: schedulerConfig)
+    }
+
+    /// `.resident`'s per-chunk snapshot of layer `L`'s pool-resident
+    /// experts: `prefillResidentExpertScratch` is allocated once to
+    /// `cfg.numExperts` and cleared in place on every later call, so the
+    /// sweep never allocates per chunk; empty when the model streams with
+    /// no expert cache to query.
+    private func residentExpertMask(layer L: Int) throws -> [Bool] {
+        if prefillResidentExpertScratch.count != cfg.numExperts {
+            prefillResidentExpertScratch = [Bool](repeating: false, count: cfg.numExperts)
+        } else {
+            for i in 0..<prefillResidentExpertScratch.count {
+                prefillResidentExpertScratch[i] = false
+            }
+        }
+        guard model.routedExpertCacheSlotCount() != nil else {
+            return prefillResidentExpertScratch
+        }
+        for expert in try model.routedExpertResidentIDs(layer: L)
+            where expert >= 0 && expert < prefillResidentExpertScratch.count {
+            prefillResidentExpertScratch[expert] = true
+        }
+        return prefillResidentExpertScratch
     }
 
     /// The shared (dense) expert branch of one prefill chunk and its scalar

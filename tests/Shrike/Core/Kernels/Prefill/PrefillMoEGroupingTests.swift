@@ -280,15 +280,21 @@ import Testing
         }
     }
 
-    @Test func recencyBalanceRequiresBothRecencyModeAndCarryParticipation() throws {
-        #expect(RealForwardRunner.prefillChunkUsesRecencyBalance(
-            mode: .recency, participatesInCarry: true) == true)
-        #expect(RealForwardRunner.prefillChunkUsesRecencyBalance(
-            mode: .recency, participatesInCarry: false) == false)
-        #expect(RealForwardRunner.prefillChunkUsesRecencyBalance(
-            mode: .carry, participatesInCarry: true) == false)
-        #expect(RealForwardRunner.prefillChunkUsesRecencyBalance(
-            mode: .carry, participatesInCarry: false) == false)
+    @Test func computedSweepOrderRequiresBothAComputedModeAndCarryParticipation() throws {
+        let computedModes: [PrefillSweepMode] = [.recency, .resident]
+        let indexModes: [PrefillSweepMode] = [.alternate, .fixed, .carry]
+        for mode in computedModes {
+            #expect(RealForwardRunner.prefillChunkUsesComputedSweepOrder(
+                mode: mode, participatesInCarry: true) == true)
+            #expect(RealForwardRunner.prefillChunkUsesComputedSweepOrder(
+                mode: mode, participatesInCarry: false) == false)
+        }
+        for mode in indexModes {
+            #expect(RealForwardRunner.prefillChunkUsesComputedSweepOrder(
+                mode: mode, participatesInCarry: true) == false)
+            #expect(RealForwardRunner.prefillChunkUsesComputedSweepOrder(
+                mode: mode, participatesInCarry: false) == false)
+        }
     }
 
     @Test func groupingRejectsInvalidMetadataBeforeKernelUse() throws {
@@ -488,6 +494,181 @@ import Testing
 
         let firstTileExperts = balanced.order[0..<balanced.tileExpertCounts[0]]
         #expect(firstTileExperts.contains(1))
+    }
+
+    @Test func residentFirstBalancedSpreadsAbsentUniformlyPreservesRecencyAndBreaksResidentTiesToTheLowerTileIndex() throws {
+        var rowsByExpert: [UInt32: Int] = [90: 9, 91: 7, 92: 5, 93: 3]
+        var lastRowByExpert: [UInt32: Int] = [90: 290, 91: 291, 92: 292, 93: 293]
+        for id in 1...20 {
+            rowsByExpert[UInt32(id)] = 1
+            lastRowByExpert[UInt32(id)] = id
+        }
+        var resident = [Bool](repeating: false, count: 94)
+        for expert in [90, 91, 92, 93] { resident[expert] = true }
+
+        let order = PrefillSweepOrder.residentFirstBalanced(
+            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert,
+            resident: resident, slots: 50, tileWidth: 8)
+
+        let expected: [UInt32] = [1, 2, 3, 4, 5, 6, 90, 93,
+                                  7, 8, 9, 10, 11, 12, 13, 91,
+                                  14, 15, 16, 17, 18, 19, 20, 92]
+        #expect(order == expected)
+        #expect(order.count == 24)
+    }
+
+    @Test func residentFirstBalancedGrowsAResidentHeadWhenResidentsNearlyFillThePool() throws {
+        var rowsByExpert: [UInt32: Int] = [:]
+        var lastRowByExpert: [UInt32: Int] = [:]
+        for id in 1...9 {
+            rowsByExpert[UInt32(id)] = 1
+            lastRowByExpert[UInt32(id)] = 9 + id
+        }
+        for id in 100...102 {
+            rowsByExpert[UInt32(id)] = 1
+            lastRowByExpert[UInt32(id)] = id - 100
+        }
+        var resident = [Bool](repeating: false, count: 103)
+        for id in 1...9 { resident[id] = true }
+
+        let order = PrefillSweepOrder.residentFirstBalanced(
+            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert,
+            resident: resident, slots: 20, tileWidth: 8)
+
+        #expect(order == [1, 2, 3, 4, 5, 6, 7, 8, 100, 101, 102, 9])
+    }
+
+    @Test func residentFirstBalancedGuardsAnExhaustedHeadSearchAgainstDroppingTheAbsentGroup() throws {
+        var rowsByExpert: [UInt32: Int] = [999: 1]
+        var lastRowByExpert: [UInt32: Int] = [999: 0]
+        for id in 1...100 {
+            rowsByExpert[UInt32(id)] = 1
+            lastRowByExpert[UInt32(id)] = id
+        }
+        var resident = [Bool](repeating: false, count: 1000)
+        resident[999] = true
+
+        let order = PrefillSweepOrder.residentFirstBalanced(
+            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert,
+            resident: resident, slots: 1, tileWidth: 8)
+
+        #expect(Set(order) == Set(rowsByExpert.keys))
+        #expect(order.count == 101)
+    }
+
+    @Test func residentFirstBalancedOmitsAResidentExpertNotRoutedThisChunk() throws {
+        let rowsByExpert: [UInt32: Int] = [3: 1, 5: 1]
+        let lastRowByExpert: [UInt32: Int] = [3: 0, 5: 1]
+        var resident = [Bool](repeating: false, count: 10)
+        resident[3] = true
+        resident[7] = true
+
+        let order = PrefillSweepOrder.residentFirstBalanced(
+            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert,
+            resident: resident, slots: 128, tileWidth: 8)
+
+        #expect(Set(order) == Set([3, 5] as [UInt32]))
+        #expect(!order.contains(7))
+        #expect(order == [5, 3])
+    }
+
+    @Test func residentFirstBalancedWithEmptyResidentMatchesRecencyBalancedExactly() throws {
+        let rowsByExpert: [UInt32: Int] = [1: 10, 2: 10, 3: 10, 4: 10, 5: 10]
+        let lastRowByExpert: [UInt32: Int] = [1: 0, 2: 1, 3: 2, 4: 3, 5: 4]
+
+        let recencyOnly = PrefillSweepOrder.recencyBalanced(
+            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert, tail: 96, tileWidth: 8)
+        let residentFirst = PrefillSweepOrder.residentFirstBalanced(
+            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert,
+            resident: [], slots: 128, tileWidth: 8)
+
+        #expect(residentFirst == recencyOnly.order)
+    }
+
+    @Test func residentFirstBalancedWithEmptyResidentPastTheFallbackTailDivergesFromRecencyBalanced() throws {
+        var rowsByExpert: [UInt32: Int] = [5: 10, 50: 1]
+        var lastRowByExpert: [UInt32: Int] = [5: 0, 50: 0]
+        for offset in 0..<95 {
+            let id = UInt32(200 + offset)
+            rowsByExpert[id] = 1
+            lastRowByExpert[id] = offset + 1
+        }
+
+        let recencyOnly = PrefillSweepOrder.recencyBalanced(
+            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert, tail: 96, tileWidth: 8)
+        let residentFirst = PrefillSweepOrder.residentFirstBalanced(
+            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert,
+            resident: [], slots: 128, tileWidth: 8)
+
+        #expect(Set(residentFirst) == Set(rowsByExpert.keys))
+        #expect(residentFirst.count == 97)
+        #expect(residentFirst != recencyOnly.order)
+    }
+
+    @Test func residentFirstBalancedHandlesAResidentArrayShorterThanNumExpertsWithoutTrapping() throws {
+        let rowsByExpert: [UInt32: Int] = [3: 1, 99: 1]
+        let lastRowByExpert: [UInt32: Int] = [3: 0, 99: 1]
+        let shortResident: [Bool] = [false, false, false, true]
+
+        let order = PrefillSweepOrder.residentFirstBalanced(
+            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert,
+            resident: shortResident, slots: 128, tileWidth: 8)
+
+        #expect(order == [99, 3])
+    }
+
+    @Test func residentFirstBalancedHandlesAResidentArrayLongerThanNumExpertsWithoutTrapping() throws {
+        let rowsByExpert: [UInt32: Int] = [2: 3, 5: 1]
+        let lastRowByExpert: [UInt32: Int] = [2: 4, 5: 1]
+        var longResident = [Bool](repeating: false, count: 200)
+        longResident[5] = true
+
+        let order = PrefillSweepOrder.residentFirstBalanced(
+            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert,
+            resident: longResident, slots: 128, tileWidth: 8)
+
+        #expect(order == [2, 5])
+    }
+
+    @Test func groupingReproducesResidentFirstBalancedFlatTilesEndToEnd() throws {
+        var rowsByExpert: [UInt32: Int] = [:]
+        var lastRowByExpert: [UInt32: Int] = [:]
+        var pairs: [PrefillTokenExpertPair] = []
+        for id in 1...9 {
+            rowsByExpert[UInt32(id)] = 1
+            lastRowByExpert[UInt32(id)] = 9 + id
+            pairs.append(Self.pair(token: UInt32(id - 1), expert: UInt32(id), rank: 0,
+                                   weightBits: UInt32(id)))
+        }
+        for id in 100...102 {
+            rowsByExpert[UInt32(id)] = 1
+            lastRowByExpert[UInt32(id)] = id - 100
+            pairs.append(Self.pair(token: UInt32(id - 91), expert: UInt32(id), rank: 0,
+                                   weightBits: UInt32(id)))
+        }
+        var resident = [Bool](repeating: false, count: 103)
+        for id in 1...9 { resident[id] = true }
+
+        let order = PrefillSweepOrder.residentFirstBalanced(
+            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert,
+            resident: resident, slots: 20, tileWidth: 8)
+        #expect(order == [1, 2, 3, 4, 5, 6, 7, 8, 100, 101, 102, 9])
+
+        let grouped = try PrefillMoEGrouping.groupTokenExpertPairs(
+            pairs,
+            queryCount: 12,
+            topK: 1,
+            numExperts: 103,
+            tileExpertCount: 8,
+            expertSortKeys: PrefillSweepOrder.expertSortKeys(forOrder: order, numExperts: 103))
+
+        #expect(grouped.groups.map(\.expert) == order)
+        #expect(grouped.tiles.count == 2)
+        #expect(grouped.tiles[0] == PrefillMoETile(groupStart: 0, groupCount: 8, pairStart: 0, pairCount: 8))
+        #expect(grouped.tiles[1] == PrefillMoETile(groupStart: 8, groupCount: 4, pairStart: 8, pairCount: 4))
+        let headResidents = Set<UInt32>([1, 2, 3, 4, 5, 6, 7, 8])
+        let firstTileExperts = Set(grouped.groups[0..<Int(grouped.tiles[0].groupCount)].map(\.expert))
+        #expect(headResidents == firstTileExperts)
     }
 
     @Test func groupingHonoursExplicitExpertTileCounts() throws {

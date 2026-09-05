@@ -97,7 +97,7 @@ struct PrefillSweepBalancedOrder: Equatable {
     let tileExpertCounts: [Int]
 }
 
-/// `SHRIKE_PREFILL_SWEEP=recency`'s expert order.
+/// `SHRIKE_PREFILL_SWEEP=recency|resident`'s expert orders.
 enum PrefillSweepOrder {
     /// Ascending by last row in the chunk, ties by expert id ascending.
     static func recency(lastRowByExpert: [UInt32: Int]) -> [UInt32] {
@@ -126,6 +126,117 @@ enum PrefillSweepOrder {
                                    tileWidth: tileWidth)
         return PrefillSweepBalancedOrder(order: head.order + tailGroup.order,
                                          tileExpertCounts: head.tileExpertCounts + tailGroup.tileExpertCounts)
+    }
+
+    /// The tile multiplier `residentFirstBalanced`'s head rule protects
+    /// against starving; the replay tool's `--sweep-head-factor` mirror,
+    /// fixed here rather than a knob (v13 T5 step 2, fix-up 1).
+    private static let residentFirstHeadFactor = 6
+
+    /// The absent group's most recent experts packed as their own tail
+    /// when `residentFirstBalanced` falls back to the resident/head/tail
+    /// split (an empty resident or absent group this chunk); independent
+    /// of `SHRIKE_PREFILL_SWEEP_TAIL`, which sizes `recencyBalanced`'s own
+    /// tail for `.recency` only.
+    private static let residentFirstFallbackTail = 96
+
+    /// Ascending by last row in the chunk, ties by rows ascending then
+    /// expert id: `resident-first`'s own ranking key, matching the replay
+    /// tool's `last-asc`. `recency(lastRowByExpert:)` above ties by expert
+    /// id alone, which under-specifies the order once a last-row tie
+    /// decides which tile an absent expert lands in.
+    private static func residentFirstRanked(rowsByExpert: [UInt32: Int],
+                                            lastRowByExpert: [UInt32: Int]) -> [UInt32] {
+        lastRowByExpert.keys.sorted { lhs, rhs in
+            let lhsLast = lastRowByExpert[lhs] ?? 0
+            let rhsLast = lastRowByExpert[rhs] ?? 0
+            if lhsLast != rhsLast { return lhsLast < rhsLast }
+            let lhsRows = rowsByExpert[lhs] ?? 0
+            let rhsRows = rowsByExpert[rhs] ?? 0
+            if lhsRows != rhsRows { return lhsRows < rhsRows }
+            return lhs < rhs
+        }
+    }
+
+    /// A resident head only while protection would starve (the pool's free
+    /// slots must cover `residentFirstHeadFactor` tiles' worth of misses for
+    /// however many mixed tiles remain), then the chunk's absent experts by
+    /// recency spread uniformly across the remaining tiles (the last tile
+    /// holds the most recent), the tiles' free slots filled by the leftover
+    /// residents heaviest-first; an empty `resident`, a chunk the pool
+    /// already holds in full, or a head search that never finds room falls
+    /// back to the resident/head/tail split packed and concatenated at
+    /// `residentFirstFallbackTail` (matches `recencyBalanced`'s own order
+    /// only when `resident` is empty and the chunk routes at most
+    /// `residentFirstFallbackTail` experts, since both then reduce to one
+    /// packed group over the same set; past that bound the two orders are
+    /// not asserted identical, only verified against the replayed
+    /// acceptance traces).
+    static func residentFirstBalanced(rowsByExpert: [UInt32: Int],
+                                      lastRowByExpert: [UInt32: Int],
+                                      resident: [Bool],
+                                      slots: Int,
+                                      tileWidth: Int) -> [UInt32] {
+        let ranked = residentFirstRanked(rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert)
+        var residentGroup: [UInt32] = []
+        var absentGroup: [UInt32] = []
+        residentGroup.reserveCapacity(ranked.count)
+        absentGroup.reserveCapacity(ranked.count)
+        for expert in ranked {
+            if Int(expert) < resident.count, resident[Int(expert)] {
+                residentGroup.append(expert)
+            } else {
+                absentGroup.append(expert)
+            }
+        }
+        guard !residentGroup.isEmpty, !absentGroup.isEmpty else {
+            return residentFirstFallbackOrder(residentGroup: residentGroup, absentGroup: absentGroup,
+                                              rowsByExpert: rowsByExpert, tileWidth: tileWidth)
+        }
+
+        let residentCount = residentGroup.count
+        let absentCount = absentGroup.count
+        let tileCount = (residentCount + absentCount + tileWidth - 1) / tileWidth
+        var head = 0
+        while head < tileCount {
+            let remainingTiles = tileCount - head
+            let mixedMisses = (absentCount + remainingTiles - 1) / remainingTiles
+            if residentCount - tileWidth * head <= slots - residentFirstHeadFactor * mixedMisses {
+                break
+            }
+            head += 1
+        }
+        let headResidents = Array(residentGroup.prefix(tileWidth * head))
+        let restResidents = Array(residentGroup.dropFirst(tileWidth * head))
+        let mixedTiles = tileCount - head
+        guard mixedTiles > 0 else {
+            return residentFirstFallbackOrder(residentGroup: residentGroup, absentGroup: absentGroup,
+                                              rowsByExpert: rowsByExpert, tileWidth: tileWidth)
+        }
+
+        var absentBins: [[UInt32]] = Array(repeating: [], count: mixedTiles)
+        for tile in 0..<mixedTiles {
+            let lo = (tile * absentCount) / mixedTiles
+            let hi = ((tile + 1) * absentCount) / mixedTiles
+            guard lo < hi else { continue }
+            absentBins[tile] = Array(absentGroup[lo..<hi])
+        }
+        let filledBins = packByRows(restResidents, into: absentBins, rowsByExpert: rowsByExpert,
+                                    tileWidth: tileWidth)
+        return headResidents + filledBins.flatMap { $0 }
+    }
+
+    private static func residentFirstFallbackOrder(residentGroup: [UInt32], absentGroup: [UInt32],
+                                                    rowsByExpert: [UInt32: Int],
+                                                    tileWidth: Int) -> [UInt32] {
+        let residentPacked = packByRows(residentGroup, rowsByExpert: rowsByExpert, tileWidth: tileWidth)
+        let tailCount = min(residentFirstFallbackTail, absentGroup.count)
+        let headCount = absentGroup.count - tailCount
+        let head = packByRows(Array(absentGroup[0..<headCount]), rowsByExpert: rowsByExpert,
+                              tileWidth: tileWidth)
+        let tailGroup = packByRows(Array(absentGroup[headCount...]), rowsByExpert: rowsByExpert,
+                                   tileWidth: tileWidth)
+        return residentPacked.order + head.order + tailGroup.order
     }
 
     /// `order`'s rank per expert id, `numExperts`-sized so it takes
@@ -164,6 +275,38 @@ enum PrefillSweepOrder {
             bins[bestIndex].total += rowsByExpert[expert] ?? 0
         }
         return (bins.flatMap(\.experts), bins.map { $0.experts.count })
+    }
+
+    /// `packByRows`, pre-seeded: `preseeded`'s bins (already tiled, at most
+    /// `tileWidth` experts each) start as-is instead of empty, and `experts`
+    /// then fill each bin's remaining capacity heaviest-first the same way,
+    /// ties to the lower bin index. Used by `residentFirstBalanced` to
+    /// spread the chunk's leftover residents across tiles the absent group
+    /// has already partly filled.
+    private static func packByRows(_ experts: [UInt32], into preseeded: [[UInt32]],
+                                   rowsByExpert: [UInt32: Int], tileWidth: Int) -> [[UInt32]] {
+        var bins = preseeded
+        var weights = preseeded.map { bin in bin.reduce(0) { $0 + (rowsByExpert[$1] ?? 0) } }
+        let heaviestFirst = experts.sorted { lhs, rhs in
+            let lhsRows = rowsByExpert[lhs] ?? 0
+            let rhsRows = rowsByExpert[rhs] ?? 0
+            if lhsRows != rhsRows { return lhsRows > rhsRows }
+            return lhs < rhs
+        }
+        for expert in heaviestFirst {
+            var bestIndex = -1
+            var bestWeight = Int.max
+            for index in bins.indices where bins[index].count < tileWidth {
+                if weights[index] < bestWeight {
+                    bestWeight = weights[index]
+                    bestIndex = index
+                }
+            }
+            guard bestIndex >= 0 else { break }
+            bins[bestIndex].append(expert)
+            weights[bestIndex] += rowsByExpert[expert] ?? 0
+        }
+        return bins
     }
 }
 

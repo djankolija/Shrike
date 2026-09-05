@@ -90,9 +90,11 @@ here:
     routed groups' natural order and packs by slot-budget fit, not a fixed
     width of 8) or its `avoidingSlots` (recomputed here from the new,
     synthetic tile boundaries, not the real batch/commit schedule).
-  - `--sweep-order resident-first` re-tiles each chunk from the pool's
-    own state at the moment the chunk begins (per layer): the chunk's
-    experts ranked `last-asc` (ties by rows ascending then expert id),
+  - `resident` is production's default `SHRIKE_PREFILL_SWEEP` value since
+    v13 T5 step 2; `carry` is kept as the A/B. `--sweep-order resident-first`
+    re-tiles each chunk from the pool's own state at the moment the chunk
+    begins (per layer): the chunk's experts ranked `last-asc` (ties by
+    rows ascending then expert id),
     split into a resident group (present in the pool, rank order kept)
     and an absent group (rank order kept). When either group is empty
     (the cold-pool case, or a chunk the pool already holds in full), this
