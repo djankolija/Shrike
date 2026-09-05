@@ -1519,6 +1519,490 @@ different kernels on a chunk.
   - **The mini is production.** Every arm stops the server on 8081 and relaunches
     it; Turbo on 8080 is never touched. One model process at a time.
 
+### Task 4: T4 — the pool's retention across the turn boundary, and where its miss count is actually exposed
+
+- [ ] **T4: the expert pool's eviction policy is the chapter's last untouched
+  term, and step zero re-prices it. Task 3 left the follow-up turn saying "the
+  routed stage is now the largest term and its drive is the miss count on a cached
+  context" ([v13-the-turn.md](v13-the-turn.md):450-452). Measured, that overstates
+  it: on turn 3 the `lru` policy removed 304 of 721 prefill misses (42 %) and
+  `prefill_s` moved 0.985 → 0.981 s, inside a 16 ms drift, because that turn's
+  routed stage sits at its GPU floor (412 ms for 338 tiles) and at the drive's
+  measured ceiling (832 misses = 1.472 GB in 412 ms = 3.57 GB/s, the peer's probe
+  number, [v13-implementation-plan.md](v13-implementation-plan.md):747) at the same
+  time. A perfect pool buys ≈ 10 ms there. **The miss count is exposed in decode,
+  not in a follow-up prefill**: four independent measurements put a decode miss at
+  ≈ 0.93 ms of wall and tX's 219-token answer carries 7,451 of them, **6.9 s of a
+  16.83 s decode, 41 %**. A clairvoyant policy at 128 slots per layer, replayed on
+  the measured route trace, removes 1,846 (**−1.7 s, −10 % of decode, 13.01 → 14.50
+  tok/s modelled**); `lru` realizes 502 of that on the box (+2.8 % tok/s) and pays
+  for it on the 8-token turns. So the task lands the trace's missing prefill line
+  and an offline replay first, prices every candidate against Belady before an arm
+  runs, and lands a policy behind `SHRIKE_EXPERT_CACHE_POLICY` either way. **The
+  mini decides**, and a measured null is a result
+  ([v13-the-turn.md](v13-the-turn.md):488-505).
+
+  **Step zero: the term as measured** (mini, the deployed a1158b6 binary, bare
+  launch, zero code). The card's follow-up chain: `turns-live 512`, tX answered
+  live at 219 tokens, `temperature: 0`, turns 2 and 3 REUSEing the default chain's
+  payloads (`t3-out/t3-default-mini-live/`) so every arm sent identical bytes.
+  **Every completion is byte-identical across all four arms below** (tX 672 chars,
+  turn 2 27, turn 3 32; verified by diffing the responses). Logs at
+  `~/.claude/handoffs/archive/shrike-v13-t0/t4-out/<tag>/`, also in the
+  controller's scratchpad; rows from `t4-rows.py`.
+
+  | request | new / cached | wall | `prefill_s` | prefill hits / misses | lookups / layer | MiB read | routed GPU / tiles | busy / span (ms) | decode s / tok / tok/s | decode hits / misses | evict / reload |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | tX (2,125, answered 219) | 2,125 / 0 | 29.72 s | 11.148 | 0 / 9,370 (0 %) | 234 | 28,385 | 3,943 / 1,187 | 19,740 / 27,942 | 16.828 / 219 / **13.01** | 62,309 / **7,451** (89.32 %) | 11,701 / 6,907 |
+  | **turn 2** | **21 / 2,345** | **1.422** | 0.844 | 1,734 / **832** (67.6 %) | 64 | 1,809 | 412 / 338 | 955 / 1,361 | 0.518 / 8 / 15.46 | 2,000 / 240 (89.29 %) | 1,072 / 1,060 |
+  | turn 3 | 36 / 2,359 | 1.461 | 0.985 | 2,676 / **721** (78.8 %) | 85 | 1,380 | 538 / 443 | 1,108 / 1,359 | 0.413 / 8 / 19.39 | 2,143 / 97 (95.67 %) | 818 / 809 |
+
+  **The zero-code A/B: the three existing `SHRIKE_EXPERT_CACHE_POLICY` values on
+  the same chain**, one launch each. The miss counts are exact (identical routes);
+  the walls are single runs.
+
+  | policy | tX tok/s | tX decode misses | turn 2 wall / `prefill_s` | t2 prefill / decode misses | turn 3 wall / `prefill_s` | t3 prefill / decode misses |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | `aging-lfu` (default) | 13.014 | 7,451 | 1.422 / 0.844 | 832 / 240 | 1.461 / 0.985 | 721 / 97 |
+  | `lru` | **13.369** | **6,949** | 1.606 / 0.870 | 869 / **368** | 1.512 / 0.981 | **417** / 179 |
+  | `lfu` | 12.941 | 7,451 | 1.429 / 0.854 | 832 / 240 | 1.474 / 1.001 | 721 / 97 |
+
+  Drift on the default across four launches (the three above plus the trace arm):
+  turn 2 wall 1.422 / 1.429 / 1.456 and T3's own 1.406 / 1.423 / 1.411; tX 13.014
+  / 12.941 / 13.099 / 13.20; turn 3 `prefill_s` 0.985 / 1.001 / 0.993. So ≈ ±1 %
+  on a wall and ≈ ±16 ms on `prefill_s`. LRU's +2.8 % on tX is above it (single
+  run), its +184 ms on turn 2 far above it, and every miss count is exact.
+
+  **`lfu` equals `aging-lfu` to the counter on every request, and the arithmetic
+  says why.** The two policies differ in exactly one place: the halving of every
+  count when `statisticsPlans` is a multiple of 1,024
+  (`PreadExpertStreamer.swift:664-670`); the victim comparator has no other policy
+  branch (`:1179-1192`, only `if cachePolicy == .lru`). `statisticsPlans` is a
+  per-instance field (`:314`) and there is one streamer per layer
+  (`Model.swift:552`), so the period is per layer. This chain makes, per layer, tX
+  30 prefill tiles (1,187 / 40) + 218 decode plans, turn 2 8 + 7 and turn 3 11 + 7
+  = **281 plans**. **The halving never fires**, and the `lfu` row proves it to the
+  unit: the pool runs **plain lifetime LFU** for any conversation under ≈ 1,000
+  decode tokens. `expertUseCount` is written only at `:514` (allocation), `:668`
+  (halve) and `:699` (increment), with no reset anywhere, so the counts are a
+  **global popularity prior since process launch**. Whether that is the design is
+  a question for the verdict, not an assumption here. On a card the halving first
+  fires inside the second or third answer (a 600-token answer is ≈ 630 plans per
+  layer). After tX's sweep every routed expert has count ≈ 1 (234 lookups per
+  layer over ≈ 234 distinct experts); the 219 decode tokens then add 1,744 uses
+  per layer over a mean of 177 distinct experts (measured on the trace), so
+  decode's set carries counts an order of magnitude above any prefill's.
+
+  **The policy family moves BOTH regimes, in opposite directions.** LRU takes 502
+  misses off a 219-token decode and 304 off turn 3's prefill, and puts 128 onto
+  turn 2's 8-token decode, 82 onto turn 3's and 37 onto turn 2's prefill: a
+  follow-up prefill's 64 experts per layer are the most recent, so under LRU they
+  displace decode's set, while under aging-LFU they carry count 1 and are the first
+  victims. **Neither policy holds the union.** The replay below shows it is
+  holdable in principle.
+
+  **Why 832 misses on turn 2 and 721 on turn 3.** A 21-token chunk's 168 routed
+  slots per layer collapse to **64 distinct experts** (2,566 lookups / 40, T3's
+  measured figure) and turn 3's 36 tokens to **85**: both fit inside 128 slots, so
+  neither is a capacity failure of the chunk. They miss because the pool holds the
+  *previous* request's decode winners. That the hit rate is nonetheless 67.6 % and
+  78.8 % says the answer's high-count residents already cover two thirds of what a
+  new user turn routes to, which is what a shared prefix plus the chat template's
+  recurring role tokens would give. **Which of the chunk's experts decode had
+  evicted is exactly what the trace cannot answer today**, because prefill's plans
+  are not recorded: that is Step 1's line, and the replay's failure on turn 3 below
+  is the measurement of the gap.
+
+  **The pool's mechanics, verified in the tree.**
+  - One `PreadExpertStreamer` per layer (`Model.swift:552`), built lazily on that
+    layer's first routed touch. `slotCount` comes from `--ram-budget`
+    (`ServerArguments.swift:113-124`) through
+    `RuntimeConfiguration.expertCacheSlots` (`:202-213`) at
+    `ServerInference.swift:687-692`: `perSlot` = stride 1,769,472 B × 40 layers =
+    70,778,880 B, `wanted` = 8 GiB / that = 121.4, snapped to the nearest of
+    `[8, 16, 24, 32, 64, 96, 128]` (`:142`) = **128 slots per layer** for 256
+    experts at top-k 8, which is the 9.06 GB CLAUDE.md records.
+  - Policy `ExpertCachePolicy` (`PreadExpertStreamer.swift:164-168`), default
+    `.agingLFU` (`:260`), env parse at `:342-349` (fails closed; the error text
+    lists `lfu, lru, aging-lfu`). **The parse lives in the streamer's `init`**, run
+    per layer, so a bad value throws mid-request forty times rather than at launch,
+    and it never reaches `RuntimeConfiguration.expertCachePolicy`
+    (`ServerInference.swift:702` passes the CLI value).
+  - A **plan** is one `makeExpertCachePlan` (`:641`): decode makes one per layer
+    per token (`RealForwardRunner.swift:6397` → `ModelExpertIO.swift:113`, `:123`),
+    prefill one per tile of 8 experts (`RealForwardRunner.swift:5378`, `:5594`,
+    `:5678` → `ModelExpertIO.swift:127`, `:134`). Hit slots are reserved before
+    victim selection (`:686`), `useClock` advances per plan (`:663`, `:697`) and
+    `expertUseCount[e] += 1` per expert per plan (`:698-699`).
+  - Victim order (`selectVictimSlots` `:1152-1177`, `shouldEvictSlot` `:1179-1192`):
+    the LFU family takes the lowest count first with ties by oldest `slotLastUse`,
+    LRU takes `slotLastUse` alone, loading and pinned slots are ineligible
+    (`:1156-1157`) and ties resolve to the lower slot index. **No host test covers
+    any of this today** (nothing in `tests/` names `ExpertCachePolicy` outside two
+    `RuntimeConfiguration` round-trips).
+  - Counters (`ServerInference.swift:1986-2005`). `expert_evictions`
+    (`PreadExpertStreamer.swift:710`) is **arithmetically redundant**: tX's 16,821
+    misses minus the 5,120 initially empty slots (128 × 40) = **11,701, the
+    measured value exactly**, turn 2 832 + 240 = **1,072**, turn 3 721 + 97 =
+    **818**. `expert_reloads` (`:1411`, `:1418`) is a **lifetime** flag, so once
+    tX's sweep has loaded 9,914 distinct (layer, expert) pairs of 10,240 every
+    later miss counts as a reload: it never says when the eviction happened.
+    `expert_rank_mass` (`:1976-1984`) is router-weight mass by rank, not frequency
+    headroom.
+  - **A speculative plan still mutates the pool.** `abandonExpertCachePlan`
+    (`:1358-1377`) resets only the loading slots, rolling back neither
+    `expertUseCount` nor `slotLastUse` nor the statistics. The path is reachable
+    only from the depth-1 tile loop (`RealForwardRunner.swift:5421-5423`), which
+    the shipped fetch depth 2 does not run, so production plans each tile exactly
+    once and a `SHRIKE_PREFILL_FETCH_DEPTH=1` capture would not replay cleanly.
+
+  **Prior art, placed rather than re-derived.** v12 Task 17's side finding that
+  plain decode is hit-rate-bound
+  ([v12-prefill-matrix-kernels.md](v12-prefill-matrix-kernels.md):1163-1166: body
+  39.6 / 48.2 / 72.5 ms, 22.0 / 18.4 / 12.5 tok/s as the hit rate falls 0.99 →
+  0.88) is this task's term from the other end. v10's P3 entry and its 2026-09-04
+  follow-on (`docs/v10-implementation-plan.md`; the follow-on is an uncommitted
+  peer edit in the working tree, archived at
+  `~/.claude/handoffs/archive/shrike-ssd-split-probe/`) closed the fetch-speed
+  lever (the mini's 1.77 MB read is at its ≈ 0.77 ms floor; splitting, padding and
+  file-splitting are all null on the deploy target) and named what survives in
+  this task's words: "policy-side (reduce miss COUNT via residency / cache)". Its
+  ramp probe also found that a 5 ms idle gap doubles the next read (`mini-ramp-run1.txt`
+  rows B and E: 64 KB p50 0.123 ms back-to-back, 0.278 ms after the gap), a caveat
+  for anything that fetches between turns. **`docs/architecture.md:76-119` holds
+  two different predictors and only one is disproven**: the proof (`:78-89`) kills
+  *same-layer, previous-token* prediction (0.00 % of misses caught at both 16 and
+  128 slots), while `ExpertPrefetchRing.swift` / `SHRIKE_PREDICTIVE_PREFETCH`
+  implement *next-layer* prediction, which predicts well (64.1 % recall) but did
+  not pay end to end and whose door the distance experiment closed (`:91-118`).
+  **T4 is neither**: eviction order is not prediction, and that passage ends "the
+  surviving miss levers are cost-side (event gating, free-running) and policy-side
+  (cache)" (`:117-118`). Candidate (c) is the one part of T4 that touches
+  prediction and inherits that bar.
+
+  **Where the miss count is exposed: two regimes, two answers.**
+
+  1. **The follow-up turn's prefill: ≈ nothing.** Turn 2's `prefill_s` is 844 ms,
+     of which the role GPU is 654 (attention 54 + GDN 165 + shared 22 + routed 412
+     + reduce 0.9), leaving 190 ms of idle: the two named host gaps are 128 (`s→r`
+     77, `r→r` 51) and the three smaller ones ≈ 62. Nothing is left over for
+     exposed fetch. The drive's occupancy (`io_fetch_ms × 8` = 952 ms over 1,072
+     misses = 0.888 ms per expert, T2's 0.84-1.02 ms) needs mean concurrency ≥ 1.79
+     to fit under the routed stage's 412 ms of GPU, which 4 threads over 2
+     published batches supply; in bandwidth terms 832 × 1.6875 MiB = 1.472 GB in
+     412 ms is 3.57 GB/s, exactly the peer's probe ceiling. **Turn 2's routed stage
+     is at its GPU floor and at the drive's ceiling at the same time.** Modelled, a
+     perfect pool takes **X = 0 to 66 ms** (66 if the drive only realizes T2's 3.08
+     GB/s: 478 − 412). Measured, turn 3's LRU arm removed 304 of 721 prefill misses
+     and `prefill_s` moved 4 ms against a 16 ms drift, so **X ≈ 10 ms** scaled to
+     all 721, and halving turn 2's 832 buys **Y ≈ 5 ms**. Both are twenty times
+     under 0.1 s. **The follow-up turn is not where this lever pays**, and Task 3's
+     closing sentence ([v13-the-turn.md](v13-the-turn.md):450-452) overstated it;
+     what is left of that stage is its per-tile GPU (1.22 ms × 338 tiles at 21
+     rows), a kernel question recorded as a follow-on.
+  2. **Decode: the chapter's largest single term.** tX answers 219 tokens at 13.01
+     tok/s with 7,451 misses = 34.0 per token = 0.85 per layer-token of 8 lookups
+     (hit rate 0.8932). Four independent measurements of what one miss costs: the
+     LRU arm's decode deltas on tX 0.447 s ÷ 502 = **0.890 ms**, turn 2 0.160 ÷ 128
+     = **1.250**, turn 3 0.056 ÷ 82 = **0.683**, pooled 0.663 ÷ 712 = **0.931**;
+     and independently v12 T17's 3.0 ms per token per point of hit rate over 3.2
+     misses per point = **0.94 ms**. At 0.93 ms, tX's 7,451 misses are **6.93 s of
+     a 16.83 s decode: 41 %**, and a card's 600-800-token answer (46-61 s) carries
+     the same 41 %: **19-25 s per card**.
+
+  **The bound: the decode route trace, replayed.** `SHRIKE_ROUTE_TRACE` produced
+  `t4-out/t4-probe-trace/route-t4-probe-trace.trace`, 9,280 lines of
+  `position layer e0 … e7` (`RealForwardRunner.swift:2027-2042`, written only from
+  `encodeDecodeRoutedMoE` at `:6387`, before planning, so it records demand and not
+  residency): 232 positions × 40 layers in three contiguous runs of 218 / 7 / 7,
+  which matches the decode counters **exactly** (tX 62,309 + 7,451 = 8 × 40 × 218;
+  turn 2 2,240 = 8 × 40 × 7, because the first generated token comes out of
+  prefill's last row, so an N-token decode traces N − 1 positions). Replayed at 128
+  slots per layer with hits reserved, cold pools, one continuous pass (the draft's
+  probe `t4-draft-replay-probe.py` in the controller's scratchpad: **modelled, and
+  superseded by Step 1's real tool**):
+
+  | policy | run 1 (tX, 218 tokens) | run 2 (turn 2, 7) | run 3 (turn 3, 7) |
+  | --- | ---: | ---: | ---: |
+  | compulsory (first touch, cold pool) | 7,004 | | |
+  | `lru` | 8,580 | 376 | 119 |
+  | `lfu` = `aging-lfu` | 9,006 | 245 | 112 |
+  | aging period 32 / 64 / 128 | 8,631 / 8,746 / 8,878 | 362 / 311 / 287 | 112 / 112 / 99 |
+  | **Belady (clairvoyant)** | **7,160** | **112** | **34** |
+
+  Three readings. (1) **The replay tracks the box**: its aging-minus-LRU delta is
+  −426 on run 1 against a measured −502, and −131 on run 2 against a measured −128.
+  (2) **The one place it fails is the one the prefill lines would fix**: run 3
+  replays −7 where the box measured **+82**, and turn 3 is the request with the
+  most prefill lookups per layer (85 against turn 2's 64), which under LRU displace
+  decode's set where the replay cannot see them. That is the argument for Step 1's
+  trace line, as a measurement rather than a hunch. (3) **A faster decay does not
+  escape the trade-off, it slides along it**: the aging period sweeps aging-LFU
+  toward LRU (period 32 lands at 8,631 / 362 against LRU's 8,580 / 376). But
+  **Belady beats both policies on both regimes at once** (7,160 and 112 and 34), so
+  the union *is* holdable and the trade-off is an artifact of these two rules, not
+  a law. Capacity misses, the part a policy can move: aging 2,002, LRU 1,576,
+  Belady **156**, so Belady removes 92 % of aging's and LRU 21 %.
+
+  **What that prices.** Belady's 1,846-miss saving on the answer at 0.93 ms is
+  **−1.72 s off a 16.83 s decode (−10.2 %), 13.01 → 14.50 tok/s**, and on a card's
+  600-token answer 46.1 → 41.4 s (modelled: the cold-pool replay's delta carried
+  onto the warm measured count; Step 1's prefill-inclusive replay replaces it). That is the **ceiling** for any eviction policy
+  at 128 slots on this trace and the largest single number in the chapter (T3 took
+  0.69 s off a follow-up turn). LRU realizes 23 % of it in the replay and 27 % on
+  the box; a segmented policy capturing half the gap would still be ≈ 2.4 s per
+  card. If Step 1's replay puts the best implementable policy inside aging-LFU's
+  drift on both regimes, the task lands the tooling and records the null.
+
+  **Candidate levers, priced from the rows and the replay.**
+  - (a) **A default flip to `lru`.** Measured: +2.8 % tok/s and −502 misses on
+    tX, −304 prefill misses on turn 3, against **+184 ms on turn 2's wall and +51
+    ms on turn 3's**. On the chapter's rule that is not free today. **But the
+    penalty is a burst transient, not a rate**: the replay's LRU penalty is +131
+    misses over run 2's 7 tokens, the pool re-converging after the policy's
+    recency set was rebuilt by prefill; it is ≈ 131 × 0.93 = **122 ms fixed**,
+    while LRU's steady-state advantage on a real answer is 2.8 % (≈ 1.1 s on a 40
+    s turn-2 answer). Modelled, LRU **wins by ≈ 1.0 s once the follow-up turn
+    decodes a card's answer instead of 8 tokens**. Arm C measures exactly that,
+    and it is why the rig needs a long-answer turn 2.
+  - (b) **A policy that holds the union**, which Belady says exists. Worth
+    replaying, cheapest first: a **protected segment** (a share of the 128 slots
+    held for experts with two or more uses, the rest LRU: SLRU / S3-FIFO), a
+    **per-plan decay** instead of the 1,024-plan halving, and **ARC-like
+    adaptation**. The aging-period sweep says a decay alone will not do it. Replay
+    first; the winner lands as a new `ExpertCachePolicy` case behind the knob.
+  - (c) **An idle-time refill between turns.** After `settle_done`
+    (`ServerInference.swift:1714-1716`, emitted from the post-response `Task`
+    `startRewrite` launches at `:1552-1558`: the precedent for work off the
+    critical path) the drive idles while the human reads, and turn 2's 240 decode
+    misses are ≈ 0.22 s of its 1.42 s wall, the largest removable term on that
+    shape. Against it: the pool has no spare slots, so a refill evicts something
+    decode would have hit; the idle drive's first reads cost ≈ 2.3× (the ramp
+    probe); and a request arriving mid-refill must cancel it as a rewrite is
+    cancelled. **Price it only if the replay says the next turn's set is
+    predictable from the conversation's history** (Belady still leaves 112 misses
+    on run 2, so the headroom above eviction is real but small). It is the one
+    candidate that is prediction and inherits `architecture.md`'s bar.
+  - **Not levers**: a larger pool (16 GB box; 8G is the measured optimum,
+    CLAUDE.md) and next-token expert prediction (v4.3's closed territory).
+
+  **The decision rule, under the chapter's real-and-free rule**
+  ([v13-the-turn.md](v13-the-turn.md):488-505). The knob lands either way. **No
+  percentage bar.** The pool's policy is global, so **both regimes are verdict rows
+  and neither may regress**: (i) `decode_tok_s` on tX's 219-token answer and on the
+  long-decode arm, and (ii) the follow-up turn's wall **at a card's answer length**
+  (turn 2 with `max_tokens` 512), with the 8-token turn 2 and turn 3 walls beside
+  them. The default moves only if the effect is **real** (the sign holds across
+  paired runs in both orders, three pairs at the leading candidate, a fourth if a
+  row sits inside twice its drift; drift is ±1 % on a wall, ±16 ms on `prefill_s`,
+  a 0.26 tok/s spread on tX's decode) and **free**: the 300 / 1k / 2k warm pairs
+  unmoved (their 58.4 / 51.6 / 50.3 % prefill hit rates depend on what the previous
+  request left resident, which Task 0's carry parity created, so a move there is a
+  cost, not a defect), the 12k control ± 1 %, `memory_pressure -Q` acceptable before
+  every launch, and **golden IDENTICAL on both boxes and both profiles**.
+
+  **Numerics: nothing moves.** Slot policy changes which expert is fetched when,
+  never what any kernel computes ([v13-the-turn.md](v13-the-turn.md):507-513), and
+  step zero measured it: all four arms' completions byte-identical. Golden
+  identical is the bar and a difference is a defect, never a recapture. The trace
+  line is diagnostic and off unless the env names a file.
+
+  **The knob.** The existing `SHRIKE_EXPERT_CACHE_POLICY` gains the new case, and
+  its allowed list and error text (`PreadExpertStreamer.swift:344-346`) gain the
+  value. Two shape fixes ride with it, both in family with T2's work: hoist the
+  parse out of `init` into a static `ExpertCachePolicy.environmentValue(_:)` in the
+  shape of `ExpertIOBackend.environmentValue` (`:170-181`), called once when the
+  session is built so a bad value fails the launch rather than the first routed
+  layer of the first request; and print the **effective** policy on the residency
+  line, which does not carry it today (`prefillGapLeversDescription`,
+  `RealForwardRunner.swift:293-330`, prints `sweep=`, `cache_layout=`, `expert_io=`
+  and, since T3, `prefill_matrix_min_rows=`), reading that same static parse rather
+  than `RuntimeConfiguration.expertCachePolicy`, which the env override never
+  reaches (`ServerInference.swift:702`). `cachePolicyDefault` (`:260`) moves on the
+  verdict. If (c) wins instead, the refill takes its own knob
+  (`SHRIKE_EXPERT_IDLE_REFILL`) and the policy knob is untouched.
+
+  **The trace's prefill line.** One line per **tile**, not per row: the pool sees
+  one plan per tile, and a per-row line would need a row→expert map the pool never
+  has. Grammar: a marked variant `p <chunkFirstPosition> <layer> <tileIndex> <e0 … e7>`,
+  so the bare `position layer e…` decode line and its consumers keep working and a
+  replay splits on the first field. Emitted from the three sites that already hold
+  the tile's expert IDs (`RealForwardRunner.swift:5371`, `:5589`, `:5675`, each a
+  `PrefillStreamedTileBinding.expertIDs(forTile:routes:)`) through the same
+  `routeTraceFD` (`:1887-1891`, opened `O_TRUNC` once per process, so a capture is
+  exactly one server's history). The formatting becomes a pure static function with
+  a host test; the write path is unchanged.
+
+  **The replay tool, `tools/expert-pool-replay.py`.** Inputs: a trace, slots per
+  layer, a policy, optionally a layer filter. Outputs: hits / misses per phase per
+  request (per layer on request) and the capacity / compulsory split. Policies:
+  `lru`, `lfu`, `aging-lfu` at a settable period, `belady`, and each candidate from
+  (b). **Fidelity list**, each verified above and each a line of the tool: hits
+  reserved before victim selection (`:686`), loading and pinned slots ineligible
+  (`:1156-1157`), ties by count then `slotLastUse` then lower slot index,
+  `expertUseCount` incremented per expert per plan and never reset, the halving at
+  multiples of 1,024 per layer, prefill's `avoidingSlots` (the held slots of the
+  open and pending batches), and one plan per tile at fetch depth 2. **Validation,
+  the step's own stop:** replaying the same trace under `aging-lfu` must reproduce
+  the measured **7,451 / 240 / 97** decode misses and, once prefill is traced,
+  **832 / 721** prefill misses, within Task 3's ± 3 counter jitter
+  ([v13-the-turn.md](v13-the-turn.md):410-414). The draft's probe reaches 9,006 /
+  245 / 112 from a cold pool with no prefill lines: the run-1 gap is prefill's
+  residency covering 1,555 first touches and the run-3 gap is the missing prefill
+  plans, so both should close, and if they do not the model is wrong. A self-test
+  on a tiny synthetic trace ships with it.
+
+  **The rig and the rows.** `turns-live` already gives the chain; the long-answer
+  turn 2 needs **one token**. `tools/turn-rig.sh:179` becomes
+  `send "turn2" "${TURN2_MAX_TOKENS:-}" "$turn2_payload"`, reusing the `send`
+  override that rewrites `max_tokens` into a temp copy (`:75-82`) instead of
+  touching the stored payload, so `REUSE` still sends byte-identical bodies in both
+  arms; the header comment (`:19-27`, `:35-36`) gains it. `USER_TURN2` cannot do
+  this: it selects which user turn is appended, not the budget (`:47-50`, `:177`).
+  The long-answer arm builds its own REUSE directory on arm A and reuses it on arm
+  B as T3 did, and its turn 3 is reported but is not a verdict row (that payload
+  carries the 8-token assistant turn while the server just produced a long one, so
+  its cached fraction differs). **Rows** exactly as `t4-rows.py` reads them (Task
+  3's fields) **plus the pool counters folded into the row**: `expert_evictions`,
+  `expert_reloads`, `expert_hit_rate_decode`, `expert_hits_decode`,
+  `expert_misses_decode`, which `t4-probe.sh` greps separately today and which all
+  already print (`ServerInference.swift:1991`, `:2002-2003`). **No new counter.**
+  Caveat to carry: `io_fetch_ms × 8` is the request's total only when the
+  completion is 8 tokens; on tX read it as `io_fetch_ms × 219`.
+
+  **Tests (RED first, host-only; no device suite for a scheduling-only change).**
+  - `expertVictimOrderFollowsThePolicy`: the comparator extracted from
+    `shouldEvictSlot` (`:1179-1192`) as a pure function over (policy, lhs count,
+    lhs last use, rhs count, rhs last use). LRU by last use alone, the LFU family
+    by count then last use, the new policy's own rule, the negative-expert slot
+    case (`:1183-1185`). The extraction is the point: none of it needs a device.
+  - `expertCachePolicyEnvironmentDefaultsAndFailsClosed`: the hoisted parse in the
+    shape of `expertIOBackendEnvironmentDefaultsAndFailsClosed`
+    (`PreadExpertStreamerTests+CachePlanning.swift:9-19`). Unset gives the default,
+    each allowed value round-trips, an unknown value throws with the allowed set.
+  - `prefillGapLeversDescriptionReportsTheCachePolicy`: the existing assertion
+    (`PreadExpertStreamerTests+CachePlanning.swift:60-67`) plus the new field.
+  - `routeTraceLineFormatsPrefillAndDecode`: the pure formatter, beside T3's parser
+    tests (`PrefillRoutedTileSchedulerTests.swift:497-513`). A decode line stays
+    bare `position layer e…`, a prefill line is `p position layer tile e…`, both
+    round-tripping through the replay's parser. Plus the replay's own
+    `--self-test`, run from the tool and not from `swift test`.
+
+  **Files.** `sources/Shrike/Infrastructure/Streaming/PreadExpertStreamer.swift`:
+  the new `ExpertCachePolicy` case and its static `environmentValue` (`:164-181`),
+  the `init` parse delegating to it (`:342-349`), `cachePolicyDefault` (`:260`) on
+  the verdict, `shouldEvictSlot` delegating to the pure comparator (`:1179-1192`),
+  and the new policy's per-slot state if (b) wins.
+  `sources/Shrike/Runtime/Inference/RealForwardRunner.swift`: `recordRouteTrace`
+  and its formatter (`:2027-2042`), the three prefill tile sites (`:5371`, `:5589`,
+  `:5675`), `prefillGapLeversDescription` (`:293-330`). `ServerInference.swift`:
+  nothing, the field rides the gap-levers string already on the residency line
+  (`:822-826`). `tools/expert-pool-replay.py` (new), `tools/turn-rig.sh:179` and
+  its header. Tests: the two files above. **Lint:** two baseline entries embed a
+  line count in their reason string and go stale on any edit to their body,
+  `PreadExpertStreamer.init` ("currently spans 162 lines") and
+  `encodeRoutedMoEPrefill` ("currently spans 244 lines"), so
+  `swiftlint lint --write-baseline` is expected (T0 to T3 each hit this on a
+  different function). **Unchanged:** every `.metal` file and kernel body,
+  `expert_io.c` and the reader, the planner's placement logic, the prompt cache.
+
+  Steps:
+
+  - [ ] Step 1 (an implementer, the offline half, **a named stop**): the trace's
+        prefill line and its host test; `tools/expert-pool-replay.py` with the
+        fidelity list above, its self-test and its validation against 7,451 / 240 /
+        97; then **one capture on the mini** of the same `turns-live 512` chain with
+        `SHRIKE_ROUTE_TRACE` on (a model run: `pgrep` and `memory_pressure -Q`
+        first) so prefill is in the trace, **and a second capture of a different
+        shape** (the `d512` 300-token pair Task 2's arms already run: a short
+        prompt, a long answer, a warm second request) so no policy is fitted to
+        one conversation; then the offline verdict over Belady, LRU, LFU,
+        aging-LFU at several periods and each candidate from (b), on both regimes
+        and both traces. **Stop here if the best implementable policy does not beat
+        aging-LFU on the answer by more than LRU does while also not regressing the
+        follow-up turns**: land the line and the tool, record the null, close.
+  - [ ] Step 2 (an implementer): the failing tests, then the hoisted parse, the
+        pure comparator, the new `ExpertCachePolicy` case, the printed field and
+        `turn-rig.sh:179`. The default does **not** move here. The four per-commit
+        gates (release build, 0 warnings; `swiftlint lint --strict --baseline`,
+        regenerated for the two stale entries; `tools/check-md-links.py`;
+        `swift test --no-parallel`, the full suite).
+  - [ ] Step 3 (numerics): `tools/golden-baseline.sh --check` on the M4 Pro at the
+        old default and at each candidate, both profiles, **IDENTICAL** every time;
+        then `tools/mini-deploy.sh --restart` and the same pair on the mini. A
+        difference is a defect and the task stops.
+  - [ ] Step 4 (the arms, controller-run, **one binary**, the policy as the A/B
+        through the rig's `SERVER_ENV`; a fresh server per chain, `REUSE` on every
+        arm after the first, tags `t4-<cell>-<order>`): **A**
+        `aging-lfu` and **B** the replay's winner via `turns-live 512`, **paired
+        in both orders, three pairs**, reading `decode_tok_s` on tX and the walls
+        on turns 2 and 3; **C** the long-answer follow-up (`TURN2_MAX_TOKENS=512`)
+        at A and B, its own REUSE directory, **the second verdict row**; **D**
+        `lru` at the same two shapes, so (a) is decided on a card's shape rather
+        than on 8 tokens; **E** the whole-chunk controls `pair 300|1k|2k` at A and
+        B with prefill hit rates compared expert for expert; **F** the 12k control;
+        **G** the long-decode arm (`MAX_TOKENS=512`) at 300 and 1k. Read the
+        **decode miss counts**, not the walls alone: if B's misses do not fall by
+        what the replay predicted, the replay is wrong and the task stops before
+        the rule is applied.
+  - [ ] Step 5 (the rule): apply it to both verdict rows and every control. The
+        default moves to the winning policy or stays `aging-lfu`. **Record the
+        verdict either way**, with the replay's prediction beside each measured
+        miss count so the reader can see how well the offline model held. Then the
+        four gates on the landed tree, golden both boxes both profiles,
+        `tools/mini-deploy.sh --restart` and the mini golden check.
+  - [ ] Step 6 (design doc): a "Task 4" section with the policy A/B table, the
+        replay table, the two-regime pricing and an "**After T4**" ledger block;
+        the Task 3 close-out sentence ([v13-the-turn.md](v13-the-turn.md):450-452)
+        corrected (its "miss count on a cached context" measures ≈ 10 ms); the
+        decode lever entry (`:481-483`) rewritten with Belady's ceiling; the routed
+        GEMM's per-tile cost at 21 rows added to Follow-ons. Plan: Task 4 `[x]`.
+        Task review by a fresh reviewer, fixes folded into the owning commit.
+
+  **Risks and what falsifies the model.**
+  - **The replay's initial state.** A traced request starts on whatever the
+    previous one left, so a capture must begin at a fresh server and cover every
+    plan from launch. Prefill's plans are what is missing today, and the draft's
+    probe shows the cost: run 3 replays −7 where the box measured +82. If Step 1's
+    replay still cannot reproduce 7,451 / 240 / 97 within ± 3 once the prefill line
+    lands, something else mutates the pool that this task has not found, and Step 1
+    stops there.
+  - **The trace's own cost.** `recordRouteTrace` is a synchronous `write(2)` per
+    layer per token (40 per decode token) and the prefill line adds one per tile
+    (338 on a 21-row turn, 18,864 on 12k). The decode cost is measured nil on the
+    trace arm (tX 13.099 tok/s against 13.014, turn 2 1.456 s against 1.422, both
+    inside drift); the prefill line's is **modelled**, ≈ 40-95 ms on a 68 s 12k
+    request at a few µs per write. It is off unless the env names a file and no
+    verdict arm runs with it on.
+  - **A policy that trades the regimes** is the expected failure, and the A/B
+    already shows its shape: LRU buys the answer and sells the turns. Both regimes
+    are verdict rows, so a policy inside aging-LFU's drift on one and above it on
+    the other records the trade and does not flip. **And the turn-2 penalty may not
+    amortise**: reading LRU's +184 ms as a fixed 122 ms burst transient rests on
+    the replay's per-run attribution, not on a measured long-answer turn 2. Arm C
+    is that measurement; if the penalty scales with the turn's token count, (a) is
+    dead and this draft is wrong.
+  - **The first-turn and 12k controls' hits move.** The 300 / 1k / 2k warm rows hit
+    58.4 / 51.6 / 50.3 % because Task 0's carry parity leaves the previous
+    request's experts resident, and which of them survives is exactly what this
+    task changes. A move there is a **cost** priced in the verdict, not a defect
+    (the opposite of T3's rule). The 12k control at 33.6 % is the large-shape check.
+  - **A policy fitted to one trace.** Every eviction rule is a bet on the access
+    pattern, and one chain is one sample of it. The offline verdict runs on two
+    captures of different shape (Step 1) and the winner must lead on both; a
+    policy that wins the 2k card and loses the short-prompt pair is recorded as
+    a trade, not flipped.
+  - **LFU's counts alias across the sweep.** Every routed expert leaves tX's
+    2,125-token prefill with count ≈ 1, so the tie-break (oldest `slotLastUse`)
+    decides most early evictions and a policy that changes how prefill increments
+    counts moves far more than its own regime. Every candidate in (b) is replayed
+    on the **prefill-inclusive** trace before it is built.
+  - **Memory and the box.** A segmented policy's extra per-slot state is a few
+    bytes × 256 experts × 40 layers; the pool's 9.06 GB does not move and
+    `--ram-budget 8G` stays. `memory_pressure -Q` before every launch. The mini is
+    production: every arm stops the server on 8081 and relaunches it, Turbo on 8080
+    is never touched, one model process at a time.
+
 ## Follow-ons (not scheduled)
 
 - The GDN chunked scan below its 64-row gate (`GDN.chunkTokens`): ≤ 33 ms on a
