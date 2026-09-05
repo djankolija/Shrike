@@ -2010,6 +2010,415 @@ different kernels on a chunk.
     production: every arm stops the server on 8081 and relaunches it, Turbo on 8080
     is never touched, one model process at a time.
 
+### Task 5: T5 — the resident-first recency sweep
+
+- [ ] **T5: Task 4 left one lever measured and unlanded. `SHRIKE_PREFILL_SWEEP=recency`
+  takes 0.6 to 0.8 s off the first turn's decode after a large prompt on the mini
+  (−0.63 s on the 2k card, −0.72 s on the 300-token prompt, −0.72 s on the 1k,
+  +3.2 to +3.9 % tok/s) and forfeits T0's carry benefit on every chunk that follows
+  another (the 300 / 1k / 2k pairs' warm prefill +3.7 / +7.5 / +10.9 %, 12k +7.2 %),
+  so it stayed a knob at default `carry`
+  ([v13-the-turn.md](v13-the-turn.md):531-537). The forfeit has one cause: an
+  ascending-by-last-row sweep visits the chunk's experts in an order unrelated to what
+  the pool already holds, so its early misses evict residents the same chunk needs
+  later. **Sweeping the chunk's resident experts first fixes exactly that**: every hit
+  is harvested before any eviction (T0's parity trick, which alternates direction to
+  approximate the same thing, made exact through the pool's own residency), and the
+  absent experts keep the recency order that leaves the prompt's last-used experts in
+  the pool for decode. Step zero replayed it on four captures at 128 slots with the
+  streamer's exact rules: **the first turn's decode gain is kept in full on every trace**
+  (a cold pool has no residents, so a first chunk's order is identical to today's
+  `recency`: −762 misses on the card's answer, −591 on the 300 prompt's 512-token
+  answer, −293 on the 8-token pair, −26 at 12k, a control), **and every row the plain recency
+  order lost comes back at or under today's** (the warm prefill after a long answer
+  −2.1 %, the chain's turn 3 −3.7 %, 12k −0.8 %, and the second 12k chunk's hits become
+  exactly 5,120 = 128 slots × 40 layers, the arithmetic maximum). One row costs: a
+  warm second prompt after a short answer, +30 prefill misses (+1.0 %) against that
+  same request's −12 decode misses, a wash of ≈ 11 ms either way. **The prize is the
+  first turn's decode after a large prompt, ≈ −0.6 s, without the multi-chunk and
+  warm-prefill losses that kept `recency` a knob.** The task lands a fifth
+  `PrefillSweepMode` behind `SHRIKE_PREFILL_SWEEP=resident`, default `carry` in the
+  commit, flipped by amend on the mini's verdict, either way
+  ([v13-the-turn.md](v13-the-turn.md):640-658).**
+
+  **Step zero: two more captures, zero Swift code** (the controller, 2026-09-06; mini,
+  the deployed 04d4de5 binary, bare launch so `sweep=carry protect=chunk` and
+  `aging-lfu`, with `SHRIKE_ROUTE_TRACE` naming a file; driver
+  `loop-files/t5-capture.sh`, archived at
+  `~/.claude/handoffs/archive/shrike-v13-t0/t5-out/`; rows by `t4-rows.py` off the
+  server's own counters):
+
+  | capture | request | new rows | wall | `prefill_s` | prefill hits / misses | routed GPU / tiles | decode misses (8 tokens) |
+  | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | `t5-cap-pair300` | t300 (cold) | 289 | 7.899 s | 5.461 | 0 / 7,639 (0 %) | 1,522 ms / 968 | 506 |
+  | `t5-cap-pair300` | t300b (warm) | 305 | 3.443 | 3.017 | 4,861 / 2,865 (62.9 %) | 1,400 / 982 | 123 |
+  | `t5-cap-12k` | the 12k prompt | 12,285 | 68.272 | 64.95 | 9,947 / 18,457 (35.0 %) | 19,797 / 3,605 | 729 |
+
+  Both validate against the replay to the unit (delta 0 on every counter, the trace's
+  own `p` lines equal to the logged tile counts). The 12k prompt is three chunks at
+  positions 0 / 4,096 / 8,192. Both captures re-confirm Task 4's no-prefix finding: the
+  prompt cache's settle after a request with no cached prefix re-prefills the whole
+  prompt in the background (954 tiles after t300; 3,595 tiles and ≈ 64 s after 12k), a
+  cache-chapter follow-on and not this task's. The other two traces are Task 4's round-3
+  captures `t4-out/t4-cap-aging-lfu-chain-r3/` (the card: a 2,125-row first turn answered
+  live at 219 tokens, then the 21- and 36-token follow-ups) and
+  `t4-out/t4-cap-aging-lfu-d512-300-r3/` (a 289-row prompt answered at 512 tokens, then a
+  warm 305-row prompt), captured with protection off and replayed here at `--protect
+  chunk`, which reproduces round 3's measured rows (705 / 614 on the follow-ups, 3,389 on
+  t300b against the box's 705 / 613 / 3,389).
+
+  **The offline verdict** (`tools/expert-pool-replay.py` at `--policy aging-lfu --slots
+  128 --protect chunk`; prefill / decode misses per request, the settle chunks summed;
+  every cell in this table re-run by this draft):
+
+  | trace | row | index (today's `carry` tiles as recorded) | `last-asc` (the plain recency order) | resident-first, plain tiles | **the design: resident-first, balanced groups, flat tiles** | Belady |
+  | --- | --- | ---: | ---: | ---: | ---: | ---: |
+  | chain r3 | tX (2,125 rows, 219-token answer) | 9,370 / 7,451 | 9,370 / 6,697 | 9,370 / 6,697 | 9,370 / **6,689** | 9,370 / 2,485 |
+  | chain r3 | turn 2 (21 new, 8 tokens) | 705 / 238 | 707 / 242 | 707 / 234 | 707 / **230** | 380 / 95 |
+  | chain r3 | turn 3 (36 new, 8 tokens) | 614 / 98 | 602 / 104 | 593 / 92 | **591** / 96 | 176 / 31 |
+  | chain r3 | settle (background) | 897 | 852 | 708 | **689** | 96 |
+  | d512-300 | t300 (289 rows, 512-token answer) | 7,639 / 10,059 | 7,639 / 9,450 | 7,639 / 9,450 | 7,639 / **9,468** | 7,639 / 3,773 |
+  | d512-300 | t300b (305 warm, 8 tokens) | 3,389 / 157 | 3,596 / 125 | 3,317 / 171 | **3,317** / 205 | 3,087 / 45 |
+  | pair300 | t300 (289 rows, 8 tokens) | 7,639 / 506 | 7,639 / 231 | 7,639 / 231 | 7,639 / **213** | 7,639 / 111 |
+  | pair300 | t300b (305 warm, 8 tokens) | 2,865 / 123 | 3,759 / 125 | 2,906 / 108 | **2,895** / 111 | 2,717 / 96 |
+  | 12k | 12,285 rows, 8 tokens | 18,457 / 729 | 20,437 / 312 | 18,271 / 427 | **18,315** / 703 | 18,294 / 56 |
+  | 12k | prefill per chunk (0 / 4,096 / 8,192) | 9,426 / 4,383 / 4,648 | 9,426 / 5,395 / 5,616 | 9,426 / **4,202** / 4,643 | | |
+
+  **Three readings.**
+
+  1. **The prize is the plain recency order's, kept whole.** On a first request the pool
+     is cold, the resident set is empty, and the order degrades to `recencyBalanced`
+     exactly (`PrefillMoEGrouping.swift:116`), so the decode gain is the one already
+     measured on the box: −762 misses on the card's answer against the −754 that
+     measured −0.63 s, −591 on the 300 prompt's 512-token answer against a measured
+     −0.72 s ([v13-the-turn.md](v13-the-turn.md):531-533). At Task 4's 0.93 ms per decode
+     miss ([v13-implementation-plan.md](v13-implementation-plan.md):1727-1731) that is
+     −0.71 s and −0.55 s modelled, bracketing the measured pair. **This gain is a fixed
+     transient, not a rate**, which the replay's `--profile` shows directly: on the card's
+     answer the per-32-token decode misses run 1,830 / 1,024 / 529 / 1,162 / 958 / 1,041 /
+     907 at index against 1,227 / 896 / 528 / 1,133 / 964 / 1,041 / 908 resident-first, so
+     −603 of the −754 is in the first 32 tokens and −731 in the first 64; on the 512-token
+     answer the per-64-token windows are 3,011 / 1,888 / 1,674 / 1,933 / 1,553 against
+     2,410 / 1,873 / 1,681 / 1,933 / 1,553, so −601 of −609 is in the first 64. The
+     boundary between a prompt's sweep and its answer's first tokens is the whole term.
+     A card's 600 to 800-token answer therefore gains the same ≈ 0.6 s absolute (1.2 to
+     1.5 % of a 46 to 61 s answer), and the 219-token answer 3.7 % of 16.8 s.
+  2. **Every row the plain order lost comes back.** The warm prefill after a long answer
+     3,389 → 3,317 (−2.1 %), the chain's turn 3 614 → 591 (−3.7 %), 12k 18,457 → 18,315
+     (−0.8 %), and the second 12k chunk's hits 4,939 → **5,120**, which is 128 slots × 40
+     layers: every slot a hit, the arithmetic maximum for that chunk and the exact form of
+     what T0's alternation approximates. The one exception is pair300's warm second
+     prompt, +30 prefill misses (+1.0 %; the plain order costs +41, and step zero's
+     `t5-layers.py` found that scatter to be 11 layers better, 6 the same, 23 worse, none
+     beyond +7, against `last-asc` losing +9 to +28 on all 40). At the short shapes'
+     measured ≈ 0.4 ms per exposed prefill miss (Task 4's verdict rows: 127 misses for 45
+     ms on the 21-token turn, 625 for 264 ms on the warm 300 after a long answer, 353 for
+     128 ms on the warm 300 pair, [v13-the-turn.md](v13-the-turn.md):550-556) that is
+     +12 ms of prefill against that same request's −12 decode misses, ≈ −11 ms: a wash
+     inside the drift of a 3.44 s wall.
+  3. **12k's 8-token decode is a control, not a verdict row.** Step zero's `t5-debug.py`,
+     re-run here: on the last 12k chunk 219 to 255 of the 256 experts are needed per
+     layer and 118 to 128 of the 128 slots hold a hit resident, so almost nothing survives
+     the chunk except the last fresh loads, and which ones is the victim comparator's slot
+     tie inside one tile. The row moves 427 to 708 across compositions that differ nowhere
+     else. Read 12k on its prefill and its wall.
+
+  **Tile composition: three balanced groups, tiled flat.** Task 4's fix round 1 measured
+  that an unbalanced order costs GPU (+0.47 s on a 2k prefill, gone once the head and tail
+  were packed by row weight, [v13-the-turn.md](v13-the-turn.md):511-518), and the plain
+  resident-first order is as unbalanced as `last-asc` (per-tile row-weight stdev 373
+  against index's 317 on the chain, 844 against 467 at 12k). Packing each of the three
+  groups (resident, absent head, absent tail of the `tail` most recent absent) by row
+  weight as `recencyBalanced` packs restores the balance, but giving each group its own
+  tiles costs partial tiles at two group boundaries: the chain 2,767 → 2,859 (+3.3 %), the
+  warm 300 chunk 982 → 1,000, the 21-token turn 338 → 358, turn 3 443 → 462. At the
+  measured ≈ 1.2 ms per routed tile on a 21-row chunk
+  ([v13-implementation-plan.md](v13-implementation-plan.md):1722) that is +24 ms on the
+  follow-up turn, which eats its own prefill gain. **Concatenating the three balanced
+  group orders and tiling the concatenation flat in runs of 8 keeps index's tile count
+  exactly** (chain 2,767, 12k 7,200, the 300 traces 2,997 and 3,871, verified per chunk)
+  with the balance intact and the misses unchanged to a few counts:
+
+  | variant | chain: tX decode / turn 2 / turn 3 | chain tiles, spread | d512-300: t300 decode / t300b | tiles, spread | pair300: t300 decode / t300b | tiles, spread | 12k: prefill / decode | tiles, spread |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | index (today) | 7,451 / 705·238 / 614·98 | 2,767, 317 | 10,059 / 3,389·157 | 2,997, 51 | 506 / 2,865·123 | 3,871, 49 | 18,457 / 729 | 7,200, 467 |
+  | rf-plain (tiles of 8 across the concatenation) | 6,697 / 707·234 / 593·92 | 2,767, 373 | 9,450 / 3,317·171 | 2,997, 77 | 231 / 2,906·108 | 3,871, 76 | 18,271 / 427 | 7,200, 844 |
+  | rf-bal:96 (three groups, each its own tiles) | 6,688 / 707·229 / 581·98 | 2,859, 283 | 9,467 / 3,317·203 | 3,043, 40 | 213 / 2,893·108 | 3,919, 32 | 18,315 / 708 | 7,232, 475 |
+  | **rf-bal-flat:96 (three balanced groups, tiled flat)** | **6,689 / 707·230 / 591·96** | **2,767, 290** | **9,468 / 3,317·205** | **2,997, 47** | **213 / 2,895·111** | **3,871, 42** | **18,315 / 703** | **7,200, 484** |
+
+  The adaptive tail (`tail` clamped to 128 − |resident|) and a strict last-asc tail move
+  nothing outside 12k's tie-break decode row (695 and 662 against 708) and cost more
+  partial tiles; both are recorded and not built. A tile that straddles a group boundary
+  is safe: a plan reserves its hit slots before `selectVictimSlots` runs
+  (`PreadExpertStreamer.swift:704-711` before `:716-722`), so a resident sharing a tile
+  with misses cannot be their victim, and every later tile of the chunk is protected by
+  `SHRIKE_EXPERT_CACHE_PROTECT=chunk` (`:1185-1195`).
+
+  **The mechanism, verified in the tree.**
+  - **The mode.** `PrefillSweepMode` (`RealForwardRunner.swift:143`, four cases today),
+    its parser `parsePrefillSweepMode` (`:546`, unknown values fall back to the default
+    rather than throwing) and env read (`:553`), the tail parser `parsePrefillSweepTail`
+    (`:557`, fails closed on anything outside 8...expertCount, since fix round 1), the
+    printed residency field (`prefillGapLeversDescription:357`, the `sweep=recency
+    tail=96` branch at `:376-378`), `prefillChunkUsesRecencyBalance` (`:693`: `.recency`
+    only, and only when the chunk participates in carry, so the verify / MTP sidecar's
+    chunks keep index tiling), and the carry write left alone under `recency`
+    (`:2593`).
+  - **The order.** `buildPrefillRoutes` (`:5173-5242`, one call site, `:5492`, once per
+    layer per chunk) builds `rowsByExpert` / `lastRowByExpert` from the chunk's pairs
+    (`:5212-5220`), calls
+    `PrefillSweepOrder.recencyBalanced(rowsByExpert:lastRowByExpert:tail:tileWidth:)`
+    (`PrefillMoEGrouping.swift:116`; `recency` at `:103`, `packByRows` at `:143`,
+    heaviest expert first into the lightest open tile), then
+    `expertSortKeys(forOrder:numExperts:)` (`:135`, one array read per comparison side;
+    round 2's lesson was that a dictionary-keyed pair sort cost +0.44 s of host on a 2k
+    chunk) and hands both to `groupTokenExpertPairs`
+    (`:177`), whose `expertTileCounts` branch (`:262-273`) slices the order into the
+    supplied group tiles. **Passing `expertTileCounts: nil` instead makes it slice flat
+    in runs of `tileExpertCount` (`:274-288`), which is index's own tiling**: the flat
+    design needs no tile-count vector at all, and the order function returns a plain
+    `[UInt32]`.
+  - **The residency the order needs is not the runner's `poolResidency`**, which is a
+    Metal `MTLResidencySet` of GPU buffers (`ExpertPoolResidency.swift`). The expert
+    residency lives per layer in `PreadExpertStreamer` (`slotExpert` / `slotState` under
+    `cacheLock`, `:318-348`) and is already exposed by `residentExperts()` (`:1293`:
+    `.resident` slots only, sorted, under the lock; its doc comment says why `.loading`
+    slots are omitted), forwarded per layer by `ModelExpertIO.routedExpertResidentIDs`
+    (`:178-182`). Today that forwarder has only diagnostic callers, both off by default
+    (`RealForwardRunner.swift:6632`, gated on `SHRIKE_PREFETCH_TRACE` at `:1986-1987`,
+    and `:6862` under predictive prefetch), and its doc comment says so; this task gives
+    it a hot-path caller and the comment is corrected with it.
+  - **The snapshot is exact under the shipped loop.** It is taken once per layer per
+    chunk at the top of `buildPrefillRoutes`, before any tile of that layer is planned.
+    At that moment layer L has no `.loading` slots: the lookahead loop commits its open
+    batch and drains every pending batch before returning (`:5885-5887`), and each tile's
+    fetch is awaited inside the loop (`:5849`), so the previous chunk's loads for layer L
+    are published (`PreadExpertStreamer.swift:1366`) before the next chunk reaches that
+    layer. If a `.loading` slot ever appeared it would count as absent and land in the
+    absent group by recency, where the plan either finds it resident by then (a hit) or
+    re-fetches it: `makeExpertCachePlan` reserves loading slots and never counts them as
+    hits (`:696-699`), so the order can only be pessimistic, never wrong.
+  - **The protection's interplay.** Under resident-first every resident of the chunk is
+    swept before any eviction happens, so `protectedExperts` has nothing resident left to
+    protect on the head and does its work only across the absent group's later tiles. The
+    starvation fallback (the plan retried with `nil`, `:718-722`) therefore fires on
+    strictly fewer plans than today, and the Follow-ons entry asking for a counter on it
+    matters less after this task, not more.
+  - **The settle's chunks take the same order** (`ServerPromptCache`'s rewrite calls
+    `prefillChunked`, `RealForwardRunner.swift:2273`, which is the same chunk path;
+    `recordRouteTraceRequestStart` is deliberately not called from it, `:2125`). The
+    replay assumes so and its settle rows move with the order (the chain 897 → 689).
+  - **Prior art placed.** T0's carry is the same idea with one bit of state instead of
+    the pool's; T4's `recency` order and its balanced tiles are the head this task
+    reorders; the route trace and `tools/expert-pool-replay.py` are the instrument
+    ([v13-the-turn.md](v13-the-turn.md):474-487). The mini's current rows are the After
+    T4 table ([v13-the-turn.md](v13-the-turn.md):578-589): the 21-token follow-up
+    1.385 s, the warm 300 / 1k / 2k first turns 3.454 / 6.385 / 10.287 s, 12k 68.209 s.
+
+  **The knob.** A **fifth `PrefillSweepMode` case, `resident`**, behind
+  `SHRIKE_PREFILL_SWEEP=resident`, beside `recency` rather than replacing its body, so
+  one binary runs `carry` (A), `resident` (B) and the already-measured `recency` (C) and
+  the arms can show that B reproduces C's decode prize while C's losses are gone.
+  `parsePrefillSweepMode` (`:546`) gains the value through the enum's `RawValue`, so its
+  fallback behaviour is unchanged and the four existing cases keep their strings. The
+  tail knob is shared unchanged (`SHRIKE_PREFILL_SWEEP_TAIL`, default 96, `:531`); the
+  printed field reads `sweep=resident tail=96`. `prefillChunkUsesRecencyBalance` (`:693`)
+  is renamed `prefillChunkUsesComputedSweepOrder` over a new
+  `PrefillSweepMode.usesComputedOrder` (`.recency` or `.resident`), and the carry write
+  (`:2593`) tests the same property so a computed order never poisons the carry state.
+  Default `carry` in the landed commit; the flip by amend on the verdict, Task 4's
+  pattern.
+
+  **The order as a pure function.**
+  `PrefillSweepOrder.residentFirstBalanced(rowsByExpert:lastRowByExpert:resident:tail:tileWidth:)
+  -> [UInt32]` beside `recencyBalanced` (`PrefillMoEGrouping.swift:116`): rank the
+  chunk's experts by last row ascending with ties by expert id (`recency`, `:103`);
+  partition by `resident` (a `[Bool]` of `numExperts` entries, `true` where the pool holds
+  that expert); take the last `min(tail, absent.count)` of the absent group as the tail;
+  return `packByRows(resident) + packByRows(head) + packByRows(tail)` concatenated, each
+  group's own `packByRows` binning into `ceil(group.count / tileWidth)` tiles as today
+  (`:143`). The caller passes the result through `expertSortKeys` (`:135`) and leaves
+  `expertTileCounts` nil, so `groupTokenExpertPairs` tiles the concatenation flat. **With
+  an empty resident set the function returns `recencyBalanced(...).order` exactly**,
+  which is the cold-pool case (a fresh launch's first chunk, and every first request's
+  first chunk) and the reason the first-turn prize is unchanged. `packByRows` is
+  O(group × tiles-in-group) and the three groups partition the chunk, so splitting into
+  three costs no more than today's two.
+
+  **The residency snapshot's cost.** One `routedExpertResidentIDs` per layer per chunk:
+  one `NSLock`, a 128-slot scan, a sort of at most 128 `Int`s, then a fill of a
+  runner-owned `[Bool]` scratch cleared in place in the shape of `routeIDScratch`
+  (`RealForwardRunner.swift:5183-5188`). Budget: ≈ 10 µs per layer, ≈ 0.4 ms per chunk
+  across 40 layers, against a 21-row turn's 844 ms and a 2k chunk's 11.1 s. The chunk
+  already does far more per layer (the route copy and pair build at `:5189-5196` walk
+  `t × topK` pairs). `prefillRouteNanos` (`:2583`, accumulated at `:5498`) is the
+  pre-registered check under `SHRIKE_PHASES`: if it moves by more than a few ms per
+  chunk, the fix is an allocation-free `residentExpertMask(into:)` on the streamer
+  filling the `[Bool]` directly under the lock, and this draft is wrong about the cost.
+
+  **The modelled gain per regime**, replayed misses priced at 0.93 ms per decode miss and
+  ≈ 0.4 ms per exposed prefill miss on the short warm shapes (≈ 0.1 ms at 2k, ≈ 0 at 12k,
+  where the routed stage is GPU-bound):
+
+  | row | replayed miss delta | modelled Δ | measured anchor |
+  | --- | --- | ---: | --- |
+  | tX decode, 2,125-row card, 219-token answer | decode −762 | **−0.71 s** (16.79 → 16.08 s, 13.0 → 13.6 tok/s) | `recency` measured −0.63 s for −754 |
+  | the 300 prompt's 512-token answer (d512-300) | decode −591 | **−0.55 s** | `recency` measured −0.72 s |
+  | the long-answer follow-up (turn 2 at 512 tokens) | decode −8 over the 7 traced positions | −10 to −60 ms, modelled from the transient's shape | to be measured; the row exists to show it does not sell |
+  | the 21-token follow-up turn | prefill +2, decode −8 | ≈ 0, tile count identical | 1.385 s, unmoved |
+  | turn 3, 36 new | prefill −23, decode −2 | −10 ms | 1.458 s |
+  | warm 300 after a long answer (d512-300 t300b) | prefill −72, decode +48 | −29 + 45 = **+16 ms** (+0.5 % of 3.175 s) | the row most likely to move the wrong way |
+  | warm 300 pair (pair300 t300b) | prefill +30, decode −12 | +12 − 11 ≈ **0** | 3.454 s |
+  | 12k, first request after launch | prefill −142, decode −26 | ≈ 0 | 68.1 to 68.3 s across launches |
+  | the settle's background re-prefill | chain −208, 12k −80 | off the critical path | ≈ 0.4 GB less read |
+
+  **The decision rule, under the chapter's real-and-free rule**
+  ([v13-the-turn.md](v13-the-turn.md):640-658). The knob lands either way. **No
+  percentage bar.** **Verdict rows:** (i) `decode_tok_s` and `decode_s` on tX's answer in
+  the live chain, and the same on the `d512-300` / `d512-1k` arms' 512-token answers, and
+  (ii) the long-answer follow-up turn's wall (turn 2 at `TURN2_MAX_TOKENS=512`). The
+  default moves only if the effect is **real** (the sign holds across paired runs in both
+  orders, three pairs, a fourth where a row sits inside twice its drift; drift is ±1 % on
+  a wall, ±16 ms on `prefill_s`, a 0.26 tok/s spread on tX's decode) and **free**: the
+  300 / 1k / 2k warm pairs' prefill back within drift of `carry` (`recency`'s +3.7 /
+  +7.5 / +10.9 % must be **gone**, which is the whole point of the task), the
+  `d512-300` warm request within drift (+16 ms modelled), the 21-token follow-up and
+  turn 3 unmoved or better, the 12k control within its launch-to-launch drift, the cold
+  first request unmoved (Task 4's unexplained +0.27 s observation on one arm of two is
+  read again here, not explained here), `memory_pressure -Q` acceptable before every
+  launch, and **golden IDENTICAL on both boxes and both profiles at `carry`, `resident`
+  and `recency`**.
+
+  **Numerics: nothing moves.** Sweep order changes which experts share a tile and when
+  they are fetched, never what any kernel computes
+  ([v13-the-turn.md](v13-the-turn.md):659-666); Task 4 measured golden identical at both
+  `recency` cells on both boxes. Golden identical is the bar and a difference is a defect,
+  never a recapture. The route trace stays off unless the env names a file and no verdict
+  arm runs with it on.
+
+  **Tests (RED first, host-only; no device suite for a scheduling-only change).**
+  - `PrefillMoEGroupingTests.swift`, in the style of the existing `recencyBalanced` cases
+    (`:438`, `:449`, `:460`) and `groupingReproducesRecencyBalancedTilesEndToEnd`
+    (`:538`): the resident group leads regardless of its experts' last rows; within each
+    group the order is `recency`'s and the packing is `packByRows`'s; an expert resident
+    but not routed by this chunk is absent from the order entirely; an empty resident set
+    returns `recencyBalanced(...).order` exactly; the tail is taken from the absent group
+    only; a `resident` array shorter or longer than `numExperts` is handled without a
+    trap (the shape `expertSortKeysSkipsAnOutOfRangeExpertRatherThanTrapping` `:431`
+    already sets); and one end-to-end case through `groupTokenExpertPairs` with
+    `expertTileCounts` nil asserting the flat tiles are `ceil(n / 8)` with contiguous pair
+    ranges.
+  - `PrefillRoutedTileSchedulerTests.swift`: `sweepModeParsesItsFourValues` (`:351`)
+    becomes five and keeps the fallback assertions;
+    `prefillGapLeversDescriptionReportsTheSweepMode` (`:361`) gains `sweep=resident
+    tail=96`; `sweepTailDefaultsAndFailsClosed` (`:384`) is unchanged and re-asserted
+    against the new mode; `recencyBalanceRequiresBothRecencyModeAndCarryParticipation`
+    (`:283`, in `PrefillMoEGroupingTests.swift`) becomes the renamed predicate over all
+    five modes plus `participatesInCarry` false.
+  - No new streamer API and so no new streamer test: `residentExperts()`'s behaviour is
+    already covered by `residentSnapshotExcludesLoadingEntries`
+    (`PreadExpertStreamerTests+CachePlanning.swift:167-183`), which is the precedent this
+    task relies on. If the route timer forces the mask accessor, its test goes there.
+  - The replay's own `--self-test` (dataset 8c is in the tree; Step 1 adds a composition
+    dataset), run from the tool and not from `swift test`.
+
+  **The rig and the rows.** Task 4's `t4-arms.sh` / `t4-arms-run3a.sh` shape with a third
+  mode (`resident` = sweep resident, protect chunk) beside `carry` and `recency`, one
+  binary, each arm relaunching the server, `SERVER_ENV` carrying the knobs: the live chain
+  ×3 in both orders (A B B A A B) with REUSE of the default chain's payloads so every arm
+  sends identical bytes; the long-answer follow-up ×2 (`TURN2_MAX_TOKENS=512`, the rig's
+  existing override, `tools/turn-rig.sh:37-39`); the `d512-300` and `d512-1k` long-decode
+  pairs ×2 in both orders; the 300 pair ×2 in both orders and 1k / 2k once each; 12k once
+  per arm; one `recency` cell on the live chain and the 300 pair to re-confirm the prize
+  and the loss on the same binary; a traced `resident` chain last so the replay's
+  prediction (9,370 / 6,689 | 707 / 230 | 591 / 96) is checked against the box; the cold
+  first requests read off the same arms; `restore` at the end. Rows exactly as
+  `t4-rows.py` reads them, the pool counters included. **No new counter.**
+
+  **Files.** `sources/Shrike/Runtime/Inference/RealForwardRunner.swift`: the fifth
+  `PrefillSweepMode` case and `usesComputedOrder` (`:143-148`), the renamed chunk
+  predicate (`:693`), the sweep field in `prefillGapLeversDescription` (`:376-378`), the
+  carry write (`:2593`), `buildPrefillRoutes` (`:5173-5242`) and its new per-chunk
+  `[Bool]` scratch beside `routeIDScratch` (`:5183-5188`).
+  `sources/Shrike/Kernels/Prefill/MoE/PrefillMoEGrouping.swift`: `residentFirstBalanced`
+  beside `recencyBalanced` (`:116`), reusing `recency` (`:103`) and `packByRows` (`:143`).
+  `sources/Shrike/Runtime/Inference/ModelExpertIO.swift`: no new API, the doc comment on
+  `routedExpertResidentIDs` (`:175-177`) corrected now that it has a hot-path caller.
+  `tools/expert-pool-replay.py`. Tests: the two files above. Docs: the design doc's Task 5
+  section and its After T5 table, this plan's checkboxes, the Follow-ons entry retired.
+  **Lint:** `encodeRoutedMoEPrefill`'s baseline entry records line 5418 and this task adds
+  lines above it in the same file, so `swiftlint lint --write-baseline
+  .swiftlint-baseline.json` is expected if the gate reports a stale entry (T0 to T4 each
+  hit this on a different function); `buildPrefillRoutes` itself must stay under 120 body
+  lines. **Unchanged:** every `.metal` file and kernel body, `expert_io.c` and the reader,
+  the planner's placement logic, the victim comparator, the prompt cache.
+
+  Steps:
+
+  - [ ] Step 1 (the replay tool, its own commit as Task 4 kept its instrument): the
+        uncommitted `--sweep-order resident-first` in the tree today is the **plain**
+        order, which is not what this task ships. Step 1 makes `resident-first` the
+        shipped composition (three balanced groups, tiled flat) behind a new
+        `--sweep-tail K` (default 96, the knob's mirror), keeps the plain order reachable
+        as `resident-first-plain` so step zero's rows stay reproducible, extends
+        `--self-test` (dataset 8c plus a composition dataset asserting the group order,
+        the packing and the flat tile count), and reproduces every cell of the two tables
+        above on the four archived traces. Gates 1 to 4.
+  - [ ] Step 2 (the Swift order behind the knob): tests RED first, then
+        `PrefillSweepOrder.residentFirstBalanced`, the residency snapshot and its scratch,
+        the fifth mode with the renamed predicate and the printed field, the carry write.
+        Default `carry` in the commit. Gates 1 to 4 on every amend.
+  - [ ] Step 3 (numerics): golden IDENTICAL on both profiles at `carry`, `resident` and
+        `recency` on the M4 Pro at every amend, and on the mini at the default and the
+        candidate cell at every amend and at all three cells at the landed commit.
+  - [ ] Step 4 (the arms on the mini, one binary): the rig above, `pgrep` and
+        `memory_pressure -Q` before every launch, production restored at the end. The
+        traced `resident` chain replayed against the box before the verdict is written.
+  - [ ] Step 5 (the rule): real and free by the rows above → `resident` becomes the
+        default by amend; real and not free → it lands as a knob beside `recency` and the
+        cost is priced in the verdict, never hidden by a bar.
+  - [ ] Step 6 (docs): the design doc's Task 5 section, the After T5 table, the lever
+        entries updated (the sweep-order entry closes), this plan's checkboxes, the
+        Follow-ons entry retired. Task review by a fresh reviewer, fixes folded into the
+        owning commit, re-review.
+
+  **Risks and what falsifies the model.**
+  - **The snapshot's timing.** The replay reads residency from the pool's `slot_expert` at
+    the chunk's first tile, and the box reads it one step earlier, at the layer's route
+    build. Between those two points nothing touches layer L's pool in the shipped loop
+    (the previous chunk's batches are drained at `:5885-5887`), but the loop has two
+    paths and only fetch depth 2 ships; a `SHRIKE_PREFILL_FETCH_DEPTH=1` capture would not
+    replay cleanly, which Task 4 already recorded. If the traced `resident` chain does not
+    replay to within Task 3's ±3 counter jitter, the residency the order sees is not the
+    residency the replay modelled and Step 4 stops there.
+  - **The host cost.** Round 2's +0.44 s of host in the tile composition is the warning.
+    The budget above is ≈ 0.4 ms per chunk for the snapshot and no new cost for the
+    packing; `prefillRouteNanos` under `SHRIKE_PHASES` is the pre-registered read, and an
+    allocation-free mask accessor is the fix if it moves.
+  - **The tile count.** The flat tiling is load-bearing: the grouped tiling costs +20
+    tiles on the 21-token turn and +18 on the warm 300 chunk, ≈ +24 ms each, which is
+    larger than those rows' prefill gains. If the shipped composition is ever changed to
+    per-group tiles, the follow-up turn's row is where it shows.
+  - **12k's decode row is a tie-break**, not a lever: 219 to 255 experts needed against
+    128 slots holding hit residents, so the 8-token decode moves 427 to 708 between
+    compositions that differ nowhere else. It is reported and is not a verdict row.
+  - **pair300's +30 and d512-300's +48.** The two rows that go the wrong way are both a
+    different prompt's overlap with what the previous request left, and both are inside a
+    3.2 to 3.4 s wall's ±1 % drift as modelled. If either moves more than modelled on the
+    box, the lever is real and not free and lands as a knob.
+  - **The prize is a fixed transient.** If the arms show the decode gain scaling with the
+    answer's length rather than sitting in its first 32 to 64 tokens, the profile above is
+    wrong and the modelled per-card saving (≈ 0.6 s, not 41 % of decode) is wrong with it.
+  - **The settle's chunks take the order too**, and their misses fall (the chain 897 →
+    689). That is background work whose only visible effect is the pool state the next
+    request starts from, which is already inside every row above; a settle that is
+    cancelled mid-chunk by an arriving request leaves a different state than the replay
+    models, and the traced chain is the check.
+  - **Memory and the box.** No new per-slot state and no allocation per tile; the pool's
+    9.06 GB does not move and `--ram-budget 8G` stays. The mini is production: every arm
+    stops the server on 8081 and relaunches it, Turbo on 8080 is never touched, one model
+    process at a time.
+
 ## Follow-ons (not scheduled)
 
 - The GDN chunked scan below its 64-row gate (`GDN.chunkTokens`): ≤ 33 ms on a
