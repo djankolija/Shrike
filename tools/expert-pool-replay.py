@@ -90,6 +90,54 @@ here:
     routed groups' natural order and packs by slot-budget fit, not a fixed
     width of 8) or its `avoidingSlots` (recomputed here from the new,
     synthetic tile boundaries, not the real batch/commit schedule).
+  - `--sweep-order resident-first` re-tiles each chunk from the pool's
+    own state at the moment the chunk begins (per layer): the chunk's
+    experts ranked `last-asc` (ties by rows ascending then expert id),
+    split into a resident group (present in the pool, rank order kept)
+    and an absent group (rank order kept). When either group is empty
+    (the cold-pool case, or a chunk the pool already holds in full), this
+    defers to `resident-first-grouped` at its own default tail
+    (`DEFAULT_SWEEP_TAIL`, not this call's own `--sweep-tail`, which
+    governs only `resident-first-grouped` itself): with the resident
+    group empty, that composition's head/tail split runs over the whole
+    ranked list, degenerating to one packed group when the absent count
+    is within the default tail (matching the Swift `recencyBalanced`'s
+    own order in that case, so the first-turn prize on a small chunk is
+    unchanged) and splitting head/tail as usual once it is not (a large
+    cold chunk, where the split still holds -- verified against the
+    replayed acceptance traces, not asserted as an identity). Otherwise:
+    with `T = ceil((R + A) / 8)` tiles, the smallest head length `h` tiles
+    (0 <= h < T) is found such that `R - 8h <= slots - sweep_head_factor
+    * ceil(A / (T - h))` -- the free slots left after the head cover
+    `--sweep-head-factor` tiles' worth of misses for however many mixed
+    tiles remain, so protection cannot starve; the first `8h` residents
+    (in rank order) form a pure-resident head. The remaining `M = T - h`
+    tiles each receive a contiguous, uniform slice of the absent group in
+    rank order (tile `j` gets ranks `floor(jA/M)..floor((j+1)A/M)-1`, so
+    the last tile holds the most recent absent experts), then the
+    leftover residents fill the tiles' free slots heaviest-first the same
+    way `_pack_by_rows` does, into the tile with the lowest total weight
+    that still has room, ties to the lower tile index. The head residents
+    and the tiles' experts (absent then residents, in placement order)
+    concatenate and re-tile flat in runs of 8, so the chunk's tile count
+    matches `index`'s exactly. This head rule assumes the production tile
+    width of 8 (`RETILE_SIZE` against the Swift's `schedulerConfig.tileExperts`,
+    which the fitting step can shrink below 8 on a tight slot budget). This
+    is what `PrefillSweepMode.carry`
+    approximates by alternating direction chunk to chunk, made exact
+    through the pool's residency, with every layer's misses spread across
+    its tiles instead of collected in the chunk's last ones. `--sweep-
+    order resident-first-grouped` is round 1's landed order this
+    composition replaces: resident, head and tail (the absent group's
+    most recent `--sweep-tail` experts, default 96) each packed by row
+    weight into their own bins, concatenated resident-head-tail and
+    re-tiled flat -- kept for round 1's own rows. `--sweep-order
+    resident-first-plain` is the step-zero order `resident-first-grouped`
+    replaced: resident group then absent group, each in `last-asc` order
+    with no row-weight packing, tiled flat in runs of 8 across the
+    concatenation. `--sweep-carry` has no effect on any of the three
+    orders (residency read off the pool's live `slot_expert` when the
+    chunk's first tile is planned).
   - `--protect chunk` (default, matching `SHRIKE_EXPERT_CACHE_PROTECT=chunk`
     since v13 T4): while a chunk's tiles are replayed, a slot holding an
     expert one of the chunk's not-yet-replayed tiles still needs is
@@ -120,7 +168,11 @@ Usage:
                          slru[:share]|arc|lru-2
                          [--slots N] [--layer L] [--avoid-lookback N]
                          [--prefill-weight one|rows]
-                         [--sweep-order index|rows-asc|rows-desc|last-asc|last-desc]
+                         [--sweep-order index|rows-asc|rows-desc|last-asc|last-desc|
+                                        resident-first|resident-first-grouped|
+                                        resident-first-plain]
+                         [--sweep-tail K]
+                         [--sweep-head-factor F]
                          [--sweep-carry off|on]
                          [--protect off|chunk]
                          [--phase-policy prefill=<policy>,decode=<policy>]
@@ -140,6 +192,8 @@ DEFAULT_AGING_PERIOD = 1024
 DEFAULT_AVOID_LOOKBACK = 3
 DEFAULT_SLRU_PROTECTED_SHARE = 0.5
 RETILE_SIZE = 8
+DEFAULT_SWEEP_TAIL = 96
+DEFAULT_SWEEP_HEAD_FACTOR = 6
 
 
 def parse_line(raw):
@@ -745,9 +799,137 @@ def _retile(tiles, sweep_order, reverse):
     return [flat[i:i + RETILE_SIZE] for i in range(0, len(flat), RETILE_SIZE)]
 
 
+def _pack_by_rows(group):
+    """Bins `group` (a list of (expert, rows, last_row) triples) into
+    `ceil(len(group) / RETILE_SIZE)` tiles the way the Swift `packByRows`
+    does: heaviest expert first, ties by expert id ascending, each placed
+    into the open tile with the lowest total weight, ties to the lower
+    tile index."""
+    if not group:
+        return []
+    tile_count = (len(group) + RETILE_SIZE - 1) // RETILE_SIZE
+    tiles = [[] for _ in range(tile_count)]
+    weights = [0] * tile_count
+    for triple in sorted(group, key=lambda triple: (-triple[1], triple[0])):
+        open_tiles = [i for i in range(tile_count) if len(tiles[i]) < RETILE_SIZE]
+        i = min(open_tiles, key=lambda j: (weights[j], j))
+        tiles[i].append(triple)
+        weights[i] += triple[1]
+    return tiles
+
+
+def _retile_resident_first_plain(tiles, resident):
+    """`tiles` as in `_retile`; `resident` the set of experts the pool
+    holds when the chunk begins. The chunk's resident experts come first,
+    then the absent ones, each group in `last-asc` order (ties by rows
+    ascending then expert id), re-tiled by RETILE_SIZE across the
+    concatenation; this is the `resident-first-plain` order."""
+    flat = [triple for tile in tiles for triple in tile]
+    key = lambda triple: (triple[0] not in resident, triple[2], triple[1], triple[0])
+    flat = sorted(flat, key=key)
+    return [flat[i:i + RETILE_SIZE] for i in range(0, len(flat), RETILE_SIZE)]
+
+
+def _retile_resident_first_grouped(tiles, resident, tail):
+    """`tiles` as in `_retile`; `resident` the set of experts the pool
+    holds when the chunk begins; `tail` the count of the absent group's
+    most recent experts to carry as their own group. Splits the chunk's
+    experts into resident and absent (each ranked `last-asc` only to pick
+    the tail), takes the absent group's last `min(tail, len(absent))` as
+    the tail and the rest as the head, packs resident/head/tail each by
+    row weight with `_pack_by_rows`, concatenates the three groups'
+    bins resident, head, tail, and re-tiles the concatenation flat in
+    runs of RETILE_SIZE; this is round 1's landed `resident-first-grouped`
+    order (v13 T5 step 1, fix-up 1: `resident-first` is now the
+    interleaved composition below)."""
+    flat = [triple for tile in tiles for triple in tile]
+    key = lambda triple: (triple[2], triple[1], triple[0])
+    resident_group = sorted((t for t in flat if t[0] in resident), key=key)
+    absent = sorted((t for t in flat if t[0] not in resident), key=key)
+    k = min(tail, len(absent))
+    head = absent[:len(absent) - k] if k else absent
+    tail_group = absent[len(absent) - k:] if k else []
+    packed = _pack_by_rows(resident_group) + _pack_by_rows(head) + _pack_by_rows(tail_group)
+    flat_order = [triple for tile in packed for triple in tile]
+    return [flat_order[i:i + RETILE_SIZE] for i in range(0, len(flat_order), RETILE_SIZE)]
+
+
+def _retile_resident_first(tiles, resident, slots, head_factor):
+    """`tiles` as in `_retile`; `resident` the set of experts the pool
+    holds when the chunk begins; `slots` the pool's slot count;
+    `head_factor` (`--sweep-head-factor`) the tile multiplier the head
+    rule protects against starving. Ranks the chunk `last-asc` (ties by
+    rows ascending then expert id), splits into a resident and an absent
+    group (each keeping rank order). If either group is empty, or the head
+    search exhausts every tile without leaving a mixed tile behind (so the
+    absent group would otherwise vanish from the order), defers to
+    `_retile_resident_first_grouped` at its default tail (`DEFAULT_SWEEP_TAIL`,
+    unaffected by this call's own `--sweep-tail`, which governs only
+    `resident-first-grouped` itself) -- the cold-pool case, matching the
+    Swift `recencyBalanced`'s own order whenever the absent group is no
+    larger than that default tail (so the grouped composition's head is
+    itself empty and it reduces to one packed group), which is the usual
+    first-chunk case. Otherwise, with `T = ceil((R + A) / RETILE_SIZE)` tiles,
+    finds the smallest head length `h` tiles (0 <= h < T) such that
+    `R - RETILE_SIZE*h <= slots - head_factor * ceil(A / (T - h))`; the
+    first `RETILE_SIZE*h` residents (rank order, not row-packed) form the
+    head. The remaining `M = T - h` tiles each take a contiguous,
+    uniform slice of the absent group in rank order (tile `j`: ranks
+    `floor(jA/M)..floor((j+1)A/M)-1`, so the last tile holds the most
+    recent), then the leftover residents fill the tiles' free slots
+    heaviest-first (rows descending, ties by expert id ascending), each
+    into the tile with the lowest total weight that still has room, ties
+    to the lower tile index. The head residents and the tiles'
+    concatenated experts (absent then residents, in placement order)
+    re-tile flat in runs of RETILE_SIZE; this is the `resident-first`
+    order."""
+    flat = [triple for tile in tiles for triple in tile]
+    key = lambda triple: (triple[2], triple[1], triple[0])
+    resident_group = sorted((t for t in flat if t[0] in resident), key=key)
+    absent_group = sorted((t for t in flat if t[0] not in resident), key=key)
+    r = len(resident_group)
+    a = len(absent_group)
+    if r == 0 or a == 0:
+        return _retile_resident_first_grouped(tiles, resident, DEFAULT_SWEEP_TAIL)
+
+    tile_count = (r + a + RETILE_SIZE - 1) // RETILE_SIZE
+    head = 0
+    while head < tile_count:
+        remaining_tiles = tile_count - head
+        m = (a + remaining_tiles - 1) // remaining_tiles
+        if r - RETILE_SIZE * head <= slots - head_factor * m:
+            break
+        head += 1
+    head_residents = resident_group[:RETILE_SIZE * head]
+    rest_residents = resident_group[RETILE_SIZE * head:]
+    mixed_tiles = tile_count - head
+    if mixed_tiles == 0:
+        return _retile_resident_first_grouped(tiles, resident, DEFAULT_SWEEP_TAIL)
+
+    bins = [[] for _ in range(mixed_tiles)]
+    weights = [0] * mixed_tiles
+    for j in range(mixed_tiles):
+        lo = (j * a) // mixed_tiles
+        hi = ((j + 1) * a) // mixed_tiles
+        bins[j] = absent_group[lo:hi]
+        weights[j] = sum(t[1] for t in bins[j])
+
+    for triple in sorted(rest_residents, key=lambda t: (-t[1], t[0])):
+        open_bins = [i for i in range(mixed_tiles) if len(bins[i]) < RETILE_SIZE]
+        if not open_bins:
+            break
+        i = min(open_bins, key=lambda j: (weights[j], j))
+        bins[i].append(triple)
+        weights[i] += triple[1]
+
+    order = head_residents + [t for b in bins for t in b]
+    return [order[i:i + RETILE_SIZE] for i in range(0, len(order), RETILE_SIZE)]
+
+
 def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID_LOOKBACK,
            prefill_weight="one", sweep_order="index", sweep_carry=False,
-           phase_policy=None, profile_window=None, protect="chunk"):
+           phase_policy=None, profile_window=None, protect="chunk",
+           sweep_tail=DEFAULT_SWEEP_TAIL, sweep_head_factor=DEFAULT_SWEEP_HEAD_FACTOR):
     """Returns (stats, total_compulsory, settle_stats, settle_meta, profile).
 
     stats[request_id] = {"prefill": [hits, misses, compulsory, capacity],
@@ -764,7 +946,9 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
         raise ValueError(
             f"--sweep-order {sweep_order} requires a trace with row counts "
             "(p lines with a '|' suffix)")
-    if sweep_order in ("last-asc", "last-desc") and not has_last_rows(lines):
+    if (sweep_order in ("last-asc", "last-desc", "resident-first",
+                        "resident-first-grouped", "resident-first-plain")
+            and not has_last_rows(lines)):
         raise ValueError(
             f"--sweep-order {sweep_order} requires a trace with last-row counts "
             "(p lines with a 'count:lastRow' suffix)")
@@ -821,6 +1005,15 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
             _kind, original_tiles, label = item
             if sweep_order == "index":
                 new_tiles = original_tiles
+            elif sweep_order == "resident-first":
+                resident = frozenset(expert for expert in pool.slot_expert if expert >= 0)
+                new_tiles = _retile_resident_first(original_tiles, resident, slots, sweep_head_factor)
+            elif sweep_order == "resident-first-grouped":
+                resident = frozenset(expert for expert in pool.slot_expert if expert >= 0)
+                new_tiles = _retile_resident_first_grouped(original_tiles, resident, sweep_tail)
+            elif sweep_order == "resident-first-plain":
+                resident = frozenset(expert for expert in pool.slot_expert if expert >= 0)
+                new_tiles = _retile_resident_first_plain(original_tiles, resident)
             else:
                 reverse = (next_reverse if sweep_carry
                           else sweep_order in ("rows-desc", "last-desc"))
@@ -1145,6 +1338,225 @@ def self_test():
     except ValueError:
         pass
 
+    # Dataset 8c: --sweep-order resident-first-grouped{,-plain}. slots=8,
+    # lfu. Chunk 1 fills the pool with 1..8. Chunk 2 needs the residents 1
+    # and 2 (the chunk's most recent rows, 20 and 21) plus the absent 9..15
+    # (rows 1..7): nine experts, two tiles. last-asc puts 9..15 and 1 in
+    # tile0 and 2 alone in tile1, so tile0's seven misses need seven of the
+    # six unprotected slots, protection drops, 2 is evicted and re-missed in
+    # tile1 (chunk 2: 1 hit, 8 misses). Both resident orders sweep 1 and 2
+    # first (tile0 = 1 2 9..14, tile1 = 15): both hits harvested before any
+    # eviction (chunk 2: 2 hits, 7 misses). resident-first-grouped's default
+    # --sweep-tail (96) covers every absent expert here (only 7 of them), so
+    # its head is empty and its tail is the whole absent group packed by row
+    # weight; every absent row is 1, so the packing's tie-break (expert id
+    # ascending) reproduces last-asc's own 9..15 order and the composition
+    # matches -plain exactly on this trace.
+    resident_trace = "\n".join([
+        "p 0 0 0 1 2 3 4 5 6 7 8 | " + " ".join("1:0" for _ in range(8)),
+        "p 5 0 0 1 2 9 10 11 12 13 14 | 1:20 1:21 1:1 1:2 1:3 1:4 1:5 1:6",
+        "p 5 0 1 15 | 1:7",
+    ])
+    stats_last_asc, _, _, _, _ = _run(resident_trace, slots=8, policy_raw="lfu",
+                                      sweep_order="last-asc")
+    check("last-asc: one hit across both chunks (2 evicted before its tile)",
+          stats_last_asc[1]["prefill"][:2], [1, 16])
+    stats_rf_plain, _, _, _, _ = _run(resident_trace, slots=8, policy_raw="lfu",
+                                      sweep_order="resident-first-plain")
+    check("resident-first-plain: both residents hit before any eviction",
+          stats_rf_plain[1]["prefill"][:2], [2, 15])
+    stats_rf_grouped, _, _, _, _ = _run(resident_trace, slots=8, policy_raw="lfu",
+                                        sweep_order="resident-first-grouped")
+    check("resident-first-grouped: same totals as -plain on this trace (see comment above)",
+          stats_rf_grouped[1]["prefill"][:2], [2, 15])
+    stats_rf_plain_carry, _, _, _, _ = _run(resident_trace, slots=8, policy_raw="lfu",
+                                            sweep_order="resident-first-plain", sweep_carry=True)
+    check("resident-first-plain: --sweep-carry has no effect",
+          stats_rf_plain_carry[1]["prefill"][:2], [2, 15])
+    stats_rf_grouped_carry, _, _, _, _ = _run(resident_trace, slots=8, policy_raw="lfu",
+                                              sweep_order="resident-first-grouped", sweep_carry=True)
+    check("resident-first-grouped: --sweep-carry has no effect",
+          stats_rf_grouped_carry[1]["prefill"][:2], [2, 15])
+
+    # _retile_resident_first_plain's own order, isolated from pool
+    # dynamics: the resident expert leads regardless of its last row;
+    # inside each group last-asc with the rows-then-id tie-break.
+    mixed_tiles = [[(5, 3, 9), (1, 1, 4), (7, 2, 9), (3, 1, 9)]]
+    check("_retile_resident_first_plain: resident first, then last-asc with ties by rows then id",
+          _retile_resident_first_plain(mixed_tiles, frozenset({7})),
+          [[(7, 2, 9), (1, 1, 4), (3, 1, 9), (5, 3, 9)]])
+
+    # _retile_resident_first_grouped (round 1's composition), isolated from
+    # pool dynamics. resident = {1, 2, 3}: 1 and 2 tie on rows (5, tie broken
+    # by id) ahead of 3 (rows 2), regardless of all three residents' last
+    # rows sitting above every absent expert's; the group split does not
+    # read recency. absent = {10..15}, last rows 10..15 ascending, ranked
+    # last-asc only to pick the tail. With --sweep-tail 3 the tail is
+    # {13, 14, 15} and the head {10, 11, 12}; packByRows orders the head by
+    # rows descending (10:3, 12:2, 11:1) and the tail by rows descending
+    # with a tie (13:4, 15:4 tied, id breaks it before 14:1). The 9-expert
+    # concatenation (3 resident + 3 head + 3 tail) re-tiled flat in runs of
+    # 8 gives a first tile spanning all three groups and a second tile of
+    # the tail's last expert, ceil(9 / 8) = 2.
+    composition_tiles = [[
+        (1, 5, 100), (2, 5, 90), (3, 2, 40),
+        (10, 3, 10), (11, 1, 11), (12, 2, 12),
+        (13, 4, 13), (14, 1, 14), (15, 4, 15),
+    ]]
+    composition_resident = frozenset({1, 2, 3})
+    check("_retile_resident_first_grouped: resident (with a rows tie), head, tail packed and "
+          "flat-retiled, tail=3",
+          _retile_resident_first_grouped(composition_tiles, composition_resident, 3),
+          [[(1, 5, 100), (2, 5, 90), (3, 2, 40), (10, 3, 10), (12, 2, 12), (11, 1, 11),
+            (13, 4, 13), (15, 4, 15)],
+           [(14, 1, 14)]])
+    check("_retile_resident_first_grouped: --sweep-tail changes the tail's membership (tail=1)",
+          _retile_resident_first_grouped(composition_tiles, composition_resident, 1),
+          [[(1, 5, 100), (2, 5, 90), (3, 2, 40), (13, 4, 13), (10, 3, 10), (12, 2, 12),
+            (11, 1, 11), (14, 1, 14)],
+           [(15, 4, 15)]])
+
+    # The same composition through replay, tail=3 as above: chunk 1 fills
+    # all 8 slots with 1, 2, 3, 20..24; chunk 2 is composition_tiles' 9
+    # experts (1, 2, 3 resident, 10..15 absent). tile0 = 1 2 3 10 12 11 13
+    # 15 (8 experts): 3 hits reserved, 5 misses against the 5 free slots
+    # (20..24; nothing protected since only 14 remains for tile1 and it is
+    # not yet resident). tile1 = 14: 1 miss (avoiding drops once it would
+    # leave no eligible slot, the same fallback dataset 8c exercises).
+    # Chunk 2: 3 hits, 6 misses; total across both chunks 3 hits, 14
+    # misses (chunk 1 is 8 compulsory misses against the empty pool).
+    composition_trace = "\n".join([
+        "p 0 0 0 1 2 3 20 21 22 23 24 | " + " ".join("1:0" for _ in range(8)),
+        "p 5 0 0 1 2 3 10 11 12 13 14 15 | "
+        "5:100 5:90 2:40 3:10 1:11 2:12 4:13 1:14 4:15",
+    ])
+    stats_composition, _, _, _, _ = _run(composition_trace, slots=8, policy_raw="lfu",
+                                         sweep_order="resident-first-grouped", sweep_tail=3)
+    check("resident-first-grouped through replay: the composition's tiling drives real "
+          "hits/misses",
+          stats_composition[1]["prefill"][:2], [3, 14])
+
+    # Dataset 8d: --sweep-order resident-first (the interleaved composition,
+    # fix-up 1). All isolated calls use RETILE_SIZE=8 tiles.
+    #
+    # (i) R = 0 or A = 0: defers to _retile_resident_first_grouped at its
+    # default tail (96), regardless of slots/head_factor (both given
+    # nonsense values below to prove they are not consulted). With only 5
+    # experts, well under the tail, the grouped composition's own head is
+    # empty and its tail is the whole group: a single _pack_by_rows call.
+    # Heaviest first, ties by expert id: 3 and 5 tie on rows (4), 3 wins;
+    # then 1 (3), 4 (2), 2 (1).
+    fallback_tiles = [[
+        (1, 3, 10), (2, 1, 11), (3, 4, 12), (4, 2, 13), (5, 4, 14),
+    ]]
+    check("resident-first: empty resident defers to resident-first-grouped's own order",
+          _retile_resident_first(fallback_tiles, frozenset(), slots=0, head_factor=0),
+          [[(3, 4, 12), (5, 4, 14), (1, 3, 10), (4, 2, 13), (2, 1, 11)]])
+    check("resident-first: all-resident chunk defers to the same grouped order",
+          _retile_resident_first(fallback_tiles, frozenset({1, 2, 3, 4, 5}), slots=0, head_factor=0),
+          [[(3, 4, 12), (5, 4, 14), (1, 3, 10), (4, 2, 13), (2, 1, 11)]])
+    # A chunk larger than the default tail: the grouped composition's own
+    # head/tail split is no longer a no-op, so this only holds as the
+    # documented delegation, not as an identity with a single packed
+    # group. 100 absent experts (ids 1..100, rows 1, last-row = id, so
+    # already rank-ordered) exceed the default tail (96): the grouped
+    # path's head keeps the 4 oldest (1..4) and its tail packs the other
+    # 96 -- verified equal to calling the grouped composition directly.
+    large_absent_tiles = [[(e, 1, e) for e in range(1, 101)]]
+    check("resident-first: a chunk past the default tail still matches "
+          "resident-first-grouped exactly, not a single packed group",
+          _retile_resident_first(large_absent_tiles, frozenset(), slots=0, head_factor=0),
+          _retile_resident_first_grouped(large_absent_tiles, frozenset(), DEFAULT_SWEEP_TAIL))
+
+    # (i-b) the head search can also exhaust every tile without ever
+    # breaking, leaving mixed_tiles at zero: R = 1, A = 100, T = ceil(101/8)
+    # = 13, and at slots=1, head_factor=6 (default) the inequality fails
+    # for every head 0..12, so the loop used to reach head=13 and return
+    # only the head residents, silently dropping the whole absent group.
+    # Run through replay (chunk 1 primes the pool's one slot with 999 so
+    # chunk 2 sees it resident) and check that every one of the chunk's
+    # 101 experts still reaches a pool.plan lookup, not just the resident.
+    guard_absent = list(range(1, 101))
+    guard_trace = "\n".join([
+        "p 0 0 0 999 | 1:0",
+        "p 5 0 0 " + " ".join(["999"] + [str(e) for e in guard_absent]) + " | "
+        + " ".join(["1:0"] + [f"1:{e}" for e in guard_absent]),
+    ])
+    stats_guard, _, _, _, _ = _run(guard_trace, slots=1, policy_raw="lfu",
+                                    sweep_order="resident-first")
+    check("resident-first: the empty-mixed-tile guard keeps every absent expert of "
+          "the chunk in the order (slots=1, R=1, A=100 exhausts the head search)",
+          sum(stats_guard[1]["prefill"][:2]), 102)
+
+    # (ii) h = 0: R = 4 residents (90..93, rows 9/7/5/3 so their heaviest-
+    # first fill order is 90, 91, 92, 93 with no rows tie among them),
+    # A = 20 absent (ids 1..20, last-row = id so already rank-ordered,
+    # every row = 1). T = ceil(24 / 8) = 3. At h = 0: m = ceil(20 / 3) = 7,
+    # 4 - 0 <= 50 - 1*7 = 43, so h = 0 (slots=50, head_factor=1). The
+    # absent group spreads 6/7/7 across the 3 tiles (ranks 0..5, 6..12,
+    # 13..19; the last tile holds 14..20, the most recent). Free slots per
+    # tile: 2, 1, 1 (4 total, matching R). Filling heaviest-first: 90
+    # (rows 9) goes to the lightest tile (bin0, weight 6) -> bin0 = 7,
+    # weight 15; 91 (rows 7) ties bin1/bin2 at weight 7, lower index wins
+    # (bin1) -> bin1 full, weight 14; 92 (rows 5) takes bin2 (only one open,
+    # weight 7) -> bin2 full, weight 12; 93 (rows 3) takes the remaining
+    # open slot, bin0 -> bin0 full, weight 18. Every tile ends at exactly 8
+    # (the flat tile count is 3, matching ceil(24 / 8) with no re-tiling
+    # needed since each bin is already RETILE_SIZE wide).
+    resident_ids = [90, 91, 92, 93]
+    resident_rows = {90: 9, 91: 7, 92: 5, 93: 3}
+    h0_tiles = [[(e, resident_rows[e], 200 + e) for e in resident_ids]
+                + [(e, 1, e) for e in range(1, 21)]]
+    h0_resident = frozenset(resident_ids)
+    h0_order = _retile_resident_first(h0_tiles, h0_resident, slots=50, head_factor=1)
+    check("resident-first: h=0, uniform 6/7/7 absent spread, recency kept, ties to the "
+          "lower tile index",
+          h0_order,
+          [[(e, 1, e) for e in range(1, 7)] + [(90, 9, 290), (93, 3, 293)],
+           [(e, 1, e) for e in range(7, 14)] + [(91, 7, 291)],
+           [(e, 1, e) for e in range(14, 21)] + [(92, 5, 292)]])
+    check("resident-first: h=0 case's flat tile count matches ceil((R+A)/8)", len(h0_order), 3)
+
+    # (iii) h > 0: R = 9 residents (1..9, last-row = 9+id so rank order is
+    # 1..9), A = 3 absent (100..102, last-row = id so already rank-ordered).
+    # T = ceil(12 / 8) = 2. At h = 0: m = ceil(3 / 2) = 2, 9 <= 10 - 1*2 = 8
+    # is false; at h = 1: m = ceil(3 / 1) = 3, 9 - 8 = 1 <= 10 - 1*3 = 7 is
+    # true (slots=10, head_factor=1), so h = 1: residents nearly fill the
+    # pool (9 of 10 slots) and the head rule protects the one mixed tile.
+    # Head = the 8 lowest-ranked residents (1..8, rank order, not
+    # row-packed); the ninth resident (9, the highest-ranked / most recent)
+    # is the only leftover, placed into the sole mixed tile alongside the
+    # 3 absent experts.
+    hpos_tiles = [[(e, 1, 9 + e) for e in range(1, 10)] + [(e, 1, e - 100) for e in range(100, 103)]]
+    hpos_resident = frozenset(range(1, 10))
+    hpos_order = _retile_resident_first(hpos_tiles, hpos_resident, slots=10, head_factor=1)
+    check("resident-first: h>0 because residents nearly fill the pool",
+          hpos_order,
+          [[(e, 1, 9 + e) for e in range(1, 9)],
+           [(100, 1, 0), (101, 1, 1), (102, 1, 2), (9, 1, 18)]])
+
+    try:
+        _run("p 0 0 0 1 2 3 | 1 1 1", slots=8, policy_raw="lfu", sweep_order="resident-first")
+        failures.append("--sweep-order resident-first should error on a trace with no last-row counts")
+    except ValueError:
+        pass
+
+    try:
+        _run("p 0 0 0 1 2 3 | 1 1 1", slots=8, policy_raw="lfu",
+             sweep_order="resident-first-grouped")
+        failures.append("--sweep-order resident-first-grouped should error on a trace with no "
+                        "last-row counts")
+    except ValueError:
+        pass
+
+    try:
+        _run("p 0 0 0 1 2 3 | 1 1 1", slots=8, policy_raw="lfu",
+             sweep_order="resident-first-plain")
+        failures.append("--sweep-order resident-first-plain should error on a trace with no "
+                        "last-row counts")
+    except ValueError:
+        pass
+
     # Dataset 9: slru. slots=4, protected_share=0.5 (protected_capacity=2).
     # A is requested 3 times (2 hits -> promoted to protected, refreshed);
     # B once (stays in probation). C, D, E, F fill/evict; a re-request of A
@@ -1296,12 +1708,36 @@ def main():
                          help="a prefill plan's expertUseCount increment: 1 (production) "
                               "or the expert's row count (needs a trace with row counts)")
     parser.add_argument("--sweep-order",
-                         choices=["index", "rows-asc", "rows-desc", "last-asc", "last-desc"],
+                         choices=["index", "rows-asc", "rows-desc", "last-asc", "last-desc",
+                                  "resident-first", "resident-first-grouped",
+                                  "resident-first-plain"],
                          default="index",
                          help="index replays each chunk's recorded tiles; rows-asc/rows-desc "
                               "re-tile a chunk by row count (needs row counts); last-asc/"
                               "last-desc re-tile by each expert's last row in the chunk, ties "
-                              "by rows ascending then expert id (needs last-row counts)")
+                              "by rows ascending then expert id (needs last-row counts); "
+                              "resident-first splits the chunk into resident and absent "
+                              "pool-resident groups (rank order kept in each), gives the "
+                              "residents a pure head only while --sweep-head-factor tiles' "
+                              "worth of misses would starve protection, spreads the absent "
+                              "group uniformly by recency across the remaining tiles, and "
+                              "fills their free slots with the leftover residents "
+                              "heaviest-first, tiled flat; resident-first-grouped is round "
+                              "1's landed order (resident/head/tail, the absent group's "
+                              "--sweep-tail most recent experts as the tail, each packed by "
+                              "row weight and tiled flat); resident-first-plain is the same "
+                              "split with no row-weight packing, resident group then absent "
+                              "group each in last-asc order (all three need last-row counts; "
+                              "--sweep-carry has no effect on any)")
+    parser.add_argument("--sweep-tail", type=int, default=DEFAULT_SWEEP_TAIL,
+                         help="the absent group's most recent experts packed as their own "
+                              f"group under --sweep-order resident-first-grouped (default "
+                              f"{DEFAULT_SWEEP_TAIL}, SHRIKE_PREFILL_SWEEP_TAIL's mirror); "
+                              "must be a positive integer")
+    parser.add_argument("--sweep-head-factor", type=int, default=DEFAULT_SWEEP_HEAD_FACTOR,
+                         help="the tile multiplier --sweep-order resident-first's head rule "
+                              f"protects against starving (default {DEFAULT_SWEEP_HEAD_FACTOR}); "
+                              "must be a positive integer")
     parser.add_argument("--sweep-carry", choices=["off", "on"], default="off",
                          help="alternate the sweep-order direction chunk to chunk (off: fixed)")
     parser.add_argument("--protect", choices=["off", "chunk"], default="chunk",
@@ -1329,6 +1765,12 @@ def main():
     if not args.trace:
         parser.error("a trace path is required unless --self-test is given")
 
+    if args.sweep_tail <= 0:
+        parser.error("--sweep-tail must be a positive integer")
+
+    if args.sweep_head_factor <= 0:
+        parser.error("--sweep-head-factor must be a positive integer")
+
     lines = load_trace(args.trace)
     policy = parse_policy(args.policy)
     phase_policy = None
@@ -1342,7 +1784,8 @@ def main():
         stats, total_compulsory, settle_stats, settle_meta, profile = replay(
             lines, args.slots, policy, args.layer, args.avoid_lookback,
             args.prefill_weight, args.sweep_order, args.sweep_carry == "on",
-            phase_policy, args.profile_window, protect=args.protect)
+            phase_policy, args.profile_window, protect=args.protect,
+            sweep_tail=args.sweep_tail, sweep_head_factor=args.sweep_head_factor)
     except ValueError as e:
         parser.error(str(e))
 
