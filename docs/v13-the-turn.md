@@ -447,11 +447,145 @@ the default, `=32` the A/B; mini, server walls):
 What is left of the 21-row turn: prefill ≈ 0.84 s = routed stage ≈ 0.48 (GPU
 0.41, holding 832 misses ≈ 1.47 GB at ≈ 0.45 s of drive underneath) + attention
 / GDN / shared ≈ 0.24 + gaps ≈ 0.12; decode 0.52 for 8 tokens; outside 0.06.
-The routed stage is now the largest term and its drive is the miss count on a
-cached context — the pool at 67.6 % hits after a real answer, 78.8 % a turn
-later — T4. Scope: measured on a launch without an MTP sidecar; the GDN
-chunked scan's 64-row gate and the routed gate's MTP scratch constraint are
-follow-ons.
+The routed stage is now the largest term; Task 4 measured that its drive is
+hidden under its per-tile GPU floor (a perfect pool is worth ≈ 10 ms here) and
+that the miss count's price is in decode. Scope: measured on a launch without
+an MTP sidecar; the GDN chunked scan's 64-row gate and the routed gate's MTP
+scratch constraint are follow-ons.
+
+## Task 4 — the expert pool's retention across the turn boundary (commit 04d4de5)
+
+The draft opened this task on the follow-up turn's routed stage and its 832
+misses on a cached context. Step zero re-priced the term before any code: the
+existing `SHRIKE_EXPERT_CACHE_POLICY` values on the card's chain showed the
+policy family moving both regimes in opposite directions (`lru` −502 decode
+misses on the answer and +128 on the 8-token follow-up's decode; `lfu` identical
+to `aging-lfu` to the counter, because the halving at 1,024 plans is per layer
+and never fires inside a conversation), and the follow-up turn's prefill had
+almost nothing exposed (turn 3's `lru` arm removed 304 of 721 misses for 4 ms of
+`prefill_s` against a 16 ms drift: its routed stage sits at its per-tile GPU
+floor with the drive underneath it). The miss count's price is in decode: a
+miss costs ≈ 0.93 ms by four independent measurements and the 219-token answer
+carries 7,451 of them, 41 % of its 16.8 s.
+
+**Step 1 built the measuring instrument.** `SHRIKE_ROUTE_TRACE` gained a
+request-start line and a per-tile prefill line carrying each expert's row count
+and last row (`r <cached> <prompt>`, `p <position> <layer> <tile> e0…e7 | n0:l0 …`;
+the settle re-prefills fall between requests and are reported apart), and
+`tools/expert-pool-replay.py` replays a capture against the pool's policies at
+128 slots per layer with the streamer's exact rules (hits reserved before victim
+selection, the three-tile `avoidingSlots` lookback, ties by count then last use
+then slot index, the halving cadence). Validated against production on six
+requests across two shapes: every request within ±1 miss, prefill and decode
+(the card chain 9,370 / 831 / 722 and 7,451 / 240 / 97 against 9,370 / 832 / 721
+and 7,451 / 240 / 97; the short-prompt pair 7,639 / 4,014 and 10,059 / 153 against
+7,639 / 4,014 and 10,059 / 154). The offline verdict on both traces (decode
+misses on the answer, card chain / pair; production 7,451 / 10,059; the
+captures predate the protection knob, so the tool reproduces these rows with
+`--protect off`):
+
+| candidate | card answer | pair answer | the follow-up turns |
+| --- | ---: | ---: | --- |
+| Belady, the ceiling | 2,485 | 3,773 | 380 / 176 prefill misses (production 831 / 722) |
+| `lru` | 6,949 | 10,362 | decode +127 / +82; the warm second prefill +1,747 on the pair |
+| `slru` 0.5 / 0.75, `arc`, `lru-2` | 6,919 / 7,017 / 7,146 / 7,265 | 10,074 / 9,982 / 10,403 / 10,195 | all regress the follow-ups' decode |
+| aging at 256 / 64 / 16 plans | 7,451 / 7,039 / 6,958 | 9,885 / 9,626 / 10,357 | slides toward `lru` |
+| prefill counts weighted by the prompt's rows | 18,383 | 13,052 | LFU pollution in its textbook form |
+| the sweep ordered by the prompt's row counts | 7,257 | 9,396 | +44 / +128 prefill misses |
+| **the sweep ordered by each expert's last use in the prompt** | **6,697** | **9,450** | +56 / +160 prefill misses; reversed 8,035 / 10,875 |
+| production with a clairvoyant decode | 3,968 | 4,960 | |
+| a clairvoyant post-sweep state with production's decode | 5,227 | 8,588 | |
+
+The reuse structure explains the table: inside an answer 74 % of an expert's
+reuses come within 8 tokens of its previous use and 97.6 % within a stack
+distance of 128, so recency already does the steady-state job and no bounded
+rule beats `lru`'s class there; Belady's capacity misses are ≈ 47 per layer, the
+answer's 175 distinct experts minus the 128 slots, so its edge is which of the
+prompt's experts it keeps across the prefill→decode boundary. Production's pool
+leaves a chunk holding the last 128 experts the index-ordered sweep visited,
+and every expert of a chunk carries its tile's plan clock, so the policy has no
+recency to prefer the experts the prompt's final tokens used, which the answer's
+first tokens reuse. Frequency was the wrong proxy for "needed soonest"; recency
+in the prompt was the right one.
+
+**Step 2 built two levers and measured them on the mini.** (1) `SHRIKE_PREFILL_SWEEP=recency`
+(with `SHRIKE_PREFILL_SWEEP_TAIL`, default 96): a chunk's experts ranked by
+last row, the most recent `tail` of them swept last, tiles packed inside the
+head and the tail for balanced row weight (the plain order clustered light
+early-used experts in the first tiles and heavy late-used ones in the last, and
+the two-tile pipeline ran fetch-bound early and GPU-bound late: +0.47 s on a 2k
+prefill, gone once balanced; a second +0.44 s was host time in the tile
+composition and the per-tile protection set, gone once the order went through
+the existing sort-key array and the protection through a per-layer `[Bool]`).
+(2) `SHRIKE_EXPERT_CACHE_PROTECT=chunk`: while a chunk sweeps, slots holding an
+expert the chunk still needs are ineligible as victims (the planner has the
+chunk's routes before it sweeps; a graded fallback drops the protection for one
+plan when too few eligible slots remain). It came out of tracing why the recency
+order lost hits on a warm second prompt: each early miss evicted a resident the
+same sweep needed later (240 such residents at use count ≥ 4, mean position 0.6
+of the sweep).
+
+The replay predicts the box to the miss for both: the recency order's decode
+misses on the card answer 6,692 / 6,701 measured against 6,697 / 6,688
+replayed, and a traced chain under both levers replayed at 6,701 / 707 / 613
+against 6,701 / 707 / 612 measured. The recency order wins the first turn's
+decode after a large prompt (−0.63 s on the 2k card, −0.72 s on the 300-token
+prompt, −0.72 s on the 1k, +3.2 to +3.9 % tok/s) and loses everywhere a chunk
+follows another, because it forfeits T0's carry benefit: the warm second prefill
+of the 300 / 1k / 2k pairs +3.7 / +7.5 / +10.9 % and 12k +7.2 %, rows the
+protection cannot rescue because nearly every resident is needed by the next
+chunk and its fallback drops it. **Not free**; it stays a knob at default
+`carry`, its refinement (a resident-first head: the chunk's needed experts that
+are already resident swept first, so every hit is harvested before any
+eviction, T0's trick made exact through the pool's residency, then the recency
+tail) is the next task's step zero, which needs traces of the pair and 12k
+shapes. Protection alone was free on every row it ran, so the verdict round
+paired it against production.
+
+**The verdict** (mini, one binary, `SHRIKE_EXPERT_CACHE_PROTECT` as the A/B,
+`off` = A today, `chunk` = C; paired in both orders where a wall is the verdict):
+
+| row | A (today) | C (protect chunk) | Δ | misses A → C |
+| --- | ---: | ---: | ---: | --- |
+| the card's 21-token follow-up turn (×3) | 1.430 s | 1.385 s | −3.1 % | 832 → 705 (replayed 705) |
+| turn 3, 36 new (×3) | 1.466 s (a third repeat at 1.700, a one-off stall, misses identical) | 1.458 s | −0.5 % | 721 → 613 (replayed 614) |
+| the 2k first turn's answer, decode s (×3) | 16.773 | 16.794 | +0.1 % (drift) | 7,451 both |
+| the 2k first turn's prefill s (×3) | 11.086 | 11.094 | +0.1 % | |
+| warm 300 prompt after a 314-token answer (×2) | 3.439 s | 3.175 s | −7.7 % | 4,014 → 3,389 |
+| warm 1k prompt after a 405-token answer | 6.261 s | 6.191 s | −1.1 % | 5,215 → 4,647 |
+| warm 300 prompt after an 8-token answer (×2) | 3.582 s | 3.454 s | −3.6 % | 3,218 → 2,865 |
+| warm 1k / 2k prompts after an 8-token answer | 6.553 / 10.323 s | 6.385 / 10.287 s | −2.6 % / −0.3 % | 4,387 → 4,066; 4,646 → 4,317 |
+| 12k, first request after launch | 68.105 s | 68.209 s | +0.15 % | 18,864 → 18,457 |
+| the long answers' decode tok/s | 13.06 / 14.01 / 14.03 | 13.04 / 13.82 / 14.01 | drift (one t300 repeat 22.93 s against 22.34–22.52 with identical misses) | unchanged |
+
+Real: the follow-up turn and every warm prefill move by more than the drift, in both orders, with the miss counts the replay predicted. Free with one priced observation: in the `300` arm a fresh server's first request at 289 rows cost +0.27 s of prefill (5.48 → 5.76 s, both repeats, the routed-tile gap's host +129 ms), and the 1,069-row one +0.10 s; the SAME requests in the `d512-300` and `d512-1k` arms, same binary and launch, showed +0.017 s (gap host −61 ms) and +0.002 s. The number stands, its cause is not established (the per-tile scan explains at most half of the larger arm's delta and none of the smaller's), and it can only occur once per launch, before any resident exists to protect. Recorded as a follow-on to measure, not as a mechanism. Golden is identical on both boxes and both profiles at
+`off` and at `chunk` at the landed commit, and at the two recency cells on the
+M4 Pro at every amend and on the mini at the landed commit (the order changes
+which experts share a tile and when they are fetched, never what any kernel
+computes).
+`SHRIKE_EXPERT_CACHE_PROTECT=chunk` is the default; `off` is the A/B.
+
+**Side findings for the ledger.** After a request whose prompt has no cached
+prefix, the prompt cache's settle re-prefills the whole prompt in the
+background (`settle_reset reason=no_prefix_snapshot`: 967 tiles, ≈ 6 GB of
+expert reads after a 3.6 s request, sweeping the pool); a follow-up turn's
+restore settle costs 450–470 misses of its own (≈ 0.8 GB) off the critical
+path. `expert_evictions` is arithmetically the misses minus the empty slots;
+`expert_reloads` is a lifetime flag, trivially ≈ every miss after the first
+sweep. The policy env parse lives in the streamer's `init`, so a bad value
+fails per layer mid-request rather than at launch (recorded, not fixed here).
+
+**After T4** (commit 04d4de5, 2026-09-05; `SHRIKE_EXPERT_CACHE_PROTECT=chunk`
+the default, `=off` the A/B; `SHRIKE_PREFILL_SWEEP=carry` unchanged; mini,
+server walls):
+
+| shape | wall | prefill hit rate | notes |
+| --- | ---: | ---: | --- |
+| follow-up turn, 21 new on a 2,345 cached context | 1.385 s | 72.5 % | was 1.41 s at 67.6 % after T3 |
+| turn 3, 36 new | 1.458 s | 82.0 % | |
+| 305 / 1,085 / 2,125 first turns (warm, after an 8-token answer) | 3.454 / 6.385 / 10.287 | 62.9 / 55.1 / 53.9 % | were 3.54 / 6.47 / 10.30 after T2 |
+| 12k, first request after launch | 68.209 s | 35.0 % | |
+| decode on the 2k card's answer | 16.794 s for 219 tokens | | unchanged by design |
 
 ## Levers, ranked for these shapes (modelled from step zero)
 
@@ -476,10 +610,28 @@ follow-ons.
   "the matrix kernels' per-dispatch floor" and priced a scalar path for tiny
   chunks. The sign was backwards: a 21-token follow-up already ran the scalar
   paths, below three 32-row gates, and that was the cost — 2.10 → 1.41 s (−33 %)
-  with every completion byte-identical. What is left of the follow-up turn is
-  its routed stage: the miss count on a cached context (T4).
-- **Decode** (v12 Task 17: hit-rate-bound, 22 / 18 / 12.5 tok/s by shape):
-  prefetch accuracy on a tools context, cross-layer miss queue depth, the
+  with every completion byte-identical. What was left of the follow-up turn,
+  its routed stage, is mostly its per-tile GPU floor (Task 4 measured the
+  drive under it at ≈ 10 ms).
+- **The expert pool's retention across the turn boundary — LANDED as Task 4**
+  (`SHRIKE_EXPERT_CACHE_PROTECT=chunk`): a chunk's own earlier misses no longer
+  evict residents the same chunk needs later, 10 to 15 % of a warm chunk's
+  prefill misses under production's sweep order (−15 % on the 21-token turn
+  and the warm 300 after a long answer, −11 % on the 300 pair, −7 % at 1k and
+  2k, −2 % at 12k), free on every row; the
+  follow-up turn −3.1 %, the warm 300 prompt after a long answer
+  −7.7 %. The replay tool and the route trace it runs on are the
+  chapter's instrument for the pool from here: Belady's ceiling on the answer
+  is −67 % of decode misses, the recency-ordered sweep reaches −10 % of them on
+  the first turn's answer and is a knob (default `carry`) because it forfeits
+  T0's carry benefit on consecutive chunks; its resident-first refinement is
+  the next task.
+- **Decode** (v12 Task 17: hit-rate-bound, 22 / 18 / 12.5 tok/s by shape; Task
+  4: a miss costs ≈ 0.93 ms and the answer's misses are 41 % of its decode).
+  Belady at 128 slots removes 67 % of them on the traced answers; recency
+  already reaches 97.6 % of an answer's reuses, so the remaining lever is the
+  prefill→decode boundary (the resident-first recency sweep, the next task),
+  not the eviction rule; then prefetch accuracy on a tools context and the
   drive's latency (an external NVMe on the mini is a copy-the-model experiment).
 
 Not levers here: the GPU kernels (busy ≤ 70 % of the span below 2k tokens); the

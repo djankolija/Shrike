@@ -1521,7 +1521,7 @@ different kernels on a chunk.
 
 ### Task 4: T4 — the pool's retention across the turn boundary, and where its miss count is actually exposed
 
-- [ ] **T4: the expert pool's eviction policy is the chapter's last untouched
+- [x] **T4: the expert pool's eviction policy is the chapter's last untouched
   term, and step zero re-prices it. Task 3 left the follow-up turn saying "the
   routed stage is now the largest term and its drive is the miss count on a cached
   context" ([v13-the-turn.md](v13-the-turn.md):450-452). Measured, that overstates
@@ -1541,6 +1541,27 @@ different kernels on a chunk.
   runs, and lands a policy behind `SHRIKE_EXPERT_CACHE_POLICY` either way. **The
   mini decides**, and a measured null is a result
   ([v13-the-turn.md](v13-the-turn.md):488-505).
+
+  **LANDED 04d4de5 (2026-09-05): the eviction policy was not the lever and the plan's Step
+  2 as drafted (a policy case) was superseded by Step 1's offline verdict; the task landed
+  the route trace's prefill and request lines, `tools/expert-pool-replay.py` (validated
+  against production at ±1 miss on six requests across two shapes; Belady 2,485 / 3,773
+  against production's 7,451 / 10,059 on the two answers; every steady-state rule in
+  `lru`'s class; the recency-ordered sweep 6,697 / 9,450), two scheduling-only levers
+  behind knobs, and measured them in three rounds on the mini: **`SHRIKE_EXPERT_CACHE_PROTECT=chunk`
+  is the default** (chunk-aware victim selection; paired A/C: the 21-token follow-up
+  1.430 → 1.385 s (−3.1 %), the warm 300 prompt after a long
+  answer 3.439 s → 3.175 s (−7.7 %), the warm 300 pair
+  3.582 s → 3.454 s (−3.6 %), 12k 68.105 s → 68.209 s
+  (+0.15 %), decode unchanged, no row worse; golden IDENTICAL both boxes both profiles
+  at every cell); **`SHRIKE_PREFILL_SWEEP=recency` stays a knob at default `carry`** (with
+  `SHRIKE_PREFILL_SWEEP_TAIL`, default 96): it takes 0.6–0.8 s off the first turn's decode
+  after a large prompt exactly as replayed (6,692 / 6,701 measured against 6,697 / 6,688)
+  and forfeits T0's carry benefit on consecutive chunks (the 300 / 1k / 2k pairs' warm
+  prefill +3.7 / +7.5 / +10.9 %, 12k +7.2 %), so it is not free; its resident-first
+  refinement is the next task. Two costs the replay could not see were found and fixed on
+  the box before the verdict (tile balance, +0.47 s; host time in the composition and the
+  per-tile protection, +0.44 s). Real and free → protection is the default.**
 
   **Step zero: the term as measured** (mini, the deployed a1158b6 binary, bare
   launch, zero code). The card's follow-up chain: `turns-live 512`, tX answered
@@ -1908,56 +1929,42 @@ different kernels on a chunk.
 
   Steps:
 
-  - [ ] Step 1 (an implementer, the offline half, **a named stop**): the trace's
-        prefill line and its host test; `tools/expert-pool-replay.py` with the
-        fidelity list above, its self-test and its validation against 7,451 / 240 /
-        97; then **one capture on the mini** of the same `turns-live 512` chain with
-        `SHRIKE_ROUTE_TRACE` on (a model run: `pgrep` and `memory_pressure -Q`
-        first) so prefill is in the trace, **and a second capture of a different
-        shape** (the `d512` 300-token pair Task 2's arms already run: a short
-        prompt, a long answer, a warm second request) so no policy is fitted to
-        one conversation; then the offline verdict over Belady, LRU, LFU,
-        aging-LFU at several periods and each candidate from (b), on both regimes
-        and both traces. **Stop here if the best implementable policy does not beat
-        aging-LFU on the answer by more than LRU does while also not regressing the
-        follow-up turns**: land the line and the tool, record the null, close.
-  - [ ] Step 2 (an implementer): the failing tests, then the hoisted parse, the
-        pure comparator, the new `ExpertCachePolicy` case, the printed field and
-        `turn-rig.sh:179`. The default does **not** move here. The four per-commit
-        gates (release build, 0 warnings; `swiftlint lint --strict --baseline`,
-        regenerated for the two stale entries; `tools/check-md-links.py`;
-        `swift test --no-parallel`, the full suite).
-  - [ ] Step 3 (numerics): `tools/golden-baseline.sh --check` on the M4 Pro at the
-        old default and at each candidate, both profiles, **IDENTICAL** every time;
-        then `tools/mini-deploy.sh --restart` and the same pair on the mini. A
-        difference is a defect and the task stops.
-  - [ ] Step 4 (the arms, controller-run, **one binary**, the policy as the A/B
-        through the rig's `SERVER_ENV`; a fresh server per chain, `REUSE` on every
-        arm after the first, tags `t4-<cell>-<order>`): **A**
-        `aging-lfu` and **B** the replay's winner via `turns-live 512`, **paired
-        in both orders, three pairs**, reading `decode_tok_s` on tX and the walls
-        on turns 2 and 3; **C** the long-answer follow-up (`TURN2_MAX_TOKENS=512`)
-        at A and B, its own REUSE directory, **the second verdict row**; **D**
-        `lru` at the same two shapes, so (a) is decided on a card's shape rather
-        than on 8 tokens; **E** the whole-chunk controls `pair 300|1k|2k` at A and
-        B with prefill hit rates compared expert for expert; **F** the 12k control;
-        **G** the long-decode arm (`MAX_TOKENS=512`) at 300 and 1k. Read the
-        **decode miss counts**, not the walls alone: if B's misses do not fall by
-        what the replay predicted, the replay is wrong and the task stops before
-        the rule is applied.
-  - [ ] Step 5 (the rule): apply it to both verdict rows and every control. The
-        default moves to the winning policy or stays `aging-lfu`. **Record the
-        verdict either way**, with the replay's prediction beside each measured
-        miss count so the reader can see how well the offline model held. Then the
-        four gates on the landed tree, golden both boxes both profiles,
-        `tools/mini-deploy.sh --restart` and the mini golden check.
-  - [ ] Step 6 (design doc): a "Task 4" section with the policy A/B table, the
-        replay table, the two-regime pricing and an "**After T4**" ledger block;
-        the Task 3 close-out sentence ([v13-the-turn.md](v13-the-turn.md):450-452)
-        corrected (its "miss count on a cached context" measures ≈ 10 ms); the
-        decode lever entry (`:481-483`) rewritten with Belady's ceiling; the routed
-        GEMM's per-tile cost at 21 rows added to Follow-ons. Plan: Task 4 `[x]`.
-        Task review by a fresh reviewer, fixes folded into the owning commit.
+  Steps (as run; the drafted Step 2 was a policy case and was superseded by Step 1's
+  verdict):
+
+  - [x] Step 1 (an implementer, three fix-up rounds): the trace's prefill line (per tile,
+        row counts and last rows added when the verdict needed them) and the request-start
+        line; `tools/expert-pool-replay.py` with the fidelity list, `--self-test`, `--expect`,
+        `--avoid-lookback` (3, the production bound), `--prefill-weight`, `--sweep-order`
+        (index / rows / last, with the carry alternation), `slru` / `arc` / `lru-2`,
+        `--phase-policy`, `--profile`; three captures of two shapes on the mini (each
+        recapture after the trace grew a field); validation ±1 on every request; the offline
+        verdict over every candidate on both traces (the tables in the design doc). The
+        named stop was reached for every eviction rule and passed by the recency-ordered
+        sweep.
+  - [x] Step 2 (an implementer, three fix-up rounds): `PrefillSweepMode.recency` with the
+        balanced tiles and `SHRIKE_PREFILL_SWEEP_TAIL`; `ExpertCacheProtectMode` with
+        `SHRIKE_EXPERT_CACHE_PROTECT`, the chunk's remaining experts carried from the tile
+        planner to `selectVictimSlots`; the rig's `TURN2_MAX_TOKENS`; the host costs of both
+        removed after round 2 measured them; the default flip and the replay's `--protect`
+        in the final amend. Gates 1–4 green on every amend, the landed tree's run 1239 / 1239.
+  - [x] Step 3 (numerics): golden IDENTICAL on both profiles at the four knob cells
+        (carry / recency × protect off / chunk) on the M4 Pro at every amend, and on the
+        mini at the default and the candidate cells at every amend and at all four cells
+        at the landed commit.
+  - [x] Step 4 (the arms, three rounds on the mini, one binary each): round 1 (the plain
+        recency order) found the tile imbalance; round 2 (balanced + protect, with the
+        attribution cells C = protect alone and D = order alone) found the host cost and
+        attributed every gain and cost to its lever, and its traced chain replayed exactly;
+        round 3 paired A against C (the tables above and in the design doc).
+  - [x] Step 5 (the rule): protection alone is real (paired in both orders, above drift)
+        and free (no control row regresses, golden identical) → `chunk` is the default; the
+        order is real on the first turn's decode and not free on consecutive chunks → a knob.
+  - [x] Step 6 (design doc): the Task 4 section, the After T4 block, the lever entries and
+        the Task 3 close-out sentence corrected; Follow-ons gained the resident-first sweep,
+        the settle re-prefill after a no-prefix request, the policy parse in the streamer's
+        `init`, and the protection fallback counter. Task review by a fresh reviewer, fixes
+        folded into the owning commit.
 
   **Risks and what falsifies the model.**
   - **The replay's initial state.** A traced request starts on whatever the
@@ -2022,6 +2029,29 @@ different kernels on a chunk.
   decision) — **before the chapter merges to main**, in its own commit with its
   own golden pair, and first if any task edits `encodeRoutedMoEPrefill`'s loop
   before then (Task 1 review).
+- **The resident-first recency sweep** (Task 4's next step, a task of its own): the
+  chunk's needed experts that are already resident swept first in recency order (every
+  hit harvested before any eviction, T0's carry trick made exact through the pool's
+  residency), then the absent ones with the recency tail last, tiles balanced by row
+  weight. Step zero: traces of the 300 / 1k / 2k pairs and 12k under today's order,
+  the replay's verdict on both regimes, then the mini. The prize is the first turn's
+  decode (−0.6 to −0.8 s measured for the plain recency order) without the warm-prefill
+  and multi-chunk losses that kept it a knob.
+- The prompt cache's settle after a request whose prompt has no cached prefix
+  re-prefills the whole prompt in the background (`settle_reset reason=no_prefix_snapshot`,
+  ≈ 6 GB of expert reads after a 300-token request, the pool swept): a cache-chapter
+  item found by Task 4's trace.
+- The expert-cache policy env parse lives in `PreadExpertStreamer.init`, so a bad value
+  fails per layer mid-request instead of at launch, and never reaches
+  `RuntimeConfiguration.expertCachePolicy` (Task 4 draft; a hoist to a static
+  `environmentValue` in the shape of `ExpertIOBackend`'s).
+- A counter for how often chunk-aware protection's starvation fallback fires (Task 4
+  review note; the replay models the fallback, the box does not report it).
+- The cold first request's +0.27 s under protection on one of two same-shape arms
+  (Task 4 round 3: the `300` arm's 289-row first request 5.48 → 5.76 s, the `d512-300`
+  arm's identical request 5.47 → 5.49): measure before explaining; a per-plan early-out
+  when no resident is protected is the candidate only if the measurement points at
+  the scan.
 - The prompt cache's interior snapshots (a prompt that diverges inside a stored
   entry re-prefills in full; append-only turns are served).
 - v12's prefill kernel follow-ons stay in [v12-prefill-matrix-kernels.md](v12-prefill-matrix-kernels.md).
