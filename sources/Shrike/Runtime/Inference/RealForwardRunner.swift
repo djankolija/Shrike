@@ -2024,11 +2024,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// be driven by it.
     ///
     /// Off unless `SHRIKE_ROUTE_TRACE` names a file. Diagnostic only.
-    private func recordRouteTrace(layer: Int, position: Int, experts: [Int]) {
+    private func recordRouteTrace(layer: Int, position: Int, tile: Int? = nil, experts: [Int],
+                                  rowCounts: [Int]? = nil, lastRows: [Int]? = nil) {
         guard routeTraceFD >= 0 else { return }
-        var line = "\(position) \(layer)"
-        for expert in experts { line += " \(expert)" }
-        line += "\n"
+        writeRouteTraceLine(Self.formatRouteTraceLine(position: position, layer: layer,
+                                                       tile: tile, experts: experts,
+                                                       rowCounts: rowCounts, lastRows: lastRows))
+    }
+
+    /// Marks a request's start in `SHRIKE_ROUTE_TRACE`; called only from
+    /// `runRawCompletion`, never from the settle rewrite's `prefillChunked` call.
+    func recordRouteTraceRequestStart(cachedTokens: Int, promptTokens: Int) {
+        guard routeTraceFD >= 0 else { return }
+        writeRouteTraceLine(Self.formatRouteTraceLine(cachedTokens: cachedTokens,
+                                                       promptTokens: promptTokens))
+    }
+
+    private func writeRouteTraceLine(_ line: String) {
         let bytes = Array(line.utf8)
         var written = 0
         while written < bytes.count {
@@ -2039,6 +2051,50 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             if n <= 0 { break }
             written += n
         }
+    }
+
+    /// Row counts and last-row indices for `SHRIKE_ROUTE_TRACE`'s prefill
+    /// suffix, one pair per expert in the tile's own order; `sortedPairs` is
+    /// sorted ascending by token within each expert's range, so the range's
+    /// last element already holds the highest row.
+    private func routeTraceRowCounts(forTile tile: PrefillMoETile,
+                                     routes: PrefillMoEGroupedRoutes) throws
+        -> (counts: [Int], lastRows: [Int]) {
+        let ranges = try PrefillExpertPairRange.ranges(forTile: tile, routes: routes)
+        let counts = ranges.map(\.pairCount)
+        let lastRows = ranges.map { Int(routes.sortedPairs[$0.pairStart + $0.pairCount - 1].token) }
+        return (counts, lastRows)
+    }
+
+    /// One `SHRIKE_ROUTE_TRACE` line: bare `position layer e0 e1 ...` for a
+    /// decode layer, `p position layer tile e0 e1 ... | n0 n1 ...` (or
+    /// `n0:l0 n1:l1 ...` once `lastRows` is given, `lK` the highest row index
+    /// `eK` was routed from in this tile's chunk) for one prefill tile, or
+    /// `r cachedTokens promptTokens` for a request's start, so a replay can
+    /// split on the first field; the suffix is omitted when `rowCounts` is
+    /// nil and stays bare counts when `lastRows` is nil, so an older parser
+    /// still reads the line.
+    static func formatRouteTraceLine(position: Int, layer: Int, tile: Int? = nil,
+                                     experts: [Int], rowCounts: [Int]? = nil,
+                                     lastRows: [Int]? = nil) -> String {
+        var line = tile.map { "p \(position) \(layer) \($0)" } ?? "\(position) \(layer)"
+        for expert in experts { line += " \(expert)" }
+        if let rowCounts, !rowCounts.isEmpty {
+            line += " |"
+            for (index, count) in rowCounts.enumerated() {
+                if let lastRows, index < lastRows.count {
+                    line += " \(count):\(lastRows[index])"
+                } else {
+                    line += " \(count)"
+                }
+            }
+        }
+        line += "\n"
+        return line
+    }
+
+    static func formatRouteTraceLine(cachedTokens: Int, promptTokens: Int) -> String {
+        "r \(cachedTokens) \(promptTokens)\n"
     }
 
     /// Appends one exact pre-plan routing/cache observation. `resident` is
@@ -2540,6 +2596,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 try await encodeRoutedMoEPrefill(
                     cb: &cb, layer: L, views: views, scratch: scratch,
                     tokenCount: t, hiddenSize: D,
+                    startPosition: startPosition,
                     descendingSweep: prefillDescendingSweep,
                     layerStart: prefillLayerStart,
                     routeNanos: &prefillRouteNanos,
@@ -5247,6 +5304,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         scratch: PrefillChunkScratchBuffers,
         tokenCount t: Int,
         hiddenSize D: Int,
+        startPosition: Int,
         descendingSweep: Bool,
         layerStart prefillLayerStart: UInt64,
         routeNanos prefillRouteNanos: inout UInt64,
@@ -5346,7 +5404,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         scratch: scratch,
                         metadata: metadata,
                         routedOffsets: routedOffsets,
-                        hiddenSize: D)
+                        hiddenSize: D,
+                        startPosition: startPosition)
                 } else {
                     var pendingBatches: [PendingPrefillBatch] = []
                     var openBatch: OpenPrefillBatch?
@@ -5379,6 +5438,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                 layer: L,
                                 experts: expertIDs,
                                 avoidingSlots: Set(heldSlots))
+                            if plan != nil, routeTraceFD >= 0 {
+                                let counted = try routeTraceRowCounts(forTile: tile, routes: routes)
+                                recordRouteTrace(layer: L, position: startPosition, tile: tileIndex,
+                                                 experts: expertIDs, rowCounts: counted.counts,
+                                                 lastRows: counted.lastRows)
+                            }
                         }
                         let batchAction = routedTileScheduler.batchAction(
                             openBatchTiles: openBatch?.tileIndices.count ?? 0,
@@ -5541,7 +5606,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         scratch: PrefillChunkScratchBuffers,
         metadata: PrefillGroupedRoutedMoEStreamedMetadataBuffers,
         routedOffsets: MoEExpertOffsets,
-        hiddenSize D: Int
+        hiddenSize D: Int,
+        startPosition: Int
     ) async throws {
         var pendingBatches: [PendingPrefillBatch] = []
         var openBatch: OpenPrefillBatch?
@@ -5572,7 +5638,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 begin = try resolveTileFetchBegin(
                     layer: L, routes: routes, tileIndex: tileIndex,
                     additionalAvoidingSlots: [], openBatch: openBatch,
-                    pendingBatches: &pendingBatches, tileLifetime: &tileLifetime)
+                    pendingBatches: &pendingBatches, tileLifetime: &tileLifetime,
+                    startPosition: startPosition)
             }
 
             var beginAwaited = false
@@ -5593,6 +5660,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 nextAvoiding.formUnion(begin.plan.assignedSlots)
                 let nextPlan = try model.planRoutedExpertsIfPossible(
                     layer: L, experts: nextExpertIDs, avoidingSlots: nextAvoiding)
+                if nextPlan != nil, routeTraceFD >= 0 {
+                    let counted = try routeTraceRowCounts(
+                        forTile: routes.tiles[nextTileIndex], routes: routes)
+                    recordRouteTrace(layer: L, position: startPosition, tile: nextTileIndex,
+                                     experts: nextExpertIDs, rowCounts: counted.counts,
+                                     lastRows: counted.lastRows)
+                }
                 if routedTileScheduler.shouldBeginLookahead(
                     afterTileIndex: tileIndex, tileCount: routes.tiles.count,
                     avoidingSlotPlanAvailable: nextPlan != nil) {
@@ -5670,13 +5744,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         additionalAvoidingSlots: Set<Int>,
         openBatch: OpenPrefillBatch?,
         pendingBatches: inout [PendingPrefillBatch],
-        tileLifetime: inout PrefillStreamedTileSlotLifetime
+        tileLifetime: inout PrefillStreamedTileSlotLifetime,
+        startPosition: Int
     ) throws -> PrefillStreamedTileFetchBegin {
         let expertIDs = try PrefillStreamedTileBinding.expertIDs(forTile: tileIndex, routes: routes)
         var avoidingSlots = Set((openBatch?.assignedSlots ?? []) + pendingBatches.flatMap(\.assignedSlots))
         avoidingSlots.formUnion(additionalAvoidingSlots)
         let plan = try model.planRoutedExpertsIfPossible(
             layer: L, experts: expertIDs, avoidingSlots: avoidingSlots)
+        if plan != nil, routeTraceFD >= 0 {
+            let counted = try routeTraceRowCounts(forTile: routes.tiles[tileIndex], routes: routes)
+            recordRouteTrace(layer: L, position: startPosition, tile: tileIndex,
+                             experts: expertIDs, rowCounts: counted.counts,
+                             lastRows: counted.lastRows)
+        }
         let begin: PrefillStreamedTileFetchBegin
         if let plan {
             begin = try PrefillStreamedTileBinding.beginFetchForTile(

@@ -135,6 +135,8 @@ public func runRawCompletion(producer: any LogitProducer,
         cachedPromptTokens = count
     }
     let computedPrefillTokens = promptIds.count - cachedPromptTokens
+    fusedRunner?.recordRouteTraceRequestStart(cachedTokens: cachedPromptTokens,
+                                              promptTokens: promptIds.count)
 
     var detok = GFDetokenizer(tokenizer: tokenizer)
     var history = Array(promptIds.prefix(cachedPromptTokens))

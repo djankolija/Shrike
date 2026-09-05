@@ -512,4 +512,38 @@ import Testing
         #expect(RealForwardRunner.prefillMatrixMinRowsDescription(16) == "prefill_matrix_min_rows=16")
     }
 
+    @Test func routeTraceLineFormatsPrefillAndDecode() {
+        #expect(RealForwardRunner.formatRouteTraceLine(
+            position: 42, layer: 3, experts: [1, 2, 3, 4, 5, 6, 7, 8])
+            == "42 3 1 2 3 4 5 6 7 8\n")
+        #expect(RealForwardRunner.formatRouteTraceLine(position: 42, layer: 3, experts: [])
+            == "42 3\n")
+        #expect(RealForwardRunner.formatRouteTraceLine(
+            position: 100, layer: 5, tile: 2, experts: [9, 10, 11])
+            == "p 100 5 2 9 10 11\n")
+        #expect(RealForwardRunner.formatRouteTraceLine(position: 100, layer: 5, tile: 0, experts: [])
+            == "p 100 5 0\n")
+        #expect(RealForwardRunner.formatRouteTraceLine(cachedTokens: 21, promptTokens: 2366)
+            == "r 21 2366\n")
+        #expect(RealForwardRunner.formatRouteTraceLine(cachedTokens: 0, promptTokens: 300)
+            == "r 0 300\n")
+        #expect(RealForwardRunner.formatRouteTraceLine(
+            position: 100, layer: 5, tile: 2, experts: [9, 10, 11], rowCounts: [4, 12, 1])
+            == "p 100 5 2 9 10 11 | 4 12 1\n")
+        #expect(RealForwardRunner.formatRouteTraceLine(
+            position: 100, layer: 5, tile: 2, experts: [9, 10, 11], rowCounts: nil)
+            == "p 100 5 2 9 10 11\n")
+        #expect(RealForwardRunner.formatRouteTraceLine(
+            position: 100, layer: 5, tile: 2, experts: [9, 10, 11], rowCounts: [])
+            == "p 100 5 2 9 10 11\n")
+        #expect(RealForwardRunner.formatRouteTraceLine(
+            position: 100, layer: 5, tile: 2, experts: [9, 10, 11],
+            rowCounts: [4, 12, 1], lastRows: [7, 20, 2])
+            == "p 100 5 2 9 10 11 | 4:7 12:20 1:2\n")
+        #expect(RealForwardRunner.formatRouteTraceLine(
+            position: 100, layer: 5, tile: 2, experts: [9, 10, 11],
+            rowCounts: [4, 12, 1], lastRows: nil)
+            == "p 100 5 2 9 10 11 | 4 12 1\n")
+    }
+
 }
