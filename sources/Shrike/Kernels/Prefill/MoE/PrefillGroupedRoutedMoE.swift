@@ -578,12 +578,14 @@ public struct PrefillStreamedTileBinding: Sendable, Equatable {
                                            tileIndex: Int,
                                            routes: PrefillMoEGroupedRoutes,
                                            plannedFetch: RoutedExpertFetchPlan? = nil,
-                                           avoidingSlots: Set<Int> = []) async throws
+                                           avoidingSlots: Set<Int> = [],
+                                           protectedExperts: [Bool]? = nil) async throws
         -> PrefillStreamedTileFetchResult {
         let expertIDs = try expertIDs(forTile: tileIndex, routes: routes)
         let plan = try plannedFetch ?? model.planRoutedExperts(layer: layer,
                                                                experts: expertIDs,
-                                                               avoidingSlots: avoidingSlots)
+                                                               avoidingSlots: avoidingSlots,
+                                                               protectedExperts: protectedExperts)
         let views: [TensorView]
         let usedPlannedFetch: Bool
         let plannedHits: Int
@@ -628,12 +630,14 @@ public struct PrefillStreamedTileBinding: Sendable, Equatable {
                                          tileIndex: Int,
                                          routes: PrefillMoEGroupedRoutes,
                                          plannedFetch: RoutedExpertFetchPlan? = nil,
-                                         avoidingSlots: Set<Int> = []) throws
+                                         avoidingSlots: Set<Int> = [],
+                                         protectedExperts: [Bool]? = nil) throws
         -> PrefillStreamedTileFetchBegin {
         let expertIDs = try expertIDs(forTile: tileIndex, routes: routes)
         guard let plan = try plannedFetch ?? model.planRoutedExperts(layer: layer,
                                                                      experts: expertIDs,
-                                                                     avoidingSlots: avoidingSlots) else {
+                                                                     avoidingSlots: avoidingSlots,
+                                                                     protectedExperts: protectedExperts) else {
             throw PrefillGroupedRoutedMoEError.invalidStreamedTileBinding(
                 "no routed expert plan available for tile \(tileIndex)")
         }

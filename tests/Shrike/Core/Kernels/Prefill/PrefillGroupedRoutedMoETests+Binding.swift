@@ -237,4 +237,40 @@ extension PrefillGroupedRoutedMoETests {
       pairCount: routes.sortedPairs.count)
   }
 
+  @Test func fetchBindingForTileForwardsProtectedExpertsToItsOwnFallbackPlan() async throws {
+    let dir = try ModelLoaderTests.writeToySynthetic()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let device = try #require(MTLCreateSystemDefaultDevice())
+    let model = try Model.load(
+      directoryURL: dir,
+      device: device,
+      expecting: .qwenToy(),
+      streamingMode: .pread(slotCount: 3))
+    let routes = try Self.tileFetchRoutes()
+    let firstBegin = try PrefillStreamedTileBinding.beginFetchForTile(
+      model: model, layer: 1, tileIndex: 0, routes: routes)
+    let firstViews = try await firstBegin.operation.completion()
+    _ = try PrefillStreamedTileBinding.bindingForCompletedFetch(begin: firstBegin, views: firstViews)
+    // expert 1 -> slot 0, expert 3 -> slot 1, expert 5 -> slot 2 (streamedTileFetchBindingUsesPreadPlanAndCacheHits).
+    #expect(firstBegin.plan.assignedSlots == [0, 1, 2])
+
+    let nextPairs = [Self.pair(token: 0, expert: 7, rank: 0)]
+    let nextRoutes = try PrefillMoEGrouping.groupTokenExpertPairs(
+      nextPairs, queryCount: 1, topK: 1, numExperts: 8, tileExpertCount: 1)
+    var protectedExperts = [Bool](repeating: false, count: 8)
+    protectedExperts[1] = true
+    protectedExperts[3] = true
+
+    // `fetchBindingForTile` receives no `plannedFetch`, so it must plan the
+    // miss itself (`PrefillGroupedRoutedMoE.swift`'s `plannedFetch ??
+    // model.planRoutedExperts(...)` fallback) and forward `protectedExperts`
+    // into that plan, not just accept the parameter unused.
+    let second = try await PrefillStreamedTileBinding.fetchBindingForTile(
+      model: model, layer: 1, tileIndex: 0, routes: nextRoutes,
+      protectedExperts: protectedExperts)
+
+    #expect(second.usedPlannedFetch)
+    #expect(second.plannedMissSlots == [2])
+  }
+
 }

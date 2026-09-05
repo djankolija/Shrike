@@ -113,6 +113,7 @@ extension Model {
     public func planRoutedExperts(layer: Int,
                                   experts: [Int],
                                   avoidingSlots: Set<Int> = [],
+                                  protectedExperts: [Bool]? = nil,
                                   prefetched: [Int: MTLBuffer] = [:]) throws
         -> RoutedExpertFetchPlan? {
         try ensureLayerOpened(layer)
@@ -121,19 +122,22 @@ extension Model {
         let prefetchPointers = prefetched.mapValues { $0.contents() }
         return RoutedExpertFetchPlan(
             layer: layer, cachePlan: try streamer.planExpertsCached(
-                experts: experts, avoidingSlots: validSlots, prefetched: prefetchPointers))
+                experts: experts, avoidingSlots: validSlots, protectedExperts: protectedExperts,
+                prefetched: prefetchPointers))
     }
 
     public func planRoutedExpertsIfPossible(layer: Int,
                                             experts: [Int],
-                                            avoidingSlots: Set<Int> = []) throws
+                                            avoidingSlots: Set<Int> = [],
+                                            protectedExperts: [Bool]? = nil) throws
         -> RoutedExpertFetchPlan? {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
         let validSlots = Set(avoidingSlots.filter { $0 >= 0 && $0 < streamer.slotCount })
         guard let cachePlan = streamer.planExpertsCachedIfPossible(
             experts: experts,
-            avoidingSlots: validSlots)
+            avoidingSlots: validSlots,
+            protectedExperts: protectedExperts)
         else {
             return nil
         }

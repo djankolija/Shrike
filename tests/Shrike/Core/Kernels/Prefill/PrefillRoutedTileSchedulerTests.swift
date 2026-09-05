@@ -330,28 +330,29 @@ import Testing
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
             sweepMode: .fixed, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
             == "overlap=on residency=set allocations=24 sweep=fixed cache_layout=pool"
-                + " expert_io=threads=4 batch_depth=1")
+                + " expert_io=threads=4 batch_depth=1 protect=chunk")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: false, residencyAllocationCount: 0, poolResidencyUnavailableReason: nil,
             sweepMode: .alternate, cacheLayout: .perSlot, expertIOThreads: 4, expertIOBatchDepth: 1)
             == "overlap=off residency=set allocations=0 sweep=alternate cache_layout=per-slot"
-                + " expert_io=threads=4 batch_depth=1")
+                + " expert_io=threads=4 batch_depth=1 protect=chunk")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: "boom",
             sweepMode: .alternate, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
             == "overlap=on residency=unavailable reason=boom sweep=alternate cache_layout=pool"
-                + " expert_io=threads=4 batch_depth=1")
+                + " expert_io=threads=4 batch_depth=1 protect=chunk")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
             sweepMode: .fixed, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
             == "overlap=on residency=none sweep=fixed cache_layout=pool"
-                + " expert_io=threads=4 batch_depth=1")
+                + " expert_io=threads=4 batch_depth=1 protect=chunk")
     }
 
-    @Test func sweepModeParsesItsThreeValues() {
+    @Test func sweepModeParsesItsFourValues() {
         #expect(RealForwardRunner.parsePrefillSweepMode("alternate") == .alternate)
         #expect(RealForwardRunner.parsePrefillSweepMode("fixed") == .fixed)
         #expect(RealForwardRunner.parsePrefillSweepMode("carry") == .carry)
+        #expect(RealForwardRunner.parsePrefillSweepMode("recency") == .recency)
         #expect(RealForwardRunner.parsePrefillSweepMode(nil) == .carry)
         #expect(RealForwardRunner.parsePrefillSweepMode("") == .carry)
         #expect(RealForwardRunner.parsePrefillSweepMode("bogus") == .carry)
@@ -362,7 +363,72 @@ import Testing
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
             sweepMode: .carry, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
             == "overlap=on residency=set allocations=24 sweep=carry cache_layout=pool"
-                + " expert_io=threads=4 batch_depth=1")
+                + " expert_io=threads=4 batch_depth=1 protect=chunk")
+        #expect(RealForwardRunner.prefillGapLeversDescription(
+            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
+            sweepMode: .recency, sweepTail: 96, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
+            == "overlap=on residency=set allocations=24 sweep=recency tail=96 cache_layout=pool"
+                + " expert_io=threads=4 batch_depth=1 protect=chunk")
+        #expect(RealForwardRunner.prefillGapLeversDescription(
+            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
+            sweepMode: .recency, sweepTail: 48, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
+            == "overlap=on residency=set allocations=24 sweep=recency tail=48 cache_layout=pool"
+                + " expert_io=threads=4 batch_depth=1 protect=chunk")
+        #expect(RealForwardRunner.prefillGapLeversDescription(
+            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
+            sweepMode: .fixed, sweepTail: 48, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
+            == "overlap=on residency=set allocations=24 sweep=fixed cache_layout=pool"
+                + " expert_io=threads=4 batch_depth=1 protect=chunk")
+    }
+
+    @Test func sweepTailDefaultsAndFailsClosed() throws {
+        #expect(try RealForwardRunner.parsePrefillSweepTail(nil, expertCount: 256) == 96)
+        #expect(try RealForwardRunner.parsePrefillSweepTail("128", expertCount: 256) == 128)
+        #expect(try RealForwardRunner.parsePrefillSweepTail("8", expertCount: 256) == 8)
+        #expect(try RealForwardRunner.parsePrefillSweepTail("256", expertCount: 256) == 256)
+        #expect(try RealForwardRunner.parsePrefillSweepTail(nil, expertCount: 64) == 64)
+        #expect(try RealForwardRunner.parsePrefillSweepTail("64", expertCount: 64) == 64)
+
+        for invalid in ["", "not-a-number", "4", "999"] {
+            #expect(throws: (any Error).self) {
+                _ = try RealForwardRunner.parsePrefillSweepTail(invalid, expertCount: 256)
+            }
+        }
+    }
+
+    @Test func chunkExpertProtectionClearsThePlannedTileInPlace() {
+        var protection = PrefillChunkExpertProtection(routedExperts: [1, 2, 3, 4, 5], expertsPerLayer: 10)
+        #expect(protection.remaining == [false, true, true, true, true, true, false, false, false, false])
+
+        protection.planning([1, 2])
+        #expect(protection.remaining == [false, false, false, true, true, true, false, false, false, false])
+
+        protection.planning([3])
+        #expect(protection.remaining == [false, false, false, false, true, true, false, false, false, false])
+
+        protection.planning([4, 5])
+        #expect(protection.remaining.allSatisfy { !$0 })
+    }
+
+    @Test func chunkExpertProtectionIgnoresAnExpertNeverRouted() {
+        var protection = PrefillChunkExpertProtection(routedExperts: [1, 2], expertsPerLayer: 10)
+
+        protection.planning([9])
+
+        #expect(protection.remaining[1] == true)
+        #expect(protection.remaining[2] == true)
+        #expect(protection.remaining[9] == false)
+    }
+
+    @Test func chunkExpertProtectionBuildsDirectlyFromRoutedGroups() {
+        let groups = [
+            PrefillMoEGroup(expert: 2, pairStart: 0, pairCount: 1),
+            PrefillMoEGroup(expert: 7, pairStart: 1, pairCount: 2),
+        ]
+
+        let protection = PrefillChunkExpertProtection(routedGroups: groups, expertsPerLayer: 10)
+
+        #expect(protection.remaining == [false, false, true, false, false, false, false, true, false, false])
     }
 
     @Test func slotLifetimeRejectsReuseInsideAnOpenBatch() throws {

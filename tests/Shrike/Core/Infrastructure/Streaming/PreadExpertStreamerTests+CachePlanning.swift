@@ -18,6 +18,27 @@ extension PreadExpertStreamerTests {
     }
   }
 
+  @Test func expertCacheProtectModeEnvironmentDefaultsAndFailsClosed() throws {
+    #expect(try ExpertCacheProtectMode.environmentValue([:]) == .chunk)
+    #expect(try ExpertCacheProtectMode.environmentValue([
+      "SHRIKE_EXPERT_CACHE_PROTECT": "chunk",
+    ]) == .chunk)
+    #expect(throws: (any Error).self) {
+      try ExpertCacheProtectMode.environmentValue([
+        "SHRIKE_EXPERT_CACHE_PROTECT": "unknown",
+      ])
+    }
+  }
+
+  @Test func prefillGapLeversDescriptionReportsTheCacheProtectMode() {
+    #expect(RealForwardRunner.prefillGapLeversDescription(
+      overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
+      sweepMode: .carry, cacheLayout: .pool, expertIOThreads: 8, expertIOBatchDepth: 2,
+      cacheProtectMode: .chunk)
+      == "overlap=on residency=none sweep=carry cache_layout=pool"
+        + " expert_io=threads=8 batch_depth=2 protect=chunk")
+  }
+
   @Test func boundedReaderConfigurationParsesThreadsAndBatchDepth() throws {
     defer {
       unsetenv("SHRIKE_EXPERT_IO_THREADS")
@@ -62,7 +83,7 @@ extension PreadExpertStreamerTests {
       overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
       sweepMode: .carry, cacheLayout: .pool, expertIOThreads: 8, expertIOBatchDepth: 2)
       == "overlap=on residency=none sweep=carry cache_layout=pool"
-        + " expert_io=threads=8 batch_depth=2")
+        + " expert_io=threads=8 batch_depth=2 protect=chunk")
   }
 
   @Test func cachedBatchWithoutExecutorLoadsTaggedBytes() throws {
@@ -272,6 +293,63 @@ extension PreadExpertStreamerTests {
     #expect(plan == nil)
   }
 
+  @Test func protectedExpertsSkipsTheLFUVictimForTheNextCandidate() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+
+    func warmedStreamer() throws -> PreadExpertStreamer {
+      let streamer = try PreadExpertStreamer(
+        layout: Self.makeLayout(path: url.path), device: device, slotCount: 2,
+        cachePolicy: .lfu)
+      _ = try streamer.loadExpertsCached(experts: [0])
+      _ = try streamer.loadExpertsCached(experts: [1])
+      _ = try streamer.loadExpertsCached(experts: [0])
+      return streamer
+    }
+
+    let unprotected = try warmedStreamer().planExpertsCached(experts: [2])
+    #expect(unprotected.misses == [0])
+    #expect(unprotected.assignedSlots == [1])
+
+    let protectedPlan = try warmedStreamer().planExpertsCached(
+      experts: [2], protectedExperts: Self.protecting([1]))
+    #expect(protectedPlan.misses == [0])
+    #expect(protectedPlan.assignedSlots == [0])
+  }
+
+  @Test func planExpertsCachedIfPossibleHonoursAProtectedExpertsArray() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 2,
+      cachePolicy: .lfu)
+
+    _ = try streamer.loadExpertsCached(experts: [0, 1])
+    let plan = streamer.planExpertsCachedIfPossible(
+      experts: [2], protectedExperts: Self.protecting([0]))
+
+    #expect(plan?.assignedSlots == [1])
+  }
+
+  @Test func fullyProtectedPoolFallsBackToUnprotectedEligibilityRatherThanFail() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 2,
+      cachePolicy: .lfu)
+
+    _ = try streamer.loadExpertsCached(experts: [0, 1])
+    let plan = try streamer.planExpertsCached(
+      experts: [2], protectedExperts: Self.protecting([0, 1]))
+
+    #expect(plan.misses == [0])
+    #expect(plan.assignedSlots.count == 1)
+    #expect([0, 1].contains(plan.assignedSlots[0]))
+  }
+
   @Test func pinnedGenerationsCannotBeEvictedUntilReleased() throws {
     let url = try Self.writeSyntheticLayer()
     defer { try? FileManager.default.removeItem(at: url) }
@@ -388,6 +466,12 @@ extension PreadExpertStreamerTests {
       let got = Self.bytes(of: result.buffer, offset: result.offset, count: Self.expertStride)
       #expect(got.allSatisfy { $0 == Self.tagByte([0, 1][index]) })
     }
+  }
+
+  private static func protecting(_ experts: [Int]) -> [Bool] {
+    var protected = [Bool](repeating: false, count: numExperts)
+    for expert in experts { protected[expert] = true }
+    return protected
   }
 
 }

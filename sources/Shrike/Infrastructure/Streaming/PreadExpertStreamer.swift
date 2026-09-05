@@ -167,6 +167,26 @@ public enum ExpertCachePolicy: String, Sendable {
     case agingLFU = "aging-lfu"
 }
 
+/// `SHRIKE_EXPERT_CACHE_PROTECT`: `chunk` keeps a slot holding an expert a
+/// later tile of the same layer-chunk still needs out of the victim set,
+/// falling back to `off`'s eligibility when too few slots remain; `chunk`
+/// is the v13 T4 measured winner and today's default, `off` the A/B.
+public enum ExpertCacheProtectMode: String, Sendable {
+    case off
+    case chunk
+
+    static func environmentValue(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> ExpertCacheProtectMode {
+        guard let raw = environment["SHRIKE_EXPERT_CACHE_PROTECT"] else { return .chunk }
+        guard let mode = ExpertCacheProtectMode(rawValue: raw) else {
+            throw ModelError.internalInconsistency(
+                detail: "unsupported SHRIKE_EXPERT_CACHE_PROTECT '\(raw)'; allowed: off, chunk")
+        }
+        return mode
+    }
+}
+
 public enum ExpertIOBackend: String, Sendable {
     case pread
     case metal
@@ -614,11 +634,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public func planExpertsCached(experts: [Int],
                                   layer: Int = 0,
                                   avoidingSlots: Set<Int> = [],
+                                  protectedExperts: [Bool]? = nil,
                                   prefetched: [Int: UnsafeMutableRawPointer] = [:]) throws
         -> ExpertCachePlan {
         guard let plan = makeExpertCachePlan(layer: layer,
                                              experts: experts,
                                              avoidingSlots: avoidingSlots,
+                                             protectedExperts: protectedExperts,
                                              prefetched: prefetched) else {
             // K10: config-triggered placement failure (too few slots for the
             // requested expert set) is recoverable — throw instead of
@@ -632,15 +654,17 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public func planExpertsCachedIfPossible(experts: [Int],
                                             layer: Int = 0,
                                             avoidingSlots: Set<Int> = [],
+                                            protectedExperts: [Bool]? = nil,
                                             prefetched: [Int: UnsafeMutableRawPointer] = [:])
         -> ExpertCachePlan? {
         makeExpertCachePlan(layer: layer, experts: experts, avoidingSlots: avoidingSlots,
-                             prefetched: prefetched)
+                             protectedExperts: protectedExperts, prefetched: prefetched)
     }
 
     private func makeExpertCachePlan(layer: Int,
                                      experts: [Int],
                                      avoidingSlots rawAvoidingSlots: consuming Set<Int>,
+                                     protectedExperts: [Bool]?,
                                      prefetched: [Int: UnsafeMutableRawPointer])
         -> ExpertCachePlan? {
         precondition(experts.count <= slotCount,
@@ -691,7 +715,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
 
         if missCount > 0 {
-            guard selectVictimSlots(missCount: missCount) else { return nil }
+            let protectedSucceeded = protectedExperts != nil
+                && selectVictimSlots(missCount: missCount, protectedExperts: protectedExperts)
+            if !protectedSucceeded {
+                guard selectVictimSlots(missCount: missCount) else { return nil }
+            }
         }
 
         useClock = clock
@@ -1148,13 +1176,22 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// filter+sort's allocations; an all-hit plan never calls this. Ties
     /// resolve to the lower slot index, which the unstable sort left
     /// unspecified. Returns false when fewer than `missCount` slots are
-    /// eligible. Caller must hold `cacheLock`.
-    private func selectVictimSlots(missCount: Int) -> Bool {
+    /// eligible. `protectedExperts` (non-nil only under
+    /// `SHRIKE_EXPERT_CACHE_PROTECT=chunk`), a `[Bool]` sized `expertsPerLayer`,
+    /// excludes a slot whose expert reads `true`, exactly like loading,
+    /// pinned, and already-reserved slots, at one array read and no hashing;
+    /// the caller retries with `nil` once this returns false. Caller must
+    /// hold `cacheLock`.
+    private func selectVictimSlots(missCount: Int, protectedExperts: [Bool]? = nil) -> Bool {
         var victimCount = 0
         var eligibleCount = 0
         for slot in 0..<slotCount {
             guard !reservedSlots[slot], slotState[slot] != .loading,
                   slotPinCount[slot] == 0 else { continue }
+            if let protectedExperts, slotExpert[slot] >= 0, slotExpert[slot] < protectedExperts.count,
+               protectedExperts[slotExpert[slot]] {
+                continue
+            }
             eligibleCount &+= 1
             if victimCount < missCount {
                 var at = victimCount

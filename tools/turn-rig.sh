@@ -21,8 +21,9 @@
 # shape — tX is sent with max_tokens <answer_max_tokens> (default 512) and
 # its real response content becomes the assistant turn; turn 2 is built from
 # that response plus the last user message of tXturn2.json (or USER_TURN2,
-# below), sent with max_tokens 8; turn 3 is built the same way from turn 2's
-# own real response plus tXturn3.json's last user message. The built
+# below), sent with max_tokens 8 (or TURN2_MAX_TOKENS, below); turn 3 is
+# built the same way from turn 2's own real response plus tXturn3.json's
+# last user message. The built
 # payloads land beside the responses in <outdir> as payload-<tag>-turn2.json
 # and payload-<tag>-turn3.json. `restore`: relaunch production and stop.
 # Every phase rotates the server's /tmp/ornith.log first and copies the
@@ -33,7 +34,10 @@
 # MODEL / MODEL_ID (optional env, default ./models/ornith15.gturbo /
 # ornith15, matching tools/mini-deploy.sh's launch): the model the relaunched
 # server serves. MAX_TOKENS (optional env): overrides the phase's cold
-# request's max_tokens (the long-decode arm raises it to 512). SERVER_ENV
+# request's max_tokens (the long-decode arm raises it to 512). TURN2_MAX_TOKENS
+# (optional env, `turns-live` only): overrides turn 2's max_tokens (default
+# 8; the long-answer follow-up arm sets it to 512, e.g. `TURN2_MAX_TOKENS=512`).
+# SERVER_ENV
 # (optional env): prepended to the server launch's env assignments, e.g.
 # SERVER_ENV="SHRIKE_PREFILL_SWEEP=carry" for the A/B. REUSE=<dir> (optional
 # env, `turns-live` only): instead of building turn 2 and turn 3 from this
@@ -176,7 +180,7 @@ case "$phase" in
     else
       build_next "$PDIR/tX.json" "$ODIR/resp-$TAG-tX.json" "${USER_TURN2:-$PDIR/tXturn2.json}" "$turn2_payload"
     fi
-    send "turn2" "" "$turn2_payload"; wait_settle 2 || exit 1
+    send "turn2" "${TURN2_MAX_TOKENS:-}" "$turn2_payload"; wait_settle 2 || exit 1
     if [ -z "${REUSE:-}" ]; then
       build_next "$turn2_payload" "$ODIR/resp-$TAG-turn2.json" "$PDIR/tXturn3.json" "$turn3_payload"
     fi

@@ -90,6 +90,30 @@ here:
     routed groups' natural order and packs by slot-budget fit, not a fixed
     width of 8) or its `avoidingSlots` (recomputed here from the new,
     synthetic tile boundaries, not the real batch/commit schedule).
+  - `--protect chunk` (default, matching `SHRIKE_EXPERT_CACHE_PROTECT=chunk`
+    since v13 T4): while a chunk's tiles are replayed, a slot holding an
+    expert one of the chunk's not-yet-replayed tiles still needs is
+    ineligible as a victim, in addition to `avoiding`. Modelled the same
+    way `RealForwardRunner.PrefillChunkExpertProtection` maintains it: the
+    chunk's `remaining` set starts as the union of every tile's own
+    experts, each tile's own experts are removed from it immediately before
+    that tile is planned (never protecting a tile against itself), and the
+    protected slot set is read off the pool's live `slot_expert` at plan
+    time. The graded fallback matches the streamer's `selectVictimSlots`:
+    a plan that cannot place every miss while both `protect` and `avoiding`
+    apply retries with `protect` dropped (keeping `avoiding`) before this
+    tool's own pre-existing avoiding-only fallback. `--protect off` replays
+    a capture taken before the knob existed, or prices the counterfactual.
+  - a capture's own `p`-line count for a request must equal that request's
+    routed tile count, or the capture is missing a plan the pool actually
+    made (fix round 1: a starved primary plan in `resolveTileFetchBegin` /
+    the depth-1 loop used to fall back to a second, untraced and
+    unprotected plan inside `beginFetchForTile`; the trace line now emits
+    once per tile after the fetch is resolved, whichever path planned it,
+    and that second plan now receives the same `protectedExperts` the
+    primary attempt would have). This tool has no way to detect a missing
+    line from the trace alone; verify it against the request's own routed
+    tile count when auditing a new capture.
 
 Usage:
   expert-pool-replay.py <trace> --policy lru|lfu|aging-lfu[:period]|belady|
@@ -98,6 +122,7 @@ Usage:
                          [--prefill-weight one|rows]
                          [--sweep-order index|rows-asc|rows-desc|last-asc|last-desc]
                          [--sweep-carry off|on]
+                         [--protect off|chunk]
                          [--phase-policy prefill=<policy>,decode=<policy>]
                          [--profile WINDOW]
   expert-pool-replay.py <trace> --policy ... --expect <file>
@@ -391,8 +416,15 @@ class LayerPool:
         count = self.expert_use_count[expert] if expert >= 0 else -1
         return (count, self.slot_last_use[slot], slot)
 
-    def plan(self, experts, avoiding=frozenset(), policy_override=None, weights=None):
-        """Places `experts`, returns (hits, misses, assigned_slots)."""
+    def plan(self, experts, avoiding=frozenset(), protect=frozenset(),
+             policy_override=None, weights=None):
+        """Places `experts`, returns (hits, misses, assigned_slots). `protect`
+        (SHRIKE_EXPERT_CACHE_PROTECT=chunk) is dropped first when too few
+        slots are eligible, matching the streamer's own graded fallback for
+        `protectedExperts`; `avoiding` (the modelled avoidingSlots) is
+        dropped next if that still is not enough, this tool's own
+        pre-existing (and separately documented) fallback for a lookback
+        that leaves no eligible slot."""
         active = policy_override or self.policy
         if active.name == "aging-lfu" and self.plans_done > 0 \
                 and self.plans_done % active.param == 0:
@@ -417,7 +449,9 @@ class LayerPool:
 
         miss_indices = [i for i in range(len(experts)) if assigned[i] == -1]
         eligible = [s for s in range(self.slots)
-                    if s not in reserved and s not in avoiding]
+                    if s not in reserved and s not in avoiding and s not in protect]
+        if len(miss_indices) > len(eligible):
+            eligible = [s for s in range(self.slots) if s not in reserved and s not in avoiding]
         if len(miss_indices) > len(eligible):
             eligible = [s for s in range(self.slots) if s not in reserved]
 
@@ -463,8 +497,9 @@ class LRU2LayerPool(LayerPool):
         key = history[0] if len(history) >= 2 else -1
         return (key, self.slot_last_use[slot], slot)
 
-    def plan(self, experts, avoiding=frozenset(), policy_override=None, weights=None):
-        result = super().plan(experts, avoiding, policy_override, weights)
+    def plan(self, experts, avoiding=frozenset(), protect=frozenset(),
+             policy_override=None, weights=None):
+        result = super().plan(experts, avoiding, protect, policy_override, weights)
         clock = self.use_clock
         for expert in experts:
             history = self.expert_history[expert]
@@ -492,7 +527,8 @@ class SLRULayerPool:
         self.compulsory = 0
         self.capacity = 0
 
-    def plan(self, experts, avoiding=frozenset(), policy_override=None, weights=None):
+    def plan(self, experts, avoiding=frozenset(), protect=frozenset(),
+             policy_override=None, weights=None):
         newly_seen = [expert not in self.seen_experts for expert in experts]
         self.seen_experts.update(experts)
         assigned = [-1] * len(experts)
@@ -511,7 +547,7 @@ class SLRULayerPool:
 
         miss_indices = [i for i in range(len(experts)) if assigned[i] == -1]
         for miss_i in miss_indices:
-            slot = self._select_victim(avoiding)
+            slot = self._select_victim(avoiding, protect)
             if newly_seen[miss_i]:
                 self.compulsory += 1
             else:
@@ -531,19 +567,22 @@ class SLRULayerPool:
             demoted, _ = self.protected.popitem(last=False)
             self.probation[demoted] = None
 
-    def _select_victim(self, avoiding):
-        for slot in list(self.probation.keys()):
-            if slot not in avoiding:
-                del self.probation[slot]
-                return slot
+    def _select_victim(self, avoiding, protect=frozenset()):
+        combined = avoiding | protect
+        for exclude in (combined, avoiding):
+            for slot in list(self.probation.keys()):
+                if slot not in exclude:
+                    del self.probation[slot]
+                    return slot
         if self.probation:
             slot = next(iter(self.probation))
             del self.probation[slot]
             return slot
-        for slot in list(self.protected.keys()):
-            if slot not in avoiding:
-                del self.protected[slot]
-                return slot
+        for exclude in (combined, avoiding):
+            for slot in list(self.protected.keys()):
+                if slot not in exclude:
+                    del self.protected[slot]
+                    return slot
         slot = next(iter(self.protected))
         del self.protected[slot]
         return slot
@@ -574,14 +613,15 @@ class ArcLayerPool:
         self.compulsory = 0
         self.capacity = 0
 
-    def plan(self, experts, avoiding=frozenset(), policy_override=None, weights=None):
+    def plan(self, experts, avoiding=frozenset(), protect=frozenset(),
+             policy_override=None, weights=None):
         newly_seen = [expert not in self.seen_experts for expert in experts]
         self.seen_experts.update(experts)
         assigned = [-1] * len(experts)
         hits = 0
         misses = 0
         for i, expert in enumerate(experts):
-            slot, hit = self._request(expert, avoiding)
+            slot, hit = self._request(expert, avoiding, protect)
             assigned[i] = slot
             if hit:
                 hits += 1
@@ -593,23 +633,25 @@ class ArcLayerPool:
                     self.capacity += 1
         return hits, misses, assigned
 
-    def _lru_pop(self, ordered, avoiding):
-        for key in list(ordered.keys()):
-            slot = self.expert_slot.get(key)
-            if slot is None or slot not in avoiding:
-                del ordered[key]
-                return key
+    def _lru_pop(self, ordered, avoiding, protect=frozenset()):
+        combined = avoiding | protect
+        for exclude in (combined, avoiding):
+            for key in list(ordered.keys()):
+                slot = self.expert_slot.get(key)
+                if slot is None or slot not in exclude:
+                    del ordered[key]
+                    return key
         key = next(iter(ordered))
         del ordered[key]
         return key
 
-    def _replace(self, favor_t2, avoiding):
+    def _replace(self, favor_t2, avoiding, protect=frozenset()):
         use_t1 = bool(self.t1) and (len(self.t1) > self.p
                                     or (favor_t2 and len(self.t1) == self.p))
         source = self.t1 if use_t1 else self.t2
         if not source:
             source = self.t2 if source is self.t1 else self.t1
-        evicted = self._lru_pop(source, avoiding)
+        evicted = self._lru_pop(source, avoiding, protect)
         slot = self.expert_slot.pop(evicted)
         self.slot_expert[slot] = -1
         if evicted >= 0:
@@ -617,7 +659,7 @@ class ArcLayerPool:
             ghost[evicted] = None
         return slot
 
-    def _request(self, expert, avoiding):
+    def _request(self, expert, avoiding, protect=frozenset()):
         if expert in self.t1:
             del self.t1[expert]
             slot = self.expert_slot[expert]
@@ -630,12 +672,12 @@ class ArcLayerPool:
             del self.b1[expert]
             delta = max(1, len(self.b2) // len(self.b1)) if self.b1 else max(1, len(self.b2))
             self.p = min(self.c, self.p + delta)
-            slot = self._replace(False, avoiding)
+            slot = self._replace(False, avoiding, protect)
         elif expert in self.b2:
             del self.b2[expert]
             delta = max(1, len(self.b1) // len(self.b2)) if self.b2 else max(1, len(self.b1))
             self.p = max(0, self.p - delta)
-            slot = self._replace(True, avoiding)
+            slot = self._replace(True, avoiding, protect)
         else:
             total_t1_b1 = len(self.t1) + len(self.b1)
             total_all = total_t1_b1 + len(self.t2) + len(self.b2)
@@ -643,17 +685,17 @@ class ArcLayerPool:
                 if len(self.t1) < self.c:
                     if self.b1:
                         del self.b1[next(iter(self.b1))]
-                    slot = self._replace(False, avoiding)
+                    slot = self._replace(False, avoiding, protect)
                 else:
-                    evicted = self._lru_pop(self.t1, avoiding)
+                    evicted = self._lru_pop(self.t1, avoiding, protect)
                     slot = self.expert_slot.pop(evicted)
                     self.slot_expert[slot] = -1
             elif total_t1_b1 < self.c and total_all >= self.c:
                 if total_all >= 2 * self.c and self.b2:
                     del self.b2[next(iter(self.b2))]
-                slot = self._replace(False, avoiding)
+                slot = self._replace(False, avoiding, protect)
             else:
-                slot = self._replace(False, avoiding)
+                slot = self._replace(False, avoiding, protect)
             self.expert_slot[expert] = slot
             self.slot_expert[slot] = expert
             self.t1[expert] = None
@@ -705,7 +747,7 @@ def _retile(tiles, sweep_order, reverse):
 
 def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID_LOOKBACK,
            prefill_weight="one", sweep_order="index", sweep_carry=False,
-           phase_policy=None, profile_window=None):
+           phase_policy=None, profile_window=None, protect="chunk"):
     """Returns (stats, total_compulsory, settle_stats, settle_meta, profile).
 
     stats[request_id] = {"prefill": [hits, misses, compulsory, capacity],
@@ -788,14 +830,21 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
 
             lookback.clear()
             active = phase_policy["prefill"] if phase_policy else None
-            for new_tile in new_tiles:
+            pending = [set(expert for expert, _rows, _last in tile) for tile in new_tiles]
+            remaining = set().union(*pending) if pending else set()
+            for tile_index, new_tile in enumerate(new_tiles):
                 tile_experts = [expert for expert, _rows, _last in new_tile]
                 tile_rows = [rows for _expert, rows, _last in new_tile]
+                remaining -= pending[tile_index]
                 avoiding = frozenset(slot for _tile, held in lookback for slot in held)
+                protect_set = (frozenset(slot for slot, expert in enumerate(pool.slot_expert)
+                                         if expert in remaining)
+                              if protect == "chunk" else frozenset())
                 weights = tile_rows if prefill_weight == "rows" else None
                 before = (pool.compulsory, pool.capacity)
                 hits, misses, assigned = pool.plan(
-                    tile_experts, avoiding=avoiding, policy_override=active, weights=weights)
+                    tile_experts, avoiding=avoiding, protect=protect_set,
+                    policy_override=active, weights=weights)
                 _accumulate(stats, settle_stats, label, hits, misses,
                            pool.compulsory - before[0], pool.capacity - before[1])
                 lookback.append((None, [slot for slot in assigned if slot >= 0]))
@@ -805,9 +854,10 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
 
 
 def print_report(stats, total_compulsory, policy, slots, layer_filter, avoid_lookback,
-                 settle_stats=None, settle_meta=None):
+                 settle_stats=None, settle_meta=None, protect="chunk"):
     layer_note = f" layer={layer_filter}" if layer_filter is not None else ""
-    print(f"policy={policy.label()} slots={slots} avoid_lookback={avoid_lookback}{layer_note}")
+    print(f"policy={policy.label()} slots={slots} avoid_lookback={avoid_lookback} "
+          f"protect={protect}{layer_note}")
     print(f"  compulsory (cold, first touch, all replayed layers) = {total_compulsory}")
     for request_id in sorted(stats):
         row = stats[request_id]
@@ -1169,6 +1219,56 @@ def self_test():
     check("profile req1 windows", dict(profile[1]), {0: 2, 1: 2})
     check("profile req2 windows", dict(profile[2]), {0: 2, 1: 2})
 
+    # Dataset 14: --protect. Request 1's decode (slots=2, lfu) leaves slot A
+    # holding expert 1 at count 2 (a hit bumped it) and slot B holding
+    # expert 2 at count 1 -- the plain-LFU victim. Request 2's prefill chunk
+    # has two tiles: tile0 needs new expert 3 (a miss), tile1 needs expert 2
+    # (still resident, not yet planned). Under `chunk`, tile0's victim
+    # selection excludes slot B (expert 2 is in `remaining`), so it takes
+    # the worse-by-count slot A instead, and tile1 then hits; under `off`
+    # tile0 evicts slot B as plain lfu would, and tile1 re-misses expert 2.
+    protect_trace = "\n".join([
+        "r 0 3", "0 0 1", "1 0 2", "2 0 1",
+        "r 2 10", "p 3 0 0 3", "p 3 0 1 2",
+    ])
+    stats_protect_on, _, _, _, _ = _run(protect_trace, slots=2, policy_raw="lfu",
+                                        protect="chunk")
+    check("protect=chunk: expert 3 miss, expert 2 protected and hit",
+          stats_protect_on[2]["prefill"], [1, 1, 1, 0])
+    stats_protect_off, _, _, _, _ = _run(protect_trace, slots=2, policy_raw="lfu",
+                                         protect="off")
+    check("protect=off: expert 2 evicted by plain lfu, then re-misses",
+          stats_protect_off[2]["prefill"], [0, 2, 1, 1])
+
+    # Dataset 15: --protect's starvation fallback. Request 1's decode fills
+    # all four slots (experts 1-4, count 1 each). Request 2's prefill
+    # chunk's first tile needs new expert 9 (a miss); its other four tiles
+    # need experts 1-4, all four still resident and all in `remaining` when
+    # tile0 plans, so every slot is nominally protected -- zero eligible --
+    # and the plan must fall back to plain lfu rather than fail. A first
+    # tile's `avoiding` (the lookback) is always empty (just cleared for
+    # the new chunk), so this is protection's own fallback in isolation:
+    # dropping `protect` for that one plan leaves exactly the eligible set
+    # `--protect off` would have used from the start, so the two runs give
+    # the identical (if unglamorous) result below -- the graceful
+    # degradation working as designed, not a test that found no effect.
+    # The cascade through the chunk's remaining four tiles (each request
+    # re-missing the expert the previous tile's own eviction just took)
+    # is this replay tool's already-documented avoidingSlots-lookback
+    # behavior, unrelated to protection.
+    fallback_trace = "\n".join([
+        "r 0 5", "0 0 1", "1 0 2", "2 0 3", "3 0 4",
+        "r 4 10", "p 5 0 0 9", "p 5 0 1 1", "p 5 0 2 2", "p 5 0 3 3", "p 5 0 4 4",
+    ])
+    stats_fallback_on, _, _, _, _ = _run(fallback_trace, slots=4, policy_raw="lfu",
+                                         protect="chunk")
+    check("protect=chunk starvation fallback: plan still succeeds",
+          stats_fallback_on[2]["prefill"], [0, 5, 1, 4])
+    stats_fallback_off, _, _, _, _ = _run(fallback_trace, slots=4, policy_raw="lfu",
+                                          protect="off")
+    check("protect=chunk under full starvation matches protect=off exactly",
+          stats_fallback_on[2]["prefill"], stats_fallback_off[2]["prefill"])
+
     if failures:
         print(f"SELF-TEST FAILED ({len(failures)} of many checks):")
         for f in failures:
@@ -1204,6 +1304,12 @@ def main():
                               "by rows ascending then expert id (needs last-row counts)")
     parser.add_argument("--sweep-carry", choices=["off", "on"], default="off",
                          help="alternate the sweep-order direction chunk to chunk (off: fixed)")
+    parser.add_argument("--protect", choices=["off", "chunk"], default="chunk",
+                         help="chunk (default, matching production): a prefill tile's victim "
+                              "selection also excludes a slot holding an expert the chunk's "
+                              "not-yet-replayed tiles still need, with the streamer's own "
+                              "graded fallback; off replays pre-SHRIKE_EXPERT_CACHE_PROTECT "
+                              "captures")
     parser.add_argument("--phase-policy", default=None,
                          help="prefill=<policy>,decode=<policy>, restricted to "
                               f"{sorted(PHASE_POLICY_ALLOWED)}")
@@ -1236,12 +1342,12 @@ def main():
         stats, total_compulsory, settle_stats, settle_meta, profile = replay(
             lines, args.slots, policy, args.layer, args.avoid_lookback,
             args.prefill_weight, args.sweep_order, args.sweep_carry == "on",
-            phase_policy, args.profile_window)
+            phase_policy, args.profile_window, protect=args.protect)
     except ValueError as e:
         parser.error(str(e))
 
     print_report(stats, total_compulsory, policy, args.slots, args.layer,
-                 args.avoid_lookback, settle_stats, settle_meta)
+                 args.avoid_lookback, settle_stats, settle_meta, protect=args.protect)
     if args.profile_window:
         print_profile(profile, args.profile_window)
     if args.expect:
