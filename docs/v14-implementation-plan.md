@@ -1,0 +1,465 @@
+# v14 implementation plan: decode pass II
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+Status of record for [v14-decode.md](v14-decode.md). Checkboxes here are the only
+status tracking. Commit SHAs in the verdicts are the branch's current ones; every
+review fix is folded into its owning commit (rebase and amend, never fixup commits),
+so the SHAs settle only once the branch stops being rebased: the subjects are the
+stable names.
+
+**Goal:** Cut the wall of a card's answer on the mini. Step zero measures 69 to 74 ms
+per decoded token on three answers of 219 / 314 / 405 tokens, of which 45 ms is GPU
+work and 26 ms is the GPU standing still, 18 to 20 ms of it in the single window
+where the routed stage waits for an expert to arrive from the SSD. One measured
+lever at a time, each landing as a knob whose default is the measured winner.
+
+**Architecture:** The runtime is v13's (the matrix prefill kernels, the collapsed
+routed tile sequencer, the resident-first sweep, chunk-aware protection, the
+two-batch expert reader, the prompt cache). Decode's own path is unchanged since
+v9's speculative routed dispatch: one cache plan per layer per token, the fetch
+begun immediately, the routed command buffer event-gated on it. Each task changes
+scheduling or policy behind a `SHRIKE_*` knob, is measured on the step-zero rig (a
+fresh server per arm, whole answers), passes the four per-commit gates, and keeps
+golden identical unless it runs different kernels on a token.
+
+**Tech Stack:** Swift 6.3, Metal 4, swift-testing, the `SHRIKE_RUNNER_STATS` /
+`SHRIKE_KERNEL_STATS` counters and their `tools/parse-*-stats.py` parsers,
+`SHRIKE_ROUTE_TRACE` with `tools/expert-pool-replay.py`, `SHRIKE_PREFETCH_TRACE`,
+and the step-zero rig (`tools/turn-rig.sh` / `tools/turn-prompts.py` /
+`tools/turn-summary.py` plus the streaming client archived at
+`~/.claude/handoffs/archive/shrike-v14-step0/loop-files/step0-stream*.{sh,py}`, to be
+moved under `tools/` by the first task that needs it in the tree).
+
+**Spec:** [v14-decode.md](v14-decode.md)
+
+## Global constraints
+
+- **The chapter's code starts on a fresh branch off `main` after v13 merges, never
+  on `perf/v13-the-turn`.** v13's branch is under its close (ThreadSanitizer, a
+  whole-branch review, then Davor's fast-forward merge and push); nothing in this
+  chapter is committed until that merge has landed and the new branch is cut from
+  the merged `main`.
+- macOS 26+, Swift 6.3+; never two model processes (`pgrep` check first); the mini's
+  server on 8081 is production and Turbo on 8080 is never touched. Restarts and
+  deploy actions are approved per session; `tools/mini-deploy.sh` copies binaries
+  plus `*.bundle` directories by default and restarts the server only when passed
+  `--restart`. `memory_pressure -Q` before every launch.
+- Four gates per code commit: release build with zero warnings; `swiftlint lint
+  --strict --baseline .swiftlint-baseline.json`; markdown link check; `swift test
+  --no-parallel`. The same suite under ThreadSanitizer (`env
+  TSAN_OPTIONS=suppressions=tsan-suppressions.txt`) runs **once per chapter at its
+  close**, before the merge to main (Davor's ruling at v13 Task 1, 2026-09-04). A
+  task whose own code is pthread or Metal-event concurrency runs a **filtered**
+  sanitizer pass in its own step (v13 Task 2's precedent), which is minutes.
+- Numerics: a scheduling or policy change is golden IDENTICAL on both boxes and both
+  profiles (`tools/golden-baseline.sh --check`); a change that runs different kernels
+  on a token follows v12's policy (2e-2 against the fp32 reference, golden recaptured
+  once per box with before and after digests in the verdict). Never recapture for an
+  unexplained mismatch.
+- Ledger protocol per task: the step-zero rig on the mini, and **a decode verdict row
+  is a whole answer**, not an 8-token burst (the rate swings 11 to 18 tok/s inside
+  one answer, [v14-decode.md](v14-decode.md) step zero row 3). The three step-zero
+  answers (2,125 / 289 / 1,069-row prompts at `max_tokens` 512, `temperature` 0) are
+  the verdict rows; the card's turn 2 and turn 3, the warm same-length second
+  prompts, and the 12k first request are the controls. One send per server lifetime
+  for a cold row, `settle_done` before a warm second send, a distinct prompt per arm.
+  Rows appended to the design's ledger. The M4 Pro is the check.
+- **No size floor:** a task's rule tests only that the effect is real (paired runs in
+  both orders, above the run-to-run drift) and free (no control row regresses, golden
+  identical). Davor's ruling at v13 Task 1.
+- Comments: none unless a genuinely non-obvious why (repo rule).
+- **Every `file:line` in this plan was re-verified against this branch's base,
+  commit `5316d2a`** (the merged v13 close), when the plan was copied onto the branch
+  on 2026-09-06; the citations into `RealForwardRunner.swift` and
+  `tools/expert-pool-replay.py` had drifted since the draft and were re-anchored.
+  The exception is `docs/v10-implementation-plan.md`, cited against the working-tree
+  copy carrying the peer's uncommitted P3 follow-on (a 50-line insertion after its
+  line 155); those resolve exactly once that edit lands. The symbol names are the
+  stable part.
+
+## Tasks
+
+### Task 1: T1, the layer's fetch under the previous layer's compute, priced before it is built
+
+- [ ] **T1: the biggest single term in the chapter is the GPU standing idle between
+  `moe_phase1_hit` and `moe_phase1_miss_fixup_phase2`, waiting for the layer's absent
+  experts: 19.68 / 19.24 / 18.03 ms per token on the three answers, 26.5 / 27.4 /
+  26.1 % of a 74.27 / 70.15 / 69.08 ms token, with `host_ms=0.0` on all three so the
+  host is never late (`step0-out/<shape>/server-mini-step0-*.log`, the `Shrike gap`
+  lines). Its two ceilings, modelled from step zero's own rows: a lookahead deep
+  enough that the drive never idles removes the window entirely (the bytes fit,
+  0.73 GB/s used of a measured 3.5 GB/s ceiling), 74.27 to 44.99 + 9.60 = 54.59 ms,
+  13.46 to 18.3 tok/s, and a 700-token card answer 52.0 to 38.2 s; a single layer of
+  lookahead with perfect prediction leaves the layer's own 1.49 ms of reads against
+  its 1.04 ms of compute, 8.2 ms per token exposed, 62.8 ms and 15.9 tok/s (44.0 s).
+  Applying the only measured predictor accuracy on record (`architecture.md:96-98`
+  recall 0.64 at top-8, `:108-118` recall 0.439 at k = 1) through 1.68 misses per
+  missing layer gives a full-layer coverage rate of 0.26 to 0.49 under an
+  independence approximation, so 3.0 to 5.6 ms per token, 4.0 to 7.5 %. **The spread
+  between 4 % and 36 % is one number the archived instruments can measure without
+  writing a line of code**, and the same passage records a −3.9 % end-to-end
+  regression at 4-bit when this was last tried (`architecture.md:100-106`). So the
+  task is a pricing task first: Step 1 measures the predictor's per-layer coverage
+  and precision offline and A/Bs the shipped `SHRIKE_PREDICTIVE_PREFETCH` path with
+  zero code, and it has a named stop that lands the null. Step 2 is written only if
+  Step 1 clears it. **The mini decides**, and a measured null is a result
+  ([v14-decode.md](v14-decode.md) "Method").**
+
+  **Alternative first task (the owner's other option): the miss path's host and
+  driver windows.** Two measured terms that need no predictor, no numerics change and
+  no closed door reopened: the routed submit gap `moe_spec_routed` to
+  `moe_phase1_hit`, **4.13 / 4.19 / 3.84 ms per token (5.6 / 6.0 / 5.6 %)** over
+  18.18 / 18.70 / 17.39 missing layers, whose host-late component is 2.04 / 1.97 /
+  1.88 ms per token while the planning inside it is only 0.16 to 0.21
+  (`cache_plan_ms`); and the post-completion wake `io_fixup_wake_ms`, **3.20 / 3.14 /
+  2.88 ms per token (4.3 / 4.5 / 4.2 %)**, the interval from the expert read
+  completing to the routed command buffer starting on the GPU
+  (`RealForwardRunner.swift:6193-6197`), which is dead by construction. Together
+  **7.33 / 7.33 / 6.72 ms per token, 9.9 / 10.4 / 9.7 % of the wall**, or 5.1 s of a
+  52.0 s card answer if all of it came off. Against it: how much is recoverable is
+  not established (part of the submit gap is driver work and the wake is a Metal
+  shared-event signal to GPU start), where T1's prize is bounded above by a number
+  three times larger and its uncertainty is a measurement T1's own Step 1 makes. In
+  favour of it: the wake sits inside T1's window, so T1 collects it if T1 works and
+  this task collects it if T1 dies; it has no prior art arguing against it; and its
+  arithmetic is entirely the box's own counters with no independence approximation.
+
+  **Ruling (Davor, 2026-09-06): the drafted T1 is the chapter's first task; the
+  alternative is the fallback the named stop moves to.** Step 1 runs first, zero
+  code, and decides whether Step 2 is written.
+
+  **Step zero: the term as measured** (mini, the deployed `b13fbfe` binary, the
+  pre-amend form of v13's close commit `c04e43b`, see the design doc's step zero; the bare
+  production launch plus `SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1` and
+  `SHRIKE_ROUTE_TRACE`, zero code; the cold request streamed so each token's arrival
+  is recorded. Logs and traces at
+  `~/.claude/handoffs/archive/shrike-v14-step0/step0-out/<shape>/`, the rows by
+  `t4-rows.py` in `ledger/step0-stream.out`).
+
+  | per token (ms) | the 2k card (219 tok) | the 300 prompt (314) | the 1k prompt (405) |
+  | --- | ---: | ---: | ---: |
+  | wall (streamed arrivals) | 74.27 | 70.15 | 69.08 |
+  | decode GPU busy (roles summed) | 44.99 | 41.52 | 42.20 |
+  | **`moe_phase1_hit` to `moe_phase1_miss_fixup_phase2`** | **19.68** | **19.24** | **18.03** |
+  | ... of which `io_fixup_wake_ms` (after the bytes land) | 3.20 | 3.14 | 2.88 |
+  | `moe_spec_routed` to `moe_phase1_hit` | 4.13 | 4.19 | 3.84 |
+  | other listed decode gaps | 2.52 | 2.74 | 2.80 |
+  | unaccounted (below the log's top-8 gap cut) | 2.95 | 2.46 | 2.21 |
+  | layers with a miss (`hit_fixup_layers`) | 18.18 | 18.70 | 17.39 |
+  | the gap per missing layer | 1.082 | 1.029 | 1.037 |
+
+  The same quantity from two other instruments: the regression's first-miss
+  coefficient over the replayed per-layer misses is **1.19 / 1.10 / 1.10 ms**
+  (`ledger/step0-fit-aligned.txt`) and `io_ms` divided by `hit_fixup_layers` is
+  **1.19 / 1.16 / 1.16 ms**. The drive's own whole-expert read at decode's roughly
+  1 ms spacing is **0.949 ms** and back-to-back **0.774**
+  (`ledger/step0-inflight-run1.txt`), so the layer pays a read plus 0.13 to 0.24 ms,
+  and 0.165 to 0.176 of that 0.24 is the post-completion wake.
+
+  **The mechanism, verified in the tree.**
+  - A decode layer plans once and fetches once. `encodeDecodeRoutedMoE`
+    (`RealForwardRunner.swift:6463`) reads the exact top-k back from the router
+    (`:6481-6489`), writes the route trace (`:6502`), plans the cache
+    (`:6510-6515`), pins (`:6525`) and begins the fetch immediately (`:6529-6537`,
+    because the shipped `SHRIKE_EXPERT_IO_SYNC` default is `.event`,
+    `RuntimeConfiguration.swift:52-59`). The routed command buffer waits on the
+    shared event rather than the host (`:6692-6700`, `io_host_waits=0` and
+    `io_host_waits_avoided` in every step-zero row).
+  - The prediction already exists and is already computed on the GPU. While encoding
+    layer L's tail the runner runs layer **L+1's** router on layer L's
+    post-attention normalized residual and writes the speculative top-k to
+    `prefetchPredictionIndices` (`RealForwardRunner.swift:3453-3471`, the next
+    router selected at `:2857-2862`), the host reads it back at `:3118-3126` and
+    passes it as `predictedNextLayer` (`:3132-3142`), and both the probe and the ring
+    are gated by `nextLayerPredictionEnabled` (`:2023-2025`), which is true when
+    either `SHRIKE_PREFETCH_TRACE` names a file or `SHRIKE_PREDICTIVE_PREFETCH=1`
+    (`:908-929`). It is an approximation by construction: layer L+1's exact router
+    input is layer L's output, which does not exist while layer L runs.
+  - The staging path exists too. `ExpertPrefetchRing`
+    (`Sources/Shrike/Runtime/Inference/ExpertPrefetchRing.swift`, 125 lines) holds
+    `topM` raw slots outside the authoritative cache (`:4-11`), `begin` stages only
+    the predicted experts that are absent and not already queued (`:43-85`),
+    `readyBuffers` hands the exact plan whatever has **completed** (`:87-100`), the
+    plan adopts those bytes (`RealForwardRunner.swift:6509`, `:6513` into
+    `planRoutedExperts(prefetched:)`) and `consume` frees the slots (`:6517`).
+  - **Two structural facts limit what the shipped path can collect**, and both are
+    Step 2's subject. `begin` is called at `RealForwardRunner.swift:6738-6743`,
+    **after** the layer's own demand fetch has completed and its blobs are in hand,
+    so the lead is only the rest of layer L plus layer L+1's attention, against one
+    layer's whole wall of 1.86 / 1.75 / 1.73 ms if it were issued at plan time. And
+    `readyBuffers` returns only `.completed` slots (`:87-100`, the comment says so),
+    so a correct but late prediction buys nothing **and its bytes are read a second
+    time** by the demand path.
+  - The ring is sized `slotCount: topM` (`:908-929`), default `min(4, topK)` = 4,
+    while a missing layer's absent set is up to 8 (mean 1.68, `max/layer` reaching
+    4 to 5 in the worst windows, `ledger/step0-fit.txt`).
+  - The pool is untouched by all of this: one `PreadExpertStreamer` per layer at 128
+    slots, `aging-lfu` (`PreadExpertStreamer.swift:164-168`, `:280`), the reader four
+    threads and two published batches (`:223-226`, the v13 T2 winner), the plan the
+    same `planExpertsCached` (`:634`) with or without prefetched bytes.
+
+  **Prior art, placed rather than re-derived.** `docs/architecture.md:76-119` holds
+  two predictors and only one is disproven: `:83-89` kills same-layer previous-token
+  prediction (0.00 % of misses caught at 16 and 128 slots), while `:96-98` measures
+  the next-layer probe at 64.1 % recall of nonresident misses at top-8 (56.4 %
+  precision) and `:108-118` measures it again at recall 0.439 / 0.322 / 0.256 / 0.223
+  for k = 1..4 with nonresident precision 0.124 falling to 0.036 (0.510 to 0.305 and
+  0.358 to 0.127 on a diverse prompt) and closes the door: "the miss-count lever is
+  closed; the surviving miss levers are cost-side (event gating, free-running) and
+  policy-side (cache)". `:100-106` records the end-to-end failure (−3.9 % at 4-bit,
+  +7.8 % at 8-bit, against a +10 % bar) and diagnoses lead time. The v10 P3 follow-on
+  repeats the verdict from the drive's side (`docs/v10-implementation-plan.md:190-200`,
+  an uncommitted peer edit in the working tree, archived at
+  `~/.claude/handoffs/archive/shrike-ssd-split-probe/`): the single 1.77 MB miss is
+  at its 0.77 ms floor, the only throughput lever is more experts in flight, and
+  "every wasted prefetch now measurably steals bytes-in-flight from the real miss".
+  **The two numbers step zero adds against that verdict are the lead time (one
+  layer's wall is 1.73 to 1.86 ms against a 0.95 to 1.08 ms read) and the bandwidth
+  headroom (0.73 GB/s used of 3.5, so total reads may rise 4.8x before the drive
+  binds, which puts the break-even precision at 0.21 and the measured k = 1
+  precision on both sides of it).** Neither makes the old verdict wrong; both make it
+  a measurement this chapter can redo in an afternoon of mini time.
+
+  **The offline experiment and its named stop.** Nothing here writes runtime code.
+  - **(i) History-only baselines, from the archived route traces alone.** A recorder
+    in the shape of `loop-files/step0-layer-misses.py` (which imports
+    `tools/expert-pool-replay.py` rather than editing it) records, for every decode
+    (position, layer), the identity of the absent experts, since an expert is absent
+    at plan time exactly when no slot holds it (`LayerPool.plan`, `:477-538`, over
+    `slot_expert`). From that: the absent-set size distribution per layer; and the
+    full-coverage rate of three predictors that need no router at all, namely the
+    previous token's demanded set at the same layer (the predictor `:83-89`
+    disproved, re-checked at 128 slots on today's pool), the union of the last n
+    tokens at that layer, and layer L's own demanded set. Any of these clearing the
+    router's rate would be a cheaper lever than the router.
+  - **(ii) The router predictor's real accuracy, from one capture per shape on the
+    mini, zero code.** `SHRIKE_PREFETCH_TRACE=<path>` emits one JSONL line per
+    (position, layer) carrying `experts`, `misses`, `resident` and
+    `next_layer_prediction` (`RealForwardRunner.swift:2223-2241`; `misses` is the
+    demand plan's own miss identities, `:6519-6521`, and `resident` is captured
+    before planning, `:6507-6508`). Joining line (position, L) to line (position,
+    L+1) yields, on this build, this pool and these three shapes: per-miss recall,
+    nonresident precision, and the quantity the lever actually hangs on, **the rate
+    p at which layer L+1's ENTIRE absent set is named at layer L**. A partly covered
+    layer still pays the serial 1.08 ms, so p, not recall, is the prize's multiplier.
+    Also report p at `SHRIKE_PREFETCH_PROBE_DISTANCE` 1 and 2 (`:2030-2031`) and at
+    top-M 4 and 8 (`:916-917`).
+  - **(iii) The zero-code A/B.** `SHRIKE_PREDICTIVE_PREFETCH=1` at top-M 4 and 8
+    against the production launch, on the three answers, paired in both orders. This
+    is the shipped scheme with its late `begin` and its completed-only join, so it
+    measures the floor of the idea, not its ceiling; if it already pays, the task
+    lands a default flip and writes nothing.
+  - **The named stop.** After (i) to (iii): if the best predictor's **full-layer
+    coverage p < 0.10 on all three shapes**, or its **precision on the fetches the
+    scheme would issue is below 0.21** (the drive's headroom, step zero row 4), the
+    lever is dead at this box's numbers. The task then lands the pricing tool, the
+    measured table, and the null, and the chapter moves to the alternative above. If
+    p clears 0.10 and precision clears 0.21, Step 2 is written, and the modelled
+    prize it must beat is p x 11.5 ms per token.
+
+  **The decision rule, under the chapter's real-and-free rule.** The default flips
+  only if the effect is **real** (the sign holds on the three answers' `decode_tok_s`
+  across paired runs in both orders, three pairs, a fourth where a row sits inside
+  twice its drift) and **free** (the card's turn 2 and turn 3 walls, the warm
+  same-length second prompts, the 12k first request and `memory_pressure -Q` all
+  unmoved, and golden IDENTICAL on both boxes and both profiles). No percentage bar,
+  and a knob lands either way.
+
+  **Numerics: nothing moves.** A prefetch changes which bytes are where and when,
+  never what a kernel computes: predicted bytes become authoritative only when the
+  exact router selects them and the ordinary planner adopts them
+  (`ExpertPrefetchRing.swift:4-11`, `RealForwardRunner.swift:6509-6517`). Golden
+  identical on both boxes and both profiles is the bar and a difference is a defect,
+  never a recapture. The adoption must also leave the **pool's** plan sequence
+  identical, which is checked, not assumed: a `SHRIKE_ROUTE_TRACE` capture under the
+  candidate replays to the same miss counts as production within v13's +/-1
+  ([v13-the-turn.md](v13-the-turn.md) "## Task 4").
+
+  **The knob.** `SHRIKE_PREDICTIVE_PREFETCH` already exists and already fails closed
+  on anything but `1` (`RealForwardRunner.swift:912-913`), as do `SHRIKE_PREFETCH_TOP_M`
+  (`:916-921`) and `SHRIKE_PREFETCH_PROBE_DISTANCE` (`:2030-2031`). Step 2's two
+  changes take sub-knobs in the same family: the ring's slot count and the in-flight
+  join. The effective mode is **not printed anywhere today**:
+  `prefillGapLeversDescription` (`:377-408`) prints `overlap=`, `residency=`,
+  `sweep=`, `cache_layout=`, `expert_io=` and `protect=`, so a `prefetch=` field
+  rides with the task exactly as `protect=` rode with v13 Task 4, read from the same
+  static parse the runner uses.
+
+  **The rig and the rows.** The step-zero streaming rig
+  (`loop-files/step0-stream.sh` plus `step0-stream-client.py`) is what produces a
+  per-token wall, and it belongs under `tools/` the moment this task needs it in the
+  tree. Rows per arm, exactly the fields step zero used: `prefill_s`, `decode_s`,
+  `decode_tok_s`, `expert_hit_rate_decode`, `expert_misses_decode`,
+  `hit_fixup_layers`, `io_ms`, `io_fixup_wake_ms`, `io_fetch_ms`, `io_hidden_pct`,
+  plus the `Shrike kernel role=` and `Shrike gap` blocks, which are the only place
+  the miss window is visible. **No new counter is needed for the verdict**; a
+  prefetch hit rate (predictions issued, adopted, wasted) is needed for the
+  attribution and is the one counter Step 2 may add.
+
+  **Tests (RED first, host-only; no device suite for a scheduling-only change).**
+  - `expertPrefetchRingStagesOnlyAbsentUnqueuedExperts`: `begin`'s filter
+    (`ExpertPrefetchRing.swift:43-52`) drops residents, drops experts already staged
+    for that layer, dedupes, and caps at the free slot count.
+  - `expertPrefetchRingGeometryFollowsTheTopK`: the ring's slot count from
+    `makePredictivePrefetch` (`:908-929`) at the new default and under the override,
+    failing closed on a bad value with the allowed range in the message.
+  - `expertPrefetchRingJoinsAnInFlightPrediction`: the new awaiting variant of
+    `readyBuffers` returns bytes for a submitted-but-not-completed operation, leaves
+    another layer's slots alone, and never awaits on an all-hit layer.
+  - `expertPrefetchRingReclaimKeepsInFlightSlots`: `reclaimTerminalSlotsUnlocked`
+    (`:113-124`) frees completed, failed and empty slots and never a submitted or
+    in-flight one; `consume` (`:102-111`) clears exactly the named experts.
+  - `prefillGapLeversDescriptionReportsThePrefetchMode`: the existing assertion
+    (`tests/Shrike/Core/Infrastructure/Streaming/PreadExpertStreamerTests+CachePlanning.swift`, the shape v13
+    Task 4 used) plus the new field.
+  - The pricing tool ships its own `--self-test` on a tiny synthetic trace, run from
+    the tool and not from `swift test`, as `tools/expert-pool-replay.py` does.
+
+  **Files.** Step 1: `tools/prefetch-coverage.py` (new: the `SHRIKE_PREFETCH_TRACE`
+  join, the history-only baselines over a route trace, the modelled prize through
+  step zero's coefficients, `--self-test`), and the step-zero streaming rig moved
+  under `tools/`. Step 2, only if the stop passes:
+  `Sources/Shrike/Runtime/Inference/ExpertPrefetchRing.swift` (the awaiting join at
+  `:87-100`, the geometry), `Sources/Shrike/Runtime/Inference/RealForwardRunner.swift`
+  (`makePredictivePrefetch` `:908-929`, the `begin` call site moved from `:6738-6743`
+  to just after the demand fetch is begun at `:6529-6537`,
+  `prefillGapLeversDescription` `:377-408`, the prefetch counters if any).
+  **Unchanged:** every `.metal` file and kernel body, `expert_io.c` and the reader,
+  `PreadExpertStreamer` and the pool's policy, the planner's placement logic, the
+  prompt cache. **Lint:** `encodeDecodeRoutedMoE` is already over the
+  `function_body_length` threshold, so its baseline entry stands; check
+  `swiftlint lint --write-baseline` if any baselined reason string embeds a line
+  count that this task's edits move (v13 hit this on a different function five times).
+
+  Steps:
+
+  - [ ] Step 1 (measurement, no code in `sources/`): the three offline arms above,
+        (i) the history-only baselines on the four archived traces, (ii) one
+        `SHRIKE_PREFETCH_TRACE` capture per shape on the mini and the coverage join,
+        (iii) the zero-code `SHRIKE_PREDICTIVE_PREFETCH` A/B at top-M 4 and 8 on the
+        three answers, paired in both orders. Deliverable: the tool, one table per
+        shape (recall, nonresident precision, full-layer coverage p at distance 1 and
+        2, the modelled prize), and the stop applied in writing.
+  - [ ] Step 2 (code, only if the stop passes): the ring sized to the layer's top-k,
+        `begin` moved to plan time so the predicted reads run beside the demand read
+        (K = 2, the probe's own arm), and the in-flight join so a correct-but-late
+        prediction is awaited instead of re-read. Host tests RED first. Gates 1 to 4,
+        plus a filtered ThreadSanitizer run over the ring's suite (the ring is
+        lock-guarded shared state across the reader's threads, v13 Task 2's
+        precedent).
+  - [ ] Step 3 (numerics): golden IDENTICAL on both profiles at every knob cell on
+        the M4 Pro at each amend, and on the mini at the default and the candidate
+        cells at each amend and at all cells at the landed commit. Plus one
+        `SHRIKE_ROUTE_TRACE` capture under the candidate replayed against production's
+        miss counts to +/-1, proving the pool's plan sequence did not move.
+  - [ ] Step 4 (the arms, on the mini, one binary per round): the three answers as
+        verdict rows, the turns and the warm second prompts and 12k as controls, each
+        arm reporting the `Shrike gap` block so the prize is attributed to the window
+        it was predicted to close, not just to the wall.
+  - [ ] Step 5 (the rule): real and free applied in writing; the default flipped by
+        amend if it passes, the knob landed at its measured default either way.
+  - [ ] Step 6 (design doc): the Task 1 section, the After T1 block, the lever
+        entries updated with what was measured, Follow-ons gained. Task review by a
+        fresh reviewer, fixes folded into the owning commit.
+
+  **Risks and what falsifies the model.**
+  - **The prior art may simply be right.** `architecture.md:108-118` closed this door
+    with paired measurements, and `docs/v10-implementation-plan.md:190-200` closed it
+    again from the drive's side. If Step 1's coverage rate comes in under 0.10, or
+    precision under 0.21, the model in the opening paragraph is wrong and the task
+    lands the null. That is the expected outcome the plan is written to survive.
+  - **Full-layer coverage is the multiplier, not recall, and the independence
+    approximation used to get 0.26 to 0.49 from a recall of 0.44 to 0.64 is not a
+    measurement.** Correlation between one layer's misses pushes the true rate up;
+    a predictor that is right about the easy expert and wrong about the rare one
+    pushes it down. Step 1 measures p directly and the modelled range is discarded
+    the moment it does.
+  - **A wasted prefetch is not free.** At precision below 0.21 the extra reads exceed
+    the drive's measured headroom and every demand read slows down; the K sweep
+    (1.076 ms at K = 2 against 0.949 at K = 1) is the cost even when the prediction
+    is right. Any arm that improves `decode_tok_s` while `io_fetch_ms` per expert
+    rises is reporting a trade, not a win.
+  - **The lead time may still be short.** Moving `begin` to plan time buys one demand
+    fetch of lead (about 1.08 ms) at the price of contending with that same fetch. If
+    the join still finds most predictions in flight rather than complete, the scheme
+    is paying for reads it cannot use, which is the k = 1 demand-contention failure
+    `architecture.md:102-104` named. The prefetch counters in Step 2 are what make
+    that visible instead of inferred.
+  - **The capture taxes what it measures.** `SHRIKE_PREFETCH_TRACE` also enables the
+    second router GEMV per layer per token (`RealForwardRunner.swift:2023-2025` gates
+    both), so a traced run's walls are not comparable to production's; only the
+    predictor's accuracy comes out of that arm. Likewise the trace's write path is a
+    synchronous `write(2)` per layer per token, measured nil on decode in v13 Task 4
+    and still not run on a verdict arm.
+  - **The replay sees misses, not exposure.** v13 Task 5 was overruled by the box
+    after the replay predicted the miss count exactly and missed a fetch-exposure
+    cost entirely. Here the replay's job is narrower (the plan sequence is unchanged)
+    and the exposure question is answered by the `Shrike gap` block on the box.
+  - **Memory and the box.** The ring at 8 slots is 8 x 1,769,472 B = 14.2 MB of
+    shared storage on top of the pool's 9.06 GB; `--ram-budget 8G` stays and
+    `memory_pressure -Q` is checked before every launch. The mini is production: one
+    model process at a time, every arm relaunches the server on 8081, Turbo on 8080
+    is never touched.
+
+## Candidate tasks (not scheduled)
+
+- **The miss path's host and driver windows** (the alternative first task above; if
+  T1 is chosen first, this is the natural second). The routed submit gap 4.13 / 4.19
+  / 3.84 ms per token and the post-completion wake 3.20 / 3.14 / 2.88, together
+  9.7 to 10.4 % of the wall. The submit gap's own counters say the planning inside it
+  is 0.16 to 0.21 ms per token, so the candidates are submission and queueing: how
+  many command buffers a missing layer costs, whether phase 1 can be encoded once and
+  reused, and whether the event's signal-to-start latency responds to how the routed
+  command buffer is committed. All measured, none of it numerics.
+
+- **What the pool has left at the prefill-to-decode boundary.** Belady removes 64.7 %
+  of the card answer's decode misses and 60.8 % of the 300 answer's
+  (`ledger/step0-profile.txt`), which is 16.5 ms per token modelled through step
+  zero's slope, but v13 replayed every bounded eviction rule within about 5 % of
+  production and found recency already at 97.6 % of an answer's reuses. What is not
+  exhausted is the state the prompt hands to the answer: v13 Task 5's resident-first
+  sweep took the first cut of it and was worth 0.5 to 0.9 s of the first turn's
+  decode. The replay tool and the four archived traces price any successor offline
+  before a line is written.
+
+- **The LM head the server never fuses.** `head_logits` is 4.82 to 5.05 ms of GPU per
+  token (6.6 to 7.2 % of the wall) and `head_fused_ms` is 0.000 on every step-zero
+  row. The fused greedy head exists and decode already asks for it
+  (`RealForwardRunner.swift:3165-3176`, `:2301`), but the server hardcodes
+  `forceLogitsHead: true` (`ServerInference.swift:661`, `:716`); v10 recorded the
+  same observation (`docs/v10-implementation-plan.md:220-222`). The fused path cannot
+  remove the head GEMV, only the full logits writeback and a dispatch, and it is a
+  behaviour change (no logits means no sampling and no logprobs), so the task is
+  "measure the fused path's saving on a greedy request, then decide whether the
+  server can pick per request", not a flip.
+
+- **The drive's idle-gap tax as a standalone.** 0.175 ms on the first read of every
+  missing layer, 3.2 ms per token, 4.3 %. Not separately collectable (the only way
+  to stop paying it is to have a read already in flight, which is T1), and the
+  keep-warm variants are measured NULL to negative on the mini
+  (`docs/v10-implementation-plan.md:170-172`). Recorded so it is not re-proposed.
+
+## Follow-ons (not scheduled)
+
+- The `Shrike gap` log truncates at eight transitions
+  (`ServerInference.swift:2058`), which leaves 2.2 to 3.0 ms per token of decode
+  unaccounted in step zero's ledger. A `--gap-limit` or a decode-only variant would
+  close the ledger to under 1 %.
+- The runner's own overlap accounting and the regression disagree about how much of
+  the fetch is exposed: `io_hidden_pct` reads 32.2 / 33.8 / 33.2 % hidden (so about
+  14.5 ms per token exposed) while the kernel gap and the regression both put the
+  whole 18 to 20 ms on the wall. One of the two definitions is not measuring what its
+  name says; worth settling before either is used in a verdict.
+- The prompt cache's settle after a request whose prompt has no cached prefix
+  re-prefills the whole prompt in the background (v13 Task 4's finding, visible again
+  in step zero's `settle chunk` rows at 2,706 to 2,982 misses); a cache-chapter item.
+- v13's open follow-ons stay in [v13-implementation-plan.md](v13-implementation-plan.md):
+  the GDN chunked scan below its 64-row gate, the routed matrix gate's `> 32`, the
+  reader's `min(count, threads)` publication signal, the resident sweep's route-build
+  host on a tiny chunk, the cold first request's prefill under the balanced recency
+  composition, the expert-cache policy parse in `PreadExpertStreamer.init`, the
+  protection-fallback counter, the cold first request's +0.27 s observation, and the
+  prompt cache's interior snapshots.
+- v12's prefill kernel follow-ons stay in [v12-prefill-matrix-kernels.md](v12-prefill-matrix-kernels.md);
+  v11's attention work stays in [v11-kv-attention-inner-loop.md](v11-kv-attention-inner-loop.md).
