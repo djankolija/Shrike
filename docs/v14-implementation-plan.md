@@ -681,6 +681,32 @@ moved under `tools/` by the first task that needs it in the tree).
         binaries build a second, generation-time `RuntimeConfiguration` that copies
         the load-time fields by name and defaulted the new one; a knob is only real
         once the runner's banner prints it.
+        **The visibility probes for B and C, MEASURED on both boxes (2026-09-06;
+        `~/.claude/handoffs/archive/shrike-v14-t2/step2-probes/`, a standalone Metal
+        program beside the idle server, `probe-summary.md` carries every cell).**
+        A kernel's writes reach the host only at the kernel's flush: an entry word
+        written first arrives with the exit word on both boxes (0 of 1,000
+        mid-kernel sightings). The exit word arrives 15 to 20 µs after `gpuEndTime`
+        on the M4 Pro and 95 to 130 on the M1; the command's status follows it by
+        27 to 40 (M4 Pro) and **60 to 70 µs on the M1** (p10 44 to 62, p90 74 to 83),
+        the M1's status lag of 164 to 200 matching production's router wake. On the
+        M1 a payload written before a device-scope fence is stale when the flag is
+        already visible in 2 to 24 % of commands, trailing it by up to 8.5 µs (0 of
+        600 on the M4 Pro; `thread_scope_system` does not exist, device scope is the
+        widest fence). In the other direction a running kernel never sees a host
+        write: 0 of 250 sightings with the write landing 1 ms into a 5 to 19 ms
+        spin, by relaxed atomic load and by read-modify-write, on either box (the
+        mini's 7 unsplit sightings in a first run were writes that preceded a late
+        launch, the boundary case production relies on). **Lever C is closed as a
+        measured negative.** Lever B is alive at a third of its sizing: the gain is
+        the status-minus-word term, 0.06 to 0.07 ms per missing layer, MODELLED 1.0
+        to 1.3 ms per token (2.5 to 3 %) over 17 to 19 missing layers on the
+        critical path; the word must come from the router command's last kernel;
+        the readback words must be self-validating (each tagged with the layer's
+        sequence in a host-readback copy of the routed ids written by the same
+        kernel, the GPU-consumed buffers and the numerics untouched), since a plain
+        flag reads a stale payload on the M1; the status wait stays as the deadline
+        fallback. Lever B's build is the owner's call at this size.
   - [ ] Step 3 (numerics): golden IDENTICAL on both boxes and both profiles at every
         knob cell; a difference is a defect, never a recapture.
   - [ ] Step 4 (the arms, the mini, one binary per round): the three answers as verdict
