@@ -197,6 +197,86 @@ production**, and the route that did pay was the sweep order at the
 prefill-to-decode boundary, which landed as v13 Task 5
 ([v13-the-turn.md](v13-the-turn.md) "## Task 4" and "## Task 5").
 
+## Task 1: the layer's fetch under the previous layer's compute (commits 254662d, 77dd587, 71fc47f)
+
+Priced before it was built, as the plan required; the pricing said build, the box
+said no, and the instrument said why. Every number is MEASURED on the mini unless
+marked modelled; the plan's Task 1 carries the full tables and the ledger the
+chapter's `.superpowers/sdd/v14-implementation-plan/progress.md` carries every ruling.
+
+**Step 1, the coverage (zero code).** The router-free predictors are dead at 128
+slots (full-layer coverage at most 0.04 on the three archived traces). The next-layer
+router probe, joined offline from one `SHRIKE_PREFETCH_TRACE` capture per shape, names
+a layer's entire absent set a layer ahead at **p = 0.462 / 0.442 / 0.428** (card / 300
+/ 1k) at top-8 with nonresident precision 0.47 / 0.42 / 0.41, and at p = 0.17 with
+precision 0.63 to 0.69 at top-4; two layers ahead costs 0.10 of p. The named stop
+(p above 0.10, precision above 0.21) cleared on every shape. The tool is
+`tools/prefetch-coverage.py`; the rig moved under `tools/` as `decode-rig.sh`,
+`decode-stream-client.py` and `decode-rows.py`.
+
+**The defect the pricing found.** The shipped `SHRIKE_PREDICTIVE_PREFETCH=1` path was
+not output-identical under the default speculative execution: every prefetch arm
+answered the card with a different text, and `tools/golden-baseline.sh` failed on
+both profiles on the M4 Pro. The GPU classifies a layer's hits and misses from the
+residency table in the attention tail before the host's plan copies a prefetched
+expert into a slot; the host then saw an all-hit layer in its own plan and took the
+speculative command's result, computed without that expert. `hit-fixup` execution
+with the prefetch was identical, `speculative-validate` threw its own cross-check.
+The fix (77dd587): in the speculative modes the fixup's partition follows the GPU's
+classification, so an adopted expert is computed by the fixup from its resident slot
+with no storage read, the all-hit shortcut applies only when the GPU saw all hits,
+and the two views failing to differ by exactly the adopted set fails closed as
+`gpu-residency` already did. Golden identical on both boxes with the knob off and on.
+
+**The A/B on the fixed path (18 lifetimes, every answer identical, follow-ups
+unmoved)**: production 13.70 / 14.13 / 14.48 tok/s, top-4 −2.4 / −1.9 / −3.0 %,
+top-8 −7.1 / −6.6 / −7.5 %, the sign in both orders on every shape. Real, free, and
+a loss.
+
+**The instrument (71fc47f) and what it showed.** The fixup's kernel role splits by
+layer class and the ring counts what it issues, adopts and reclaims unadopted:
+
+| arm | adopted-only layers per token | layers that still read, ms each | ring reads issued / adopted / wasted per token |
+| --- | ---: | --- | --- |
+| production | 0 | 17.4 to 18.7 at 1.03 to 1.07 | 0 |
+| top-4 | 2.4 to 2.7 | 15.0 to 16.1 at 1.15 to 1.23 | 12 / 6.6 to 7.3 / 40 to 46 % |
+| top-8 | 5.3 to 6.1 | 12.0 to 13.0 at 1.59 to 1.71 | 35 to 37 / 9.9 to 11.6 / 67 to 72 % |
+
+An adopted-only layer's window collapses below 0.12 ms (65.9 ms over the card's 587
+such layers at top-4, the block's twelfth entry), so the mechanism works. The
+drive takes the saving back: the layers that still read slow in proportion to the
+ring's reads in flight beside them (step zero's row 4 had already measured 0.77 ms
+for a read alone and 1.08 each for two overlapped). On the card at top-4, per token,
+every hidden layer priced at production's 1.07 ms, 2.7 hidden layers save 2.9 ms
+and 15.5 slowed reads cost 2.5; the probe's second router pass costs 2.0 to 2.3 ms
+of GPU time in the attention tail and the submit gap grows a measured 1.0 (the
+adoption's copy of 0.9 and the begin path's 0.4 of host time sit inside it): +2.6
+to +2.9 modelled against +2.8 measured, and every arm's ledger closes within 0.5
+ms per token. Wasted reads are 40 to 46 % of the ring's at top-4 and 67 to 72 % at
+top-8, each one paid for by a demand read that ran slower.
+
+**Reading.** On this drive a hidden read costs the neighbouring demand reads about
+what it saves. The lever pays only if all four hold at once: the predicted read lands
+in a reserved pool slot (no copy), it is issued where it overlaps no demand read (at
+plan time on all-hit layers), the probe is fused into the router dispatch it
+duplicates (53 µs per layer today, dispatch-bound), and the wasted reads fall well
+below half. Modelled with all four: +3 to +7 % of tok/s, the contention model the
+risk. The redesign is recorded as a candidate task with those preconditions, to be
+re-priced on the box as it stands when it is next considered, never on this model.
+
+**After T1** (2026-09-06; the shipping default's output unchanged, the knob off):
+production's rows are step zero's to within their repeat (13.6 to 13.8 / 14.1 to
+14.4 / 14.4 to 14.5 tok/s on the three answers). The speculative modes, the default
+included, gained the fail-closed residency check `gpu-residency` always had; it did
+not fire in 27 lifetimes and twelve golden runs. `SHRIKE_PREDICTIVE_PREFETCH=1` is
+now output-identical and −2 to −3 % at top-4, −7 % at top-8; the runner line
+carries `prefetch_begin_ms`, `prefetch_issued`, `prefetch_adopted`,
+`prefetch_reclaimed`; the runner names `moe_phase1_miss_fixup_phase2_adopted` as its
+own kernel role on adopted-only layers (its gap falls below the block's cut in
+every archived run) and the gap block prints twelve transitions. The chapter moves to the miss path's host and driver windows
+(Task 2), whose wins compose with any later prefetch: it cuts what a missing layer
+costs, a prefetch cuts how many layers miss.
+
 ## Levers, ranked for these shapes (modelled from step zero)
 
 Every prize below is stated against the card's 74.27 ms token unless another shape
@@ -301,6 +381,14 @@ measured rows above, not a measurement.
     the whole scheme on the shipped binary (`RealForwardRunner.swift:908-929`). It is
     the same shape as v13 Task 4's opening move, which priced three existing policy
     values before writing a line.
+
+  **Measured (Task 1).** p = 0.43 to 0.46 at top-8 on the three shapes (the
+  independence estimate's upper end), precision 0.41 to 0.47; the shipped path fixed
+  and then measured at −2 to −3 % (top-4) and −7 % (top-8): the hidden layers'
+  windows collapse and the drive slows the remaining reads by as much, the probe's
+  second router pass costs 2.1 ms per token of GPU time. The lever is closed in its
+  shipped form and recorded as a candidate redesign with four preconditions (the
+  Task 1 section above, the plan's candidate list).
 
 - **(b) Fewer misses.** Belady at 128 slots removes 64.7 % of the card answer's
   decode misses (row 5). Through the single-feature slope that is 0.831 x (30.7 −
@@ -428,7 +516,11 @@ after digests in the verdict).
   behind it.** `architecture.md:100-118` records a −3.9 % end-to-end regression at
   4-bit and closes the door on distance; the v10 follow-on repeats it. This chapter
   reopens it only as far as a pricing step goes, with a named stop, and lands the
-  null if the coverage rate does not clear the bar.
+  null if the coverage rate does not clear the bar. **Realized, differently than
+  feared (Task 1):** the coverage cleared the bar, the shipped path turned out to be
+  wrong under speculative execution and was fixed, and the measured loss came from
+  the drive serving the prefetch's reads beside the demand reads, not from the
+  predictor.
 - **Row 1's decomposition is per-request and averaged over the answer**, while row 3
   shows the answer is not stationary. A lever measured on one stretch of text can
   read as a win that is a different stretch. Whole answers, paired, both orders.

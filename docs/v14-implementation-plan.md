@@ -82,7 +82,7 @@ moved under `tools/` by the first task that needs it in the tree).
 
 ### Task 1: T1, the layer's fetch under the previous layer's compute, priced before it is built
 
-- [ ] **T1: the biggest single term in the chapter is the GPU standing idle between
+- [x] **T1: the biggest single term in the chapter is the GPU standing idle between
   `moe_phase1_hit` and `moe_phase1_miss_fixup_phase2`, waiting for the layer's absent
   experts: 19.68 / 19.24 / 18.03 ms per token on the three answers, 26.5 / 27.4 /
   26.1 % of a 74.27 / 70.15 / 69.08 ms token, with `host_ms=0.0` on all three so the
@@ -428,7 +428,7 @@ moved under `tools/` by the first task that needs it in the tree).
         and the plan beyond the adopted set fails the generation instead of running
         a different partition. The mini's golden with the knob off and on is the
         deploy's gate.
-        Landed 0ca0195; the mini's golden IDENTICAL with the knob off and on.
+        Landed 77dd587; the mini's golden IDENTICAL with the knob off and on.
         **The zero-code A/B on the fixed binary (mini, 18 lifetimes, every answer
         identical, the follow-ups unmoved): production 13.70 / 14.13 / 14.48 tok/s on
         card / 300 / 1k, top-4 −2.4 / −1.9 / −3.0 %, top-8 −7.1 / −6.6 / −7.5 %, the
@@ -477,18 +477,24 @@ moved under `tools/` by the first task that needs it in the tree).
         reserved slot), and the wasted reads fall. Modelled ceiling with all four:
         +3 to +7 % tok/s, the contention model the risk. Ruling on the continuation:
         Davor's.
-  - [ ] Step 3 (numerics): golden IDENTICAL on both profiles at every knob cell on
+  **T1 CLOSED 2026-09-06 as a measured result** (Davor's ruling after the instrument):
+  the fix 77dd587 and the instrument 71fc47f stay, the shipping default is unchanged,
+  the redesign is a candidate task below with its four preconditions, and the chapter
+  moves to the alternative (Task 2). Steps 3 to 5 did not run: the lever closed at
+  Step 2's measurement. Golden identical on both boxes with the knob off and on is on
+  the record for both landed commits.
+  - [ ] Step 3 (numerics, not run): golden IDENTICAL on both profiles at every knob cell on
         the M4 Pro at each amend, and on the mini at the default and the candidate
         cells at each amend and at all cells at the landed commit. Plus one
         `SHRIKE_ROUTE_TRACE` capture under the candidate replayed against production's
         miss counts to +/-1, proving the pool's plan sequence did not move.
-  - [ ] Step 4 (the arms, on the mini, one binary per round): the three answers as
+  - [ ] Step 4 (the arms, not run): the three answers as
         verdict rows, the turns and the warm second prompts and 12k as controls, each
         arm reporting the `Shrike gap` block so the prize is attributed to the window
         it was predicted to close, not just to the wall.
-  - [ ] Step 5 (the rule): real and free applied in writing; the default flipped by
+  - [ ] Step 5 (the rule, not run): real and free applied in writing; the default flipped by
         amend if it passes, the knob landed at its measured default either way.
-  - [ ] Step 6 (design doc): the Task 1 section, the After T1 block, the lever
+  - [x] Step 6 (design doc): the Task 1 section, the After T1 block, the lever
         entries updated with what was measured, Follow-ons gained. Task review by a
         fresh reviewer, fixes folded into the owning commit.
 
@@ -533,6 +539,22 @@ moved under `tools/` by the first task that needs it in the tree).
 
 ## Candidate tasks (not scheduled)
 
+- **The prefetch redesign (T1's candidate, re-price before building).** T1 measured
+  the mechanism sound (an adopted-only layer's window collapses below 0.11 ms) and
+  the shipped form a loss (−2 to −3 % at top-4, −7 % at top-8) because the drive
+  serves the ring's reads beside the demand reads and slows them by about what the
+  hidden layers save, with 40 to 72 % of the ring's reads wasted. It pays only if
+  all four hold: (1) the predicted read lands in a reserved pool slot, no host copy
+  (today 0.12 ms per adopted expert in the submit gap); (2) it is issued where it
+  overlaps no demand read, at plan time on all-hit layers, never beside a miss
+  layer's own read; (3) the probe is fused into the router dispatch it duplicates
+  (53 µs per layer of GPU time today, 2.1 ms per token); (4) the wasted reads fall
+  well below half (top-4's precision 0.63 to 0.69 is the better start). Modelled
+  ceiling with all four: +3 to +7 % of tok/s; the contention model is the risk and
+  the zero-code distance-2 probe (the same ring with `SHRIKE_PREFETCH_PROBE_DISTANCE=2`,
+  three lifetimes) tests it before any line is written. Re-price on the box as it
+  stands after Task 2, never on this model.
+
 - **The miss path's host and driver windows** (the alternative first task above; if
   T1 is chosen first, this is the natural second). The routed submit gap 4.13 / 4.19
   / 3.84 ms per token and the post-completion wake 3.20 / 3.14 / 2.88, together
@@ -571,10 +593,16 @@ moved under `tools/` by the first task that needs it in the tree).
 
 ## Follow-ons (not scheduled)
 
-- The `Shrike gap` log truncates at eight transitions
-  (`ServerInference.swift:2058`), which leaves 2.2 to 3.0 ms per token of decode
-  unaccounted in step zero's ledger. A `--gap-limit` or a decode-only variant would
-  close the ledger to under 1 %.
+- DONE in 71fc47f: the `Shrike gap` log prints twelve transitions instead of eight
+  (`ServerInference.swift`, the `prefix` in `emitKernelDiagnostics`); step zero's 2.2
+  to 3.0 ms per token below the old cut is now listed.
+- From T1's review: `hit_fixup_layers` counts adopted-only layers under the prefetch
+  knob (they run the hit split), so `io_ms / hit_fixup_layers` mixes classes there;
+  a per-class counter would let the estimator mean one thing. The ring's counters
+  have no host test (`begin` needs a `Model`; a seam would allow one). The
+  speculative modes' fail-closed residency check is symmetric; a directional form
+  (the GPU's misses a superset of the plan's, equal beyond the adopted set) would
+  keep the benign direction alive if it ever occurred.
 - The runner's own overlap accounting and the regression disagree about how much of
   the fetch is exposed: `io_hidden_pct` reads 32.2 / 33.8 / 33.2 % hidden (so about
   14.5 ms per token exposed) while the kernel gap and the regression both put the
