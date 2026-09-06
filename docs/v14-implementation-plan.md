@@ -537,6 +537,91 @@ moved under `tools/` by the first task that needs it in the tree).
     model process at a time, every arm relaunches the server on 8081, Turbo on 8080
     is never touched.
 
+### Task 2: T2, the miss path's host and driver windows
+
+- [ ] **T2: a missing layer pays two windows that have nothing to do with the bytes:
+  the routed submit gap, `moe_spec_routed` to `moe_phase1_hit`, **3.86 / 3.95 / 3.91
+  ms per token** on the card / 300 / 1k answers (0.21 ms per missing layer), of which
+  host-late 2.01 / 1.98 / 1.90 (the hit split's command committed after the spec
+  command's GPU end), driver 0.30 / 0.30 / 0.27 and queue 1.57 / 1.67 / 1.75; and the
+  post-completion wake `io_fixup_wake_ms`, **2.77 / 2.85 / 2.91 ms per token** (0.15
+  per missing layer), the interval from the expert read landing to the fixup command
+  starting on the GPU, which the fixup's encoded event wait spends by construction.
+  Together **6.6 to 6.8 ms per token, 9 % of the wall**, all MEASURED on the
+  instrumented build's production arms (b39d937, `step2-instrument/`, the runner line
+  and the twelve-transition gap block), none of it bytes, none of it numerics.
+  Planning inside the submit gap is 0.21 ms per token (`cache_plan_ms`), the top-k
+  readback 0.009, the storage submission-to-start 0.55, so what fills the host-late
+  2.0 ms is the rest of the missing layer's host path between the readback and the
+  hit split's commit: the pin, the fetch's submission to the reader, the hit split's
+  argument buffer (`MoE.makeRoutedArgumentBuffer` allocates a fresh `MTLBuffer` per
+  missing layer where the fixup reuses one, `makeReusedRoutedArgumentBuffer`), the
+  active-slot write, the phase-1 subset encode and the commit. Which of those is the
+  0.11 ms is the first measurement. **The mini decides**, and a measured null is a
+  result.**
+
+  **The mechanism, verified in the tree** (every citation against the branch).
+  - A missing layer costs four command buffers where an all-hit layer costs two: the
+    attention tail (router and classification), the speculative routed command, the
+    hit split (`encodeRoutedPhase1Subset` on a fresh command buffer, committed
+    before the fetch is awaited) and the fixup (`buildAndCommitMissFixupCommand`,
+    which encodes the event wait, `encodeWaitForEvent`, then phase 1 for the misses
+    and phase 2). Each commit pays the driver's commit-to-start latency once: the
+    submit gap's driver plus queue terms are 1.9 ms per token, about 0.1 ms per
+    missing layer, the price of the hit split's own command.
+  - The host path between the readback and the hit split's commit runs on the layer's
+    critical path: `planRoutedExperts`, `pinRoutedExperts`, `beginFetchRoutedExperts`
+    (the submission into the C reader's batch slot, `submit_batch`, which blocks
+    when both published batches are busy), `routedExpertBuffers`, the argument
+    buffer allocation, `writeActiveSlots`, the encode, the commit. Only the plan and
+    the readback are timed today.
+  - The wake is the event: the reader thread signals the shared event when the batch
+    lands, the driver wakes the parked fixup command, the GPU starts it 0.15 ms
+    later. The host never waits (`io_host_waits` 0, `io_host_waits_avoided` every
+    layer). `SHRIKE_EXPERT_IO_SYNC=host` is the shipped A/B for the other way round
+    (the host awaits the read and commits the fixup then; v10 T3 measured a host-spin
+    late commit null on the M1, not on the mini). The phase-1 kernels carry an
+    `io_status` early-return guard (`moe_io_ready`), not a poll.
+
+  **Steps.**
+  - [ ] Step 0 (zero code): the sync mode A/B on the mini, `SHRIKE_EXPERT_IO_SYNC=host`
+        against the default `event`, the three answers paired in both orders, the
+        wake and the submit gap per token the readings, tok/s the verdict. Answers
+        whether the event's signal-to-start latency is the floor or the host's
+        commit-to-start is lower on this box.
+  - [ ] Step 1 (instrument, no scheduling change): per-stage host timers on the missing
+        layer's path (pin, fetch submission, argument buffer, encode-and-commit of the
+        hit split, the fixup's encode-and-commit) on the runner line, one rig pass, the
+        0.11 ms per missing layer split into named terms. The tools read them.
+  - [ ] Step 2 (code, by measured size): the terms the split names, each with a knob,
+        host tests RED first; the obvious candidates are the hit split's argument
+        buffer reused like the fixup's, the hit split committed before the fetch is
+        submitted so the GPU starts the hits while the host talks to the reader, and
+        the hit split folded onto the speculative command's queue position where the
+        classification allows it. Gates 1 to 4.
+  - [ ] Step 3 (numerics): golden IDENTICAL on both boxes and both profiles at every
+        knob cell; a difference is a defect, never a recapture.
+  - [ ] Step 4 (the arms, the mini, one binary per round): the three answers as verdict
+        rows, the turns and the warm second prompts as controls, the gap block
+        attributing the saving to the window it was predicted to close.
+  - [ ] Step 5 (the rule): real and free applied in writing; defaults flipped by amend
+        if they pass, the knobs landed at their measured defaults either way.
+  - [ ] Step 6 (design doc): the Task 2 section, the After T2 block, the lever entries.
+        Task review by a fresh reviewer, fixes folded into the owning commits.
+
+  **The decision rule.** Real: the sign holds on the three answers' `decode_tok_s`
+  across paired runs in both orders. Free: the turns, the warm second prompts and
+  `memory_pressure -Q` unmoved, golden IDENTICAL. No size floor. **Numerics: nothing
+  moves**; every change here is when a command is committed and what buffer it
+  reads its arguments from, never what a kernel computes.
+
+  **Files.** Step 1: `sources/Shrike/Runtime/Inference/RealForwardRunner.swift` (the
+  routed encoder's timers and the runner's totals), `sources/ShrikeServer/Core/ServerInference.swift`
+  (the runner line), `tools/decode-rows.py`. Step 2: the same encoder,
+  `sources/Shrike/Kernels/MoE/MoE.swift` (a second reusable argument buffer).
+  **Unchanged:** every `.metal` file, the reader, the pool, the planner, the prompt
+  cache. **Lint:** `encodeDecodeRoutedMoE` is baselined; regenerate on growth.
+
 ## Candidate tasks (not scheduled)
 
 - **The prefetch redesign (T1's candidate, re-price before building).** T1 measured
@@ -554,15 +639,6 @@ moved under `tools/` by the first task that needs it in the tree).
   the zero-code distance-2 probe (the same ring with `SHRIKE_PREFETCH_PROBE_DISTANCE=2`,
   three lifetimes) tests it before any line is written. Re-price on the box as it
   stands after Task 2, never on this model.
-
-- **The miss path's host and driver windows** (the alternative first task above; if
-  T1 is chosen first, this is the natural second). The routed submit gap 4.13 / 4.19
-  / 3.84 ms per token and the post-completion wake 3.20 / 3.14 / 2.88, together
-  9.7 to 10.4 % of the wall. The submit gap's own counters say the planning inside it
-  is 0.16 to 0.21 ms per token, so the candidates are submission and queueing: how
-  many command buffers a missing layer costs, whether phase 1 can be encoded once and
-  reused, and whether the event's signal-to-start latency responds to how the routed
-  command buffer is committed. All measured, none of it numerics.
 
 - **What the pool has left at the prefill-to-decode boundary.** Belady removes 64.7 %
   of the card answer's decode misses and 60.8 % of the 300 answer's
