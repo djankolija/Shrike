@@ -573,6 +573,8 @@ public struct PrefillStreamedTileBinding: Sendable, Equatable {
         return routes.groups[groupStart..<(groupStart + groupCount)].map { Int($0.expert) }
     }
 
+    /// The unsplit plan-fetch-bind reference the tests exercise; production
+    /// runs `beginFetchForTile` and `bindingForCompletedFetch` instead.
     public static func fetchBindingForTile(model: Model,
                                            layer: Int,
                                            tileIndex: Int,

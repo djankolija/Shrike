@@ -44,7 +44,8 @@ struct PrefillRoutedTileSchedulerConfig: Sendable, Equatable {
     let tileExperts: Int
     let tilesPerCommandBuffer: Int
     /// A tile fetched one ahead of the batch pipeline, held from plan time
-    /// until its own GPU work completes; 0 keeps today's single-fetch loop.
+    /// until its own GPU work completes; 0 begins each tile's fetch at its
+    /// own turn.
     let fetchLookahead: Int
 
     init(maxPendingDepth: Int = 1, tileExperts: Int = 8, tilesPerCommandBuffer: Int = 1,
@@ -102,9 +103,9 @@ struct PrefillRoutedTileScheduler: Sendable, Equatable {
         guard input.hasPendingTile else {
             return .issueWithoutPending
         }
-        // In production `RealForwardRunner.encodeRoutedMoEPrefill`'s post-append
-        // drain loop already holds pendingDepth ≤ maxPendingDepth before the next
-        // `decide`, so this guard only fires if a caller violates that invariant.
+        // `PrefillRoutedTileSequencer`'s post-append drain loop already holds
+        // pendingDepth ≤ maxPendingDepth before the next `decide`, so this
+        // guard only fires if a caller violates that invariant.
         guard input.pendingDepth <= config.maxPendingDepth else {
             return .drainBeforeIssue(reason: .maxPendingDepthReached)
         }
@@ -117,13 +118,19 @@ struct PrefillRoutedTileScheduler: Sendable, Equatable {
         return .prefetchNext(avoidingSlots: input.pendingAssignedSlots)
     }
 
+    /// Whether the successor tile is planned ahead at all: only while the
+    /// config asks for a lookahead and a successor tile remains.
+    func plansLookahead(afterTileIndex index: Int, tileCount: Int) -> Bool {
+        config.fetchLookahead > 0 && index + 1 < tileCount
+    }
+
     /// Whether to begin the next tile's fetch before awaiting the current
-    /// one's: only while the config asks for a lookahead, a successor tile
-    /// remains, and that successor's avoiding-slots plan actually resolved.
+    /// one's: only while the successor is planned ahead and its
+    /// avoiding-slots plan actually resolved.
     func shouldBeginLookahead(afterTileIndex index: Int,
                               tileCount: Int,
                               avoidingSlotPlanAvailable: Bool) -> Bool {
-        config.fetchLookahead > 0 && avoidingSlotPlanAvailable && index + 1 < tileCount
+        plansLookahead(afterTileIndex: index, tileCount: tileCount) && avoidingSlotPlanAvailable
     }
 
     func batchAction(openBatchTiles: Int,

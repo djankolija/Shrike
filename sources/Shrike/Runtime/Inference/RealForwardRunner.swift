@@ -5558,161 +5558,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     routes: routes)
                 let routedOffsets = try model.routedExpertOffsets(layer: L)
                 var tailError: Error?
-                let routedTileScheduler = PrefillRoutedTileScheduler(config: schedulerConfig)
-                let lastTileIndex = routes.tiles.count - 1
-                if schedulerConfig.fetchLookahead > 0 {
-                    try await encodeRoutedTilesWithLookahead(
-                        layer: L,
-                        routes: routes,
-                        routedTileScheduler: routedTileScheduler,
-                        schedulerConfig: schedulerConfig,
-                        lastTileIndex: lastTileIndex,
-                        scratch: scratch,
-                        metadata: metadata,
-                        routedOffsets: routedOffsets,
-                        hiddenSize: D,
-                        startPosition: startPosition)
-                } else {
-                    var pendingBatches: [PendingPrefillBatch] = []
-                    var openBatch: OpenPrefillBatch?
-                    var tileLifetime = PrefillStreamedTileSlotLifetime()
-                    func currentOpenBatch() throws -> OpenPrefillBatch {
-                        if let openBatch { return openBatch }
-                        guard let batchCB = ctx.queue.makeCommandBuffer() else {
-                            throw ModelError.residentBufferWrapFailed
-                        }
-                        let batch = OpenPrefillBatch(commandBuffer: batchCB)
-                        openBatch = batch
-                        return batch
-                    }
-                    func commitOpenBatch() {
-                        guard let batch = openBatch else { return }
-                        openBatch = nil
-                        batch.commandBuffer.commit()
-                        pendingBatches.append(batch.sealed())
-                    }
-
-                    var protection = chunkExpertProtection(routes: routes)
-                    for (tileIndex, tile) in routes.tiles.enumerated() {
-                        let expertIDs = try PrefillStreamedTileBinding.expertIDs(
-                            forTile: tileIndex,
-                            routes: routes)
-                        protection?.planning(expertIDs)
-                        let openBatchSlots = openBatch?.assignedSlots ?? []
-                        let heldSlots = openBatchSlots + pendingBatches.flatMap(\.assignedSlots)
-                        let plan = try model.planRoutedExpertsIfPossible(
-                            layer: L,
-                            experts: expertIDs,
-                            avoidingSlots: Set(heldSlots),
-                            protectedExperts: protection?.remaining)
-                        let batchAction = routedTileScheduler.batchAction(
-                            openBatchTiles: openBatch?.tileIndices.count ?? 0,
-                            openBatchSlots: openBatchSlots,
-                            nextTileAvoidingSlotPlanAvailable: plan != nil,
-                            isLastTile: tileIndex == lastTileIndex)
-                        if batchAction.commitBeforeAppend {
-                            commitOpenBatch()
-                        }
-                        var plannedFetch: RoutedExpertFetchPlan?
-                        if pendingBatches.isEmpty {
-                            let decision = routedTileScheduler.decide(
-                                PrefillRoutedTileSchedulerInput(
-                                    hasPendingTile: false,
-                                    pendingAssignedSlots: [],
-                                    avoidingSlotPlanAvailable: false))
-                            switch decision {
-                            case .issueWithoutPending:
-                                plannedFetch = plan
-                            case .prefetchNext, .drainBeforeIssue:
-                                throw ModelError.indexCorrupt(
-                                    detail: "routed tile scheduler requested pending action without pending tile")
-                            }
-                        } else {
-                            let pendingAssignedSlots = pendingBatches.flatMap(\.assignedSlots)
-                            let decision = routedTileScheduler.decide(
-                                PrefillRoutedTileSchedulerInput(
-                                    hasPendingTile: true,
-                                    pendingDepth: pendingBatches.count,
-                                    pendingAssignedSlots: pendingAssignedSlots,
-                                    avoidingSlotPlanAvailable: plan != nil))
-                            switch decision {
-                            case .prefetchNext:
-                                guard let plan else {
-                                    throw ModelError.indexCorrupt(
-                                        detail: "routed tile scheduler requested missing plan")
-                                }
-                                plannedFetch = plan
-                            case .drainBeforeIssue:
-                                if let plan {
-                                    try model.abandonRoutedExpertPlan(plan)
-                                }
-                                try drainOldestPendingBatch(&pendingBatches, lifetime: &tileLifetime)
-                            case .issueWithoutPending:
-                                throw ModelError.indexCorrupt(
-                                    detail: "routed tile scheduler ignored pending tile")
-                            }
-                        }
-                        let fetch = try await PrefillStreamedTileBinding.fetchBindingForTile(
-                            model: model,
-                            layer: L,
-                            tileIndex: tileIndex,
-                            routes: routes,
-                            plannedFetch: plannedFetch,
-                            avoidingSlots: Set((openBatch?.assignedSlots ?? [])
-                                + pendingBatches.flatMap(\.assignedSlots)),
-                            protectedExperts: protection?.remaining)
-                        if routeTraceFD >= 0 {
-                            let counted = try routeTraceRowCounts(forTile: tile, routes: routes)
-                            recordRouteTrace(layer: L, position: startPosition, tile: tileIndex,
-                                             experts: expertIDs, rowCounts: counted.counts,
-                                             lastRows: counted.lastRows)
-                        }
-                        try fetch.binding.validateCoversPairs(routes.sortedPairs,
-                                                              pairStart: Int(tile.pairStart),
-                                                              pairCount: Int(tile.pairCount))
-                        if !fetch.plannedMissSlots.isEmpty {
-                            try tileLifetime.begin(tileIndex: tileIndex,
-                                                   plannedSlots: fetch.plannedMissSlots)
-                        }
-                        let argumentBuffer = try prefillGroupedMoE.makeStreamedArgumentBuffer(
-                            device: ctx.device,
-                            binding: fetch.binding)
-                        let streamedParams = PrefillGroupedRoutedMoEStreamedParams(
-                            pairStart: tile.pairStart,
-                            pairCount: tile.pairCount,
-                            d: UInt32(D),
-                            routedIntermediate: UInt32(cfg.moeIntermediateSize),
-                            topK: UInt32(cfg.topKExperts),
-                            hiddenStrideElements: UInt32(D),
-                            binding: fetch.binding,
-                            offsets: routedOffsets)
-                        let batch = try currentOpenBatch()
-                        try encodeRoutedTileExperts(commandBuffer: batch.commandBuffer,
-                                                    scratch: scratch,
-                                                    sortedPairs: metadata.sortedPairs,
-                                                    routes: routes,
-                                                    tile: tile,
-                                                    binding: fetch.binding,
-                                                    argumentBuffer: argumentBuffer,
-                                                    params: streamedParams)
-                        batch.append(tileIndex: tileIndex,
-                                     fetch: fetch,
-                                     argumentBuffer: argumentBuffer)
-                        if batchAction.commitAfterAppend != nil {
-                            commitOpenBatch()
-                        }
-                        // A still-open batch holds the tile just encoded and
-                        // counts against the depth budget with the committed ones.
-                        while pendingBatches.count + (openBatch == nil ? 0 : 1)
-                            > schedulerConfig.maxPendingDepth {
-                            try drainOldestPendingBatch(&pendingBatches, lifetime: &tileLifetime)
-                        }
-                    }
-                    commitOpenBatch()
-                    while !pendingBatches.isEmpty {
-                        try drainOldestPendingBatch(&pendingBatches, lifetime: &tileLifetime)
-                    }
-                }
+                let tileDriver = ExpertStreamedTileDriver(
+                    runner: self,
+                    layer: L,
+                    routes: routes,
+                    scratch: scratch,
+                    metadata: metadata,
+                    routedOffsets: routedOffsets,
+                    hiddenSize: D,
+                    startPosition: startPosition,
+                    protection: chunkExpertProtection(routes: routes))
+                try await PrefillRoutedTileSequencer(
+                    scheduler: PrefillRoutedTileScheduler(config: schedulerConfig))
+                    .run(tileCount: routes.tiles.count, driver: tileDriver)
                 prefillTileEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
                 prefillTileNanos &+= prefillTileEnd - prefillRouteEnd
                 guard let tailCB = ctx.queue.makeCommandBuffer() else {
@@ -5767,80 +5625,147 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return PrefillChunkExpertProtection(routedGroups: routes.groups, expertsPerLayer: cfg.numExperts)
     }
 
-    /// Plans and, if the scheduler agrees, begins tile `tileIndex + 1`'s
-    /// fetch while tile `tileIndex`'s is still in flight; `nil` when the
-    /// scheduler declines the lookahead this tile.
-    private func beginLookaheadForNextTile(
-        layer L: Int,
-        routes: PrefillMoEGroupedRoutes,
-        tileIndex: Int,
-        routedTileScheduler: PrefillRoutedTileScheduler,
-        openBatch: OpenPrefillBatch?,
-        pendingBatches: [PendingPrefillBatch],
-        beginAssignedSlots: [Int],
-        protection: inout PrefillChunkExpertProtection?,
-        tileLifetime: inout PrefillStreamedTileSlotLifetime,
-        startPosition: Int
-    ) throws -> PrefillStreamedTileFetchBegin? {
-        let nextTileIndex = tileIndex + 1
-        let nextExpertIDs = try PrefillStreamedTileBinding.expertIDs(
-            forTile: nextTileIndex, routes: routes)
-        protection?.planning(nextExpertIDs)
-        var nextAvoiding = Set((openBatch?.assignedSlots ?? []) + pendingBatches.flatMap(\.assignedSlots))
-        nextAvoiding.formUnion(beginAssignedSlots)
-        let nextPlan = try model.planRoutedExpertsIfPossible(
-            layer: L, experts: nextExpertIDs, avoidingSlots: nextAvoiding,
-            protectedExperts: protection?.remaining)
-        if nextPlan != nil, routeTraceFD >= 0 {
-            let counted = try routeTraceRowCounts(forTile: routes.tiles[nextTileIndex], routes: routes)
-            recordRouteTrace(layer: L, position: startPosition, tile: nextTileIndex,
-                             experts: nextExpertIDs, rowCounts: counted.counts,
-                             lastRows: counted.lastRows)
-        }
-        guard routedTileScheduler.shouldBeginLookahead(
-            afterTileIndex: tileIndex, tileCount: routes.tiles.count,
-            avoidingSlotPlanAvailable: nextPlan != nil) else { return nil }
-        let nextBegin = try PrefillStreamedTileBinding.beginFetchForTile(
-            model: model, layer: L, tileIndex: nextTileIndex, routes: routes,
-            plannedFetch: nextPlan)
-        let nextMissSlots = nextBegin.plan.misses.map { nextBegin.plan.assignedSlots[$0] }
-        if !nextMissSlots.isEmpty {
-            try tileLifetime.begin(tileIndex: nextTileIndex, plannedSlots: nextMissSlots)
-        }
-        return nextBegin
-    }
+    /// One prefill layer's routed tiles as `PrefillRoutedTileSequencer`
+    /// drives them: the pool's kept plans and begun fetches by tile, the open
+    /// and pending command buffers, the slot lifetimes and the chunk's expert
+    /// protection.
+    private final class ExpertStreamedTileDriver: PrefillRoutedTileDriver {
+        /// unchecked-invariant: built inside `encodeRoutedMoEPrefill`, handed to
+        /// the sequencer's `run` and released before that call returns, never
+        /// stored or captured, so the runner always outlives it.
+        private unowned let runner: RealForwardRunner
+        private let layer: Int
+        private let routes: PrefillMoEGroupedRoutes
+        private let scratch: PrefillChunkScratchBuffers
+        private let metadata: PrefillGroupedRoutedMoEStreamedMetadataBuffers
+        private let routedOffsets: MoEExpertOffsets
+        private let hiddenSize: Int
+        private let startPosition: Int
+        private var protection: PrefillChunkExpertProtection?
+        private var pendingBatches: [PendingPrefillBatch] = []
+        private var openBatch: OpenPrefillBatch?
+        private var tileLifetime = PrefillStreamedTileSlotLifetime()
+        private var keptPlans: [Int: RoutedExpertFetchPlan] = [:]
+        private var begunFetches: [Int: PrefillStreamedTileFetchBegin] = [:]
 
-    /// `SHRIKE_PREFILL_FETCH_DEPTH > 1`'s tile loop: tile N+1's fetch is
-    /// begun (plan resolved, `assignedSlots` reserved) before tile N's is
-    /// awaited, so the drive's next reads start while the host is still
-    /// encoding N; a begun-but-not-yet-awaited operation is always drained —
-    /// by this loop's `defer`, or synchronously inside whichever helper
-    /// begins it — before a throw propagates, never abandoned.
-    private func encodeRoutedTilesWithLookahead(
-        layer L: Int,
-        routes: PrefillMoEGroupedRoutes,
-        routedTileScheduler: PrefillRoutedTileScheduler,
-        schedulerConfig: PrefillRoutedTileSchedulerConfig,
-        lastTileIndex: Int,
-        scratch: PrefillChunkScratchBuffers,
-        metadata: PrefillGroupedRoutedMoEStreamedMetadataBuffers,
-        routedOffsets: MoEExpertOffsets,
-        hiddenSize D: Int,
-        startPosition: Int
-    ) async throws {
-        var pendingBatches: [PendingPrefillBatch] = []
-        var openBatch: OpenPrefillBatch?
-        var tileLifetime = PrefillStreamedTileSlotLifetime()
-        var protection = chunkExpertProtection(routes: routes)
-        func currentOpenBatch() throws -> OpenPrefillBatch {
-            if let openBatch { return openBatch }
-            guard let batchCB = ctx.queue.makeCommandBuffer() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            let batch = OpenPrefillBatch(commandBuffer: batchCB)
-            openBatch = batch
-            return batch
+        init(runner: RealForwardRunner,
+             layer: Int,
+             routes: PrefillMoEGroupedRoutes,
+             scratch: PrefillChunkScratchBuffers,
+             metadata: PrefillGroupedRoutedMoEStreamedMetadataBuffers,
+             routedOffsets: MoEExpertOffsets,
+             hiddenSize: Int,
+             startPosition: Int,
+             protection: PrefillChunkExpertProtection?) {
+            self.runner = runner
+            self.layer = layer
+            self.routes = routes
+            self.scratch = scratch
+            self.metadata = metadata
+            self.routedOffsets = routedOffsets
+            self.hiddenSize = hiddenSize
+            self.startPosition = startPosition
+            self.protection = protection
         }
+
+        var openBatchTiles: Int { openBatch?.tileIndices.count ?? 0 }
+        var openBatchSlots: [Int] { openBatch?.assignedSlots ?? [] }
+        var pendingDepth: Int { pendingBatches.count }
+        var pendingAssignedSlots: [Int] { pendingBatches.flatMap(\.assignedSlots) }
+        private var heldSlots: Set<Int> { Set(openBatchSlots + pendingAssignedSlots) }
+
+        func plan(tile: Int, avoidingInFlight inFlight: Int?) throws -> Bool {
+            let expertIDs = try PrefillStreamedTileBinding.expertIDs(forTile: tile, routes: routes)
+            protection?.planning(expertIDs)
+            var avoiding = heldSlots
+            if let inFlight {
+                guard let fetch = begunFetches[inFlight] else {
+                    throw ModelError.indexCorrupt(
+                        detail: "routed tile \(inFlight) planned as in flight before its fetch was begun")
+                }
+                avoiding.formUnion(fetch.plan.assignedSlots)
+            }
+            let plan = try runner.model.planRoutedExpertsIfPossible(
+                layer: layer,
+                experts: expertIDs,
+                avoidingSlots: avoiding,
+                protectedExperts: protection?.remaining)
+            keptPlans[tile] = plan
+            return plan != nil
+        }
+
+        func begin(tile: Int) throws {
+            let fetch: PrefillStreamedTileFetchBegin
+            if let plan = keptPlans.removeValue(forKey: tile) {
+                do {
+                    fetch = try PrefillStreamedTileBinding.beginFetchForTile(
+                        model: runner.model, layer: layer, tileIndex: tile, routes: routes,
+                        plannedFetch: plan)
+                } catch {
+                    // The streamer's begin throws only before it executes the
+                    // plan, whose miss slots stay reserved until abandoned.
+                    try? runner.model.abandonRoutedExpertPlan(plan)
+                    throw error
+                }
+            } else {
+                fetch = try PrefillStreamedTileBinding.beginFetchForTile(
+                    model: runner.model, layer: layer, tileIndex: tile, routes: routes,
+                    avoidingSlots: heldSlots, protectedExperts: protection?.remaining)
+            }
+            // Kept before the lifetime check so a throw below is still waited out.
+            begunFetches[tile] = fetch
+            if runner.routeTraceFD >= 0 {
+                let counted = try runner.routeTraceRowCounts(forTile: routes.tiles[tile], routes: routes)
+                runner.recordRouteTrace(layer: layer, position: startPosition, tile: tile,
+                                        experts: fetch.expertIDs, rowCounts: counted.counts,
+                                        lastRows: counted.lastRows)
+            }
+            let missSlots = fetch.plan.misses.map { fetch.plan.assignedSlots[$0] }
+            if !missSlots.isEmpty {
+                try tileLifetime.begin(tileIndex: tile, plannedSlots: missSlots)
+            }
+        }
+
+        func abandonPlan(tile: Int) throws {
+            guard let plan = keptPlans.removeValue(forKey: tile) else { return }
+            try runner.model.abandonRoutedExpertPlan(plan)
+        }
+
+        func encode(tile: Int) async throws {
+            guard let begun = begunFetches[tile] else {
+                throw ModelError.indexCorrupt(
+                    detail: "routed tile \(tile) encoded before its fetch was begun")
+            }
+            let views = try await begun.operation.completion()
+            begunFetches.removeValue(forKey: tile)
+            let fetch = try PrefillStreamedTileBinding.bindingForCompletedFetch(begin: begun, views: views)
+            let tileRange = routes.tiles[tile]
+            try fetch.binding.validateCoversPairs(routes.sortedPairs,
+                                                  pairStart: Int(tileRange.pairStart),
+                                                  pairCount: Int(tileRange.pairCount))
+            let argumentBuffer = try runner.prefillGroupedMoE.makeStreamedArgumentBuffer(
+                device: runner.ctx.device, binding: fetch.binding)
+            let streamedParams = PrefillGroupedRoutedMoEStreamedParams(
+                pairStart: tileRange.pairStart,
+                pairCount: tileRange.pairCount,
+                d: UInt32(hiddenSize),
+                routedIntermediate: UInt32(runner.cfg.moeIntermediateSize),
+                topK: UInt32(runner.cfg.topKExperts),
+                hiddenStrideElements: UInt32(hiddenSize),
+                binding: fetch.binding,
+                offsets: routedOffsets)
+            let batch = try currentOpenBatch()
+            try runner.encodeRoutedTileExperts(commandBuffer: batch.commandBuffer,
+                                               scratch: scratch,
+                                               sortedPairs: metadata.sortedPairs,
+                                               routes: routes,
+                                               tile: tileRange,
+                                               binding: fetch.binding,
+                                               argumentBuffer: argumentBuffer,
+                                               params: streamedParams)
+            batch.append(tileIndex: tile, fetch: fetch, argumentBuffer: argumentBuffer)
+        }
+
         func commitOpenBatch() {
             guard let batch = openBatch else { return }
             openBatch = nil
@@ -5848,143 +5773,30 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             pendingBatches.append(batch.sealed())
         }
 
-        var inFlight: PrefillStreamedTileFetchBegin?
-        for (tileIndex, tile) in routes.tiles.enumerated() {
-            let begin: PrefillStreamedTileFetchBegin
-            if let carried = inFlight {
-                begin = carried
-                inFlight = nil
-            } else {
-                begin = try resolveTileFetchBegin(
-                    layer: L, routes: routes, tileIndex: tileIndex,
-                    additionalAvoidingSlots: [], openBatch: openBatch,
-                    pendingBatches: &pendingBatches, tileLifetime: &tileLifetime,
-                    protection: &protection,
-                    startPosition: startPosition)
-            }
-
-            var beginAwaited = false
-            var reachedSuccessfulEnd = false
-            defer {
-                if !reachedSuccessfulEnd {
-                    if !beginAwaited { _ = try? begin.operation.wait() }
-                    if let pending = inFlight { _ = try? pending.operation.wait() }
-                }
-            }
-
-            if tileIndex < lastTileIndex {
-                inFlight = try beginLookaheadForNextTile(
-                    layer: L, routes: routes, tileIndex: tileIndex,
-                    routedTileScheduler: routedTileScheduler,
-                    openBatch: openBatch, pendingBatches: pendingBatches,
-                    beginAssignedSlots: begin.plan.assignedSlots,
-                    protection: &protection,
-                    tileLifetime: &tileLifetime, startPosition: startPosition)
-            }
-
-            let openBatchSlots = openBatch?.assignedSlots ?? []
-            let batchAction = routedTileScheduler.batchAction(
-                openBatchTiles: openBatch?.tileIndices.count ?? 0,
-                openBatchSlots: openBatchSlots,
-                nextTileAvoidingSlotPlanAvailable: true,
-                isLastTile: tileIndex == lastTileIndex)
-            if batchAction.commitBeforeAppend {
-                commitOpenBatch()
-            }
-
-            let views = try await begin.operation.completion()
-            beginAwaited = true
-            let fetch = try PrefillStreamedTileBinding.bindingForCompletedFetch(begin: begin, views: views)
-            try fetch.binding.validateCoversPairs(routes.sortedPairs,
-                                                  pairStart: Int(tile.pairStart),
-                                                  pairCount: Int(tile.pairCount))
-            let argumentBuffer = try prefillGroupedMoE.makeStreamedArgumentBuffer(
-                device: ctx.device, binding: fetch.binding)
-            let streamedParams = PrefillGroupedRoutedMoEStreamedParams(
-                pairStart: tile.pairStart,
-                pairCount: tile.pairCount,
-                d: UInt32(D),
-                routedIntermediate: UInt32(cfg.moeIntermediateSize),
-                topK: UInt32(cfg.topKExperts),
-                hiddenStrideElements: UInt32(D),
-                binding: fetch.binding,
-                offsets: routedOffsets)
-            let batch = try currentOpenBatch()
-            try encodeRoutedTileExperts(commandBuffer: batch.commandBuffer,
-                                        scratch: scratch,
-                                        sortedPairs: metadata.sortedPairs,
-                                        routes: routes,
-                                        tile: tile,
-                                        binding: fetch.binding,
-                                        argumentBuffer: argumentBuffer,
-                                        params: streamedParams)
-            batch.append(tileIndex: tileIndex, fetch: fetch, argumentBuffer: argumentBuffer)
-            if batchAction.commitAfterAppend != nil {
-                commitOpenBatch()
-            }
-            while pendingBatches.count + (openBatch == nil ? 0 : 1)
-                > schedulerConfig.maxPendingDepth {
-                try drainOldestPendingBatch(&pendingBatches, lifetime: &tileLifetime)
-            }
-            reachedSuccessfulEnd = true
+        func drainOldestBatch() throws {
+            try runner.drainOldestPendingBatch(&pendingBatches, lifetime: &tileLifetime)
         }
-        commitOpenBatch()
-        while !pendingBatches.isEmpty {
-            try drainOldestPendingBatch(&pendingBatches, lifetime: &tileLifetime)
-        }
-    }
 
-    /// Resolves and begins one tile's fetch without an already-begun
-    /// lookahead to inherit: plans it avoiding the held slots, falling back
-    /// to one drain-and-replan if the cache has no room, exactly as the
-    /// depth-1 loop's per-tile planning does.
-    private func resolveTileFetchBegin(
-        layer L: Int,
-        routes: PrefillMoEGroupedRoutes,
-        tileIndex: Int,
-        additionalAvoidingSlots: Set<Int>,
-        openBatch: OpenPrefillBatch?,
-        pendingBatches: inout [PendingPrefillBatch],
-        tileLifetime: inout PrefillStreamedTileSlotLifetime,
-        protection: inout PrefillChunkExpertProtection?,
-        startPosition: Int
-    ) throws -> PrefillStreamedTileFetchBegin {
-        let expertIDs = try PrefillStreamedTileBinding.expertIDs(forTile: tileIndex, routes: routes)
-        protection?.planning(expertIDs)
-        var avoidingSlots = Set((openBatch?.assignedSlots ?? []) + pendingBatches.flatMap(\.assignedSlots))
-        avoidingSlots.formUnion(additionalAvoidingSlots)
-        let plan = try model.planRoutedExpertsIfPossible(
-            layer: L, experts: expertIDs, avoidingSlots: avoidingSlots,
-            protectedExperts: protection?.remaining)
-        let begin: PrefillStreamedTileFetchBegin
-        if let plan {
-            begin = try PrefillStreamedTileBinding.beginFetchForTile(
-                model: model, layer: L, tileIndex: tileIndex, routes: routes, plannedFetch: plan)
-        } else {
-            try drainOldestPendingBatch(&pendingBatches, lifetime: &tileLifetime)
-            var freshAvoiding = Set((openBatch?.assignedSlots ?? [])
-                + pendingBatches.flatMap(\.assignedSlots))
-            freshAvoiding.formUnion(additionalAvoidingSlots)
-            begin = try PrefillStreamedTileBinding.beginFetchForTile(
-                model: model, layer: L, tileIndex: tileIndex, routes: routes,
-                avoidingSlots: freshAvoiding, protectedExperts: protection?.remaining)
-        }
-        if routeTraceFD >= 0 {
-            let counted = try routeTraceRowCounts(forTile: routes.tiles[tileIndex], routes: routes)
-            recordRouteTrace(layer: L, position: startPosition, tile: tileIndex,
-                             experts: expertIDs, rowCounts: counted.counts,
-                             lastRows: counted.lastRows)
-        }
-        let missSlots = begin.plan.misses.map { begin.plan.assignedSlots[$0] }
-        if !missSlots.isEmpty {
-            do {
-                try tileLifetime.begin(tileIndex: tileIndex, plannedSlots: missSlots)
-            } catch {
-                _ = try? begin.operation.wait()
-                throw error
+        func abandonBegunFetches() {
+            for fetch in begunFetches.values {
+                _ = try? fetch.operation.wait()
             }
+            begunFetches.removeAll()
+            for plan in keptPlans.values {
+                try? runner.model.abandonRoutedExpertPlan(plan)
+            }
+            keptPlans.removeAll()
         }
-        return begin
+
+        private func currentOpenBatch() throws -> OpenPrefillBatch {
+            if let openBatch { return openBatch }
+            guard let batchCB = runner.ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            let batch = OpenPrefillBatch(commandBuffer: batchCB)
+            openBatch = batch
+            return batch
+        }
     }
 
     /// One routed tile's experts: the grouped GEMMs over every expert, else
