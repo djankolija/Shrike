@@ -143,7 +143,7 @@ internal enum PrefillProjectionDispatchPolicy {
 /// sweeps the chunk's pool-resident experts first, then the absent ones by
 /// the same recency split, all three groups packed by row weight and tiled
 /// flat (v13 T5 step 2, today's default).
-internal enum PrefillSweepMode: String, Sendable, Equatable {
+internal enum PrefillSweepMode: String, Sendable, Equatable, CaseIterable {
     case alternate
     case fixed
     case carry
@@ -349,10 +349,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public var prefillGapLeversDescription: String {
         // Parsed configuration, not the layer streamers' live readers -- reaching
         // one would force a layer open ahead of the lazy load.
-        let boundedReader = (try? BoundedReaderConfiguration.environmentValue())
-            ?? BoundedReaderConfiguration(
-                threads: BoundedReaderConfiguration.defaultThreads,
-                batchDepth: BoundedReaderConfiguration.defaultBatchDepth)
+        let boundedReader: BoundedReaderConfiguration?
+        let boundedReaderFailure: String?
+        do {
+            boundedReader = try BoundedReaderConfiguration.environmentValue()
+            boundedReaderFailure = nil
+        } catch ModelError.internalInconsistency(let detail) {
+            boundedReader = nil
+            boundedReaderFailure = detail
+        } catch {
+            boundedReader = nil
+            boundedReaderFailure = String(describing: error)
+        }
         return Self.prefillGapLeversDescription(
             overlap: prefillRouteOverlap,
             residencyAllocationCount: poolResidency?.allocationCount,
@@ -360,8 +368,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             sweepMode: prefillSweepMode,
             sweepTail: prefillSweepTail,
             cacheLayout: (try? ExpertCacheLayout.environmentValue()) ?? .pool,
-            expertIOThreads: boundedReader.threads,
-            expertIOBatchDepth: boundedReader.batchDepth,
+            expertIOThreads: boundedReader?.threads ?? BoundedReaderConfiguration.defaultThreads,
+            expertIOBatchDepth: boundedReader?.batchDepth ?? BoundedReaderConfiguration.defaultBatchDepth,
+            expertIOParseFailure: boundedReaderFailure,
             cacheProtectMode: expertCacheProtectMode)
     }
 
@@ -374,6 +383,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         cacheLayout: ExpertCacheLayout,
         expertIOThreads: Int,
         expertIOBatchDepth: Int,
+        expertIOParseFailure: String? = nil,
         cacheProtectMode: ExpertCacheProtectMode = .chunk
     ) -> String {
         let residency: String
@@ -387,9 +397,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let sweep = sweepMode == .recency
             ? "sweep=\(sweepMode.rawValue) tail=\(sweepTail)"
             : "sweep=\(sweepMode.rawValue)"
+        // A reader configuration the streamer will refuse must not print as
+        // the defaults it is not running.
+        let expertIO = expertIOParseFailure.map { "expert_io=invalid(\($0))" }
+            ?? "expert_io=threads=\(expertIOThreads) batch_depth=\(expertIOBatchDepth)"
         return "overlap=\(overlap ? "on" : "off") residency=\(residency)"
             + " \(sweep) cache_layout=\(cacheLayout.rawValue)"
-            + " expert_io=threads=\(expertIOThreads) batch_depth=\(expertIOBatchDepth)"
+            + " \(expertIO)"
             + " protect=\(cacheProtectMode.rawValue)"
     }
 
@@ -533,8 +547,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let poolResidency: ExpertPoolResidency?
     private let poolResidencyUnavailableReason: String?
     /// `SHRIKE_PREFILL_SWEEP=alternate|fixed|carry|recency|resident` selects the
-    /// `PrefillSweepMode`; unset or unknown takes `prefillSweepModeDefault`,
-    /// `resident`, v13 T5's measured winner, with `carry` kept as the A/B.
+    /// `PrefillSweepMode`; unset takes `prefillSweepModeDefault`, `resident`,
+    /// v13 T5's measured winner, with `carry` kept as the A/B; an unknown
+    /// value fails at launch like the knob's siblings.
     private let prefillSweepMode: PrefillSweepMode
     private static let prefillSweepModeDefault = PrefillSweepMode.resident
     /// `SHRIKE_PREFILL_SWEEP_TAIL=<n>` sizes `recency`'s tail group, clamped
@@ -556,15 +571,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private static let prefillTailTileDefault = 32
     private let prefillMatrixMinRows: Int
 
-    static func parsePrefillSweepMode(_ raw: String?) -> PrefillSweepMode {
-        guard let raw, let mode = PrefillSweepMode(rawValue: raw) else {
-            return prefillSweepModeDefault
+    static func parsePrefillSweepMode(_ raw: String?) throws -> PrefillSweepMode {
+        guard let raw, !raw.isEmpty else { return prefillSweepModeDefault }
+        guard let mode = PrefillSweepMode(rawValue: raw) else {
+            throw ModelError.internalInconsistency(
+                detail: "unsupported SHRIKE_PREFILL_SWEEP '\(raw)'; allowed: "
+                    + PrefillSweepMode.allCases.map(\.rawValue).joined(separator: ", "))
         }
         return mode
     }
 
-    private static func environmentPrefillSweepMode() -> PrefillSweepMode {
-        parsePrefillSweepMode(ProcessInfo.processInfo.environment["SHRIKE_PREFILL_SWEEP"])
+    private static func environmentPrefillSweepMode() throws -> PrefillSweepMode {
+        try parsePrefillSweepMode(ProcessInfo.processInfo.environment["SHRIKE_PREFILL_SWEEP"])
     }
 
     static func parsePrefillSweepTail(_ raw: String?, expertCount: Int) throws -> Int {
@@ -765,7 +783,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTED_GEMM"] != "per-expert"
         self.prefillRouteOverlap =
             ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTE_OVERLAP"] != "off"
-        self.prefillSweepMode = Self.environmentPrefillSweepMode()
+        self.prefillSweepMode = try Self.environmentPrefillSweepMode()
         self.prefillSweepTail = try Self.environmentPrefillSweepTail(expertCount: self.cfg.numExperts)
         self.prefillTailTile = Self.environmentPrefillTailTile()
         self.prefillMatrixMinRows = Self.environmentPrefillMatrixMinRows()

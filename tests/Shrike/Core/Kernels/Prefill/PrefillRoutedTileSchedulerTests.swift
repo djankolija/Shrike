@@ -348,15 +348,27 @@ import Testing
                 + " expert_io=threads=4 batch_depth=1 protect=chunk")
     }
 
-    @Test func sweepModeParsesItsFiveValues() {
-        #expect(RealForwardRunner.parsePrefillSweepMode("alternate") == .alternate)
-        #expect(RealForwardRunner.parsePrefillSweepMode("fixed") == .fixed)
-        #expect(RealForwardRunner.parsePrefillSweepMode("carry") == .carry)
-        #expect(RealForwardRunner.parsePrefillSweepMode("recency") == .recency)
-        #expect(RealForwardRunner.parsePrefillSweepMode("resident") == .resident)
-        #expect(RealForwardRunner.parsePrefillSweepMode(nil) == .resident)
-        #expect(RealForwardRunner.parsePrefillSweepMode("") == .resident)
-        #expect(RealForwardRunner.parsePrefillSweepMode("bogus") == .resident)
+    @Test func sweepModeParsesItsFiveValuesAndFailsClosed() throws {
+        #expect(try RealForwardRunner.parsePrefillSweepMode("alternate") == .alternate)
+        #expect(try RealForwardRunner.parsePrefillSweepMode("fixed") == .fixed)
+        #expect(try RealForwardRunner.parsePrefillSweepMode("carry") == .carry)
+        #expect(try RealForwardRunner.parsePrefillSweepMode("recency") == .recency)
+        #expect(try RealForwardRunner.parsePrefillSweepMode("resident") == .resident)
+        #expect(try RealForwardRunner.parsePrefillSweepMode(nil) == .resident)
+        #expect(try RealForwardRunner.parsePrefillSweepMode("") == .resident)
+        #expect(throws: ModelError.self) {
+            try RealForwardRunner.parsePrefillSweepMode("carrry")
+        }
+    }
+
+    @Test func prefillGapLeversDescriptionReportsAnInvalidReaderParse() {
+        let line = RealForwardRunner.prefillGapLeversDescription(
+            overlap: true, residencyAllocationCount: 1, poolResidencyUnavailableReason: nil,
+            sweepMode: .resident, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1,
+            expertIOParseFailure: "unsupported SHRIKE_EXPERT_IO_THREADS 'many'")
+
+        #expect(line.contains("expert_io=invalid(unsupported SHRIKE_EXPERT_IO_THREADS 'many')"))
+        #expect(!line.contains("threads=4"))
     }
 
     @Test func prefillGapLeversDescriptionReportsTheSweepMode() {

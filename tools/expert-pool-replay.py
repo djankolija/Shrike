@@ -193,6 +193,8 @@ DEFAULT_AGING_PERIOD = 1024
 # held-tile count at 1 tile per batch and fetch depth 2 (see module docstring).
 DEFAULT_AVOID_LOOKBACK = 3
 DEFAULT_SLRU_PROTECTED_SHARE = 0.5
+# The production tile width; the Swift's fitting() narrows tileExperts below 8 on
+# a small cache, which no re-tiling order here models.
 RETILE_SIZE = 8
 DEFAULT_SWEEP_TAIL = 96
 DEFAULT_SWEEP_HEAD_FACTOR = 6

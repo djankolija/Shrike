@@ -263,7 +263,7 @@ enum PrefillSweepOrder {
             return lhs < rhs
         }
         for expert in heaviestFirst {
-            var bestIndex = 0
+            var bestIndex = -1
             var bestTotal = Int.max
             for (index, bin) in bins.enumerated() where bin.experts.count < tileWidth {
                 if bin.total < bestTotal {
@@ -271,6 +271,7 @@ enum PrefillSweepOrder {
                     bestIndex = index
                 }
             }
+            guard bestIndex >= 0 else { break }
             bins[bestIndex].experts.append(expert)
             bins[bestIndex].total += rowsByExpert[expert] ?? 0
         }

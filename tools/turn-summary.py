@@ -18,7 +18,7 @@ for ln in log:
     elif cur is not None:
         cur.append(ln)
         if " completed in " in ln:
-            blocks.append(cur); cur = []
+            blocks.append(cur); cur = None
 
 
 def grab(pattern, text, cast=float, default=None):
