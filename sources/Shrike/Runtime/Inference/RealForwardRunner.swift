@@ -374,8 +374,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             cacheProtectMode: expertCacheProtectMode,
             specPhase1: specPhase1Coverage,
             routerWake: hostWaitSpin ? routerWake : .status,
-            prefetch: prefetchConfiguration,
+            prefetch: prefetchConfigurationInEffect,
             prefetchTopM: predictivePrefetchTopM)
+    }
+
+    private var prefetchConfigurationInEffect: RuntimePrefetch {
+        RuntimePrefetch(enabled: prefetchConfiguration.enabled, topM: prefetchConfiguration.topM,
+                        inFlight: prefetchConfiguration.inFlight,
+                        placement: prefetchConfiguration.placement,
+                        distance: prefetchConfiguration.distance,
+                        tracePath: prefetchConfiguration.tracePath,
+                        adoption: prefetchBlitActive ? .blit : .copy,
+                        joinMicros: prefetchConfiguration.joinMicros)
     }
 
     static func prefillGapLeversDescription(
@@ -422,6 +432,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard prefetch.enabled else { return "off" }
         return "on top_m=\(topM) inflight=\(prefetch.inFlight)"
             + " placement=\(prefetch.placement.rawValue) distance=\(prefetch.distance)"
+            + " adopt=\(prefetch.adoption.rawValue) join_us=\(prefetch.joinMicros)"
     }
 
     /// The prefill router kernel in force (`block` or `tiled tokens=N`) and its
@@ -781,6 +792,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let expertCacheProtectMode: ExpertCacheProtectMode
     private let predictivePrefetch: ExpertPrefetchRing?
     private let prefetchConfiguration: RuntimePrefetch
+    /// The blit lands in the fixup command, so it applies only where the
+    /// fixup computes the adopted experts.
+    private let prefetchBlitActive: Bool
     private let anePrefill: ANEPrefillAttention?
     private let predictivePrefetchTopM: Int
     public let rdadviseEnabled: Bool
@@ -829,12 +843,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.expertIOBackend = try ExpertIOBackend.environmentValue()
         self.expertCacheProtectMode = try ExpertCacheProtectMode.environmentValue()
         self.prefetchConfiguration = runtimeConfiguration.prefetch
+        self.prefetchBlitActive = runtimeConfiguration.prefetch.adoption == .blit
+            && [.speculative, .speculativeValidate, .gpuResidency]
+                .contains(runtimeConfiguration.decodeExpertExecution)
         let prefetch = try Self.makePredictivePrefetch(
             model: model, device: context.device,
             configuration: runtimeConfiguration.prefetch)
         self.predictivePrefetchTopM = prefetch.topM
         self.predictivePrefetch = prefetch.ring
-        self.prefetchTraceFD = Self.openPrefetchTrace(runtimeConfiguration.prefetch.tracePath)
+        self.prefetchTraceFD = try Self.openPrefetchTrace(runtimeConfiguration.prefetch.tracePath)
         self.anePrefill = try Self.makeANEPrefill(
             model: model, device: context.device)
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
@@ -966,9 +983,47 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 slowCallNanos: rdadviseAdaptiveSlowCallNanos))
     }
 
-    private static func openPrefetchTrace(_ path: String?) -> Int32 {
+    static func openPrefetchTrace(_ path: String?) throws -> Int32 {
         guard let path else { return -1 }
-        return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+        let descriptor = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+        guard descriptor >= 0 else {
+            throw RuntimeConfigurationError.invalidPrefetch(
+                "trace path \(path) cannot be opened: \(String(cString: strerror(errno)))")
+        }
+        return descriptor
+    }
+
+    private func makePrefetchAdoptionGuard(plan: RoutedExpertFetchPlan?,
+                                           adopted: Set<Int>) -> PrefetchAdoptionGuard? {
+        guard let plan, !adopted.isEmpty else { return nil }
+        let model = self.model
+        let ring = predictivePrefetch
+        return PrefetchAdoptionGuard(
+            fail: { model.failAdoptedPrefetches(plan: plan) },
+            release: { ring?.consume(layer: plan.layer, experts: adopted, adopted: false) })
+    }
+
+    private func makePrefetchAdoptionTransfer(plan: RoutedExpertFetchPlan, experts: [Int],
+                                              views: [TensorView],
+                                              staged: [Int: MTLBuffer]) throws -> PrefetchAdoptionTransfer {
+        var sources: [MTLBuffer] = []
+        for index in plan.adopted {
+            guard let source = staged[experts[index]] else {
+                throw ModelError.internalInconsistency(
+                    detail: "an adopted prefetch has no staged buffer")
+            }
+            sources.append(source)
+        }
+        let adoptedExperts = Set(plan.adopted.map { experts[$0] })
+        let layer = plan.layer
+        return PrefetchAdoptionTransfer(
+            plan: plan,
+            sources: sources,
+            destinations: plan.adopted.map { views[$0].buffer },
+            destinationOffsets: plan.adopted.map { Int(views[$0].offset) },
+            byteCount: Int(views[plan.adopted[0]].length)) { [predictivePrefetch] adopted in
+                predictivePrefetch?.consume(layer: layer, experts: adoptedExperts, adopted: adopted)
+            }
     }
 
     /// A refused speculative read is counted, never thrown into the decode.
@@ -1988,6 +2043,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalLoopProduceNanos: UInt64 = 0
     public private(set) var totalCachePlanNanos: UInt64 = 0
     public var totalPrefetchBeginNanos: UInt64 { predictivePrefetch?.statistics.beginNanos ?? 0 }
+    public private(set) var totalPrefetchBlitExperts: UInt64 = 0
     public private(set) var totalRoutedPinNanos: UInt64 = 0
     public private(set) var totalRoutedSubmitNanos: UInt64 = 0
     public private(set) var totalHitSplitArgBufNanos: UInt64 = 0
@@ -4012,7 +4068,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         routedOffsets: MoEExpertOffsets,
         topK: UInt32,
         d D: UInt32,
-        f FmoE: UInt32
+        f FmoE: UInt32,
+        adoptionTransfer: PrefetchAdoptionTransfer? = nil
     ) throws -> (cb: MTLCommandBuffer, commitNanos: UInt64) {
         // The phase-2 reduce already folded the shared branch (h1Buf
         // as its residual); the tail is a plain residual add.
@@ -4031,6 +4088,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // wait-free) measured null on the M1 — the parked-CB wake is as fast
         // as a fresh-commit schedule (v10 T3, 2026-08-31); keep the encoded
         // wait.
+        if let adoptionTransfer {
+            try adoptionTransfer.encodeCopy(commandBuffer: routedCB)
+            totalPrefetchBlitExperts &+= UInt64(adoptionTransfer.expertCount)
+        }
         if let token = ioToken {
             routedCB.encodeWaitForEvent(token.event, value: token.value)
         }
@@ -6353,6 +6414,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let specScratch: (acts: MTLBuffer, y: MTLBuffer)?
         let expertLease: RoutedExpertLease?
         let storageOperation: RoutedExpertLoadOperation?
+        let adoptionTransfer: PrefetchAdoptionTransfer?
         let overlapCompletionClock: CommandCompletionClock?
         let expectedOverlapCompletions: Int
         let hitCommitNanos: UInt64
@@ -6399,6 +6461,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // completion mark). If any command/error path exits early, leave the
         // cache entries empty rather than retaining a LOADING slot.
         var finalizedStagingTransfer = false
+        var finalizedAdoption = false
         defer {
             if let operation = pending.storageOperation {
                 if operation.storage.requiresGPUFinalization,
@@ -6406,6 +6469,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     model.failRoutedExpertStagingTransfer(plan: operation.plan)
                 }
                 operation.storage.releaseStagingTransfer()
+            }
+            if let transfer = pending.adoptionTransfer, !finalizedAdoption {
+                if let plan = transfer.plan { model.failAdoptedPrefetches(plan: plan) }
+                transfer.release(adopted: false)
             }
         }
         if waitIfNeeded {
@@ -6435,6 +6502,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             totalIoNanos &+= operation.storage.loadNanos
             totalMissIoNanos &+= operation.storage.loadNanos
             ioCompletedNanos = operation.storage.completedNanos
+        }
+        if let transfer = pending.adoptionTransfer {
+            if let plan = transfer.plan { try model.finalizeAdoptedPrefetches(plan: plan) }
+            finalizedAdoption = true
+            transfer.release()
         }
         if let sharedCB = pending.sharedCB, let err = sharedCB.error {
             throw ModelError.commandBufferFailed(
@@ -6807,16 +6879,31 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let canUsePlannedFetch = cfg.topKExperts <= MoE.maxStreamedExperts
         let residentBeforePlan = prefetchTraceFD >= 0
             ? try model.routedExpertResidentIDs(layer: L) : []
-        let readyPrefetches = predictivePrefetch?.readyBuffers(layer: L, experts: experts) ?? [:]
+        let readyPrefetches = predictivePrefetch?.readyBuffers(
+            layer: L, experts: experts,
+            joinNanos: UInt64(prefetchConfiguration.joinMicros) * 1_000) ?? [:]
         let cachePlanStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        let plannedFetch = canUsePlannedFetch
-            ? try model.planRoutedExperts(
-                layer: L, experts: experts, prefetched: readyPrefetches)
-            : nil
-        totalCachePlanNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cachePlanStarted
-        if !readyPrefetches.isEmpty {
-            predictivePrefetch?.consume(layer: L, experts: Set(readyPrefetches.keys))
+        let plannedFetch: RoutedExpertFetchPlan?
+        do {
+            plannedFetch = canUsePlannedFetch
+                ? try model.planRoutedExperts(
+                    layer: L, experts: experts, prefetched: readyPrefetches,
+                    adoption: prefetchBlitActive ? .blit : .copy)
+                : nil
+        } catch {
+            predictivePrefetch?.unlease(layer: L, experts: Set(readyPrefetches.keys))
+            throw error
         }
+        totalCachePlanNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cachePlanStarted
+        // The blit's adopted slots stay leased until their command completes.
+        let blitAdopted = prefetchBlitActive
+            ? Set((plannedFetch?.adopted ?? []).map { experts[$0] }) : Set<Int>()
+        let consumedAtPlan = Set(readyPrefetches.keys).subtracting(blitAdopted)
+        if !consumedAtPlan.isEmpty {
+            predictivePrefetch?.consume(layer: L, experts: consumedAtPlan)
+        }
+        let adoptionGuard = makePrefetchAdoptionGuard(plan: plannedFetch, adopted: blitAdopted)
+        defer { adoptionGuard?.abandon() }
         let missesForTrace = plannedFetch.map { plan in
             plan.misses.map { experts[$0] }
         } ?? experts
@@ -7070,6 +7157,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
             }
         }
+        if let adoptionGuard, let plannedFetch {
+            adoptionGuard.attach(try makePrefetchAdoptionTransfer(
+                plan: plannedFetch, experts: experts, views: blobs, staged: readyPrefetches))
+        }
+        let adoptionTransfer = adoptionGuard?.transfer
         schedulePredictivePrefetch(layer: L, predicted: predictedNextLayer,
                                    demand: plannedLoad?.storage)
         decodeRoutedBufsScratch.removeAll(keepingCapacity: true)
@@ -7100,6 +7192,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 specScratch: nil,
                 expertLease: expertLease,
                 storageOperation: eventLoad,
+                adoptionTransfer: nil,
                 overlapCompletionClock: eventLoad == nil ? nil : overlapCompletionClock,
                 expectedOverlapCompletions: expectedOverlapCompletions,
                 hitCommitNanos: 0,
@@ -7111,6 +7204,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             return
         }
         let hitSplitFixup = (phase1HitCB != nil || specComputesHits) && !phase1MissSlots.isEmpty
+        guard pendingRoutedCommand == nil else {
+            // The pipeline drains the previous layer's routed CB before
+            // queuing the next, so this is a logic error, not a user
+            // condition — but it must fail the generation, not trap.
+            throw ModelError.internalInconsistency(
+                detail: "routed command-buffer pipeline not drained before queuing the next layer")
+        }
         let fixupBuildStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let (routedCB, routedCommitNanos) = try buildAndCommitMissFixupCommand(
             eventLoad: eventLoad,
@@ -7120,20 +7220,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             phase1MissSlots: phase1MissSlots,
             routedBufs: routedBufs,
             routedOffsets: routedOffsets,
-            topK: topK, d: D, f: FmoE)
+            topK: topK, d: D, f: FmoE,
+            adoptionTransfer: adoptionTransfer)
         totalFixupBuildNanos &+= routedCommitNanos - fixupBuildStarted
         if missCount > 0, let completed = completedStorageNanos, completed > 0 {
             let submitted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if submitted >= completed {
                 totalIOCompletionToFixupSubmitNanos &+= submitted - completed
             }
-        }
-        guard pendingRoutedCommand == nil else {
-            // The pipeline drains the previous layer's routed CB before
-            // queuing the next, so this is a logic error, not a user
-            // condition — but it must fail the generation, not trap.
-            throw ModelError.internalInconsistency(
-                detail: "routed command-buffer pipeline not drained before queuing the next layer")
         }
         pendingRoutedCommand = PendingRoutedCommand(
             cb: routedCB,
@@ -7145,6 +7239,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 ? specScratch[L % specScratch.count] : nil,
             expertLease: expertLease,
             storageOperation: eventLoad,
+            adoptionTransfer: adoptionTransfer,
             overlapCompletionClock: eventLoad == nil ? nil : overlapCompletionClock,
             expectedOverlapCompletions: expectedOverlapCompletions,
             hitCommitNanos: hitCommitNanos,
@@ -7156,6 +7251,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     : "moe_phase1_miss_fixup_phase2",
             encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
         transferredExpertLease = true
+        adoptionGuard?.commit()
         totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
         if layerTraceEnabled,
            position < 3 || position % 16 == 0 {

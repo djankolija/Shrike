@@ -130,6 +130,43 @@ import Testing
         #expect(issuedBuffers.first === leased)
     }
 
+    @Test func unleaseReturnsAThrowingPlansPredictionsToTheRing() throws {
+        let ring = try makeRing(slots: 4, budget: 4)
+        let operation = ExpertLoadOperation()
+        try ring.begin(layer: 2, experts: [1], resident: []) { _, _ in operation }
+        operation.finish(.success(()))
+        let leased = try #require(ring.readyBuffers(layer: 2, experts: [1])[1])
+        ring.unlease(layer: 2, experts: [1])
+
+        var issuedBuffers: [MTLBuffer] = []
+        try ring.begin(layer: 3, experts: [5, 6, 7, 8], resident: []) { _, buffers in
+            issuedBuffers = buffers
+            return ExpertLoadOperation()
+        }
+        #expect(issuedBuffers.count == 4)
+        #expect(issuedBuffers.contains { $0 === leased })
+        #expect(ring.statistics.reclaimedUnadopted == 1)
+        #expect(ring.statistics.adopted == 0)
+    }
+
+    @Test func aReleaseThatIsNotAnAdoptionIsNotCountedAsOne() throws {
+        let ring = try makeRing(slots: 4, budget: 4)
+        let operation = ExpertLoadOperation()
+        try ring.begin(layer: 2, experts: [1], resident: []) { _, _ in operation }
+        operation.finish(.success(()))
+        _ = try #require(ring.readyBuffers(layer: 2, experts: [1])[1])
+        ring.consume(layer: 2, experts: [1], adopted: false)
+        #expect(ring.statistics.adopted == 0)
+
+        var issuedBuffers: [MTLBuffer] = []
+        try ring.begin(layer: 3, experts: [5, 6, 7, 8], resident: []) { _, buffers in
+            issuedBuffers = buffers
+            return ExpertLoadOperation()
+        }
+        #expect(issuedBuffers.count == 4)
+        #expect(ring.statistics.reclaimedUnadopted == 0)
+    }
+
     @Test func predictionsBeyondTheBudgetOrTheSlotsAreCountedAsRefused() throws {
         let ring = try makeRing(slots: 4, budget: 1)
         try ring.begin(layer: 2, experts: [1, 2, 3], resident: []) { _, _ in ExpertLoadOperation() }
@@ -155,6 +192,44 @@ import Testing
         #expect(ring.noteHookFailure())
         #expect(!ring.noteHookFailure())
         #expect(ring.statistics.hookFailures == 2)
+    }
+
+    @Test func readyBuffersJoinsAnInFlightPredictionThatFinishesWithinTheBudget() throws {
+        let ring = try makeRing(slots: 4, budget: 2)
+        let operation = ExpertLoadOperation()
+        try ring.begin(layer: 2, experts: [1], resident: []) { _, _ in operation }
+        operation.markInFlight()
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(2)) {
+            operation.finish(.success(()))
+        }
+        let ready = ring.readyBuffers(layer: 2, experts: [1, 5], joinNanos: 500_000_000)
+        #expect(Set(ready.keys) == [1])
+        #expect(ring.statistics.joined == 1)
+        #expect(ring.statistics.late == 0)
+    }
+
+    @Test func aJoinedBatchCountsEveryPredictionItCarried() throws {
+        let ring = try makeRing(slots: 4, budget: 2)
+        let operation = ExpertLoadOperation()
+        try ring.begin(layer: 2, experts: [1, 2], resident: []) { _, _ in operation }
+        operation.markInFlight()
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(2)) {
+            operation.finish(.success(()))
+        }
+        let ready = ring.readyBuffers(layer: 2, experts: [1, 2], joinNanos: 500_000_000)
+        #expect(Set(ready.keys) == [1, 2])
+        #expect(ring.statistics.joined == 2)
+    }
+
+    @Test func readyBuffersCountsAJoinThatMissesItsBudgetAsLate() throws {
+        let ring = try makeRing(slots: 4, budget: 2)
+        let operation = ExpertLoadOperation()
+        try ring.begin(layer: 2, experts: [1], resident: []) { _, _ in operation }
+        operation.markInFlight()
+        #expect(ring.readyBuffers(layer: 2, experts: [1], joinNanos: 2_000_000).isEmpty)
+        #expect(ring.statistics.joined == 0)
+        #expect(ring.statistics.late == 1)
+        operation.finish(.success(()))
     }
 
     @Test func beginRollsTheSlotsBackWhenTheIssueThrows() throws {

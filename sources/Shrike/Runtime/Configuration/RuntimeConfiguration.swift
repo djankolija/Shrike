@@ -111,6 +111,14 @@ public enum RuntimePrefetchPlacement: String, Codable, Sendable {
     case beside
 }
 
+/// How an adopted prediction reaches its cache slot: a host `memcpy` at plan
+/// time (`copy`), or a GPU blit at the head of the fixup command that computes
+/// it (`blit`, only where the fixup computes adopted experts).
+public enum RuntimePrefetchAdoption: String, Codable, Sendable {
+    case copy
+    case blit
+}
+
 /// The predictive routed-expert prefetch. Every value is validated whether
 /// or not the ring is on, so a mistyped knob never runs as a default it is
 /// not.
@@ -124,9 +132,14 @@ public struct RuntimePrefetch: Codable, Sendable, Equatable {
     public let placement: RuntimePrefetchPlacement
     public let distance: Int
     public let tracePath: String?
+    public let adoption: RuntimePrefetchAdoption
+    /// How long a plan waits for a prediction still in flight before reading
+    /// the expert itself; 0 never waits.
+    public let joinMicros: Int
 
     public static let allowedInFlight = 1...8
     public static let allowedDistance = 1...8
+    public static let allowedJoinMicros = 0...2000
 
     public static let off = RuntimePrefetch(enabled: false, topM: nil, inFlight: 1,
                                             placement: .after, distance: 1, tracePath: nil)
@@ -134,13 +147,16 @@ public struct RuntimePrefetch: Codable, Sendable, Equatable {
                                                    placement: .after, distance: 1, tracePath: nil)
 
     public init(enabled: Bool, topM: Int?, inFlight: Int, placement: RuntimePrefetchPlacement,
-                distance: Int, tracePath: String?) {
+                distance: Int, tracePath: String?, adoption: RuntimePrefetchAdoption = .blit,
+                joinMicros: Int = 400) {
         self.enabled = enabled
         self.topM = topM
         self.inFlight = inFlight
         self.placement = placement
         self.distance = distance
         self.tracePath = tracePath
+        self.adoption = adoption
+        self.joinMicros = joinMicros
     }
 
     public static func environmentValue(
@@ -170,8 +186,21 @@ public struct RuntimePrefetch: Codable, Sendable, Equatable {
         let distance = try positiveInt(environment, "SHRIKE_PREFETCH_PROBE_DISTANCE",
                                        allowed: allowedDistance) ?? production.distance
         let trace = environment["SHRIKE_PREFETCH_TRACE"].flatMap { $0.isEmpty ? nil : $0 }
+        let adoption: RuntimePrefetchAdoption
+        if let raw = environment["SHRIKE_PREFETCH_ADOPT"] {
+            guard let value = RuntimePrefetchAdoption(rawValue: raw) else {
+                throw RuntimeConfigurationError.invalidPrefetch(
+                    "SHRIKE_PREFETCH_ADOPT '\(raw)'; allowed: copy, blit")
+            }
+            adoption = value
+        } else {
+            adoption = production.adoption
+        }
+        let joinMicros = try positiveInt(environment, "SHRIKE_PREFETCH_JOIN_US",
+                                         allowed: allowedJoinMicros) ?? production.joinMicros
         return RuntimePrefetch(enabled: enabled, topM: topM, inFlight: inFlight,
-                               placement: placement, distance: distance, tracePath: trace)
+                               placement: placement, distance: distance, tracePath: trace,
+                               adoption: adoption, joinMicros: joinMicros)
     }
 
     private static func positiveInt(_ environment: [String: String], _ name: String,

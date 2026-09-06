@@ -71,6 +71,14 @@ public struct ExpertCachePlan: Sendable, Equatable {
     }
 }
 
+/// How a plan adopts prefetched bytes for an absent expert: copied into the
+/// slot on the host at plan time, or left to a GPU blit the caller encodes,
+/// the slot `loading` until `finalizeAdoptedSlots`.
+public enum PrefetchAdoption {
+    case hostCopy([Int: UnsafeMutableRawPointer])
+    case gpuBlit(Set<Int>)
+}
+
 public struct ExpertStreamingStatistics: Sendable, Equatable {
     public let plans: UInt64
     public let requestedExperts: UInt64
@@ -640,13 +648,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                                   layer: Int = 0,
                                   avoidingSlots: Set<Int> = [],
                                   protectedExperts: [Bool]? = nil,
-                                  prefetched: [Int: UnsafeMutableRawPointer] = [:]) throws
+                                  adoption: PrefetchAdoption = .hostCopy([:])) throws
         -> ExpertCachePlan {
         guard let plan = makeExpertCachePlan(layer: layer,
                                              experts: experts,
                                              avoidingSlots: avoidingSlots,
                                              protectedExperts: protectedExperts,
-                                             prefetched: prefetched) else {
+                                             adoption: adoption) else {
             // K10: config-triggered placement failure (too few slots for the
             // requested expert set) is recoverable — throw instead of
             // crashing; the runner already handles thrown errors.
@@ -660,17 +668,17 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                                             layer: Int = 0,
                                             avoidingSlots: Set<Int> = [],
                                             protectedExperts: [Bool]? = nil,
-                                            prefetched: [Int: UnsafeMutableRawPointer] = [:])
+                                            adoption: PrefetchAdoption = .hostCopy([:]))
         -> ExpertCachePlan? {
         makeExpertCachePlan(layer: layer, experts: experts, avoidingSlots: avoidingSlots,
-                             protectedExperts: protectedExperts, prefetched: prefetched)
+                             protectedExperts: protectedExperts, adoption: adoption)
     }
 
     private func makeExpertCachePlan(layer: Int,
                                      experts: [Int],
                                      avoidingSlots rawAvoidingSlots: consuming Set<Int>,
                                      protectedExperts: [Bool]?,
-                                     prefetched: [Int: UnsafeMutableRawPointer])
+                                     adoption: PrefetchAdoption)
         -> ExpertCachePlan? {
         precondition(experts.count <= slotCount,
                      "expert cache needs at least \(experts.count) slots")
@@ -759,17 +767,27 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                                      slot: slot,
                                      state: ExpertResidencyEntry.loading,
                                      generation: slotGeneration[slot])
-            if let source = prefetched[experts[index]] {
-                memcpy(slotPointers[slot], source, Int(layout.expertStride))
-                slotState[slot] = .resident
-                publishResidencyUnlocked(expert: experts[index],
-                                         slot: slot,
-                                         state: ExpertResidencyEntry.resident,
-                                         generation: slotGeneration[slot])
-                adoptedPrefetches.append(experts[index])
-                adoptedIndices.append(index)
-            } else {
-                misses.append(index)
+            switch adoption {
+            case .hostCopy(let sources):
+                if let source = sources[experts[index]] {
+                    memcpy(slotPointers[slot], source, Int(layout.expertStride))
+                    slotState[slot] = .resident
+                    publishResidencyUnlocked(expert: experts[index],
+                                             slot: slot,
+                                             state: ExpertResidencyEntry.resident,
+                                             generation: slotGeneration[slot])
+                    adoptedPrefetches.append(experts[index])
+                    adoptedIndices.append(index)
+                } else {
+                    misses.append(index)
+                }
+            case .gpuBlit(let adoptable):
+                if adoptable.contains(experts[index]) {
+                    adoptedPrefetches.append(experts[index])
+                    adoptedIndices.append(index)
+                } else {
+                    misses.append(index)
+                }
             }
         }
 
@@ -1387,6 +1405,50 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// the blit engine.
     func markStagedMetalPlanResident(_ plan: ExpertCachePlan) throws {
         try markPlanMissesResident(plan)
+    }
+
+    /// A plan's `gpuBlit` adoptions become resident only once the command
+    /// carrying their blit has completed; before that a later layer could read
+    /// bytes still owned by the blit engine.
+    public func finalizeAdoptedSlots(_ plan: ExpertCachePlan) throws {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        for index in plan.adopted {
+            let slot = plan.assignedSlots[index]
+            guard slot >= 0, slot < slotCount,
+                  slotGeneration[slot] == plan.assignedGenerations[index],
+                  slotState[slot] == .loading else {
+                throw ModelError.internalInconsistency(
+                    detail: "expert-cache slot generation changed during prefetch adoption")
+            }
+        }
+        for index in plan.adopted {
+            let slot = plan.assignedSlots[index]
+            slotState[slot] = .resident
+            slotExpert[slot] = plan.experts[index]
+            slotLastUse[slot] = useClock
+            publishResidencyUnlocked(expert: plan.experts[index],
+                                     slot: slot,
+                                     state: ExpertResidencyEntry.resident,
+                                     generation: plan.assignedGenerations[index])
+        }
+    }
+
+    public func failAdoptedSlots(_ plan: ExpertCachePlan) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        for index in plan.adopted {
+            let slot = plan.assignedSlots[index]
+            guard slot >= 0, slot < slotCount,
+                  slotGeneration[slot] == plan.assignedGenerations[index],
+                  slotState[slot] == .loading else { continue }
+            slotState[slot] = .empty
+            slotExpert[slot] = -1
+            publishResidencyUnlocked(expert: plan.experts[index],
+                                     slot: slot,
+                                     state: ExpertResidencyEntry.empty,
+                                     generation: slotGeneration[slot])
+        }
     }
 
     /// Clears a staged load if its event-gated transfer command fails. This is

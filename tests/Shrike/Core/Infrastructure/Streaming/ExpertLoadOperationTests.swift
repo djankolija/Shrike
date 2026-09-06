@@ -63,6 +63,25 @@ import Testing
         }
     }
 
+    @Test func boundedWaitReportsWhetherTheOperationFinishedInTime() {
+        let finishing = ExpertLoadOperation()
+        finishing.markInFlight()
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(2)) {
+            finishing.finish(.success(()))
+        }
+        let deadline = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 500_000_000
+        #expect(finishing.wait(untilNanos: deadline))
+        #expect(finishing.state == .completed)
+
+        let stalled = ExpertLoadOperation()
+        stalled.markInFlight()
+        let soon = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 3_000_000
+        #expect(!stalled.wait(untilNanos: soon))
+        #expect(stalled.state == .inFlight)
+        #expect(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) >= soon)
+        stalled.finish(.success(()))
+    }
+
     @Test func completionHookRunsAtOnceWhenTheOperationIsAlreadyTerminal() {
         struct ExpectedFailure: Error {}
         let operation = ExpertLoadOperation()

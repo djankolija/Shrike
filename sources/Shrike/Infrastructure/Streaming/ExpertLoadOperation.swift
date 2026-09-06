@@ -84,6 +84,17 @@ public final class ExpertLoadOperation: @unchecked Sendable {
         if let error { throw error }
     }
 
+    func wait(untilNanos deadline: UInt64) -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        while currentState == .submitted || currentState == .inFlight {
+            let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            guard now < deadline else { return false }
+            condition.wait(until: Date(timeIntervalSinceNow: Double(deadline - now) / 1e9))
+        }
+        return true
+    }
+
     /// Suspension-only completion for schedulers. No worker thread is occupied
     /// while the storage service owns the request.
     public func completion() async throws {

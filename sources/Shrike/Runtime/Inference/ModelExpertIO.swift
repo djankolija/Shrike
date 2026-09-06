@@ -115,16 +115,31 @@ extension Model {
                                   experts: [Int],
                                   avoidingSlots: Set<Int> = [],
                                   protectedExperts: [Bool]? = nil,
-                                  prefetched: [Int: MTLBuffer] = [:]) throws
+                                  prefetched: [Int: MTLBuffer] = [:],
+                                  adoption: RuntimePrefetchAdoption = .copy) throws
         -> RoutedExpertFetchPlan? {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
         let validSlots = Set(avoidingSlots.filter { $0 >= 0 && $0 < streamer.slotCount })
-        let prefetchPointers = prefetched.mapValues { $0.contents() }
+        let planAdoption: PrefetchAdoption = adoption == .blit
+            ? .gpuBlit(Set(prefetched.keys))
+            : .hostCopy(prefetched.mapValues { $0.contents() })
         return RoutedExpertFetchPlan(
             layer: layer, cachePlan: try streamer.planExpertsCached(
                 experts: experts, avoidingSlots: validSlots, protectedExperts: protectedExperts,
-                prefetched: prefetchPointers))
+                adoption: planAdoption))
+    }
+
+    func finalizeAdoptedPrefetches(plan: RoutedExpertFetchPlan) throws {
+        try ensureLayerOpened(plan.layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
+        try streamer.finalizeAdoptedSlots(plan.cachePlan)
+    }
+
+    func failAdoptedPrefetches(plan: RoutedExpertFetchPlan) {
+        guard (try? ensureLayerOpened(plan.layer)) != nil else { return }
+        let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
+        streamer.failAdoptedSlots(plan.cachePlan)
     }
 
     public func planRoutedExpertsIfPossible(layer: Int,

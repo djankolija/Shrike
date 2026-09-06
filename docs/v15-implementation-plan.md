@@ -253,22 +253,43 @@ the probe's sleeping host). The design doc carries the tables and the placement 
     null on tok/s with the per-read verdict passed is the expected outcome the plan
     is written to survive.
 
-### Task 2: the reserved-slot landing and the late join
+### Task 2: the adoption by GPU blit and the bounded late join
 
 - [ ] **T2: adoption is a host copy of a full expert stride inside the submit gap,
-  0.12 ms per adopted expert (0.9 ms per token at top-4, 1.2 to 1.4 at top-8), and a
-  correct prediction still in flight at plan time is read twice.** The copy sits at
-  `PreadExpertStreamer.swift:762-771` under the cache lock because the ring's buffers
-  are not cache slots (`:1309-1311`); the plan's `adopted` set exists so the GPU's
-  residency snapshot and the plan can disagree by exactly that set
-  (`RealForwardRunner.swift:6819-6828`). The task lands the predicted read in a pool
-  slot the planner reserves speculatively (a victim chosen as for a miss, `loading`
-  under a new generation, `resident` when the bytes land, the same path a demand
-  miss takes at `:744-761`), so the classifier sees an adopted expert as a hit and
-  the copy and the `adopted` fold disappear; a predicted read still in flight at
-  plan time is joined by the fixup's event wait instead of duplicated. Costs the pool
-  a wasted fill per wrong prediction. Modelled +1.2 to +1.6 ms per token. **Built
-  only if Task 1's per-read verdict passes.**
+  0.12 ms per adopted expert (1.2 to 1.5 ms per token at Task 1's default, the
+  submit gap 2.2 to 2.4 to 3.4 to 3.7 ms per token measured), and a correct
+  prediction still in flight at plan time (0.5 to 1.0 per token) is read twice.**
+  The copy sits at `PreadExpertStreamer.swift:762-771` under the cache lock because
+  the ring's buffers are not cache slots (`:1309-1311`). Step 0 priced the plan's
+  original design, a speculative landing straight into a pool slot, and found the
+  wrong fills' evictions cost about one miss per token, most of the prize; Davor's
+  ruling (2026-09-07) took the alternative: **the ring stays, the planner reserves
+  the adopted slot as `loading` without copying, and the fixup command carries a GPU
+  blit from the ring's buffer into the slot ahead of its event wait**, the shape the
+  Metal-I/O storage path already uses (`MetalExpertStagingTransfer.encodeCopy`,
+  `RealForwardRunner.swift:4037-4042`, the slot resident only when that command has
+  completed, `:6404-6432`). No host copy, no speculative eviction, the pool's
+  accounting untouched; the GPU pays a blit of 1.77 MB per adopted expert under the
+  demand read it was already waiting for. And **the late join**: a prediction still
+  in flight when the exact route asks for it is awaited up to a bound (the residual
+  of a read that is nearly done) instead of being read again beside its own
+  duplicate. Modelled: +1.2 to +1.5 ms per token from the copy and +0.3 to +0.6 from
+  the join, +2 to +3 %. **The mini decides**, and a measured null is a result.
+
+  **The mechanism, verified in the tree.**
+  - The fixup command is built once for every mode that computes the adopted
+    experts (`buildAndCommitMissFixupCommand`, `RealForwardRunner.swift:4005`); its
+    event wait is encoded first, so a blit encoded before it runs the moment the
+    command starts, under the demand read; Metal orders the blit before the compute
+    on the same slab.
+  - The plan's `adopted` indices already ride the fixup's partition
+    (`:6886`, `:6899`) and the GPU's classifier already sees them as misses; nothing
+    in the kernels changes. The slot is pinned by the plan's lease until the pending
+    command is finished (`pinRoutedExperts`, `finishPendingRoutedCommand`).
+  - The ring's leased slot (Task 1's lease) is held until the command completes and
+    released there, not at the plan; the ring is sized for the slots in flight,
+    the completed ones awaiting a plan and the adopted ones awaiting their blit.
+  - `ExpertLoadOperation.wait()` is unbounded; the join needs a bounded wait.
 
   **Steps.**
   - [x] Step 0 (zero code): the replay tool prices the wasted fills. Extend
@@ -293,37 +314,67 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         The misses saved per token at the ring's cell (10.9 / 10.2 / 9.2) fall short of
         the useful fills (11.8 / 11.3 / 10.1) by **about one miss per token: the wrong
         fills' evictions**, 0.85 ms per token at step zero's slope, against the copy's
-        1.2 to 1.5 ms. So the landing as designed nets 0.3 to 0.6 ms per token before
-        the late join (0.5 to 1.0 late predictions per token, each worth most of a
-        read), about +1 to +2 % in all. **The design fork, Davor's call:** (i) build
-        it as designed; (ii) keep T1's staging ring and have the fixup compute an
-        adopted expert straight from the ring's buffer, with the copy into the slot a
-        GPU blit encoded in the same command (no host copy, no speculative eviction,
-        the pool's accounting untouched; the GPU pays about 0.03 ms per adopted
-        expert); (iii) a buffer swap under the per-slot cache layout (no copy at all,
-        but the layout the T5 measurements did not choose). (ii) keeps the whole
-        1.2 to 1.5 ms and this session's recommendation.
-  - [ ] Step 1 (tests RED first): the planner's speculative reservation (a slot
-        claimed `loading` for a predicted expert, released or promoted, never
-        double-claimed, protected experts and chunk protection respected, the
-        generation rule for a pinned slot); the classifier and plan agreement with
-        no `adopted` set; the late join's event accounting (the fixup waits on the
-        speculative operation's token when its expert is in the plan's misses).
-  - [ ] Step 2 (the code): the reservation API on `PreadExpertStreamer`, the ring
-        retargeted at reserved slots (its own buffers retired behind the knob),
-        `beginPrefetch` given a completion token, the late join in the runner's fixup
-        build, the `adopted` fold retired on the new path, the counters
-        (`prefetch_landed`, `prefetch_joined`, `prefetch_evicted_unused`). Four gates.
-  - [ ] Step 3 (numerics): golden IDENTICAL on both boxes and profiles, the knob off
-        and on, plus `speculative-validate` on the M4 Pro; one `SHRIKE_ROUTE_TRACE`
-        capture replayed against production's miss counts to bound the wasted fills'
-        effect on the plan sequence.
-  - [ ] Step 4 (the arms, mini): the Task 1 winning cell with and without the landing,
-        mirrored, the three answers; readings: the submit gap (the copy's 0.12 per
-        adopted expert should leave it), `prefetch_late` (should go to zero),
-        `prefetch_evicted_unused`, the hit rate, tok/s.
-  - [ ] Step 5 (the rule): real and free flips the default to the landing; a null
-        lands the knob at its measured default.
+        1.2 to 1.5 ms. So the landing as first designed nets 0.3 to 0.6 ms per token
+        before the late join, about +1 to +2 % in all. The fork was Davor's call:
+        (i) the landing as designed; (ii) the adoption by GPU blit from the ring's
+        buffer (no host copy, no speculative eviction); (iii) a buffer swap under the
+        per-slot cache layout, which v9 measured a loss (the per-slot to pool flip
+        halved the all-hit gap, 32.6 to 16.7 ms per token, Metal residency over about
+        3,400 slot buffers). **Ruled (ii)**; an index swap inside one slab is the
+        swap done properly and a later refinement.
+  - [x] Step 1 (tests RED first): the streamer's blit adoption (a plan with an
+        adoptable expert reserves its slot `loading` with the bytes untouched, lists
+        it in `adopted`, excludes it from the resident sweep until
+        `finalizeAdoptedSlots` marks it resident under the generation guard, and
+        `failAdoptedSlots` empties it); the adoption transfer (a Metal blit from
+        tagged source buffers into slab regions lands the bytes, an out-of-bounds
+        range throws before encoding, `release` runs once); the operation's bounded
+        wait (true when finished before the deadline from another thread, false at
+        the deadline); the ring's join (an in-flight prediction finishing within the
+        budget is adopted and counted `joined`, one that does not is `late`);
+        `RuntimePrefetch.adoption` (`copy` | `blit`) and `joinMicros` (0 to 2000)
+        fail-closed with the banner's `adopt=` and `join_us=` fields.
+  - [x] Step 2 (the code): the streamer's `PrefetchAdoption` (`hostCopy` /
+        `gpuBlit`) through the model's plan entry point, the finalize and fail paths
+        beside the Metal staging ones; `PrefetchAdoptionTransfer` built by the runner
+        from the ring's buffers and the plan's expert views, encoded at the head of
+        the fixup command, carried on the pending command, finalized and released
+        when it finishes (and failed on every early exit); the ring's slots released
+        at that point in blit mode; the bounded join in `readyBuffers`; the knobs in
+        both binaries and the banner; `prefetch_joined` and `prefetch_blit_experts`
+        on the runner line and in `tools/decode-rows.py`. Four gates; the filtered
+        sanitizer pass.
+  - [x] Step 3 (numerics): golden IDENTICAL on both boxes and both profiles at
+        `copy` and `blit`, join off and on, plus `speculative-validate` on the M4 Pro.
+        **DONE 2026-09-07:** copy, blit, blit with the join at 400 µs and off on the
+        mini; those plus blit under `speculative-validate` on the M4 Pro; the filtered
+        sanitizer pass 57 tests, no report.
+  - [x] Step 4 (the arms, mini): Task 1's default (copy, no join) against blit,
+        against blit with the join, mirrored per shape; readings: the submit gap
+        (the copy's 0.12 per adopted expert should leave it), the miss window,
+        `prefetch_late` and `prefetch_joined`, the fixup's GPU time (the blit),
+        tok/s, the follow-ups as controls. **DONE 2026-09-07, 18 lifetimes, every
+        answer identical** (`~/.claude/handoffs/archive/shrike-v15-t2/t2-arms-summary.md`):
+
+        | cell | card tok/s | the 300 | the 1k | submit gap ms per token | late / joined per token |
+        | --- | ---: | ---: | ---: | --- | --- |
+        | copy (Task 1's default) | 14.65 / 14.61 | 15.44 / 15.44 | 15.41 / 15.44 | 4.19 / 3.64 / 3.38 | 0.5 / 0 |
+        | blit | 15.08 / 15.10 (+3.2 %) | 15.89 / 15.76 (+2.5 %) | 15.38 / 15.63 (+0.5 %) | 2.48 / 2.5 to 2.7 / 2.4 to 2.5 | 0.6 to 0.8 / 0 |
+        | blit, join 400 µs | 15.17 / 14.87 (+2.7 %) | 16.03 / 16.06 (+3.9 %) | 15.73 / 15.72 (+1.9 %) | 2.5 to 2.7 | 0.00 / 0.6 to 0.9 |
+
+        The blit takes the copy out of the submit gap on every shape (1.7 / 1.2 / 1.0
+        ms per token); the join catches every late prediction and lifts adoption by
+        0.4 to 0.8 per token. Under the blit the gap block's miss window no longer
+        measures the GPU's idle time (the command starts with the blit ahead of its
+        event wait), so the wall and tok/s are the verdict: 68.6 to 66.2 / 64.9 to
+        62.5 / 65.0 to 63.7 ms per token from copy to blit with the join.
+  - [x] Step 5 (the rule): real and free flips the defaults to blit and the winning
+        join bound; a null lands the knobs at their measured defaults. **DONE
+        2026-09-07:** blit with the join is real (both orders on all three shapes,
+        +3.6 / +1.8, +3.8 / +4.0, +2.1 / +1.8 % against a drift of −0.2 / 0.0 / +0.2)
+        and free (the follow-ups unmoved, golden identical everywhere): the defaults
+        are `adopt=blit join_us=400`; `SHRIKE_PREFETCH_ADOPT=copy` and
+        `SHRIKE_PREFETCH_JOIN_US=0` are the A/Bs.
   - [ ] Step 6 (design doc, review).
 
 ### Task 3: the fused probe
@@ -378,6 +429,33 @@ the probe's sleeping host). The design doc carries the tables and the placement 
 
 ## Candidate tasks (not scheduled)
 
+- **The two-distance queue (SCHEDULED as a step zero after Task 2 lands; Davor's
+  ruling 2026-09-07 ≈ 01:50 on a peer session's proposal, "agreed with your
+  recommendations").** The proposal's diagnosis holds on the deployed default's own
+  counters: per token on the card the ring issues 20.2 predictions, adopts 10.0 and
+  refuses 15.0 for want of the one read in flight, and the refused ones are mostly
+  layer L + 1's further absent experts, which no placement can serve inside the
+  0.9 ms lead a read has before L + 1's plan (Task 1's B = 2 arm measured exactly
+  that); the idle half of every window can only be spent on layers further ahead.
+  The proposal's forecast, the previous token's route, is measured dead in the record
+  (`docs/architecture.md`, "What the proof disproves": 0.00 % of misses at 16 and
+  128 slots, the predictable set and the miss set disjoint by construction), so it is
+  not run. What survives is a queue fed by the router probe at distances 1 and 2 (the
+  corrected probe's distance-2 coverage 0.34 to 0.37 at precision 0.29 to 0.34, Task 1
+  Step 6): a window with nothing useful for L + 1 serves L + 2's prediction with
+  2.6 ms of lead, and under Task 2's blit a wrong one costs a ring slot and drive time
+  the placement rule already makes free. **The step zero, zero runtime code, on T1's
+  archived captures:** (i) join the distance-1 and distance-2 captures by position and
+  target layer and report the union's full-layer coverage and precision per layer
+  against 0.46 / 0.47; (ii) price the queue with the replay tool's fill hook (a
+  target's fill from the d1 line at T − 1 or the d2 line at T − 2, one per window)
+  against Task 1's modelled 4309 / 6261 / 7666 misses. **The named stop:** a union
+  coverage near 0.46 or misses near 4309 means the chapter proceeds as written. If it
+  survives, it is a task with a bounded prize (the misses the current mechanism
+  cannot reach, about 20 per token) and Task 3 becomes "fuse both distances into one
+  dispatch". A smaller separate item from the same proposal, the token-boundary window
+  (the head and sampling, about 5 ms of idle drive, spent on layers 0 to 4 if their
+  routes follow from the sampled token), is priced later.
 - **(e) Deeper lookahead.** The "drive never idles" ceiling (18.3 tok/s on the cold
   card, 22 with the other gaps) needs reads two or more layers ahead; T1's
   distance-2 coverage was measured on the mis-scaled probe and Task 1 Step 6

@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Shrike
 
@@ -350,21 +351,34 @@ import Testing
 
     @Test func prefillGapLeversDescriptionReportsThePrefetchInEffect() {
         let on = RuntimePrefetch(enabled: true, topM: 8, inFlight: 2, placement: .beside,
-                                 distance: 2, tracePath: nil)
+                                 distance: 2, tracePath: nil, adoption: .blit, joinMicros: 400)
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
             sweepMode: .fixed, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1,
             prefetch: on, prefetchTopM: 8)
             == "overlap=on residency=set allocations=24 sweep=fixed cache_layout=pool"
                 + " expert_io=threads=4 batch_depth=1 protect=chunk spec_phase1=all-hit router_wake=word"
-                + " prefetch=on top_m=8 inflight=2 placement=beside distance=2")
+                + " prefetch=on top_m=8 inflight=2 placement=beside distance=2 adopt=blit join_us=400")
         let architectureTopM = RuntimePrefetch(enabled: true, topM: nil, inFlight: 1,
                                                placement: .after, distance: 1, tracePath: nil)
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
             sweepMode: .fixed, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1,
             prefetch: architectureTopM, prefetchTopM: 4)
-            .hasSuffix(" prefetch=on top_m=4 inflight=1 placement=after distance=1"))
+            .hasSuffix(" prefetch=on top_m=4 inflight=1 placement=after distance=1 adopt=blit join_us=400"))
+    }
+
+    @Test func prefetchTraceOpensFailClosed() throws {
+        #expect(try RealForwardRunner.openPrefetchTrace(nil) == -1)
+        #expect(throws: RuntimeConfigurationError.self) {
+            try RealForwardRunner.openPrefetchTrace("/nonexistent-\(UUID().uuidString)/prefetch.jsonl")
+        }
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("prefetch-\(UUID().uuidString).jsonl").path
+        let descriptor = try RealForwardRunner.openPrefetchTrace(path)
+        #expect(descriptor >= 0)
+        close(descriptor)
+        try FileManager.default.removeItem(atPath: path)
     }
 
     @Test func sweepModeParsesItsFiveValuesAndFailsClosed() throws {

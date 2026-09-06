@@ -26,7 +26,7 @@ RUNNER = ["expert_hit_rate_decode", "expert_misses_decode", "hit_fixup_layers", 
           "io_fixup_wake_ms", "io_fetch_ms", "io_hidden_pct", "cache_plan_ms",
           "prefetch_begin_ms", "prefetch_issued", "prefetch_adopted", "prefetch_reclaimed",
           "prefetch_deferred", "prefetch_overlapped", "prefetch_late", "prefetch_refused",
-          "prefetch_hook_failed",
+          "prefetch_joined", "prefetch_blit_experts", "prefetch_hook_failed",
           "router_readback_ms", "path_pin_ms", "path_submit_ms", "path_argbuf_ms",
           "path_hit_encode_ms", "path_fixup_build_ms", "path_hit_commit_to_kernel_ms",
           "path_hit_kernel_to_gpu_ms", "path_fixup_commit_to_kernel_ms", "path_router_wake_ms",
@@ -107,7 +107,12 @@ for block in blocks:
     if runner["prefetch_issued"] is not None:
         print(f"    prefetch: begin_ms={fmt(runner['prefetch_begin_ms'])} "
               f"issued={fmt(runner['prefetch_issued'], 0)} adopted={fmt(runner['prefetch_adopted'], 0)} "
-              f"reclaimed={fmt(runner['prefetch_reclaimed'], 0)}")
+              f"reclaimed={fmt(runner['prefetch_reclaimed'], 0)} "
+              f"late={fmt(runner['prefetch_late'], 0)} joined={fmt(runner['prefetch_joined'], 0)} "
+              f"refused={fmt(runner['prefetch_refused'], 0)} deferred={fmt(runner['prefetch_deferred'], 0)} "
+              f"overlapped={fmt(runner['prefetch_overlapped'], 0)} "
+              f"blit_experts={fmt(runner['prefetch_blit_experts'], 0)} "
+              f"hook_failed={fmt(runner['prefetch_hook_failed'], 0)}")
 
 for path in token_paths:
     arrivals = [t[1] for t in json.load(open(path))["tokens"]]

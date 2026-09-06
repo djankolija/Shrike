@@ -109,7 +109,7 @@ import Testing
         #expect(try RuntimePrefetch.environmentValue([:]) == .production)
         #expect(RuntimePrefetch.production
             == RuntimePrefetch(enabled: true, topM: nil, inFlight: 1, placement: .after,
-                               distance: 1, tracePath: nil))
+                               distance: 1, tracePath: nil, adoption: .blit, joinMicros: 400))
         #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREDICTIVE_PREFETCH": "0"]) == .off)
         #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREDICTIVE_PREFETCH": "1"]) == .production)
         #expect(try RuntimePrefetch.environmentValue([
@@ -122,6 +122,14 @@ import Testing
         ]) == RuntimePrefetch(enabled: true, topM: 8, inFlight: 2, placement: .beside,
                               distance: 2, tracePath: "/tmp/prefetch.jsonl"))
         #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREFETCH_TRACE": ""]).tracePath == nil)
+        #expect(RuntimePrefetch.production.adoption == .blit)
+        #expect(RuntimePrefetch.production.joinMicros == 400)
+        let copyUnjoined = try RuntimePrefetch.environmentValue([
+            "SHRIKE_PREFETCH_ADOPT": "copy", "SHRIKE_PREFETCH_JOIN_US": "0",
+        ])
+        #expect(copyUnjoined.adoption == .copy)
+        #expect(copyUnjoined.joinMicros == 0)
+        #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREFETCH_JOIN_US": "250"]).joinMicros == 250)
         let bad: [[String: String]] = [
             ["SHRIKE_PREDICTIVE_PREFETCH": "yes"],
             ["SHRIKE_PREFETCH_TOP_M": "0"],
@@ -131,6 +139,10 @@ import Testing
             ["SHRIKE_PREFETCH_PLACEMENT": "typo"],
             ["SHRIKE_PREFETCH_PROBE_DISTANCE": "0"],
             ["SHRIKE_PREFETCH_PROBE_DISTANCE": "far"],
+            ["SHRIKE_PREFETCH_ADOPT": "memcpy"],
+            ["SHRIKE_PREFETCH_JOIN_US": "-1"],
+            ["SHRIKE_PREFETCH_JOIN_US": "2001"],
+            ["SHRIKE_PREFETCH_JOIN_US": "soon"],
         ]
         for environment in bad {
             #expect(throws: RuntimeConfigurationError.self) {

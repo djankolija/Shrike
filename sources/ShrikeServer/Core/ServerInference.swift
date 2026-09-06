@@ -453,6 +453,8 @@ private struct RunnerCounterSnapshot {
     let prefetchOverlapped: UInt64
     let prefetchLate: UInt64
     let prefetchRefused: UInt64
+    let prefetchJoined: UInt64
+    let prefetchBlitExperts: UInt64
     let prefetchHookFailures: UInt64
     let pathPin: UInt64
     let pathSubmit: UInt64
@@ -1146,6 +1148,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             prefetchOverlapped: runner.prefetchStatistics.overlapped,
             prefetchLate: runner.prefetchStatistics.late,
             prefetchRefused: runner.prefetchStatistics.refused,
+            prefetchJoined: runner.prefetchStatistics.joined,
+            prefetchBlitExperts: runner.totalPrefetchBlitExperts,
             prefetchHookFailures: runner.prefetchStatistics.hookFailures,
             pathPin: runner.totalRoutedPinNanos,
             pathSubmit: runner.totalRoutedSubmitNanos,
@@ -2038,7 +2042,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "router_readback_ms=%.4f cache_plan_ms=%.4f prefetch_begin_ms=%.4f "
                 + "prefetch_issued=%llu prefetch_adopted=%llu prefetch_reclaimed=%llu "
                 + "prefetch_deferred=%llu prefetch_overlapped=%llu prefetch_late=%llu "
-                + "prefetch_refused=%llu prefetch_hook_failed=%llu "
+                + "prefetch_refused=%llu prefetch_joined=%llu prefetch_blit_experts=%llu "
+                + "prefetch_hook_failed=%llu "
                 + "path_pin_ms=%.4f path_submit_ms=%.4f path_argbuf_ms=%.4f "
                 + "path_hit_encode_ms=%.4f path_fixup_build_ms=%.4f "
                 + "path_hit_commit_to_kernel_ms=%.4f path_hit_kernel_to_gpu_ms=%.4f "
@@ -2082,6 +2087,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             runner.prefetchStatistics.overlapped - snapshot.prefetchOverlapped,
             runner.prefetchStatistics.late - snapshot.prefetchLate,
             runner.prefetchStatistics.refused - snapshot.prefetchRefused,
+            runner.prefetchStatistics.joined - snapshot.prefetchJoined,
+            runner.totalPrefetchBlitExperts - snapshot.prefetchBlitExperts,
             runner.prefetchStatistics.hookFailures - snapshot.prefetchHookFailures,
             ms(runner.totalRoutedPinNanos, snapshot.pathPin),
             ms(runner.totalRoutedSubmitNanos, snapshot.pathSubmit),

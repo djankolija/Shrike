@@ -5,7 +5,8 @@ import Metal
 /// line: `deferred` batches were issued from a demand batch's completion,
 /// `overlapped` demand batches were submitted with a ring read in flight,
 /// `late` predictions were still in flight when the exact route asked for
-/// them, `refused` predictions found no budget or slot.
+/// them, `refused` predictions found no budget or slot, `joined` predictions
+/// were in flight and finished inside the join budget.
 public struct ExpertPrefetchStatistics: Sendable, Equatable {
     public var issued: UInt64 = 0
     public var adopted: UInt64 = 0
@@ -13,6 +14,7 @@ public struct ExpertPrefetchStatistics: Sendable, Equatable {
     public var deferred: UInt64 = 0
     public var overlapped: UInt64 = 0
     public var late: UInt64 = 0
+    public var joined: UInt64 = 0
     public var refused: UInt64 = 0
     public var hookFailures: UInt64 = 0
     public var beginNanos: UInt64 = 0
@@ -148,19 +150,31 @@ final class ExpertPrefetchRing: @unchecked Sendable {
         }
     }
 
-    /// Completed raw bytes for one exact route, leased until `consume`.
-    /// In-flight reads are not awaited: a demand miss remains authoritative
-    /// and may start immediately.
-    func readyBuffers(layer: Int, experts: [Int]) -> [Int: MTLBuffer] {
+    /// Completed raw bytes for one exact route, leased until `consume`. A
+    /// requested prediction still in flight is awaited up to `joinNanos` (one
+    /// deadline for all of them); past it the demand miss stays authoritative.
+    func readyBuffers(layer: Int, experts: [Int], joinNanos: UInt64 = 0) -> [Int: MTLBuffer] {
         let requested = Set(experts)
+        let deadline = joinNanos > 0 ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + joinNanos : 0
         lock.lock()
         defer { lock.unlock() }
         var result: [Int: MTLBuffer] = [:]
+        var joinedOperations: Set<ObjectIdentifier> = []
         for index in slots.indices where slots[index].layer == layer
             && requested.contains(slots[index].expert) {
-            if slots[index].operation?.state == .completed {
+            if deadline > 0, slots[index].isInFlight, let operation = slots[index].operation {
+                lock.unlock()
+                let joined = operation.wait(untilNanos: deadline)
+                lock.lock()
+                if joined { joinedOperations.insert(ObjectIdentifier(operation)) }
+                guard slots[index].layer == layer, requested.contains(slots[index].expert) else {
+                    continue
+                }
+            }
+            if let operation = slots[index].operation, operation.state == .completed {
                 result[slots[index].expert] = slots[index].buffer
                 slots[index].leased = true
+                if joinedOperations.contains(ObjectIdentifier(operation)) { stats.joined &+= 1 }
             } else if slots[index].isInFlight {
                 stats.late &+= 1
             }
@@ -168,7 +182,7 @@ final class ExpertPrefetchRing: @unchecked Sendable {
         return result
     }
 
-    func consume(layer: Int, experts: Set<Int>) {
+    func consume(layer: Int, experts: Set<Int>, adopted: Bool = true) {
         lock.lock()
         defer { lock.unlock() }
         for index in slots.indices where slots[index].layer == layer
@@ -177,7 +191,16 @@ final class ExpertPrefetchRing: @unchecked Sendable {
             slots[index].expert = -1
             slots[index].operation = nil
             slots[index].leased = false
-            stats.adopted &+= 1
+            if adopted { stats.adopted &+= 1 }
+        }
+    }
+
+    func unlease(layer: Int, experts: Set<Int>) {
+        lock.withLock {
+            for index in slots.indices where slots[index].layer == layer
+                && experts.contains(slots[index].expert) {
+                slots[index].leased = false
+            }
         }
     }
 
