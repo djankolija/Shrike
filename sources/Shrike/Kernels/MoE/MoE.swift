@@ -332,6 +332,14 @@ final class MoE {
     static let specPhase2ArgsOffset = MemoryLayout<UInt32>.stride * 3
     static let specTailArgsOffset = MemoryLayout<UInt32>.stride * 6
 
+    /// The classifier's tagged copy of the host's readback; `RouterHostReadback` gives the layout.
+    struct RouterHostReadbackArguments {
+        let buffer: MTLBuffer
+        let tag: UInt32
+        let topKWeights: MTLBuffer
+        let predictedIndices: MTLBuffer
+    }
+
     func encodeResidencyClassification(
         commandBuffer: MTLCommandBuffer,
         topKIndices: MTLBuffer,
@@ -346,7 +354,8 @@ final class MoE {
         topK: UInt32,
         numExperts: UInt32,
         speculative: SpeculativeDispatchArguments? = nil,
-        phase1Hits: Bool = false
+        phase1Hits: Bool = false,
+        hostReadback: RouterHostReadbackArguments? = nil
     ) throws {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
@@ -359,7 +368,8 @@ final class MoE {
             missExperts: missExperts, resolvedSlots: resolvedSlots,
             resolvedGenerations: resolvedGenerations,
             topK: topK, numExperts: numExperts,
-            speculative: speculative, phase1Hits: phase1Hits)
+            speculative: speculative, phase1Hits: phase1Hits,
+            hostReadback: hostReadback)
         encoder.endEncoding()
     }
 
@@ -377,11 +387,19 @@ final class MoE {
         topK: UInt32,
         numExperts: UInt32,
         speculative: SpeculativeDispatchArguments? = nil,
-        phase1Hits: Bool = false
+        phase1Hits: Bool = false,
+        hostReadback: RouterHostReadbackArguments? = nil
     ) {
         precondition(topK <= UInt32(Self.maxStreamedExperts))
         if let speculative {
             precondition(speculative.arguments.length >= Self.specDispatchArgsLength)
+        }
+        if let hostReadback {
+            precondition(hostReadback.tag != 0)
+            precondition(hostReadback.buffer.length
+                >= RouterHostReadback.wordCount(topK: Int(topK)) * MemoryLayout<UInt32>.stride)
+            precondition(hostReadback.topKWeights.length >= Int(topK) * MemoryLayout<UInt16>.stride)
+            precondition(hostReadback.predictedIndices.length >= Int(topK) * MemoryLayout<UInt32>.stride)
         }
         var topKValue = topK
         var expertCount = numExperts
@@ -415,6 +433,13 @@ final class MoE {
             var hitsFlag: UInt32 = phase1Hits ? 1 : 0
             encoder.setBytes(&hitsFlag, length: MemoryLayout<UInt32>.stride, index: 13)
         }
+        // A zero tag tells the kernel there is no copy to write; the bindings
+        // stay valid either way.
+        var readbackTag = hostReadback?.tag ?? 0
+        encoder.setBuffer(hostReadback?.buffer ?? topKIndices, offset: 0, index: 14)
+        encoder.setBytes(&readbackTag, length: MemoryLayout<UInt32>.stride, index: 15)
+        encoder.setBuffer(hostReadback?.topKWeights ?? topKIndices, offset: 0, index: 16)
+        encoder.setBuffer(hostReadback?.predictedIndices ?? topKIndices, offset: 0, index: 17)
         encoder.dispatchThreadgroups(
             MTLSize(width: 1, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))

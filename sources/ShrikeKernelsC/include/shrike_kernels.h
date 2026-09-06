@@ -6,6 +6,7 @@
 
 // Re-exported so the Swift module surfaces every C entry point.
 #include "shrike_expert_io.h"
+#include "shrike_atomics.h"
 
 /// `out[r] = sum_i (q[r][i] * scale[r][g(i)] + bias[r][g(i)]) * x[i]`
 ///

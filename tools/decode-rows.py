@@ -27,7 +27,8 @@ RUNNER = ["expert_hit_rate_decode", "expert_misses_decode", "hit_fixup_layers", 
           "prefetch_begin_ms", "prefetch_issued", "prefetch_adopted", "prefetch_reclaimed",
           "router_readback_ms", "path_pin_ms", "path_submit_ms", "path_argbuf_ms",
           "path_hit_encode_ms", "path_fixup_build_ms", "path_hit_commit_to_kernel_ms",
-          "path_hit_kernel_to_gpu_ms", "path_fixup_commit_to_kernel_ms", "path_router_wake_ms"]
+          "path_hit_kernel_to_gpu_ms", "path_fixup_commit_to_kernel_ms", "path_router_wake_ms",
+          "path_router_wake_fallbacks"]
 
 
 def grab(pattern, text, cast=float):
@@ -54,7 +55,7 @@ def fmt(value, digits=3):
 
 log_path, token_paths = sys.argv[1], sys.argv[2:]
 lines = open(log_path, errors="ignore").read().splitlines()
-levers = next((m.group(0)[:160] for ln in lines
+levers = next((m.group(0) for ln in lines
                if (m := re.search(r"prefill_gap_levers=(\S+(?: \S+=\S+)*)", ln))), None)
 print(f"== {log_path.rsplit('/', 1)[-1]}  [{levers}]")
 
@@ -93,6 +94,7 @@ for block in blocks:
           f"submit_ms/tok={fmt_gap(gaps['submit'], completion)}")
     if runner["path_pin_ms"] is not None:
         print(f"    path: router_wake={fmt(runner['path_router_wake_ms'])} "
+              f"wake_fallbacks={fmt(runner['path_router_wake_fallbacks'], 0)} "
               f"readback={fmt(runner['router_readback_ms'])} plan={fmt(runner['cache_plan_ms'])} "
               f"pin={fmt(runner['path_pin_ms'])} submit={fmt(runner['path_submit_ms'])} "
               f"argbuf={fmt(runner['path_argbuf_ms'])} hit_encode={fmt(runner['path_hit_encode_ms'])} "

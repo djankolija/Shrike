@@ -154,6 +154,36 @@ static inline uint moe_classify_residency_body(
     return misses;
 }
 
+/// The host's readback as words tagged with the layer's sequence (high 16
+/// bits), so a host polling this copy can trust each word before the command
+/// is marked complete. Layout per RouterHostReadback: the two counts, then the
+/// ids, weight bits, hit positions, miss positions and predicted ids, top_k
+/// each. A zero tag skips the copy.
+static inline void moe_publish_router_readback(
+    device uint* out,
+    uint tag,
+    device const uint* topk_indices,
+    device const half* topk_weights,
+    device const uint* predicted_indices,
+    device const uint* hit_positions,
+    device const uint* miss_positions,
+    uint misses,
+    uint top_k,
+    uint num_experts) {
+    if (tag == 0u) return;
+    const uint hits = top_k - misses;
+    const uint t = tag << 16;
+    out[0] = t | hits;
+    out[1] = t | misses;
+    for (uint i = 0; i < top_k; ++i) {
+        out[2 + i] = t | min(topk_indices[i], num_experts - 1u);
+        out[2 + top_k + i] = t | uint(as_type<ushort>(topk_weights[i]));
+        out[2 + 2 * top_k + i] = t | (i < hits ? hit_positions[i] : 0u);
+        out[2 + 3 * top_k + i] = t | (i < misses ? miss_positions[i] : 0u);
+        out[2 + 4 * top_k + i] = t | (predicted_indices[i] & 0xffffu);
+    }
+}
+
 kernel void moe_classify_expert_residency(
     device const uint* topk_indices [[buffer(0)]],
     device const ExpertResidencyGPU* residency [[buffer(1)]],
@@ -166,12 +196,19 @@ kernel void moe_classify_expert_residency(
     device ulong* resolved_generations [[buffer(8)]],
     constant uint& top_k [[buffer(9)]],
     constant uint& num_experts [[buffer(10)]],
+    device uint* host_readback [[buffer(14)]],
+    constant uint& host_readback_tag [[buffer(15)]],
+    device const half* topk_weights [[buffer(16)]],
+    device const uint* predicted_indices [[buffer(17)]],
     uint lane [[thread_index_in_threadgroup]]) {
     if (lane != 0) return;
-    moe_classify_residency_body(
+    const uint misses = moe_classify_residency_body(
         topk_indices, residency, hit_count, hit_positions,
         miss_count, miss_positions, miss_experts,
         resolved_slots, resolved_generations, top_k, num_experts);
+    moe_publish_router_readback(
+        host_readback, host_readback_tag, topk_indices, topk_weights,
+        predicted_indices, hit_positions, miss_positions, misses, top_k, num_experts);
 }
 
 /// v9 speculative dispatch: additionally publishes indirect dispatch
@@ -193,6 +230,10 @@ kernel void moe_classify_expert_residency_spec(
     constant MoESpecDispatchArgs& spec_full_grids [[buffer(11)]],
     device MoESpecDispatchArgs* spec_args [[buffer(12)]],
     constant uint& spec_phase1_hits [[buffer(13)]],
+    device uint* host_readback [[buffer(14)]],
+    constant uint& host_readback_tag [[buffer(15)]],
+    device const half* topk_weights [[buffer(16)]],
+    device const uint* predicted_indices [[buffer(17)]],
     uint lane [[thread_index_in_threadgroup]]) {
     if (lane != 0) return;
     const uint misses = moe_classify_residency_body(
@@ -212,6 +253,9 @@ kernel void moe_classify_expert_residency_spec(
         spec_args->tail_threadgroups[i] = all_hit
             ? spec_full_grids.tail_threadgroups[i] : zero_grid;
     }
+    moe_publish_router_readback(
+        host_readback, host_readback_tag, topk_indices, topk_weights,
+        predicted_indices, hit_positions, miss_positions, misses, top_k, num_experts);
 }
 
 static inline float moe_hidden_activation(float x) {

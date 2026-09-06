@@ -458,6 +458,7 @@ private struct RunnerCounterSnapshot {
     let pathHitKernelToGPU: UInt64
     let pathFixupCommitToKernel: UInt64
     let pathRouterWake: UInt64
+    let pathRouterWakeFallbacks: UInt64
     let ioQueue: UInt64
     let ioCompletionToFixup: UInt64
     let ioHostWaits: UInt64
@@ -675,7 +676,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             decodeExpertExecution: try RuntimeDecodeExpertExecution.environmentValue(),
             expertIOSynchronization: try RuntimeExpertIOSynchronization.environmentValue(),
             expertIOSubmission: try RuntimeExpertIOSubmission.environmentValue(),
-            specPhase1Coverage: try RuntimeSpecPhase1Coverage.environmentValue())
+            specPhase1Coverage: try RuntimeSpecPhase1Coverage.environmentValue(),
+            routerWake: try RuntimeRouterWake.environmentValue())
         let slotOverride = ProcessInfo.processInfo.environment["SHRIKE_EXPERT_CACHE_SLOTS"]
             .flatMap(Int.init)
         // Precedence: --expert-cache-slots flag, then the env override, then a
@@ -732,6 +734,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             expertIOSynchronization: loadRuntime.expertIOSynchronization,
             expertIOSubmission: loadRuntime.expertIOSubmission,
             specPhase1Coverage: loadRuntime.specPhase1Coverage,
+            routerWake: loadRuntime.routerWake,
             kvCachePrecision: kvCachePrecision,
             ropeScalingMode: ropeScalingMode,
             yarnContextTokens: ropeScalingMode == .yarn
@@ -1141,6 +1144,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             pathHitKernelToGPU: runner.totalHitKernelToGPUNanos,
             pathFixupCommitToKernel: runner.totalFixupCommitToKernelNanos,
             pathRouterWake: runner.totalRouterWakeNanos,
+            pathRouterWakeFallbacks: runner.totalRouterWakeFallbacks,
             ioQueue: runner.totalIOQueueNanos,
             ioCompletionToFixup: runner.totalIOCompletionToFixupSubmitNanos,
             ioHostWaits: runner.totalExpertIOHostWaits,
@@ -2025,6 +2029,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "path_hit_encode_ms=%.4f path_fixup_build_ms=%.4f "
                 + "path_hit_commit_to_kernel_ms=%.4f path_hit_kernel_to_gpu_ms=%.4f "
                 + "path_fixup_commit_to_kernel_ms=%.4f path_router_wake_ms=%.4f "
+                + "path_router_wake_fallbacks=%llu "
                 + "io_queue_ms=%.4f "
                 + "io_load_ms=%.4f io_fetch_ms=%.4f io_fixup_wake_ms=%.4f "
                 + "io_completion_to_fixup_ms=%.4f io_host_waits=%llu "
@@ -2068,6 +2073,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             ms(runner.totalHitKernelToGPUNanos, snapshot.pathHitKernelToGPU),
             ms(runner.totalFixupCommitToKernelNanos, snapshot.pathFixupCommitToKernel),
             ms(runner.totalRouterWakeNanos, snapshot.pathRouterWake),
+            runner.totalRouterWakeFallbacks - snapshot.pathRouterWakeFallbacks,
             ms(runner.totalIOQueueNanos, snapshot.ioQueue),
             Double(expert.totalLoadNanos) / Double(tokens) / 1_000_000,
             Double(expert.fetchNanos) / Double(tokens) / 1_000_000,

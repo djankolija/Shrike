@@ -650,7 +650,7 @@ moved under `tools/` by the first task that needs it in the tree).
         direction (the runtime's `moe_io_ready` guard relies on it after a command
         boundary, not during one); (D) the argument buffer reused like the fixup's,
         0.1, subsumed by A. Order: A, then B behind a probe, then C behind a probe.
-  - [ ] Step 2 (code, by measured size): lever A first, the hit split folded into the
+  - [x] Step 2 (code, by measured size): lever A first, the hit split folded into the
         speculative command (phase 1 for the GPU-classified hits on every layer, the
         fixup computing the misses and phase 2 as it does today; a knob; host tests
         RED first; golden identical on both boxes; the arms). Then lever B behind a
@@ -707,13 +707,59 @@ moved under `tools/` by the first task that needs it in the tree).
         kernel, the GPU-consumed buffers and the numerics untouched), since a plain
         flag reads a stale payload on the M1; the status wait stays as the deadline
         fallback. Lever B's build is the owner's call at this size.
-  - [ ] Step 3 (numerics): golden IDENTICAL on both boxes and both profiles at every
-        knob cell; a difference is a defect, never a recapture.
-  - [ ] Step 4 (the arms, the mini, one binary per round): the three answers as verdict
+        **Lever B LANDED as the default, a measured REAL AND FREE result** (2026-09-06,
+        the owner's go at 18:03, "every bit counts"; `SHRIKE_ROUTER_WAKE=word`, the
+        default, `status` the A/B override). The build: both residency classifier
+        kernels end by writing `moe_publish_router_readback`, a copy of everything the
+        host reads after a router (the hit and miss counts, the ids, the weight bits,
+        the hit and miss positions, the predicted ids) with the layer's tag in each
+        word's high 16 bits (`RouterHostReadback`, the tag cycling 1 to 0xffff per
+        encoded routed layer); in the residency modes the host reads that copy in
+        BOTH wake modes, so the default golden proves the copy bit for bit and the
+        word mode differs only in the wait: it polls `RouterHostReadback.isComplete`
+        (acquire loads through `shrike_load_acquire_u32`) and falls back to the
+        status wait after one second (`path_router_wake_fallbacks` on the runner
+        line); the bookkeeping that reads GPU stamps (the attention records, the
+        wake stamp, the previous routed command's spec record, fixup wake and
+        commit-to-kernel terms) moves to a deferred queue drained once the driver
+        marks the commands complete, the lease release and the storage wait staying
+        immediate; speculative-validate's cross-check stays immediate too (deferred
+        it compared the previous layer's spec scratch against the next layer's
+        classic scratch: the one golden failure of the build, L on the short profile,
+        fixed before the arms). Gates: build 0 warnings, lint (the baseline
+        regenerated for the five grown baselined functions; the runner's init at 121
+        lines decomposed instead), 1271 tests; golden IDENTICAL on the M4 Pro in six
+        cells (default, word, validate + word, then with the default flipped: word,
+        status, validate) and on the mini in four (default and word before the flip,
+        word and status after). **The arms (mini, 12 lifetimes, prod word word prod
+        per shape, the knob verified by the banner, every answer identical, zero
+        fallbacks), MEASURED: word against production +2.9 / +2.8 % on the card
+        (13.69 / 13.72 to 14.09 / 14.10 tok/s, the prod repeat +0.2 %), +3.1 / +3.4 %
+        on the 300 (14.28 / 14.34 to 14.71 / 14.83, +0.4 %), +3.5 / +3.7 % on the 1k
+        (14.51 / 14.42 to 15.01 / 14.96, −0.6 %); the router wake per token 6.3 to
+        6.5 down to 2.5 to 2.6 ms on all three (0.16 to 0.063 per layer), the submit
+        gap's host-late term 1.9 to 2.0 down to 0.22 (it was the wake), the fixup
+        wake and the miss window unmoved, the card's turns (1.39 to 1.40 / 1.47 to
+        1.48 s) and the warm second prompts (3.08 to 3.12, 5.90 to 5.97 s) unmoved,
+        memory pressure 91 % free before and after.** The sign holds on the three
+        answers in both orders: real; the controls and golden: free; the default
+        flipped before the commit. Archive `~/.claude/handoffs/archive/shrike-v14-t2/step2-leverB/`
+        (`t2-leverB-summary.md`, the twelve lifetimes, the golden logs, the drivers).
+        The word wake covers the residency modes (the classifier writes the copy);
+        the classic modes keep the status wait under either knob value.
+  - [x] Step 3 (numerics): golden IDENTICAL on both boxes and both profiles at every
+        knob cell; a difference is a defect, never a recapture. **DONE across levers A
+        and B** (A: three cells on each box; B: six on the M4 Pro, four on the mini);
+        B's one failure was a build defect fixed before the arms, never a recapture.
+  - [x] Step 4 (the arms, the mini, one binary per round): the three answers as verdict
         rows, the turns and the warm second prompts as controls, the gap block
-        attributing the saving to the window it was predicted to close.
-  - [ ] Step 5 (the rule): real and free applied in writing; defaults flipped by amend
-        if they pass, the knobs landed at their measured defaults either way.
+        attributing the saving to the window it was predicted to close. **DONE** (A's
+        12 lifetimes a null; B's 12 real, the saving in the router wake term, 4 ms per
+        token, and the submit gap's host-late term, where it was predicted).
+  - [x] Step 5 (the rule): real and free applied in writing; defaults flipped by amend
+        if they pass, the knobs landed at their measured defaults either way. **DONE**:
+        A landed at all-hit (a null), B flipped to word (real and free), C never built
+        (a measured negative at the probe).
   - [ ] Step 6 (design doc): the Task 2 section, the After T2 block, the lever entries.
         Task review by a fresh reviewer, fixes folded into the owning commits.
 

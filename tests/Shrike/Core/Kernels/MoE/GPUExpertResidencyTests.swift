@@ -11,6 +11,7 @@ import Testing
         let slots: [UInt32]
         let generations: [UInt64]
         var specArgs: [UInt32] = []
+        var hostReadback: RouterHostReadback?
     }
 
     private static let phase1FullGrid = MTLSize(width: 256, height: 1, depth: 1)
@@ -100,6 +101,34 @@ import Testing
         #expect(base.generations == result.generations)
     }
 
+    @Test(arguments: [false, true])
+    func classifierPublishesTheTaggedHostReadback(speculative: Bool) throws {
+        let url = try PreadExpertStreamerTests.writeSyntheticLayer()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let context = try MetalContext()
+        let streamer = try PreadExpertStreamer(
+            layout: PreadExpertStreamerTests.makeLayout(path: url.path),
+            device: context.device,
+            slotCount: 2)
+        let moe = try MoE(context: context,
+                          siluActivation: true,
+                          specializedD: 2048,
+                          specializedF: 512,
+                          specializedNumExperts: 4)
+        _ = try streamer.loadExpertsCached(experts: [0, 2])
+        let result = try classify([0, 1, 2, 3], streamer: streamer,
+                                  moe: moe, context: context,
+                                  speculative: speculative, readbackTag: 0x4d2)
+        #expect(result.hits == [0, 2])
+        #expect(result.hostReadback == RouterHostReadback(
+            hitCount: 2, missCount: 2,
+            expertIDs: [0, 1, 2, 3],
+            weightBits: [0x3800, 0x3400, 0x3000, 0x2c00],
+            hitPositions: [0, 2],
+            missPositions: [1, 3],
+            predictedIDs: [3, 2, 1, 0]))
+    }
+
     @Test func speculativePhase1GridFollowsThePartialHitKnob() throws {
         let url = try PreadExpertStreamerTests.writeSyntheticLayer()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -135,7 +164,8 @@ import Testing
                           moe: MoE,
                           context: MetalContext,
                           speculative: Bool = false,
-                          phase1Hits: Bool = false) throws -> Classification {
+                          phase1Hits: Bool = false,
+                          readbackTag: UInt32? = nil) throws -> Classification {
         func buffer<T>(_ values: [T]) -> MTLBuffer {
             values.withUnsafeBytes { bytes in
                 context.device.makeBuffer(
@@ -157,6 +187,12 @@ import Testing
             ? context.device.makeBuffer(length: MoE.specDispatchArgsLength,
                                         options: .storageModeShared)!
             : nil
+        let weights = buffer(Array([Float16(0.5), 0.25, 0.125, 0.0625].prefix(experts.count)))
+        let predicted = buffer(Array(experts.reversed()))
+        let readbackWords = readbackTag == nil ? nil : context.device.makeBuffer(
+            length: RouterHostReadback.wordCount(topK: experts.count)
+                * MemoryLayout<UInt32>.stride,
+            options: .storageModeShared)
         let commandBuffer = context.queue.makeCommandBuffer()!
         try moe.encodeResidencyClassification(
             commandBuffer: commandBuffer,
@@ -178,7 +214,12 @@ import Testing
                     phase2Threadgroups: Self.phase2FullGrid,
                     tailThreadgroups: Self.tailFullGrid)
             },
-            phase1Hits: phase1Hits)
+            phase1Hits: phase1Hits,
+            hostReadback: readbackTag.map {
+                MoE.RouterHostReadbackArguments(
+                    buffer: readbackWords!, tag: $0,
+                    topKWeights: weights, predictedIndices: predicted)
+            })
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         if let error = commandBuffer.error { throw error }
@@ -198,6 +239,13 @@ import Testing
             generations: values(generations, count: experts.count, as: UInt64.self),
             specArgs: specArgsBuffer.map {
                 values($0, count: 9, as: UInt32.self)
-            } ?? [])
+            } ?? [],
+            hostReadback: readbackWords.flatMap { words in
+                RouterHostReadback.decode(
+                    words: words.contents().bindMemory(
+                        to: UInt32.self,
+                        capacity: RouterHostReadback.wordCount(topK: experts.count)),
+                    topK: experts.count, tag: readbackTag!)
+            })
     }
 }

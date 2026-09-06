@@ -93,6 +93,27 @@ import Testing
         }
     }
 
+    @Test func routerWakeEnvironmentIsFailClosed() throws {
+        #expect(try RuntimeRouterWake.environmentValue([:]) == .word)
+        #expect(try RuntimeRouterWake.environmentValue([
+            "SHRIKE_ROUTER_WAKE": "status",
+        ]) == .status)
+        #expect(throws: RuntimeConfigurationError.self) {
+            try RuntimeRouterWake.environmentValue([
+                "SHRIKE_ROUTER_WAKE": "typo",
+            ])
+        }
+    }
+
+    @Test func configurationDefaultsMatchTheEnvironmentDefaults() throws {
+        #expect(RuntimeConfiguration.production.routerWake == .word)
+        #expect(RuntimeConfiguration.production.specPhase1Coverage == .allHit)
+        #expect(RuntimeConfiguration.production.routerWake
+            == (try RuntimeRouterWake.environmentValue([:])))
+        #expect(RuntimeConfiguration.production.specPhase1Coverage
+            == (try RuntimeSpecPhase1Coverage.environmentValue([:])))
+    }
+
     @Test func expertIOSynchronizationEnvironmentIsFailClosed() throws {
         #expect(try RuntimeExpertIOSynchronization.environmentValue([:]) == .event)
         #expect(try RuntimeExpertIOSynchronization.environmentValue([

@@ -82,6 +82,26 @@ public enum RuntimeSpecPhase1Coverage: String, Codable, Sendable {
     }
 }
 
+/// How the host learns that a routed layer's router has run: the residency
+/// classifier's tagged host readback polled directly (the default), or the
+/// command's completion mark, which the driver publishes later. The poll needs
+/// the spin host wait; under `SHRIKE_HOST_WAIT=wait` the status path's parked
+/// wait is taken instead.
+public enum RuntimeRouterWake: String, Codable, Sendable {
+    case status
+    case word
+
+    public static func environmentValue(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> RuntimeRouterWake {
+        guard let raw = environment["SHRIKE_ROUTER_WAKE"] else { return .word }
+        guard let value = RuntimeRouterWake(rawValue: raw) else {
+            throw RuntimeConfigurationError.invalidRouterWake(raw)
+        }
+        return value
+    }
+}
+
 public enum RuntimeExpertIOSubmission: String, Codable, Sendable {
     case deferred
     case immediate
@@ -125,6 +145,7 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
     case invalidExpertIOSynchronization(String)
     case invalidExpertIOSubmission(String)
     case invalidSpecPhase1Coverage(String)
+    case invalidRouterWake(String)
 
     public var description: String {
         switch self {
@@ -148,6 +169,8 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
             return "unsupported expert I/O submission '\(value)'; allowed: deferred, immediate"
         case .invalidSpecPhase1Coverage(let value):
             return "unsupported spec phase-1 coverage '\(value)'; allowed: all-hit, hits"
+        case .invalidRouterWake(let value):
+            return "unsupported router wake '\(value)'; allowed: status, word"
         }
     }
 }
@@ -249,6 +272,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let expertIOSynchronization: RuntimeExpertIOSynchronization
     public let expertIOSubmission: RuntimeExpertIOSubmission
     public let specPhase1Coverage: RuntimeSpecPhase1Coverage
+    public let routerWake: RuntimeRouterWake
     public let kvCachePrecision: KVCachePrecision
     public let ropeScalingMode: RuntimeRoPEScalingMode
     public let yarnContextTokens: Int
@@ -264,6 +288,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 expertIOSynchronization: RuntimeExpertIOSynchronization = .event,
                 expertIOSubmission: RuntimeExpertIOSubmission = .immediate,
                 specPhase1Coverage: RuntimeSpecPhase1Coverage = .allHit,
+                routerWake: RuntimeRouterWake = .word,
                 kvCachePrecision: KVCachePrecision = .int8,
                 ropeScalingMode: RuntimeRoPEScalingMode = .none,
                 yarnContextTokens: Int = RuntimeConfiguration.defaultYaRNContextTokens) throws {
@@ -287,6 +312,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.expertIOSynchronization = expertIOSynchronization
         self.expertIOSubmission = expertIOSubmission
         self.specPhase1Coverage = specPhase1Coverage
+        self.routerWake = routerWake
         self.kvCachePrecision = kvCachePrecision
         self.ropeScalingMode = ropeScalingMode
         self.yarnContextTokens = yarnContextTokens
