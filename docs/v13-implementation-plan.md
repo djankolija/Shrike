@@ -2012,7 +2012,7 @@ different kernels on a chunk.
 
 ### Task 5: T5 — the resident-first recency sweep
 
-- [ ] **T5: Task 4 left one lever measured and unlanded. `SHRIKE_PREFILL_SWEEP=recency`
+- [x] **T5: Task 4 left one lever measured and unlanded. `SHRIKE_PREFILL_SWEEP=recency`
   takes 0.6 to 0.8 s off the first turn's decode after a large prompt on the mini
   (−0.63 s on the 2k card, −0.72 s on the 300-token prompt, −0.72 s on the 1k,
   +3.2 to +3.9 % tok/s) and forfeits T0's carry benefit on every chunk that follows
@@ -2040,6 +2040,38 @@ different kernels on a chunk.
   `PrefillSweepMode` behind `SHRIKE_PREFILL_SWEEP=resident`, default `carry` in the
   commit, flipped by amend on the mini's verdict, either way
   ([v13-the-turn.md](v13-the-turn.md):640-658).**
+
+  **LANDED 3b30e64 (2026-09-06): the composition as drafted (three grouped blocks tiled
+  flat) kept every replayed miss gain on the box and was NOT free: round 1 of the arms
+  cost +29 / +56 ms on the follow-up turns, +130 ms on the 50-row turn after a long
+  answer and +0.64 s (+20 %) on the warm 305 after a long answer, with equal or fewer
+  misses, because sweeping every hit first leaves each layer's misses in pure-miss tiles at its
+  end, where an 8-expert fetch has one preceding tile's GPU to hide under; the replay
+  counts misses and cannot see exposure. Fix-up round 1 replaced it with the INTERLEAVED
+  composition (a pure-resident head only while the residents not yet swept exceed the
+  slots minus six tiles' worth of misses, so protection cannot starve inside the
+  three-tile avoiding window; then the absent experts in recency order spread uniformly
+  over the remaining tiles, the last tile holding the most recent; residents filling
+  each tile's free slots heaviest-first into the lightest tile; tiled flat), priced
+  offline first (misses at or below index on every trace, the modelled exposure below
+  index on every chunk) and landed in both the tool (`--sweep-order resident-first` with
+  `--sweep-head-factor` 6; the drafted order kept as `resident-first-grouped`, step
+  zero's as `resident-first-plain`) and the Swift. The tail knob
+  (`SHRIKE_PREFILL_SWEEP_TAIL`) no longer applies to the shipped mode: the interleave has
+  no tail group, the cold-pool fallback fixes its own tail at 96, and the residency line
+  prints `tail=` only under `recency`. Round 2: real on the first turn's
+  decode after a large prompt (the card's answer −0.71 s ×3, the 300 / 1k prompts'
+  answers −0.53 / −0.86 s; every miss count as replayed, the traced chain at delta ≤ 1)
+  AND on four of the five warm first turns after an answer (the 300 pair's warm −478 ms /
+  −14 %, the 1k pair's −578 ms / −9 %, the warm 305 / 1,085 after a long answer −80 /
+  −225 ms; the 2,125-row warm +0.5 %, within drift), a
+  second prize the replay could not predict (equal misses; the interleave hides the
+  fetch under the GPU better than the index order); the priced observation is the two
+  short follow-up turns' +13 to +16 ms (+1 %, at the drift band, ≈ 10 ms of it the route
+  build's host by the gap counters); 12k and the cold first requests within drift (the
+  cold prefill +0.4 % on three repeats, singles to +1.4 %, a row to measure).
+  `SHRIKE_PREFILL_SWEEP=resident` is the default; `carry` and `recency` the A/B. Golden
+  identical at the three cells on both boxes at every landed commit; gates 1246 / 1246.**
 
   **Step zero: two more captures, zero Swift code** (the controller, 2026-09-06; mini,
   the deployed 04d4de5 binary, bare launch so `sweep=carry protect=chunk` and
@@ -2123,7 +2155,9 @@ different kernels on a chunk.
      tie inside one tile. The row moves 427 to 708 across compositions that differ nowhere
      else. Read 12k on its prefill and its wall.
 
-  **Tile composition: three balanced groups, tiled flat.** Task 4's fix round 1 measured
+  **Tile composition, as drafted: three balanced groups, tiled flat** (overruled on the
+  box by round 1 of the arms; the landed interleave is in the LANDED paragraph and the
+  design doc's Task 5 section). Task 4's fix round 1 measured
   that an unbalanced order costs GPU (+0.47 s on a 2k prefill, gone once the head and tail
   were packed by row weight, [v13-the-turn.md](v13-the-turn.md):511-518), and the plain
   resident-first order is as unbalanced as `last-asc` (per-tile row-weight stdev 373
@@ -2215,7 +2249,9 @@ different kernels on a chunk.
     T4 table ([v13-the-turn.md](v13-the-turn.md):578-589): the 21-token follow-up
     1.385 s, the warm 300 / 1k / 2k first turns 3.454 / 6.385 / 10.287 s, 12k 68.209 s.
 
-  **The knob.** A **fifth `PrefillSweepMode` case, `resident`**, behind
+  **The knob, as drafted** (the tail knob's sharing and the printed `tail=` under
+  `resident` were overruled by fix-up 1; see LANDED)**.** A **fifth `PrefillSweepMode`
+  case, `resident`**, behind
   `SHRIKE_PREFILL_SWEEP=resident`, beside `recency` rather than replacing its body, so
   one binary runs `carry` (A), `resident` (B) and the already-measured `recency` (C) and
   the arms can show that B reproduces C's decode prize while C's losses are gone.
@@ -2229,7 +2265,9 @@ different kernels on a chunk.
   Default `carry` in the landed commit; the flip by amend on the verdict, Task 4's
   pattern.
 
-  **The order as a pure function.**
+  **The order as a pure function, as drafted** (superseded by fix-up 1's interleave, whose
+  signature is `residentFirstBalanced(rowsByExpert:lastRowByExpert:resident:slots:tileWidth:)`;
+  see LANDED)**.**
   `PrefillSweepOrder.residentFirstBalanced(rowsByExpert:lastRowByExpert:resident:tail:tileWidth:)
   -> [UInt32]` beside `recencyBalanced` (`PrefillMoEGrouping.swift:116`): rank the
   chunk's experts by last row ascending with ties by expert id (`recency`, `:103`);
@@ -2355,7 +2393,7 @@ different kernels on a chunk.
 
   Steps:
 
-  - [ ] Step 1 (the replay tool, its own commit as Task 4 kept its instrument): the
+  - [x] Step 1 (the replay tool, its own commit as Task 4 kept its instrument): the
         uncommitted `--sweep-order resident-first` in the tree today is the **plain**
         order, which is not what this task ships. Step 1 makes `resident-first` the
         shipped composition (three balanced groups, tiled flat) behind a new
@@ -2364,23 +2402,36 @@ different kernels on a chunk.
         `--self-test` (dataset 8c plus a composition dataset asserting the group order,
         the packing and the flat tile count), and reproduces every cell of the two tables
         above on the four archived traces. Gates 1 to 4.
-  - [ ] Step 2 (the Swift order behind the knob): tests RED first, then
+  - [x] Step 2 (the Swift order behind the knob): tests RED first, then
         `PrefillSweepOrder.residentFirstBalanced`, the residency snapshot and its scratch,
         the fifth mode with the renamed predicate and the printed field, the carry write.
         Default `carry` in the commit. Gates 1 to 4 on every amend.
-  - [ ] Step 3 (numerics): golden IDENTICAL on both profiles at `carry`, `resident` and
+  - [x] Step 3 (numerics): golden IDENTICAL on both profiles at `carry`, `resident` and
         `recency` on the M4 Pro at every amend, and on the mini at the default and the
         candidate cell at every amend and at all three cells at the landed commit.
-  - [ ] Step 4 (the arms on the mini, one binary): the rig above, `pgrep` and
+  - [x] Step 4 (the arms on the mini, one binary): the rig above, `pgrep` and
         `memory_pressure -Q` before every launch, production restored at the end. The
         traced `resident` chain replayed against the box before the verdict is written.
-  - [ ] Step 5 (the rule): real and free by the rows above → `resident` becomes the
+  - [x] Step 5 (the rule): real and free by the rows above → `resident` becomes the
         default by amend; real and not free → it lands as a knob beside `recency` and the
         cost is priced in the verdict, never hidden by a bar.
-  - [ ] Step 6 (docs): the design doc's Task 5 section, the After T5 table, the lever
+  - [x] Step 6 (docs): the design doc's Task 5 section, the After T5 table, the lever
         entries updated (the sweep-order entry closes), this plan's checkboxes, the
         Follow-ons entry retired. Task review by a fresh reviewer, fixes folded into the
         owning commit, re-review.
+
+  Landed, per step: Step 1 as 8b6d523 (the tool; first the drafted composition, then
+  fix-up 1's interleave by amend; the eight archived cells and the four fix-up
+  acceptance rows reproduced exactly; gates 1239 / 1239 then 1246 / 1246). Step 2 as
+  3b30e64 (the Swift; first the drafted composition, then the interleave by amend, then
+  the default flip by amend; PrefillMoEGrouping 34 / 34, PrefillRoutedTileScheduler
+  43 / 43; gates 1246 / 1246 on each amend). Step 3: golden identical at `carry`,
+  `resident` and `recency` on both boxes at each landed commit. Step 4: round 1
+  (stopped after the live, long-answer and 300-long-answer sections once the
+  clustering was priced) and round 2 (the full sequence; archived
+  `~/.claude/handoffs/archive/shrike-v13-t0/t5-out/round1/`, `round2/`). Step 5: real
+  and free by the rows above with the follow-up turns' +16 ms as the priced
+  observation; the default flipped by amend on Davor's ruling. Step 6: this commit.
 
   **Risks and what falsifies the model.**
   - **The snapshot's timing.** The replay reads residency from the pool's `slot_expert` at
@@ -2438,14 +2489,17 @@ different kernels on a chunk.
   decision) — **before the chapter merges to main**, in its own commit with its
   own golden pair, and first if any task edits `encodeRoutedMoEPrefill`'s loop
   before then (Task 1 review).
-- **The resident-first recency sweep** (Task 4's next step, a task of its own): the
-  chunk's needed experts that are already resident swept first in recency order (every
-  hit harvested before any eviction, T0's carry trick made exact through the pool's
-  residency), then the absent ones with the recency tail last, tiles balanced by row
-  weight. Step zero: traces of the 300 / 1k / 2k pairs and 12k under today's order,
-  the replay's verdict on both regimes, then the mini. The prize is the first turn's
-  decode (−0.6 to −0.8 s measured for the plain recency order) without the warm-prefill
-  and multi-chunk losses that kept it a knob.
+- The resident sweep's route-build host on a tiny chunk (Task 5 round 2: the two short
+  follow-up turns +13 to +16 ms, ≈ 0.45 ms per layer in the shared-to-routed gap by the
+  gap counters; an allocation-free residency mask on the streamer and a cheaper tile
+  placement are the candidates). Measure first: the runner's `SHRIKE_PHASES` print is
+  lost to stdout buffering under the server's redirected launch (the next launch kills
+  the process before the buffer flushes), itself a one-line fix.
+- The cold first request's prefill under the balanced recency composition (Task 5 round
+  2: +0.4 % on three repeats at 2,125 rows, single runs +1.4 % at 2,093 and +0.7 % at
+  12k): a cold pool's tiles are all-miss under any order, so only the packing's GPU
+  overlap can move; the same family as Task 4's +0.27 s observation; measure before
+  explaining.
 - The prompt cache's settle after a request whose prompt has no cached prefix
   re-prefills the whole prompt in the background (`settle_reset reason=no_prefix_snapshot`,
   ≈ 6 GB of expert reads after a 300-token request, the pool swept): a cache-chapter

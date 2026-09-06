@@ -538,8 +538,8 @@ chunk and its fallback drops it. **Not free**; it stays a knob at default
 `carry`, its refinement (a resident-first head: the chunk's needed experts that
 are already resident swept first, so every hit is harvested before any
 eviction, T0's trick made exact through the pool's residency, then the recency
-tail) is the next task's step zero, which needs traces of the pair and 12k
-shapes. Protection alone was free on every row it ran, so the verdict round
+tail) landed as Task 5 (below), interleaved after the box overruled the
+grouped head. Protection alone was free on every row it ran, so the verdict round
 paired it against production.
 
 **The verdict** (mini, one binary, `SHRIKE_EXPERT_CACHE_PROTECT` as the A/B,
@@ -587,6 +587,119 @@ server walls):
 | 12k, first request after launch | 68.209 s | 35.0 % | |
 | decode on the 2k card's answer | 16.794 s for 219 tokens | | unchanged by design |
 
+## Task 5 — the resident-first recency sweep (commit 3b30e64)
+
+Task 4 left the recency-ordered sweep as a knob: it wins the first turn's decode
+after a large prompt and forfeits T0's carry benefit on every chunk that follows
+another. Step zero captured two more route traces on the mini under today's
+order (the 300 pair and 12k, beside Task 4's card chain and its 300-prompt
+long-answer pair; every capture replays to the unit) and priced the refinement
+offline: sweep the chunk's pool-resident experts first, so every hit is
+harvested before any eviction, then the absent ones by recency. On all four
+traces the replay of step zero's own order (resident then absent, each by
+recency, tiles of eight) kept the plain recency order's decode gain whole (−754
+misses on the card's answer, −609 on the 300 prompt's) and returned every row
+that order had lost to at or under today's (the warm 305 after a long answer
+3,389 → 3,317, 12k 18,457 → 18,271), with one warm row +41 misses of overlap
+scatter (the 300 pair's warm, 2,865 → 2,906). The drafted composition packed
+three row-balanced groups (resident, absent head, absent tail) and tiled the
+concatenation flat at index's own tile count, within a few misses of those rows.
+
+**Round 1 on the box overruled the composition.** With every miss count as
+replayed (the card's answer 7,451 → 6,702, the 300 prompt's 10,059 → 9,485,
+the warm 305 3,389 → 3,317), the follow-up turns cost +29 / +56 ms, the 50-row
+turn after a long answer +130 ms and the warm 305 after a long answer **+0.64 s
+(+20 %)**, with equal or fewer misses and less fetch work. The gap counters showed
+where: the routed-to-routed host wait rose by 100 to 620 ms while the
+shared-to-routed wait fell, scaling with the chunk's miss count. Sweeping every
+hit first leaves each layer's misses in pure-miss tiles at its end, and at fetch
+depth 2 a pure-miss tile's 8-expert fetch (≈ 14 MB, 4 to 5 ms) has one
+preceding tile's ≈ 1.2 ms of GPU to hide under, where the index order spreads
+2 to 3 misses per tile whose fetch hides under the previous tile. The replay
+counts misses and cannot see exposure; a per-tile miss-density readout
+(`t5-interleave.py`) ranked the landed order's cost the right way on every row
+the box priced.
+
+**The landed order interleaves.** A pure-resident head only while the residents
+not yet swept exceed the slots minus six tiles' worth of misses (protection
+starves inside the three-tile avoiding window otherwise: the naive interleave
+gave back 195 misses on the 300 pair and 666 at 12k), then the chunk's absent
+experts in recency order spread uniformly over the remaining tiles (the last
+tile holds the most recent, the decode prize), each tile's free slots filled
+with residents heaviest-first into the lightest tile (rows balanced), tiled
+flat. The tail knob (`SHRIKE_PREFILL_SWEEP_TAIL`) no longer applies to this
+mode: the interleave has no tail group, the cold-pool fallback fixes its own
+tail at 96, and the residency line prints `tail=` only under `recency`.
+Priced offline before the fix-up: misses at or below index on every
+trace (the warm 305 after a long answer 3,325, the 300 pair's warm 2,846
+against 2,865, 12k 18,321 against 18,457, the decode prizes unchanged) and the
+modelled exposure below index on every chunk. Both implementations carry it
+(`tools/expert-pool-replay.py --sweep-order resident-first`, the drafted order
+kept as `resident-first-grouped`; `PrefillSweepOrder.residentFirstBalanced`),
+and the box's traced chain replays against the tool at delta ≤ 1 while the
+carry-captured chain predicts it within ±3.
+
+**The verdict** (mini, one binary, `SHRIKE_PREFILL_SWEEP` as the A/B, `carry` =
+A today, `resident` = B; paired in both orders where a wall is the verdict):
+
+| row | A (carry) | B (resident) | Δ | misses A → B |
+| --- | ---: | ---: | ---: | --- |
+| the 2k card's 219-token answer, decode (×3) | 16.725 s | 16.013 s | −0.71 s, −4.3 % | 7,451 → 6,689 (replayed 6,689) |
+| the 300 prompt's 314-token answer, decode (×2) | 22.456 | 21.923 | −0.53 s | 10,059 → 9,468 (replayed 9,468) |
+| the 1k prompt's 405-token answer, decode | 29.078 | 28.220 | −0.86 s | 12,234 → 11,398 |
+| the long-answer follow-up, turn 2 at 106 tokens (×2) | 8.664 | 8.555 | unmoved (one A repeat at 8.827) | prefill 705 → 707; decode 3,017 both |
+| warm 305 after the long answer (×2) | 3.170 | 3.090 | −2.5 % | 3,389 → 3,325 (replayed 3,325) |
+| warm 1,085 after the long answer | 6.176 | 5.951 | −3.6 % | 4,647 → 4,386 |
+| warm 305 after an 8-token answer (×2) | 3.439 | 2.961 | **−13.9 %** | 2,865 → 2,845 |
+| warm 1,085 / 2,125 after an 8-token answer | 6.467 / 10.287 | 5.889 / 10.342 | −8.9 % / +0.5 % (drift) | 4,066 → 4,084; 4,317 → 4,325 |
+| the 21-token follow-up (×3) | 1.385 | 1.401 | **+16 ms, +1.2 %** | 705 → 707 |
+| turn 3, 36 new (×3) / the 50-row turn (×2) | 1.461 / 1.604 | 1.474 / 1.615 | +13 / +11 ms | 613 → 616; 954 → 952 |
+| 12k, first request after launch | 68.263 | 68.461 | +0.3 % (drift; prefill +0.45 s, decode −0.29) | 18,457 → 18,321 |
+| the cold first requests' prefill: 2,125 rows (×3) / 289 / 1,069 / 2,093 | 11.070 / 5.473 / 7.890 / 10.931 | 11.111 / 5.492 / 7.939 / 11.085 | +0.4 % (×3); singles to +1.4 % | identical (a cold pool) |
+| the same cold requests' 8-token decode | 0.754 / 0.868 / 0.889 | 0.523 / 0.527 / 0.528 | −0.3 s each | 506 → 213; 633 → 252; 640 → 242 |
+
+Real on both verdict rows and on four of the five warm first turns after an
+answer (the fifth, the 2,125-row warm, +0.5 %, within drift): the warm rows
+are a second prize the replay could not predict (their misses are
+equal; the interleave hides the fetch under the GPU better than the index
+order does, which the plain recency order had made 4 to 11 % worse). Free
+with one priced observation: the two short follow-up turns +13 to +16 ms,
+consistent on all three pairs, at the drift band Task 4 recorded (±16 ms on
+`prefill_s`); the gap counters put ≈ 10 ms of it in the shared-to-routed gap
+that holds the route build (the residency snapshot and the composition, ≈ 0.45
+ms per layer) and the rest in the first tile's fetch and two misses, a modelled
+attribution because the phase timer's output never reaches the server's log (a
+follow-on). The cold first requests' prefill +0.4 % on three repeats at 2k with
+single runs to +1.4 %: a cold pool's tiles are all-miss under any order, so
+only the packing's GPU overlap can move; recorded beside Task 4's +0.27 s as a
+row to measure, not a mechanism. Golden is identical on both boxes and both
+profiles at `carry`, `resident` and `recency` at every landed commit.
+`SHRIKE_PREFILL_SWEEP=resident` is the default; `carry` and `recency` are the A/B.
+
+**Side findings for the ledger.** The recency reference on the same binary
+reproduced Task 4's trade (the card's answer 15.94 s, the warm 305 pair 3.675 s
+against carry's 3.439). The order's cold-pool fallback (no resident, or nothing
+absent) has to delegate to the grouped composition rather than a single pack:
+the grouped order's flatten-then-rechunk discards each group's own bin
+boundaries on chunks over 96 experts and a single pack does not reproduce it,
+caught by the acceptance traces where the hand-built tests could not. The
+runner's `SHRIKE_PHASES` print goes to a stdout that is fully buffered under the
+server's redirected launch and is lost when the next launch kills the process.
+
+**After T5** (commit 3b30e64, 2026-09-06; `SHRIKE_PREFILL_SWEEP=resident` the
+default, `carry` / `recency` the A/B; `SHRIKE_EXPERT_CACHE_PROTECT=chunk`
+unchanged; mini, server walls, round 2's means):
+
+| shape | wall | prefill hit rate | notes |
+| --- | ---: | ---: | --- |
+| follow-up turn, 21 new on a 2,345 cached context | 1.401 s | 72.5 % | was 1.385 after T4 (+16 ms, the priced observation) |
+| turn 3, 36 new | 1.474 s | 81.9 % | was 1.458 |
+| 305 / 1,085 / 2,125 first turns (warm, after an 8-token answer) | 2.961 / 5.889 / 10.342 | 63.2 / 54.9 / 53.8 % | were 3.454 / 6.385 / 10.287 after T4 |
+| 305 first turn, warm after a 314-token answer | 3.090 s | 57.0 % | was 3.175 |
+| 12k, first request after launch | 68.461 s | 35.5 % | was 68.209 (drift) |
+| decode on the 2k card's 219-token answer | 16.013 s (13.68 tok/s) | | was 16.794 after T4 |
+| decode on the 300 prompt's 314-token answer | 21.923 s (14.32 tok/s) | | was 22.456 (carry, the same round) |
+
 ## Levers, ranked for these shapes (modelled from step zero)
 
 - **First-chunk hit rate — LANDED as Task 0** (`SHRIKE_PREFILL_SWEEP=carry`):
@@ -624,13 +737,22 @@ server walls):
   chapter's instrument for the pool from here: Belady's ceiling on the answer
   is −67 % of decode misses, the recency-ordered sweep reaches −10 % of them on
   the first turn's answer and is a knob (default `carry`) because it forfeits
-  T0's carry benefit on consecutive chunks; its resident-first refinement is
-  the next task.
+  T0's carry benefit on consecutive chunks; its resident-first refinement
+  landed as Task 5.
+- **The resident-first recency sweep — LANDED as Task 5**
+  (`SHRIKE_PREFILL_SWEEP=resident`): the chunk's pool-resident experts ahead of
+  any eviction and its absent experts by recency interleaved across the tiles;
+  the first turn's decode after a large prompt −0.5 to −0.9 s (the card −4.3 %),
+  four of the five warm first turns after an answer −2.5 to −14 %, the fifth
+  within drift (the interleave hides the fetch under the GPU better than the
+  index order, a prize the replay could not see), the two short follow-up turns +13 to +16 ms at the drift band. The
+  drafted grouped composition was overruled by the box (miss clustering at each
+  layer's tail, +0.64 s on a warm 305): the replay counts misses, not exposure.
 - **Decode** (v12 Task 17: hit-rate-bound, 22 / 18 / 12.5 tok/s by shape; Task
   4: a miss costs ≈ 0.93 ms and the answer's misses are 41 % of its decode).
   Belady at 128 slots removes 67 % of them on the traced answers; recency
   already reaches 97.6 % of an answer's reuses, so the remaining lever is the
-  prefill→decode boundary (the resident-first recency sweep, the next task),
+  prefill→decode boundary (the resident-first recency sweep, landed as Task 5),
   not the eviction rule; then prefetch accuracy on a tools context and the
   drive's latency (an external NVMe on the mini is a copy-the-model experiment).
 
