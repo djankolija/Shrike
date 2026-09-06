@@ -371,7 +371,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             expertIOThreads: boundedReader?.threads ?? BoundedReaderConfiguration.defaultThreads,
             expertIOBatchDepth: boundedReader?.batchDepth ?? BoundedReaderConfiguration.defaultBatchDepth,
             expertIOParseFailure: boundedReaderFailure,
-            cacheProtectMode: expertCacheProtectMode)
+            cacheProtectMode: expertCacheProtectMode,
+            specPhase1: specPhase1Coverage)
     }
 
     static func prefillGapLeversDescription(
@@ -384,7 +385,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         expertIOThreads: Int,
         expertIOBatchDepth: Int,
         expertIOParseFailure: String? = nil,
-        cacheProtectMode: ExpertCacheProtectMode = .chunk
+        cacheProtectMode: ExpertCacheProtectMode = .chunk,
+        specPhase1: RuntimeSpecPhase1Coverage = .allHit
     ) -> String {
         let residency: String
         if let residencyAllocationCount {
@@ -405,6 +407,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             + " \(sweep) cache_layout=\(cacheLayout.rawValue)"
             + " \(expertIO)"
             + " protect=\(cacheProtectMode.rawValue)"
+            + " spec_phase1=\(specPhase1.rawValue)"
     }
 
     /// The prefill router kernel in force (`block` or `tiled tokens=N`) and its
@@ -744,6 +747,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let decodeExpertExecution: RuntimeDecodeExpertExecution
     private let expertIOSynchronization: RuntimeExpertIOSynchronization
     private let expertIOSubmission: RuntimeExpertIOSubmission
+    private let specPhase1Coverage: RuntimeSpecPhase1Coverage
     private let expertIOBackend: ExpertIOBackend
     private let expertCacheProtectMode: ExpertCacheProtectMode
     private let predictivePrefetch: ExpertPrefetchRing?
@@ -793,6 +797,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.decodeExpertExecution = runtimeConfiguration.decodeExpertExecution
         self.expertIOSynchronization = runtimeConfiguration.expertIOSynchronization
         self.expertIOSubmission = runtimeConfiguration.expertIOSubmission
+        self.specPhase1Coverage = runtimeConfiguration.specPhase1Coverage
         self.expertIOBackend = try ExpertIOBackend.environmentValue()
         self.expertCacheProtectMode = try ExpertCacheProtectMode.environmentValue()
         let prefetch = try Self.makePredictivePrefetch(
@@ -3502,7 +3507,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 resolvedGenerations: residencyResolvedGenerations,
                 topK: UInt32(cfg.topKExperts),
                 numExperts: UInt32(cfg.numExperts),
-                speculative: speculative)
+                speculative: speculative,
+                phase1Hits: decodeExpertExecution == .speculative
+                    && specPhase1Coverage == .hits)
         }
         if ownsEncoder { tailEncoder.endEncoding() }
     }
@@ -3897,6 +3904,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private func buildAndCommitMissFixupCommand(
         eventLoad: RoutedExpertLoadOperation?,
         phase1HitCB: MTLCommandBuffer?,
+        hitsComputedElsewhere: Bool = false,
         phase1HitSplitArgBuf: MTLBuffer?,
         phase1MissSlots: [UInt32],
         routedBufs: [MTLBuffer],
@@ -3938,7 +3946,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             routedBlobs: routedBufs,
             topK: topK,
             routedBufferOffsets: decodeRoutedOffsetsScratch)
-        if splitArgBuf != nil {
+        let missesOnly = (phase1HitCB != nil || hitsComputedElsewhere) && !phase1MissSlots.isEmpty
+        if missesOnly {
             totalHitFixupLayers &+= 1
             writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
             try moe.encodeRoutedPersistentPhase1SubsetU16Load(
@@ -6686,10 +6695,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         let fixupHasMisses = !phase1MissSlots.isEmpty
             || plannedFetch.map { !$0.misses.isEmpty } == true
+        // On an all-miss layer the classifier publishes no phase-1 grid, so the
+        // fixup runs the full phase 1 as on the classic path.
+        let specComputesHits = decodeExpertExecution == .speculative
+            && specPhase1Coverage == .hits
+            && phase1MissSlots.count < cfg.topKExperts
         var argBufStartedForEncode: UInt64 = 0
         if let plan = plannedFetch,
            plan.hits > 0,
-           fixupHasMisses {
+           !phase1HitSlots.isEmpty,
+           fixupHasMisses,
+           !specComputesHits {
             let argBufStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let plannedBlobs = try model.routedExpertBuffers(for: plan)
             for blob in plannedBlobs {
@@ -6850,11 +6866,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
             return
         }
-        let hitSplitFixup = phase1HitCB != nil && !phase1MissSlots.isEmpty
+        let hitSplitFixup = (phase1HitCB != nil || specComputesHits) && !phase1MissSlots.isEmpty
         let fixupBuildStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let (routedCB, routedCommitNanos) = try buildAndCommitMissFixupCommand(
             eventLoad: eventLoad,
             phase1HitCB: phase1HitCB,
+            hitsComputedElsewhere: specComputesHits,
             phase1HitSplitArgBuf: phase1HitSplitArgBuf,
             phase1MissSlots: phase1MissSlots,
             routedBufs: routedBufs,

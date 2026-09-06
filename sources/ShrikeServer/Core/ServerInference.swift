@@ -674,7 +674,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             forceLogitsHead: true,
             decodeExpertExecution: try RuntimeDecodeExpertExecution.environmentValue(),
             expertIOSynchronization: try RuntimeExpertIOSynchronization.environmentValue(),
-            expertIOSubmission: try RuntimeExpertIOSubmission.environmentValue())
+            expertIOSubmission: try RuntimeExpertIOSubmission.environmentValue(),
+            specPhase1Coverage: try RuntimeSpecPhase1Coverage.environmentValue())
         let slotOverride = ProcessInfo.processInfo.environment["SHRIKE_EXPERT_CACHE_SLOTS"]
             .flatMap(Int.init)
         // Precedence: --expert-cache-slots flag, then the env override, then a
@@ -730,6 +731,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             decodeExpertExecution: loadRuntime.decodeExpertExecution,
             expertIOSynchronization: loadRuntime.expertIOSynchronization,
             expertIOSubmission: loadRuntime.expertIOSubmission,
+            specPhase1Coverage: loadRuntime.specPhase1Coverage,
             kvCachePrecision: kvCachePrecision,
             ropeScalingMode: ropeScalingMode,
             yarnContextTokens: ropeScalingMode == .yarn

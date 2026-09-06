@@ -81,6 +81,18 @@ import Testing
         }
     }
 
+    @Test func specPhase1CoverageEnvironmentIsFailClosed() throws {
+        #expect(try RuntimeSpecPhase1Coverage.environmentValue([:]) == .allHit)
+        #expect(try RuntimeSpecPhase1Coverage.environmentValue([
+            "SHRIKE_SPEC_PHASE1": "hits",
+        ]) == .hits)
+        #expect(throws: RuntimeConfigurationError.self) {
+            try RuntimeSpecPhase1Coverage.environmentValue([
+                "SHRIKE_SPEC_PHASE1": "typo",
+            ])
+        }
+    }
+
     @Test func expertIOSynchronizationEnvironmentIsFailClosed() throws {
         #expect(try RuntimeExpertIOSynchronization.environmentValue([:]) == .event)
         #expect(try RuntimeExpertIOSynchronization.environmentValue([

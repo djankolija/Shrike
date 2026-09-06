@@ -192,6 +192,7 @@ kernel void moe_classify_expert_residency_spec(
     constant uint& num_experts [[buffer(10)]],
     constant MoESpecDispatchArgs& spec_full_grids [[buffer(11)]],
     device MoESpecDispatchArgs* spec_args [[buffer(12)]],
+    constant uint& spec_phase1_hits [[buffer(13)]],
     uint lane [[thread_index_in_threadgroup]]) {
     if (lane != 0) return;
     const uint misses = moe_classify_residency_body(
@@ -199,9 +200,12 @@ kernel void moe_classify_expert_residency_spec(
         miss_count, miss_positions, miss_experts,
         resolved_slots, resolved_generations, top_k, num_experts);
     const bool all_hit = (misses == 0u);
+    // With spec_phase1_hits the phase-1 grid runs on any layer that has a hit;
+    // the kernel skips the absent positions and the fixup fills them.
+    const bool phase1 = all_hit || (spec_phase1_hits != 0u && misses < top_k);
     for (uint i = 0; i < 3; ++i) {
         const uint zero_grid = (i == 0u) ? 0u : 1u;
-        spec_args->phase1_threadgroups[i] = all_hit
+        spec_args->phase1_threadgroups[i] = phase1
             ? spec_full_grids.phase1_threadgroups[i] : zero_grid;
         spec_args->phase2_threadgroups[i] = all_hit
             ? spec_full_grids.phase2_threadgroups[i] : zero_grid;
@@ -1054,6 +1058,7 @@ kernel void moe_phase1_gate_up_act_spec_u16load(
     if (rowg >= moe_fc_top_k(top_k) * moe_fc_f(F)) return;
     const uint k = rowg / moe_fc_f(F);
     const uint f = rowg % moe_fc_f(F);
+    if (resolved_slots[k] == 0xffffffffu) return;
 
     device const uint8_t* base =
         expert_pool + ulong(resolved_slots[k]) * pool_slot_stride;

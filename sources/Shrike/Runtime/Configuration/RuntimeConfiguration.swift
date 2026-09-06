@@ -64,6 +64,24 @@ public enum RuntimeExpertIOSynchronization: String, Codable, Sendable {
     }
 }
 
+/// Which routed experts the speculative command computes in phase 1: only on
+/// an all-hit layer (the classifier zeroes its grids otherwise), or the
+/// GPU-classified hits on every layer while the fixup keeps the misses.
+public enum RuntimeSpecPhase1Coverage: String, Codable, Sendable {
+    case allHit = "all-hit"
+    case hits
+
+    public static func environmentValue(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> RuntimeSpecPhase1Coverage {
+        guard let raw = environment["SHRIKE_SPEC_PHASE1"] else { return .allHit }
+        guard let value = RuntimeSpecPhase1Coverage(rawValue: raw) else {
+            throw RuntimeConfigurationError.invalidSpecPhase1Coverage(raw)
+        }
+        return value
+    }
+}
+
 public enum RuntimeExpertIOSubmission: String, Codable, Sendable {
     case deferred
     case immediate
@@ -106,6 +124,7 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
     case invalidDecodeExpertExecution(String)
     case invalidExpertIOSynchronization(String)
     case invalidExpertIOSubmission(String)
+    case invalidSpecPhase1Coverage(String)
 
     public var description: String {
         switch self {
@@ -127,6 +146,8 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
             return "unsupported expert I/O synchronization '\(value)'; allowed: host, event"
         case .invalidExpertIOSubmission(let value):
             return "unsupported expert I/O submission '\(value)'; allowed: deferred, immediate"
+        case .invalidSpecPhase1Coverage(let value):
+            return "unsupported spec phase-1 coverage '\(value)'; allowed: all-hit, hits"
         }
     }
 }
@@ -227,6 +248,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let decodeExpertExecution: RuntimeDecodeExpertExecution
     public let expertIOSynchronization: RuntimeExpertIOSynchronization
     public let expertIOSubmission: RuntimeExpertIOSubmission
+    public let specPhase1Coverage: RuntimeSpecPhase1Coverage
     public let kvCachePrecision: KVCachePrecision
     public let ropeScalingMode: RuntimeRoPEScalingMode
     public let yarnContextTokens: Int
@@ -241,6 +263,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 decodeExpertExecution: RuntimeDecodeExpertExecution = .speculative,
                 expertIOSynchronization: RuntimeExpertIOSynchronization = .event,
                 expertIOSubmission: RuntimeExpertIOSubmission = .immediate,
+                specPhase1Coverage: RuntimeSpecPhase1Coverage = .allHit,
                 kvCachePrecision: KVCachePrecision = .int8,
                 ropeScalingMode: RuntimeRoPEScalingMode = .none,
                 yarnContextTokens: Int = RuntimeConfiguration.defaultYaRNContextTokens) throws {
@@ -263,6 +286,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.decodeExpertExecution = decodeExpertExecution
         self.expertIOSynchronization = expertIOSynchronization
         self.expertIOSubmission = expertIOSubmission
+        self.specPhase1Coverage = specPhase1Coverage
         self.kvCachePrecision = kvCachePrecision
         self.ropeScalingMode = ropeScalingMode
         self.yarnContextTokens = yarnContextTokens

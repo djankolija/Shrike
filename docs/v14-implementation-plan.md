@@ -656,6 +656,31 @@ moved under `tools/` by the first task that needs it in the tree).
         RED first; golden identical on both boxes; the arms). Then lever B behind a
         mini probe of a kernel-written word's visibility latency to a polling host,
         then lever C behind the reverse probe. Gates 1 to 4 per commit.
+        **Lever A LANDED as a knob at its measured default, a NULL** (2026-09-06;
+        `SHRIKE_SPEC_PHASE1=hits`, default `all-hit`): the speculative classifier
+        publishes the phase-1 grid on any layer with a hit under a buffer flag, the
+        spec phase-1 kernel returns on a `0xffffffff` slot, the host's hit split
+        stays home and the fixup encodes the misses-only subset; two host tests, nine
+        banner expectations extended, the four gates, golden IDENTICAL on both boxes
+        with the knob off and on and under speculative-validate. **The arms (mini,
+        12 lifetimes, prod hits hits prod per shape, every answer identical): hits
+        against production +0.1 / −2.6 / +0.1 % on card / 300 / 1k, the 300's second
+        run a −4.0 % outlier against a +0.2 % production repeat; no sign holds.** The
+        rows say why: with the hit split gone, the window from the speculative
+        command to the fixup is 1.24 to 1.31 ms per missing layer, the old window's
+        1.03 to 1.10 plus the old submit gap's 0.22 minus 0.03: the hit split's pickup
+        and launch ran UNDER the storage read the fixup waits for, so removing them
+        shortened nothing on the critical path. Step 1's sizing summed latencies
+        around four commands without asking which lie on the path; per missing layer
+        the path is the router wake (0.16), the host to the fetch submission (≈ 0.02),
+        the read (0.95), the fixup's event wake (0.15) and the fixup's GPU time. So
+        the levers on the path are B (the router wake, ≈ 2.9 ms per token on the
+        missing layers) and C (the fixup's wake, ≈ 2.8), each behind its visibility
+        probe on the mini; A's modelled 3 ms was off the path. A first lesson for the
+        probes: the first lever A arms measured production twice because both
+        binaries build a second, generation-time `RuntimeConfiguration` that copies
+        the load-time fields by name and defaulted the new one; a knob is only real
+        once the runner's banner prints it.
   - [ ] Step 3 (numerics): golden IDENTICAL on both boxes and both profiles at every
         knob cell; a difference is a defect, never a recapture.
   - [ ] Step 4 (the arms, the mini, one binary per round): the three answers as verdict

@@ -387,6 +387,36 @@ import ShrikeValidationSupport
         try runSpec()
         #expect(Fp16Buffer.read(specOutput, count: Self.dimension)
                 == sentinel.map { Float(Float16($0)) })
+
+        // Lever A: an absent slot makes the spec phase 1 skip that position, so
+        // its activation row keeps whatever it held while the others match.
+        let absentPosition = 3
+        let rowSentinel: [Float] = (0..<Self.intermediate).map { Float($0 % 5) - 2 }
+        let actsPointer = specActs.contents()
+            .bindMemory(to: Float16.self, capacity: Self.topK * Self.intermediate)
+        for position in 0..<Self.topK {
+            for (index, value) in rowSentinel.enumerated() {
+                actsPointer[position * Self.intermediate + index] = Float16(value)
+            }
+        }
+        resolvedSlots.contents()
+            .bindMemory(to: UInt32.self, capacity: Self.topK)[absentPosition] = 0xffff_ffff
+        writeGrids(
+            phase1: MoE.specPhase1FullGrid(f: UInt32(Self.intermediate),
+                                           topK: UInt32(Self.topK)),
+            phase2: MTLSize(width: 0, height: 1, depth: 1),
+            tail: MTLSize(width: 0, height: 1, depth: 1))
+        try runSpec()
+        let partialActs = Fp16Buffer.read(specActs, count: Self.topK * Self.intermediate)
+        let referenceActs = Fp16Buffer.read(fullActs, count: Self.topK * Self.intermediate)
+        for position in 0..<Self.topK {
+            let row = position * Self.intermediate..<(position + 1) * Self.intermediate
+            if position == absentPosition {
+                #expect(Array(partialActs[row]) == rowSentinel.map { Float(Float16($0)) })
+            } else {
+                #expect(Array(partialActs[row]) == Array(referenceActs[row]))
+            }
+        }
     }
 
     @Test func gptOssRoutedPipelineWithBiasesMatchesReference() throws {

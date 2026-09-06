@@ -100,11 +100,42 @@ import Testing
         #expect(base.generations == result.generations)
     }
 
+    @Test func speculativePhase1GridFollowsThePartialHitKnob() throws {
+        let url = try PreadExpertStreamerTests.writeSyntheticLayer()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let context = try MetalContext()
+        let streamer = try PreadExpertStreamer(
+            layout: PreadExpertStreamerTests.makeLayout(path: url.path),
+            device: context.device,
+            slotCount: 2)
+        let moe = try MoE(context: context,
+                          siluActivation: true,
+                          specializedD: 2048,
+                          specializedF: 512,
+                          specializedNumExperts: 4)
+        _ = try streamer.loadExpertsCached(experts: [0, 2])
+        let partialWithKnob = try classify([0, 1, 2, 3], streamer: streamer, moe: moe,
+                                           context: context, speculative: true,
+                                           phase1Hits: true)
+        #expect(partialWithKnob.hits == [0, 2])
+        #expect(Array(partialWithKnob.specArgs[0..<3]) == Array(Self.fullGrids[0..<3]))
+        #expect(Array(partialWithKnob.specArgs[3..<9]) == Array(Self.zeroGrids[3..<9]))
+        let partialWithoutKnob = try classify([0, 1, 2, 3], streamer: streamer, moe: moe,
+                                              context: context, speculative: true)
+        #expect(partialWithoutKnob.specArgs == Self.zeroGrids)
+        let allMissWithKnob = try classify([1, 3, 1, 3], streamer: streamer, moe: moe,
+                                           context: context, speculative: true,
+                                           phase1Hits: true)
+        #expect(allMissWithKnob.hits.isEmpty)
+        #expect(allMissWithKnob.specArgs == Self.zeroGrids)
+    }
+
     private func classify(_ experts: [UInt32],
                           streamer: PreadExpertStreamer,
                           moe: MoE,
                           context: MetalContext,
-                          speculative: Bool = false) throws -> Classification {
+                          speculative: Bool = false,
+                          phase1Hits: Bool = false) throws -> Classification {
         func buffer<T>(_ values: [T]) -> MTLBuffer {
             values.withUnsafeBytes { bytes in
                 context.device.makeBuffer(
@@ -146,7 +177,8 @@ import Testing
                     phase1Threadgroups: Self.phase1FullGrid,
                     phase2Threadgroups: Self.phase2FullGrid,
                     tailThreadgroups: Self.tailFullGrid)
-            })
+            },
+            phase1Hits: phase1Hits)
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         if let error = commandBuffer.error { throw error }

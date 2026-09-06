@@ -345,7 +345,8 @@ final class MoE {
         resolvedGenerations: MTLBuffer,
         topK: UInt32,
         numExperts: UInt32,
-        speculative: SpeculativeDispatchArguments? = nil
+        speculative: SpeculativeDispatchArguments? = nil,
+        phase1Hits: Bool = false
     ) throws {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
@@ -358,7 +359,7 @@ final class MoE {
             missExperts: missExperts, resolvedSlots: resolvedSlots,
             resolvedGenerations: resolvedGenerations,
             topK: topK, numExperts: numExperts,
-            speculative: speculative)
+            speculative: speculative, phase1Hits: phase1Hits)
         encoder.endEncoding()
     }
 
@@ -375,7 +376,8 @@ final class MoE {
         resolvedGenerations: MTLBuffer,
         topK: UInt32,
         numExperts: UInt32,
-        speculative: SpeculativeDispatchArguments? = nil
+        speculative: SpeculativeDispatchArguments? = nil,
+        phase1Hits: Bool = false
     ) {
         precondition(topK <= UInt32(Self.maxStreamedExperts))
         if let speculative {
@@ -410,6 +412,8 @@ final class MoE {
             ]
             encoder.setBytes(&grids, length: Self.specDispatchArgsLength, index: 11)
             encoder.setBuffer(speculative.arguments, offset: 0, index: 12)
+            var hitsFlag: UInt32 = phase1Hits ? 1 : 0
+            encoder.setBytes(&hitsFlag, length: MemoryLayout<UInt32>.stride, index: 13)
         }
         encoder.dispatchThreadgroups(
             MTLSize(width: 1, height: 1, depth: 1),
