@@ -325,9 +325,14 @@ moved under `tools/` by the first task that needs it in the tree).
   (`makePredictivePrefetch` `:908-929`, the `begin` call site moved from `:6738-6743`
   to just after the demand fetch is begun at `:6529-6537`,
   `prefillGapLeversDescription` `:377-408`, the prefetch counters if any).
-  **Unchanged:** every `.metal` file and kernel body, `expert_io.c` and the reader,
-  `PreadExpertStreamer` and the pool's policy, the planner's placement logic, the
-  prompt cache. **Lint:** `encodeDecodeRoutedMoE` is already over the
+  **As landed** (`git diff --stat 5316d2a..71fc47f`): the fix touched
+  `PreadExpertStreamer.swift` (`ExpertCachePlan.adopted`), `DecodeExpertPartition.swift`
+  (`populate(adoptedIndices:)`), `ModelExpertIO.swift` and the runner; the instrument
+  `ExpertPrefetchRing.swift` (the counters), the runner, `ServerInference.swift` (the
+  runner line) and `tools/decode-rows.py`; the tools `decode-rig.sh`,
+  `decode-stream-client.py` and `prefetch-coverage.py` are new. **Unchanged:** every
+  `.metal` file and kernel body, `expert_io.c` and the reader's threads, the pool's
+  policy, the planner's placement logic, the prompt cache. **Lint:** `encodeDecodeRoutedMoE` is already over the
   `function_body_length` threshold, so its baseline entry stands; check
   `swiftlint lint --write-baseline` if any baselined reason string embeds a line
   count that this task's edits move (v13 hit this on a different function five times).
@@ -393,7 +398,8 @@ moved under `tools/` by the first task that needs it in the tree).
         completion and the victim selection were each read and ruled out).
         **Ruling (Davor, 2026-09-06): Step 2 opens with the fix, the fixup follows
         the GPU's classification.**
-  - [ ] Step 2 (code; the stop passed): **first the fix**: in the speculative
+  - [x] Step 2 (code; the stop passed; closed at its measurement, the fix 77dd587 and
+        the instrument 71fc47f landed, the arms a measured loss): **first the fix**: in the speculative
         modes the fixup's partition follows the GPU's classification (its misses are
         the plan's misses plus the adopted experts, which the fixup computes from
         their now-resident slots with no storage read; `specAllHit` only when the
@@ -539,7 +545,7 @@ moved under `tools/` by the first task that needs it in the tree).
 
 ### Task 2: T2, the miss path's host and driver windows
 
-- [ ] **T2: a missing layer pays two windows that have nothing to do with the bytes:
+- [x] **T2: a missing layer pays two windows that have nothing to do with the bytes:
   the routed submit gap, `moe_spec_routed` to `moe_phase1_hit`, **3.86 / 3.95 / 3.91
   ms per token** on the card / 300 / 1k answers (0.21 ms per missing layer), of which
   host-late 2.01 / 1.98 / 1.90 (the hit split's command committed after the spec
@@ -548,7 +554,7 @@ moved under `tools/` by the first task that needs it in the tree).
   per missing layer), the interval from the expert read landing to the fixup command
   starting on the GPU, which the fixup's encoded event wait spends by construction.
   Together **6.6 to 6.8 ms per token, 9 % of the wall**, all MEASURED on the
-  instrumented build's production arms (b39d937, `step2-instrument/`, the runner line
+  instrumented build's production arms (the instrument's build, 71fc47f, `step2-instrument/`, the runner line
   and the twelve-transition gap block), none of it bytes, none of it numerics.
   Planning inside the submit gap is 0.21 ms per token (`cache_plan_ms`), the top-k
   readback 0.009, the storage submission-to-start 0.55, so what fills the host-late
@@ -662,7 +668,10 @@ moved under `tools/` by the first task that needs it in the tree).
         spec phase-1 kernel returns on a `0xffffffff` slot, the host's hit split
         stays home and the fixup encodes the misses-only subset; two host tests, nine
         banner expectations extended, the four gates, golden IDENTICAL on both boxes
-        with the knob off and on and under speculative-validate. **The arms (mini,
+        with the knob off and on and under speculative-validate (a cell that proves
+        nothing about the knob: the host's hit split and the flag are speculative-only,
+        so the knob is inert under validate; the review fold added the classifier's
+        grid test for the knob itself). **The arms (mini,
         12 lifetimes, prod hits hits prod per shape, every answer identical): hits
         against production +0.1 / −2.6 / +0.1 % on card / 300 / 1k, the 300's second
         run a −4.0 % outlier against a +0.2 % production repeat; no sign holds.** The
@@ -760,7 +769,21 @@ moved under `tools/` by the first task that needs it in the tree).
         if they pass, the knobs landed at their measured defaults either way. **DONE**:
         A landed at all-hit (a null), B flipped to word (real and free), C never built
         (a measured negative at the probe).
-  - [ ] Step 6 (design doc): the Task 2 section, the After T2 block, the lever entries.
+  - [x] Step 6 (design doc): the Task 2 section, the After T2 block, the lever entries.
+        **DONE 2026-09-06**: `docs/v14-decode.md`'s Task 2 section (Steps 0 and 1,
+        lever A, the probes, lever B with its arms table), the After T2 block, lever
+        (d)'s measured addendum, a realized-risk entry on shared-memory visibility.
+        The fresh review of T2's seven commits: 0 C / 6 I / 10 M, "mergeable after
+        the fixes"; every finding folded into the owning commit: the deferred
+        records' failed-command attribution (a failed command now throws by name at
+        the drain), the word poll gated on the spin host wait (`SHRIKE_HOST_WAIT=wait`
+        takes the status path), the layer trace's stamps printed as pending until
+        they exist, the fallback's direct wait, the single-pass decode, the tail
+        stage's coupled residency argument, the queue cleared at a token's start,
+        lever A's all-miss layers running the full phase 1 (and the knob's flag passed
+        only in the speculative mode), a kernel test for lever A's grid publication,
+        two more decoder tests, the fixup's commit stamp taken before its commit, the
+        rows tool's adopted window under lever A, and this file list.
         Task review by a fresh reviewer, fixes folded into the owning commits.
 
   **The decision rule.** Real: the sign holds on the three answers' `decode_tok_s`
@@ -769,12 +792,27 @@ moved under `tools/` by the first task that needs it in the tree).
   moves**; every change here is when a command is committed and what buffer it
   reads its arguments from, never what a kernel computes.
 
-  **Files.** Step 1: `sources/Shrike/Runtime/Inference/RealForwardRunner.swift` (the
-  routed encoder's timers and the runner's totals), `sources/ShrikeServer/Core/ServerInference.swift`
-  (the runner line), `tools/decode-rows.py`. Step 2: the same encoder,
-  `sources/Shrike/Kernels/MoE/MoE.swift` (a second reusable argument buffer).
-  **Unchanged:** every `.metal` file, the reader, the pool, the planner, the prompt
-  cache. **Lint:** `encodeDecodeRoutedMoE` is baselined; regenerate on growth.
+  **Files, as landed.** Step 1: `sources/Shrike/Runtime/Inference/RealForwardRunner.swift`
+  (the routed encoder's timers and the runner's totals),
+  `sources/ShrikeServer/Core/ServerInference.swift` (the runner line),
+  `tools/decode-rows.py`. Lever A: `sources/Shrike/Metal/MoE/moe.metal` (the
+  speculative classifier's phase-1 grid under the buffer flag, the spec phase-1
+  kernel's return on an absent slot), `sources/Shrike/Kernels/MoE/MoE.swift`, the
+  runner, `RuntimeConfiguration.swift`, `Run.swift`, `ServerInference.swift` (the
+  knob in both configurations). Lever B: `moe.metal` (`moe_publish_router_readback`
+  at the end of both classifier kernels), `MoE.swift` (the readback bindings),
+  `sources/Shrike/Runtime/Inference/RouterHostReadback.swift` (new: the tagged word
+  layout and its decoder), `sources/ShrikeKernelsC/include/shrike_atomics.h` (new:
+  the acquire load), the runner (the tag, the word poll, the deferred records), the
+  two configuration sites, `tools/decode-rows.py`. Lever D's second argument buffer
+  was never built (subsumed by A, a null). The draft runner
+  (`sources/Shrike/Runtime/Generation/StreamingMTP.swift`) and the app
+  (`sources/ShrikeApp/Core/Configuration/AppRuntimeOptions.swift`) build their
+  configurations without any environment knob, as before this task, so they take the
+  defaults (`word`, `all-hit`); the A/B overrides reach the server and the CLI.
+  **Unchanged:** the reader, the pool, the planner, the prompt cache, the prefill
+  path. **Lint:** the five baselined functions that grew took a regenerated
+  baseline; the runner's initializer, at the limit, was decomposed instead.
 
 ## Candidate tasks (not scheduled)
 

@@ -277,6 +277,115 @@ every archived run) and the gap block prints twelve transitions. The chapter mov
 (Task 2), whose wins compose with any later prefetch: it cuts what a missing layer
 costs, a prefetch cuts how many layers miss.
 
+## Task 2: the miss path's host and driver windows (commits c6db18b, 2e2afd4, b6b7d32, 8d318ec, 601dc30)
+
+Two windows on a missing layer that had nothing to do with bytes: the routed submit
+gap (3.9 ms per token at the task's opening) and the post-completion wake (2.8 to
+2.9), together 9 % of the wall. The task split them into named terms, priced the
+levers, probed the two that needed hardware facts before code, built the one that
+survived, and landed it as the default. Every number is MEASURED on the mini unless
+marked modelled; the plan's Task 2 carries the tables, the ledger every ruling, the
+archive `~/.claude/handoffs/archive/shrike-v14-t2/` every run.
+
+**Step 0, the sync mode (zero code, c6db18b).** `SHRIKE_EXPERT_IO_SYNC=host` against
+the default `event`, 12 lifetimes: −1.0 / −0.5 / +0.2 % on the three answers, inside
+the event pairs' own drift. The terms move and cancel: the wake becomes the host's
+wait, the miss window grows 0.7 to 0.85 ms per token, the submit gap's host-late term
+drops 0.45 (the event-driven submission's own host cost). The event's signal-to-start
+is not recoverable by the sync mode on this box, as v10 T3 had found on the M1.
+
+**Step 1, the split (2e2afd4).** Per-stage timers on the missing layer's path, three
+lifetimes per shape. Per token on the card / 300 / 1k: the router wake, the status
+spin's return after the router command's GPU end, **6.46 / 6.32 / 6.45 ms, 0.16 on
+every one of the 40 layers**; the timed host stages 0.75 / 0.77 / 0.75 (0.041 per
+missing layer); the hit split's pickup 0.58 / 0.56 / 0.53 and launch 1.89 / 2.18 /
+1.94; the fixup's pickup 0.71 / 0.70 / 0.65 and its wake 2.85 / 3.38 / 2.81 (0.15 per
+missing layer). Of a missing layer's 0.37 ms of windows, host code was 0.04 and 0.33
+was driver and launch latency around four command buffers. The levers were sized
+from the split: (A) the hit split folded into the speculative command, modelled 2.8
+to 3.1 ms per token; (B) the router wake replaced by a word the router's last kernel
+writes, up to 2.9; (C) the fixup's wake replaced by a GPU-side spin on the reader's
+status word, up to 2.8; (D) the argument buffer reused, 0.1, subsumed by A.
+
+**Lever A (b6b7d32), a null that named the critical path.** `SHRIKE_SPEC_PHASE1=hits`
+runs the speculative command's phase 1 on the GPU's hits on every layer and leaves
+the fixup the misses; golden identical in every cell; the arms +0.1 / −2.6 / +0.1 %,
+every answer identical. The rows said why: with the hit split gone, the window from
+the speculative command to the fixup was 1.24 to 1.31 ms per missing layer, the old
+window's 1.03 to 1.10 plus the old submit gap's 0.22 minus 0.03. The hit split's
+pickup and launch had run under the storage read the fixup waits for anyway. Step
+1's sizing had summed latencies around four commands without asking which lie on
+the path; per missing layer the path is the router wake (0.16), the host to the fetch
+submission (0.02), the read (0.95), the fixup's event wake (0.15) and the fixup's GPU
+time. The knob landed at its all-hit default.
+
+**The probes (8d318ec), the hardware facts B and C needed.** A standalone Metal
+program on both boxes (`step2-probes/`): a kernel publishes an entry word, works,
+writes a payload, fences at device scope and bumps a counter, while the host polls
+the counter and the command's status; and the reverse, a kernel spinning on a word
+the host writes mid-kernel. Measured: a kernel's writes reach the host only at the
+kernel's flush (the entry word arrives with the exit word, 0 of 1,000 mid-kernel
+sightings); on the M1 the exit word lands 95 to 130 µs after `gpuEndTime` and the
+status 60 to 70 µs after the word (the M1's status lag of 164 to 200 matching
+production's router wake); the payload written before the fence is stale when the
+counter is already visible in 2 to 24 % of commands, trailing it by up to 8.5 µs (0
+of 600 on the M4 Pro; there is no system-scope fence in the shading language). In
+the other direction a running kernel never sees a host write: 0 of 250 with the
+write landing 1 ms into a 5 to 19 ms spin, by relaxed atomic load and by
+read-modify-write, on either box. **Lever C died at the probe**; lever B survived
+with a protocol: the word must come from the router command's last kernel, and every
+word the host reads must validate itself, since no word can vouch for another.
+
+**Lever B (601dc30), the router wake by a tagged host readback.** Both residency
+classifier kernels, the last dispatch of the router command in the residency modes,
+end by copying what the host reads after a router (the hit and miss counts, the ids,
+the weight bits, the hit and miss positions, the predicted ids) into words carrying
+the layer's sequence in their high 16 bits (`RouterHostReadback`,
+`moe_publish_router_readback`). The host reads that copy in both wake modes, so the
+default golden proves the copy bit for bit, and under `SHRIKE_ROUTER_WAKE=word`
+polls it instead of the command's completion mark, with the status wait as a
+one-second fallback (`path_router_wake_fallbacks`, zero in every lifetime). The
+bookkeeping that reads GPU stamps waits in a queue until the driver marks the
+commands complete; the lease release and the storage wait stay immediate, and so
+does speculative-validate's cross-check, which reads scratch the next layer
+overwrites (deferring it was the build's one golden failure, on the validate cell
+the matrix has for exactly this). Golden identical in ten cells across the two
+boxes and the default flip. The arms, 12 lifetimes, prod word word prod per shape:
+
+| shape | prod tok/s | word tok/s | word vs prod | prod repeat | router wake ms/tok | submit gap ms/tok (host-late) | fixup wake | answers |
+| --- | --- | --- | --- | ---: | --- | --- | --- | --- |
+| card | 13.69 / 13.72 | 14.09 / 14.10 | +2.9 / +2.8 % | +0.2 % | 6.54 to 2.53 | 3.94 (2.01) to 2.13 (0.22) | 2.86 / 2.92 | identical |
+| 300 | 14.28 / 14.34 | 14.71 / 14.83 | +3.1 / +3.4 % | +0.4 % | 6.29 to 2.55 | 4.10 (1.95) to 2.33 (0.21) | 3.21 / 3.25 | identical |
+| 1k | 14.51 / 14.42 | 15.01 / 14.96 | +3.5 / +3.7 % | −0.6 % | 6.45 to 2.55 | 3.71 (1.90) to 2.06 (0.23) | 2.63 / 2.73 | identical |
+
+Real (the sign holds on the three answers in both orders) and free (the follow-up
+turns 1.39 to 1.40 and 1.47 to 1.48 s, the warm second prompts 3.08 to 3.12 and
+5.90 to 5.97 s, memory pressure 91 % free, all unmoved; golden identical), so the
+default flipped to `word` before the commit. The wall per token fell 2.1 to 2.5 ms
+against 1.0 to 1.3 modelled from the probe: production's word lands 0.063 ms after
+the router's GPU end where the probe's payload kernel put it at 0.095 to 0.13 (its
+single-word kernel at 0.052), so the router wake shed 0.10 per layer, not 0.065,
+and the submit gap's host-late term, which was the wake, fell from 2.0 to 0.22.
+
+**After T2** (2026-09-06; the shipping default changed once, `router_wake=word`):
+production answers the card / 300 / 1k at **14.09 to 14.10 / 14.71 to 14.83 / 14.96
+to 15.01 tok/s**, against 13.6 to 13.8 / 14.1 to 14.4 / 14.4 to 14.5 at the
+chapter's opening, +2.8 to +3.6 %. Of the two windows the task opened on (6.6 to 6.8
+ms per token), the router wake's 4.0 ms of stat and 2.1 to 2.5 of wall are
+recovered; the fixup's wake (2.6 to 3.3 per token) stays, a floor for a command
+gated on a host-signalled event on this box (the sync mode moved it into the host's
+wait at the same cost, and a running kernel cannot see the reader's word), and the
+submit gap's driver and queue terms (0.25 and 1.6 to 1.9) sit off the critical path,
+as lever A showed. The knobs: `SHRIKE_ROUTER_WAKE=status` and `SHRIKE_SPEC_PHASE1=hits`
+are the A/B overrides, `SHRIKE_PREDICTIVE_PREFETCH=1` the measured loss. The runner
+line carries `path_*` for the split and `path_router_wake_fallbacks`; the classic
+execution modes, which run no classifier, keep the status wait under either knob
+value, and so does `SHRIKE_HOST_WAIT=wait`, since the word wake is a poll (the
+banner prints the mode in effect). The chapter closes here; the prefetch redesign
+with its four preconditions
+and the follow-ons stay in the plan as candidates, to be priced on the box as it
+stands when next considered.
+
 ## Levers, ranked for these shapes (modelled from step zero)
 
 Every prize below is stated against the card's 74.27 ms token unless another shape
@@ -434,6 +543,18 @@ measured rows above, not a measurement.
   established: some of the submit gap may be irreducible driver work, and the wake is
   a Metal shared-event signal to GPU start.
 
+  **Measured (Task 2).** The submit gap's host-late term was the router wake: the
+  driver marks the router command complete 0.16 ms after its GPU end, on every
+  layer, and the host's status spin cannot see past the mark. A word the classifier
+  writes last lands 0.063 ms after the end, and polling it (lever B, the default
+  now) took the term from 2.0 to 0.22 ms per token and the wall down 2.1 to 2.5 ms,
+  +2.8 to +3.6 % of tok/s. The wake is what its description said: a host-signalled
+  event's signal-to-start, 0.15 ms per missing layer, not recoverable by the sync
+  mode (Step 0, a null) nor by a GPU-side spin on the status word (the probe: a
+  running kernel never sees a host write). The gap's driver and queue terms belong
+  to the hit split's command, which runs under the storage read and is off the
+  critical path (lever A, a null).
+
 - **(e) The LM head the server never fuses.** `head_logits` is **4.89 / 5.05 / 4.82
   ms of GPU per token, 6.6 / 7.2 / 7.0 %** of the wall, and `head_fused_ms` is
   0.000 on all three shapes. A fused greedy head exists and is the decode path's
@@ -524,6 +645,14 @@ after digests in the verdict).
 - **Row 1's decomposition is per-request and averaged over the answer**, while row 3
   shows the answer is not stationary. A lever measured on one stretch of text can
   read as a win that is a different stretch. Whole answers, paired, both orders.
+- **Shared memory between a running kernel and the host is neither symmetric nor
+  ordered.** Realized at Task 2's probes, before any code: a kernel's writes reach
+  the host at its flush and one word cannot vouch for another (a payload trails its
+  flag by up to 8.5 µs on the M1, 2 to 24 % of commands), and a running kernel never
+  sees a host write. A host poll on device memory is safe only on words that
+  validate themselves, which is what lever B built, and a GPU-side spin on a host
+  word is not an option on this hardware. The M4 Pro would have hidden the first
+  fact (0 stale payloads in 600); the mini decides.
 - **The replay sees misses, not exposure.** v13 Task 5 was overruled by the box after
   the replay predicted the miss count correctly and missed a fetch-exposure cost
   entirely. Offline pricing selects candidates; the mini decides.

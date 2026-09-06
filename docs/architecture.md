@@ -118,4 +118,8 @@ clear the +10 % bar on this model. The miss-count lever is closed; the surviving
 miss levers are cost-side (event gating, free-running) and policy-side (cache).
 
 Output correctness was verified when it was built: greedy 4-bit output matched the
-disabled run byte-for-byte, and the 4-bit golden baseline passed.
+disabled run byte-for-byte, and the 4-bit golden baseline passed. That held only
+under the classic execution modes: v14's Task 1 ([v14-decode.md](v14-decode.md))
+found the path not output-identical under the default speculative execution, fixed
+it, and re-measured it at −2 to −3 % (top-4) and −7 % (top-8) on the mini; the
+knob stays off and the redesign's preconditions are recorded there.
