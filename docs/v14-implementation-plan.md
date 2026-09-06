@@ -601,16 +601,61 @@ moved under `tools/` by the first task that needs it in the tree).
         not recoverable by the sync mode on this box (v10 T3's M1 null repeats on the
         mini); the 0.45 ms per token of event-driven submission cost is a named term
         for Step 1's split.
-  - [ ] Step 1 (instrument, no scheduling change): per-stage host timers on the missing
+  - [x] Step 1 (instrument, no scheduling change): per-stage host timers on the missing
         layer's path (pin, fetch submission, argument buffer, encode-and-commit of the
         hit split, the fixup's encode-and-commit) on the runner line, one rig pass, the
         0.11 ms per missing layer split into named terms. The tools read them.
-  - [ ] Step 2 (code, by measured size): the terms the split names, each with a knob,
-        host tests RED first; the obvious candidates are the hit split's argument
-        buffer reused like the fixup's, the hit split committed before the fetch is
-        submitted so the GPU starts the hits while the host talks to the reader, and
-        the hit split folded onto the speculative command's queue position where the
-        classification allows it. Gates 1 to 4.
+        **DONE 2026-09-06 in three rounds** (the host stages; the two commands' commit
+        stamps against their kernel and GPU starts; the router wake), each a
+        production lifetime per shape on the mini
+        (`~/.claude/handoffs/archive/shrike-v14-t2/step1/`). Per token, card / 300 /
+        1k, MEASURED:
+
+        | term | card | 300 | 1k | per layer |
+        | --- | ---: | ---: | ---: | --- |
+        | the router wake (`path_router_wake_ms`: the status spin's return after the router command's GPU end, every layer) | 6.46 | 6.32 | 6.45 | 0.16 on all 40 |
+        | the timed host stages (readback 0.009, plan 0.21, pin 0.046, submit 0.09, argument buffer 0.14, hit split encode and commit 0.14, fixup build 0.11) | 0.75 | 0.77 | 0.75 | 0.041 per missing layer |
+        | the hit split's commit to kernel start (the driver's pickup) | 0.58 | 0.56 | 0.53 | 0.031 per missing layer |
+        | the hit split's kernel start to GPU start (the launch) | 1.89 | 2.18 | 1.94 | 0.10 to 0.12 per missing layer |
+        | the fixup's commit to kernel start | 0.71 | 0.70 | 0.65 | 0.038 per missing layer |
+        | the fixup's wake (`io_fixup_wake_ms`, the read landing to the GPU start) | 2.85 | 3.38 | 2.81 | 0.15 per missing layer |
+        | the submit gap, for reference (Step 0's rows: host-late 2.0 + driver 0.3 + queue 1.6 to 1.75) | 3.95 | 4.17 | 3.86 | 0.22 per missing layer |
+
+        The missing layer's timeline on the card, from the router command's GPU end:
+        the host wakes 0.16 ms late (the driver marks the command complete that long
+        after the GPU finishes; v9's spin removed the thread-park wake of ≈ 0.175,
+        this is what the spin cannot see past), spends 0.041 in the timed stages and
+        about 0.08 elsewhere (the previous layer's pending command finished, the
+        partition and its classification check, the scratch handling), commits the
+        hit split ≈ 0.28 after the router's end; the driver picks it up 0.03 later and
+        the GPU launches it 0.10 to 0.12 after that, the speculative command's 0.23
+        overlapping the first part: the submit gap's 0.22. The fixup is committed with
+        its event wait 0.11 after the hit split, picked up 0.04 later, and started by
+        the GPU 0.15 after the read lands. So of a missing layer's ≈ 0.37 ms of
+        windows (the 0.22 submit gap and the 0.15 wake), host code is 0.04 and 0.33 is
+        driver and launch latency around four commands.
+        **The levers, sized from the split (MODELLED, per token):** (A) the hit split
+        folded into the speculative command, which already computes the GPU's hits on
+        an all-hit layer and can compute them on every layer while the fixup keeps the
+        misses and phase 2: removes its argument buffer, encode and commit (0.28), its
+        pickup (0.55) and its launch (1.9 to 2.2), ≈ 2.8 to 3.1 ms, 4 %, no visibility
+        risk, the T1 fix's partition rule already in place; (B) the router wake: the
+        host polls a word the router kernel writes last instead of the command's
+        status, up to 18 x 0.16 = 2.9 ms on the missing layers (the all-hit layers'
+        wake overlaps the speculative command), the risk a CPU's view of an in-flight
+        kernel's write on shared memory, to be probed on the mini with a test kernel
+        before it is built; (C) the fixup's wake: a bounded GPU-side spin on the
+        `io_status` word inside a command that is already running, so the read's
+        landing costs no launch, up to ≈ 2 ms, the same visibility risk in the other
+        direction (the runtime's `moe_io_ready` guard relies on it after a command
+        boundary, not during one); (D) the argument buffer reused like the fixup's,
+        0.1, subsumed by A. Order: A, then B behind a probe, then C behind a probe.
+  - [ ] Step 2 (code, by measured size): lever A first, the hit split folded into the
+        speculative command (phase 1 for the GPU-classified hits on every layer, the
+        fixup computing the misses and phase 2 as it does today; a knob; host tests
+        RED first; golden identical on both boxes; the arms). Then lever B behind a
+        mini probe of a kernel-written word's visibility latency to a polling host,
+        then lever C behind the reverse probe. Gates 1 to 4 per commit.
   - [ ] Step 3 (numerics): golden IDENTICAL on both boxes and both profiles at every
         knob cell; a difference is a defect, never a recapture.
   - [ ] Step 4 (the arms, the mini, one binary per round): the three answers as verdict

@@ -22,7 +22,10 @@ GAPS = {
 }
 RUNNER = ["expert_hit_rate_decode", "expert_misses_decode", "hit_fixup_layers", "io_ms",
           "io_fixup_wake_ms", "io_fetch_ms", "io_hidden_pct", "cache_plan_ms",
-          "prefetch_begin_ms", "prefetch_issued", "prefetch_adopted", "prefetch_reclaimed"]
+          "prefetch_begin_ms", "prefetch_issued", "prefetch_adopted", "prefetch_reclaimed",
+          "router_readback_ms", "path_pin_ms", "path_submit_ms", "path_argbuf_ms",
+          "path_hit_encode_ms", "path_fixup_build_ms", "path_hit_commit_to_kernel_ms",
+          "path_hit_kernel_to_gpu_ms", "path_fixup_commit_to_kernel_ms", "path_router_wake_ms"]
 
 
 def grab(pattern, text, cast=float):
@@ -86,6 +89,15 @@ for block in blocks:
           f"window_ms/tok={fmt_gap(gaps['window'], completion)} "
           f"adopted_ms/tok={fmt_gap(gaps['adopted'], completion)} "
           f"submit_ms/tok={fmt_gap(gaps['submit'], completion)}")
+    if runner["path_pin_ms"] is not None:
+        print(f"    path: router_wake={fmt(runner['path_router_wake_ms'])} "
+              f"readback={fmt(runner['router_readback_ms'])} plan={fmt(runner['cache_plan_ms'])} "
+              f"pin={fmt(runner['path_pin_ms'])} submit={fmt(runner['path_submit_ms'])} "
+              f"argbuf={fmt(runner['path_argbuf_ms'])} hit_encode={fmt(runner['path_hit_encode_ms'])} "
+              f"fixup_build={fmt(runner['path_fixup_build_ms'])} | "
+              f"hit commit>kernel={fmt(runner['path_hit_commit_to_kernel_ms'])} "
+              f"kernel>gpu={fmt(runner['path_hit_kernel_to_gpu_ms'])} "
+              f"fixup commit>kernel={fmt(runner['path_fixup_commit_to_kernel_ms'])} (ms per token)")
     if runner["prefetch_issued"] is not None:
         print(f"    prefetch: begin_ms={fmt(runner['prefetch_begin_ms'])} "
               f"issued={fmt(runner['prefetch_issued'], 0)} adopted={fmt(runner['prefetch_adopted'], 0)} "

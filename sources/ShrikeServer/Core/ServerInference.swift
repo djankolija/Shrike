@@ -449,6 +449,15 @@ private struct RunnerCounterSnapshot {
     let prefetchIssued: UInt64
     let prefetchAdopted: UInt64
     let prefetchReclaimed: UInt64
+    let pathPin: UInt64
+    let pathSubmit: UInt64
+    let pathArgBuf: UInt64
+    let pathHitEncode: UInt64
+    let pathFixupBuild: UInt64
+    let pathHitCommitToKernel: UInt64
+    let pathHitKernelToGPU: UInt64
+    let pathFixupCommitToKernel: UInt64
+    let pathRouterWake: UInt64
     let ioQueue: UInt64
     let ioCompletionToFixup: UInt64
     let ioHostWaits: UInt64
@@ -1121,6 +1130,15 @@ public actor ServerModelSession: ServerInferenceBackend {
             prefetchIssued: runner.prefetchStatistics.issued,
             prefetchAdopted: runner.prefetchStatistics.adopted,
             prefetchReclaimed: runner.prefetchStatistics.reclaimedUnadopted,
+            pathPin: runner.totalRoutedPinNanos,
+            pathSubmit: runner.totalRoutedSubmitNanos,
+            pathArgBuf: runner.totalHitSplitArgBufNanos,
+            pathHitEncode: runner.totalHitSplitEncodeNanos,
+            pathFixupBuild: runner.totalFixupBuildNanos,
+            pathHitCommitToKernel: runner.totalHitCommitToKernelNanos,
+            pathHitKernelToGPU: runner.totalHitKernelToGPUNanos,
+            pathFixupCommitToKernel: runner.totalFixupCommitToKernelNanos,
+            pathRouterWake: runner.totalRouterWakeNanos,
             ioQueue: runner.totalIOQueueNanos,
             ioCompletionToFixup: runner.totalIOCompletionToFixupSubmitNanos,
             ioHostWaits: runner.totalExpertIOHostWaits,
@@ -2001,6 +2019,10 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "expert_load_p99_ms=%.3f io_hidden_pct=%.2f hit_fixup_layers=%llu "
                 + "router_readback_ms=%.4f cache_plan_ms=%.4f prefetch_begin_ms=%.4f "
                 + "prefetch_issued=%llu prefetch_adopted=%llu prefetch_reclaimed=%llu "
+                + "path_pin_ms=%.4f path_submit_ms=%.4f path_argbuf_ms=%.4f "
+                + "path_hit_encode_ms=%.4f path_fixup_build_ms=%.4f "
+                + "path_hit_commit_to_kernel_ms=%.4f path_hit_kernel_to_gpu_ms=%.4f "
+                + "path_fixup_commit_to_kernel_ms=%.4f path_router_wake_ms=%.4f "
                 + "io_queue_ms=%.4f "
                 + "io_load_ms=%.4f io_fetch_ms=%.4f io_fixup_wake_ms=%.4f "
                 + "io_completion_to_fixup_ms=%.4f io_host_waits=%llu "
@@ -2035,6 +2057,15 @@ public actor ServerModelSession: ServerInferenceBackend {
             runner.prefetchStatistics.issued - snapshot.prefetchIssued,
             runner.prefetchStatistics.adopted - snapshot.prefetchAdopted,
             runner.prefetchStatistics.reclaimedUnadopted - snapshot.prefetchReclaimed,
+            ms(runner.totalRoutedPinNanos, snapshot.pathPin),
+            ms(runner.totalRoutedSubmitNanos, snapshot.pathSubmit),
+            ms(runner.totalHitSplitArgBufNanos, snapshot.pathArgBuf),
+            ms(runner.totalHitSplitEncodeNanos, snapshot.pathHitEncode),
+            ms(runner.totalFixupBuildNanos, snapshot.pathFixupBuild),
+            ms(runner.totalHitCommitToKernelNanos, snapshot.pathHitCommitToKernel),
+            ms(runner.totalHitKernelToGPUNanos, snapshot.pathHitKernelToGPU),
+            ms(runner.totalFixupCommitToKernelNanos, snapshot.pathFixupCommitToKernel),
+            ms(runner.totalRouterWakeNanos, snapshot.pathRouterWake),
             ms(runner.totalIOQueueNanos, snapshot.ioQueue),
             Double(expert.totalLoadNanos) / Double(tokens) / 1_000_000,
             Double(expert.fetchNanos) / Double(tokens) / 1_000_000,

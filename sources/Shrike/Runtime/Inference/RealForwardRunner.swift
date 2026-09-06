@@ -1901,6 +1901,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalLoopProduceNanos: UInt64 = 0
     public private(set) var totalCachePlanNanos: UInt64 = 0
     public private(set) var totalPrefetchBeginNanos: UInt64 = 0
+    public private(set) var totalRoutedPinNanos: UInt64 = 0
+    public private(set) var totalRoutedSubmitNanos: UInt64 = 0
+    public private(set) var totalHitSplitArgBufNanos: UInt64 = 0
+    public private(set) var totalHitSplitEncodeNanos: UInt64 = 0
+    public private(set) var totalFixupBuildNanos: UInt64 = 0
+    public private(set) var totalHitCommitToKernelNanos: UInt64 = 0
+    public private(set) var totalHitKernelToGPUNanos: UInt64 = 0
+    public private(set) var totalFixupCommitToKernelNanos: UInt64 = 0
+    public private(set) var totalRouterWakeNanos: UInt64 = 0
     public var prefetchStatistics: (issued: UInt64, adopted: UInt64, reclaimedUnadopted: UInt64) {
         predictivePrefetch?.statistics ?? (0, 0, 0)
     }
@@ -3099,6 +3108,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try waitForRouterCompletion(cmds.routerCB)
+            if cmds.routerCB.gpuEndTime > 0 {
+                let woke = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                let gpuEnd = UInt64(cmds.routerCB.gpuEndTime * 1_000_000_000)
+                totalRouterWakeNanos &+= woke > gpuEnd ? woke - gpuEnd : 0
+            }
             if let tailCB = cmds.tailCB {
                 recordKernelGPU(role: "attn_norm_qkv", cmds.attnCB)
                 if let attentionCB = cmds.softmaxCB {
@@ -3890,7 +3904,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         topK: UInt32,
         d D: UInt32,
         f FmoE: UInt32
-    ) throws -> MTLCommandBuffer {
+    ) throws -> (cb: MTLCommandBuffer, commitNanos: UInt64) {
         // The phase-2 reduce already folded the shared branch (h1Buf
         // as its residual); the tail is a plain residual add.
         let gTail: (MTLCommandBuffer) throws -> Void = { [self] cb in
@@ -3970,8 +3984,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                ioStatus: ioStatus?.0,
                                                ioStatusOffset: ioStatus?.1 ?? 0)
         try gTail(routedCB)
+        let commitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         routedCB.commit()
-        return routedCB
+        return (routedCB, commitNanos)
     }
 
     /// SHRIKE_HOST_WAIT=spin: poll instead of parking the thread, trading a
@@ -6105,6 +6120,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let storageOperation: RoutedExpertLoadOperation?
         let overlapCompletionClock: CommandCompletionClock?
         let expectedOverlapCompletions: Int
+        let hitCommitNanos: UInt64
+        let routedCommitNanos: UInt64
         let kernelRole: String
         let encodeAndCommitNanos: UInt64
     }
@@ -6220,8 +6237,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         if let phase1HitCB = pending.phase1HitCB {
             recordKernelGPU(role: "moe_phase1_hit", phase1HitCB)
+            if pending.hitCommitNanos > 0, phase1HitCB.kernelStartTime > 0 {
+                let kernelStart = UInt64(phase1HitCB.kernelStartTime * 1_000_000_000)
+                let gpuStart = UInt64(max(0, phase1HitCB.gpuStartTime) * 1_000_000_000)
+                totalHitCommitToKernelNanos &+= kernelStart > pending.hitCommitNanos
+                    ? kernelStart - pending.hitCommitNanos : 0
+                totalHitKernelToGPUNanos &+= gpuStart > kernelStart ? gpuStart - kernelStart : 0
+            }
         }
         recordKernelGPU(role: pending.kernelRole, pending.cb)
+        if pending.routedCommitNanos > 0, pending.cb.kernelStartTime > 0 {
+            let kernelStart = UInt64(pending.cb.kernelStartTime * 1_000_000_000)
+            totalFixupCommitToKernelNanos &+= kernelStart > pending.routedCommitNanos
+                ? kernelStart - pending.routedCommitNanos : 0
+        }
         totalCb2Nanos &+= pending.encodeAndCommitNanos
     }
 
@@ -6526,12 +6555,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         recordPrefetchTrace(layer: L, position: position, experts: experts,
                             misses: missesForTrace, resident: residentBeforePlan,
                             nextLayerPrediction: predictedNextLayer)
+        let pinStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let expertLease = try plannedFetch.map { try model.pinRoutedExperts(for: $0) }
+        totalRoutedPinNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - pinStarted
         // v4.2 Phase B: once slots and generations are reserved and pinned,
         // submit real storage immediately. Hit partitioning, argument binding,
         // and command encoding below now overlap the reader queue.
         let shouldSubmitImmediately = expertIOSubmission == .immediate
             || expertIOSynchronization == .event
+        let submitStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let plannedLoad = shouldSubmitImmediately
             ? try plannedFetch.map {
                 try model.beginFetchRoutedExperts(
@@ -6539,6 +6571,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     eventDriven: expertIOSynchronization == .event && !$0.misses.isEmpty)
             }
             : nil
+        totalRoutedSubmitNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - submitStarted
         var transferredExpertLease = false
         var phase1HitCB: MTLCommandBuffer?
         defer {
@@ -6653,9 +6686,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         let fixupHasMisses = !phase1MissSlots.isEmpty
             || plannedFetch.map { !$0.misses.isEmpty } == true
+        var argBufStartedForEncode: UInt64 = 0
         if let plan = plannedFetch,
            plan.hits > 0,
            fixupHasMisses {
+            let argBufStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let plannedBlobs = try model.routedExpertBuffers(for: plan)
             for blob in plannedBlobs {
                 decodeHitSplitRoutedBufsScratch.append(blob.buffer)
@@ -6665,6 +6700,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 routedBlobs: decodeHitSplitRoutedBufsScratch,
                 topK: topK,
                 routedBufferOffsets: decodeHitSplitRoutedOffsetsScratch)
+            argBufStartedForEncode = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            totalHitSplitArgBufNanos &+= argBufStartedForEncode - argBufStarted
             if let argBuf = phase1HitSplitArgBuf, plan.hits > 0, fixupHasMisses {
                 writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
                 guard let cb = ctx.queue.makeCommandBuffer() else {
@@ -6681,9 +6718,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
         }
 
+        var hitCommitNanos: UInt64 = 0
         if let cb = phase1HitCB {
             overlapCompletionClock?.track(cb)
+            hitCommitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             cb.commit()
+            totalHitSplitEncodeNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - argBufStartedForEncode
         }
         let missCount = plannedFetch?.misses.count ?? experts.count
         let fixupMissCount = plannedFetch == nil
@@ -6802,6 +6842,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 storageOperation: eventLoad,
                 overlapCompletionClock: eventLoad == nil ? nil : overlapCompletionClock,
                 expectedOverlapCompletions: expectedOverlapCompletions,
+                hitCommitNanos: 0,
+                routedCommitNanos: 0,
                 kernelRole: "moe_spec_routed",
                 encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
             transferredExpertLease = true
@@ -6809,7 +6851,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             return
         }
         let hitSplitFixup = phase1HitCB != nil && !phase1MissSlots.isEmpty
-        let routedCB = try buildAndCommitMissFixupCommand(
+        let fixupBuildStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let (routedCB, routedCommitNanos) = try buildAndCommitMissFixupCommand(
             eventLoad: eventLoad,
             phase1HitCB: phase1HitCB,
             phase1HitSplitArgBuf: phase1HitSplitArgBuf,
@@ -6817,6 +6860,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             routedBufs: routedBufs,
             routedOffsets: routedOffsets,
             topK: topK, d: D, f: FmoE)
+        totalFixupBuildNanos &+= routedCommitNanos - fixupBuildStarted
         if missCount > 0, let completed = completedStorageNanos, completed > 0 {
             let submitted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if submitted >= completed {
@@ -6842,6 +6886,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             storageOperation: eventLoad,
             overlapCompletionClock: eventLoad == nil ? nil : overlapCompletionClock,
             expectedOverlapCompletions: expectedOverlapCompletions,
+            hitCommitNanos: hitCommitNanos,
+            routedCommitNanos: routedCommitNanos,
             kernelRole: !hitSplitFixup
                 ? "moe_phase1_2_routed"
                 : missCount == 0
