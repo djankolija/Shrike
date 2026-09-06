@@ -245,7 +245,7 @@ identical on both boxes and both profiles at both values. Scope: measured on a
 launch without an MTP sidecar; the knob clamps to 2 (a deeper lookahead needs a
 FIFO of in-flight operations and, with one batch published at a time, is
 modelled at ≈ 0.8 % — deferred with T2). **The two loop paths are not the same
-loop:** the original at `=1` runs the scheduler's `decide` and its
+loop** (until the close's collapse, below): the original at `=1` runs the scheduler's `decide` and its
 commit-before-append valve; the lookahead at `=2` runs neither — its bootstrap
 re-plans after draining one pending batch and throws `expertCacheUnplaceable`
 if the cache still has no room, which `fitting`'s budget makes unreachable at
@@ -255,7 +255,7 @@ judgment: collapse them into one loop as a follow-on before the chapter merges
 to main, in its own commit with its own golden pair, and first if any task
 edits the loop before then; the begin/await/drain sequencing is factored into a
 host-testable decision with it (today it lives only in the runner, covered by
-golden).
+golden). Done at the chapter's close (the close section after Task 5).
 
 ## Task 2 — the expert reader publishing two batches at once (commit d3efdeb)
 
@@ -587,7 +587,7 @@ server walls):
 | 12k, first request after launch | 68.209 s | 35.0 % | |
 | decode on the 2k card's answer | 16.794 s for 219 tokens | | unchanged by design |
 
-## Task 5 — the resident-first recency sweep (commit 3b30e64)
+## Task 5 — the resident-first recency sweep (commit 17146ae)
 
 Task 4 left the recency-ordered sweep as a knob: it wins the first turn's decode
 after a large prompt and forfeits T0's carry benefit on every chunk that follows
@@ -686,7 +686,7 @@ caught by the acceptance traces where the hand-built tests could not. The
 runner's `SHRIKE_PHASES` print goes to a stdout that is fully buffered under the
 server's redirected launch and is lost when the next launch kills the process.
 
-**After T5** (commit 3b30e64, 2026-09-06; `SHRIKE_PREFILL_SWEEP=resident` the
+**After T5** (commit 17146ae, 2026-09-06; `SHRIKE_PREFILL_SWEEP=resident` the
 default, `carry` / `recency` the A/B; `SHRIKE_EXPERT_CACHE_PROTECT=chunk`
 unchanged; mini, server walls, round 2's means):
 
@@ -699,6 +699,94 @@ unchanged; mini, server walls, round 2's means):
 | 12k, first request after launch | 68.461 s | 35.5 % | was 68.209 (drift) |
 | decode on the 2k card's 219-token answer | 16.013 s (13.68 tok/s) | | was 16.794 after T4 |
 | decode on the 300 prompt's 314-token answer | 21.923 s (14.32 tok/s) | | was 22.456 (carry, the same round) |
+
+## The chapter close
+
+**The two-loop collapse** (commit c04e43b, 2026-09-06; Task 1's follow-on,
+taken first at the close as its review's condition asked). `encodeRoutedMoEPrefill`
+had two routed tile loops: the original at `SHRIKE_PREFILL_FETCH_DEPTH=1` and the
+lookahead's at `=2`, each with its own copy of the batch bookkeeping, plus two
+helpers for the lookahead's bootstrap and its successor plan. They are one loop
+now, `PrefillRoutedTileSequencer` (`sources/Shrike/Kernels/Prefill/MoE/`), driven
+at every depth through a small driver protocol (`PrefillRoutedTileDriver`: the
+batch counts and held slots, then plan, begin, abandonPlan, encode,
+commitOpenBatch, drainOldestBatch and abandonBegunFetches). The runner's
+`ExpertStreamedTileDriver` owns the pool's kept plans and begun fetches by tile,
+the open and pending command buffers, the slot lifetimes and the chunk's
+protection; a test's recording driver answers the same calls from counters. What
+the collapse reconciles, per the review: the lookahead is a predicate
+(`plansLookahead` decides whether the successor is planned ahead at all,
+`shouldBeginLookahead` whether its resolved plan is begun); a tile whose fetch the
+lookahead began is carried into its own turn and skips planning; every other tile
+is planned at its turn and issued through `decide` (the kept plan abandoned, the
+oldest batch drained, the tile re-planned on `.drainBeforeIssue`); and the
+commit-before-append valve runs on the actual plan availability at both depths.
+The lookahead path had hardcoded that availability to `true`, so its valve was
+dead and its bootstrap re-planned after one drain without committing the open
+batch first; the depth-1 recovery now applies at both depths, still unreachable at
+128 slots by `fitting`'s budget (Task 1's Minor 4). A begun fetch is kept by the
+driver before its slot-lifetime check, so any throw after a begin is waited out by
+the sequencer's one catch (Task 1's Important 1, now structural). The trace line
+is written at begin, in tile order as before. The begin/await/drain order is
+asserted on the host for the first time: nine traces in
+`PrefillRoutedTileSequencerTests` (the successor begun before the tile is
+awaited; each tile at its own turn without a lookahead; the last tile begins no
+successor and zero tiles make no call; an unplaceable tile commits the open batch
+and drains it before the re-plan, at depth 1 and at the lookahead depth; a
+declined lookahead planned again at its own turn; the open batch counting against
+the depth with the committed ones; a slotless pending batch drained and the kept
+plan abandoned; a failure waiting out every begun fetch). `encodeRoutedMoEPrefill`
+244 to 153 raw lines, still over the lint threshold so its baseline entry stands;
+the runner's diff is −362 / +217 lines; `decide` and `batchAction` are unchanged.
+**Golden identical** at `SHRIKE_PREFILL_FETCH_DEPTH` 2 (the default) and 1, short
+and long, on both boxes; gates 1 to 4 green (build 0 warnings, lint 0 / 225, links 56 files 0 broken, tests 1,257 / 1,257 in 168 suites, 601.8 s). No timing row: in every
+case the 128-slot budget makes reachable, the sequencer issues the same plan,
+begin, await, commit and drain sequence the two loops did, so Task 1's and Task
+5's rows stand as measured; the mini serves the collapsed build at the bare
+launch.
+
+**The ThreadSanitizer suite, once at the close**: 1,257 / 1,257 in 168 suites, 2,835 s,
+no report (the tree before the review's fix round; the round's changes are a guard on an
+invariant path, a parser that now throws, a seed constant, comments and test assertions,
+so the run stands for the amended tree).
+
+**The whole-branch review** (a fresh reviewer over 3774ef1..2f16c0d, the chapter's 22
+commits): ready after the must-fix list, 0 Critical, 3 Important, 11 Minor, none of the
+22 deferred items a must-fix (10 fine as they are, 12 moot). The reviewer walked every
+sequencer trace by hand against the loop and found the collapse correct, its error path
+strictly better than the loops it replaced, and no kept plan able to leak. The fix round,
+by amend and one fix-wave commit: the docs cited two pre-amend shas for Task 5 that the
+push would have garbage-collected, now the landed `17146ae` and `c99fa0e`;
+the driver's in-flight avoidance fell through silently if a successor were ever planned
+before its predecessor's fetch was begun, a silent-numerics class, and now throws
+(`ExpertStreamedTileDriver.plan`); the error-path test asserted only that the abandon was
+called, and now asserts what the driver released, with a kept-plan case beside it (commit
+c04e43b, the collapse amended). The fix wave (commit e0bba79): `SHRIKE_PREFILL_SWEEP`
+fails closed on an unknown value like the knob's siblings (unset and empty still take
+`resident`); the ready banner prints a reader configuration the streamer will refuse as
+`expert_io=invalid(...)` instead of the defaults it is not running; `packByRows`' two
+overloads seed their search the same way; two tool notes. Left as they are by ruling: the
+scheduler's unread `.prefetchNext` payload (v12's close ruled the same: it serves the
+scheduler's tests) and `ExpertCacheProtectMode`'s home in the streamer's file. The
+reviewer also asked for one measurement the collapse's golden pair does not give, a
+timing row on the shipping binary, taken below. The re-review found every finding
+addressed with no new breakage and one overclaim of this session's own: the second
+error-path test promised a kept-plan case the sequencer cannot reach (a plan is kept only
+between its planning and its begin, and nothing that throws sits between them). Its
+follow-up, amended into c04e43b: the driver now abandons a kept plan whose begin throws
+(the streamer's begin throws only before it executes a plan, and an unexecuted plan's
+miss slots stay reserved until abandoned), and the test pins what is reachable, a failure
+inside a begin waiting out the begun predecessor.
+
+**The timing row on the shipping binary** (e0bba79's release build, the mini, two
+fresh-server `pair 300` runs through the chapter's rig at the default, measured): the warm
+305-token first turn **2.934 / 2.925 s** at 63.2 % hits (4,881 / 2,845) against Task 5's
+landed 2.961 s at 63.2 %, inside the chapter's drift band; the cold 289-row first request
+7.698 / 8.003 s (7,639 misses, as every cold row). Golden identical at fetch depth 2 and 1,
+short and long, on both boxes on the fix-round build; gates 1 to 4 green on it (build 0
+warnings, lint 0 / 225, links 57 files 0 broken, tests 1,259 / 1,259 in 168 suites); the
+mini serves it at the bare launch. The chapter's closing table describes the binary that
+ships.
 
 ## Levers, ranked for these shapes (modelled from step zero)
 

@@ -2041,7 +2041,7 @@ different kernels on a chunk.
   commit, flipped by amend on the mini's verdict, either way
   ([v13-the-turn.md](v13-the-turn.md):640-658).**
 
-  **LANDED 3b30e64 (2026-09-06): the composition as drafted (three grouped blocks tiled
+  **LANDED 17146ae (2026-09-06, the sha after the task's fix round by amend): the composition as drafted (three grouped blocks tiled
   flat) kept every replayed miss gain on the box and was NOT free: round 1 of the arms
   cost +29 / +56 ms on the follow-up turns, +130 ms on the 50-row turn after a long
   answer and +0.64 s (+20 %) on the warm 305 after a long answer, with equal or fewer
@@ -2420,10 +2420,11 @@ different kernels on a chunk.
         Follow-ons entry retired. Task review by a fresh reviewer, fixes folded into the
         owning commit, re-review.
 
-  Landed, per step: Step 1 as 8b6d523 (the tool; first the drafted composition, then
-  fix-up 1's interleave by amend; the eight archived cells and the four fix-up
-  acceptance rows reproduced exactly; gates 1239 / 1239 then 1246 / 1246). Step 2 as
-  3b30e64 (the Swift; first the drafted composition, then the interleave by amend, then
+  Landed, per step: Step 1 as c99fa0e (the tool; first the drafted composition, then
+  fix-up 1's interleave by amend, then the review's fix round by amend; the eight archived
+  cells and the four fix-up acceptance rows reproduced exactly; gates 1239 / 1239 then
+  1246 / 1246). Step 2 as
+  17146ae (the Swift; first the drafted composition, then the interleave by amend, then
   the default flip by amend; PrefillMoEGrouping 34 / 34, PrefillRoutedTileScheduler
   43 / 43; gates 1246 / 1246 on each amend). Step 3: golden identical at `carry`,
   `resident` and `recency` on both boxes at each landed commit. Step 4: round 1
@@ -2470,6 +2471,51 @@ different kernels on a chunk.
     stops the server on 8081 and relaunches it, Turbo on 8080 is never touched, one model
     process at a time.
 
+## The chapter close
+
+The order Task 1's review and the Global constraints set: the collapse first (its own
+commit, its own golden pair), the ThreadSanitizer suite once, a whole-branch review with
+a fix round by amend and a re-review, then the fast-forward merge to main and the push,
+which are Davor's alone.
+
+- [x] **The two-loop collapse** (Task 1's follow-on): `encodeRoutedMoEPrefill`'s two
+  routed tile loops into one `PrefillRoutedTileSequencer`
+  (`sources/Shrike/Kernels/Prefill/MoE/PrefillRoutedTileSequencer.swift`) over the
+  `PrefillRoutedTileDriver` protocol, the runner's `ExpertStreamedTileDriver` the I/O
+  adapter, the three lookahead helpers gone; the lookahead a predicate
+  (`plansLookahead`, `shouldBeginLookahead`), `decide` and the commit-before-append
+  valve live at both fetch depths, the begin/await/drain order asserted by nine host
+  traces (`tests/Shrike/Core/Kernels/Prefill/PrefillRoutedTileSequencerTests.swift`).
+  **LANDED c04e43b (2026-09-06, the sha after the close review's fix round and its
+  follow-up, both by amend)**: golden identical at `SHRIKE_PREFILL_FETCH_DEPTH` 2 and 1, short and long, on
+  both boxes; gates 1 to 4 (build 0 warnings, lint 0 / 225, links 56 files 0 broken,
+  tests 1,257 / 1,257 in 168 suites, 601.8 s); the mini serves it at the bare launch. The
+  record is the design doc's close section ([v13-the-turn.md](v13-the-turn.md)).
+- [x] The full ThreadSanitizer suite once
+  (`env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test --no-parallel --sanitize=thread`):
+  **1,257 / 1,257 in 168 suites, 2,835 s, no report** (2026-09-06, on the tree before
+  the review's fix round; it stands for the amended tree, whose changes are a guard on an
+  invariant path, a parser that now throws, a seed constant, comments and test
+  assertions, no concurrency or dispatch shape).
+- [x] The whole-branch review 3774ef1..HEAD by a fresh reviewer, its fix round by amend
+  into the owning commits, a re-review. **Review done** (2026-09-06: ready after the
+  must-fix list; 0 Critical, 3 Important, 11 Minor; no must-fix among the deferred items)
+  and **the fix round landed**: the collapse amended as c04e43b (the driver's in-flight
+  guard throws, the error-path test asserts what the driver released, the `unowned`
+  invariant, two comments), the fix wave e0bba79 (the sweep parse fails closed, the ready
+  banner prints a bad reader parse, `packByRows`' overloads agree, two tool notes), the
+  docs' pre-amend shas re-pointed; gates on the amended tree build 0 warnings, lint 0 / 225,
+  links 57 / 0, tests 1,259 / 1,259; golden identical at fetch depth 2 and 1 on both boxes;
+  the reviewer's timing row on the shipping binary, the warm 305 first turn 2.934 / 2.925 s
+  against Task 5's 2.961 (design doc, The chapter close). **Re-review: all findings
+  addressed, no new Critical or Important breakage**, one coverage overclaim named (a
+  test of the sequencer's error path whose name promised a kept-plan case the sequencer
+  cannot reach); its follow-up amended into c04e43b: the driver abandons a kept plan whose
+  begin throws (the streamer's begin throws only before it executes a plan, whose miss
+  slots would otherwise stay reserved), and the test now pins a failure inside a begin
+  waiting out the begun predecessor. The branch is review-clean.
+- [ ] The fast-forward merge to main and the push (Davor's alone).
+
 ## Follow-ons (not scheduled)
 
 - The GDN chunked scan below its 64-row gate (`GDN.chunkTokens`): ≤ 33 ms on a
@@ -2483,12 +2529,6 @@ different kernels on a chunk.
   the claim predicate before parking; the shutdown path keeps its broadcast. The
   read is turn 3's +26 ms at eight threads; at the default four it is inside
   noise, so this rides on any task that raises the thread count.
-- Collapse Task 1's two routed tile loops into one (the lookahead as a
-  predicate; the scheduler's `decide` and the commit-before-append valve
-  reconciled; the begin/await/drain sequencing factored into a host-testable
-  decision) — **before the chapter merges to main**, in its own commit with its
-  own golden pair, and first if any task edits `encodeRoutedMoEPrefill`'s loop
-  before then (Task 1 review).
 - The resident sweep's route-build host on a tiny chunk (Task 5 round 2: the two short
   follow-up turns +13 to +16 ms, ≈ 0.45 ms per layer in the shared-to-routed gap by the
   gap counters; an allocation-free residency mask on the streamer and a cheaper tile
