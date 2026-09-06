@@ -584,11 +584,23 @@ moved under `tools/` by the first task that needs it in the tree).
     `io_status` early-return guard (`moe_io_ready`), not a poll.
 
   **Steps.**
-  - [ ] Step 0 (zero code): the sync mode A/B on the mini, `SHRIKE_EXPERT_IO_SYNC=host`
+  - [x] Step 0 (zero code): the sync mode A/B on the mini, `SHRIKE_EXPERT_IO_SYNC=host`
         against the default `event`, the three answers paired in both orders, the
         wake and the submit gap per token the readings, tok/s the verdict. Answers
         whether the event's signal-to-start latency is the floor or the host's
         commit-to-start is lower on this box.
+        **DONE 2026-09-06, a measured NULL** (12 lifetimes, every answer identical,
+        `~/.claude/handoffs/archive/shrike-v14-t2/step0/`): host against event, means,
+        card −1.0 %, 300 −0.5 %, 1k +0.2 %, inside the event pairs' own drift (0.3 to
+        1.0 %). The terms move and cancel: under `host` the wake disappears (it is the
+        host's wait now, unmeasured by that counter) but the miss window grows 0.7 to
+        0.85 ms per token on the card and the 300 (the host's wake plus commit-to-start
+        replacing the event's signal-to-start, 1.07 to 1.13 ms per missing layer) and
+        the submit gap's host-late drops 0.45 (2.0 to 1.55: the event-driven fetch
+        submission's own host cost, 0.025 ms per missing layer). The event's wake is
+        not recoverable by the sync mode on this box (v10 T3's M1 null repeats on the
+        mini); the 0.45 ms per token of event-driven submission cost is a named term
+        for Step 1's split.
   - [ ] Step 1 (instrument, no scheduling change): per-stage host timers on the missing
         layer's path (pin, fetch submission, argument buffer, encode-and-commit of the
         hit split, the fixup's encode-and-commit) on the runner line, one rig pass, the
