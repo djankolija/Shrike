@@ -428,6 +428,55 @@ moved under `tools/` by the first task that needs it in the tree).
         and the plan beyond the adopted set fails the generation instead of running
         a different partition. The mini's golden with the knob off and on is the
         deploy's gate.
+        Landed 0ca0195; the mini's golden IDENTICAL with the knob off and on.
+        **The zero-code A/B on the fixed binary (mini, 18 lifetimes, every answer
+        identical, the follow-ups unmoved): production 13.70 / 14.13 / 14.48 tok/s on
+        card / 300 / 1k, top-4 −2.4 / −1.9 / −3.0 %, top-8 −7.1 / −6.6 / −7.5 %, the
+        sign in both orders on every shape: real, free, and a loss.** Davor's ruling:
+        instrument before deciding. **The instrument** (the fixup's kernel role
+        `moe_phase1_miss_fixup_phase2_adopted` on adopted-only layers so the gap block
+        splits the window by class, the block's cut raised to 12, the ring's issued /
+        adopted / reclaimed-unadopted counters and the begin path's host time on the
+        runner line as `prefetch_*`) answers the question the A/B could not, per token
+        on the mini (measured):
+
+        | shape, arm | tok/s | adopted-only layers | storage-miss layers, ms each | ring reads issued / adopted / wasted | plan ms | begin ms |
+        | --- | ---: | ---: | --- | --- | ---: | ---: |
+        | card, prod | 13.67 | 0 | 18.2 at 1.07 | 0 | 0.21 | 0 |
+        | card, top-4 | 13.17 | 2.7 | 15.5 at 1.23 | 12.1 / 7.3 / 4.8 (40 %) | 1.09 | 0.39 |
+        | card, top-8 | 12.94 | 6.1 | 12.1 at 1.64 | 34.9 / 11.6 / 23.3 (67 %) | 1.66 | 0.47 |
+        | 300, prod | 14.39 | 0 | 18.7 at 1.03 | 0 | 0.21 | 0 |
+        | 300, top-4 | 13.85 | 2.6 | 16.1 at 1.16 | 12.5 / 6.7 / 5.8 (46 %) | 0.96 | 0.39 |
+        | 300, top-8 | 12.89 | 5.7 | 13.0 at 1.71 | 37.3 / 10.5 / 26.8 (72 %) | 1.42 | 0.50 |
+        | 1k, prod | 14.43 | 0 | 17.4 at 1.04 | 0 | 0.21 | 0 |
+        | 1k, top-4 | 14.04 | 2.4 | 15.0 at 1.15 | 11.9 / 6.6 / 5.3 (45 %) | 0.85 | 0.38 |
+        | 1k, top-8 | 13.41 | 5.3 | 12.0 at 1.59 | 35.6 / 9.9 / 25.7 (72 %) | 1.20 | 0.46 |
+
+        **An adopted-only layer's window does collapse** (its gap total falls below
+        the block's twelfth entry, 65.9 ms over the card's 587 such layers: below 0.12
+        ms per layer against 1.03 to 1.07 for a
+        read), **and the drive takes it back**: the layers that still read slow from
+        1.03 to 1.07 ms to 1.15 to 1.23 at top-4 and 1.59 to 1.71 at top-8, in
+        proportion to the ring's reads in flight beside the demand reads (step zero's
+        probe: 0.77 ms alone, 1.08 each for two overlapped). The card's ledger at
+        top-4, per token, every hidden layer priced at production's 1.07 ms: 2.7
+        hidden layers save 2.9 ms, 15.5 slowed reads cost 2.5, the probe's router pass
+        costs 2.0 to 2.3 of GPU time in the attention tail (`attn_layer_linear` plus
+        `attn_layer_kv`, 15.4 to 17.8 ms across the nine rows), and the submit gap
+        grows a measured 1.0 (the adoption copy's 0.9 and the begin path's 0.4 sit
+        inside it, partly absorbed by slack): +2.6 to +2.9 modelled against +2.8
+        measured. At top-8 the hidden 6.1 layers save 6.5 and the 12.1 slowed reads
+        cost 6.9. Under the knob `hit_fixup_layers` counts the adopted-only layers too
+        (they run the hit split for the first time), so a storage-miss layer count is
+        the gap block's `count`, never that field.
+        So on this drive a hidden read costs the neighbouring demand reads about what
+        it saves; the lever pays only if its reads stop overlapping demand reads
+        (issued at plan time on all-hit layers they overlap nothing, on miss layers
+        they contend with the layer's own read), the probe is fused into the router
+        dispatch it duplicates (53 µs per layer today), the copy goes (a read into a
+        reserved slot), and the wasted reads fall. Modelled ceiling with all four:
+        +3 to +7 % tok/s, the contention model the risk. Ruling on the continuation:
+        Davor's.
   - [ ] Step 3 (numerics): golden IDENTICAL on both profiles at every knob cell on
         the M4 Pro at each amend, and on the mini at the default and the candidate
         cells at each amend and at all cells at the landed commit. Plus one

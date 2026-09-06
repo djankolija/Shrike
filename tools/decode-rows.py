@@ -16,16 +16,31 @@ import statistics
 import sys
 
 GAPS = {
-    "window": r"gap moe_phase1_hit->moe_phase1_miss_fixup_phase2 total_ms=\s*[\d.]+ per_token_ms=([\d.]+)",
-    "submit": r"gap moe_spec_routed->moe_phase1_hit total_ms=\s*[\d.]+ per_token_ms=([\d.]+)",
+    "window": r"gap moe_phase1_hit->moe_phase1_miss_fixup_phase2 total_ms=\s*[\d.]+ per_token_ms=([\d.]+) count=(\d+)",
+    "adopted": r"gap moe_phase1_hit->moe_phase1_miss_fixup_phase2_adopted total_ms=\s*[\d.]+ per_token_ms=([\d.]+) count=(\d+)",
+    "submit": r"gap moe_spec_routed->moe_phase1_hit total_ms=\s*[\d.]+ per_token_ms=([\d.]+) count=(\d+)",
 }
 RUNNER = ["expert_hit_rate_decode", "expert_misses_decode", "hit_fixup_layers", "io_ms",
-          "io_fixup_wake_ms", "io_fetch_ms", "io_hidden_pct"]
+          "io_fixup_wake_ms", "io_fetch_ms", "io_hidden_pct", "cache_plan_ms",
+          "prefetch_begin_ms", "prefetch_issued", "prefetch_adopted", "prefetch_reclaimed"]
 
 
 def grab(pattern, text, cast=float):
     m = re.search(pattern, text)
     return cast(m.group(1)) if m else None
+
+
+def gap(pattern, text):
+    m = re.search(pattern, text)
+    return (float(m.group(1)), int(m.group(2))) if m else None
+
+
+def fmt_gap(value, tokens):
+    if value is None:
+        return "n/a"
+    per_token, count = value
+    per_layer = per_token * tokens / count if tokens and count else 0.0
+    return f"{per_token:.3f} ({count} layers, {per_layer:.2f} ms each)"
 
 
 def fmt(value, digits=3):
@@ -59,15 +74,22 @@ for block in blocks:
     decode = grab(r"decode_s=([\d.]+)", text)
     tok_s = grab(r"decode_tok_s=([\d.]+)", text)
     runner = {key: grab(rf"{key}=([\d.]+)", text) for key in RUNNER}
-    gaps = {key: grab(pattern, text) for key, pattern in GAPS.items()}
+    gaps = {key: gap(pattern, text) for key, pattern in GAPS.items()}
     print(f"  prompt={prompt} cached={cached} completion={completion} wall={fmt(wall)}s "
           f"prefill_s={fmt(prefill)} decode_s={fmt(decode)} decode_tok_s={fmt(tok_s, 2)} | "
           f"hit_rate={fmt(runner['expert_hit_rate_decode'], 4)} "
           f"misses={fmt(runner['expert_misses_decode'], 0)} "
           f"fixup_layers={fmt(runner['hit_fixup_layers'], 0)} "
           f"io_ms={fmt(runner['io_ms'])} wake_ms={fmt(runner['io_fixup_wake_ms'])} "
-          f"fetch_ms={fmt(runner['io_fetch_ms'])} hidden_pct={fmt(runner['io_hidden_pct'], 1)} | "
-          f"window_ms/tok={fmt(gaps['window'])} submit_ms/tok={fmt(gaps['submit'])}")
+          f"fetch_ms={fmt(runner['io_fetch_ms'])} hidden_pct={fmt(runner['io_hidden_pct'], 1)} "
+          f"plan_ms={fmt(runner['cache_plan_ms'])} | "
+          f"window_ms/tok={fmt_gap(gaps['window'], completion)} "
+          f"adopted_ms/tok={fmt_gap(gaps['adopted'], completion)} "
+          f"submit_ms/tok={fmt_gap(gaps['submit'], completion)}")
+    if runner["prefetch_issued"] is not None:
+        print(f"    prefetch: begin_ms={fmt(runner['prefetch_begin_ms'])} "
+              f"issued={fmt(runner['prefetch_issued'], 0)} adopted={fmt(runner['prefetch_adopted'], 0)} "
+              f"reclaimed={fmt(runner['prefetch_reclaimed'], 0)}")
 
 for path in token_paths:
     arrivals = [t[1] for t in json.load(open(path))["tokens"]]

@@ -1900,6 +1900,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalLoopProgressNanos: UInt64 = 0
     public private(set) var totalLoopProduceNanos: UInt64 = 0
     public private(set) var totalCachePlanNanos: UInt64 = 0
+    public private(set) var totalPrefetchBeginNanos: UInt64 = 0
+    public var prefetchStatistics: (issued: UInt64, adopted: UInt64, reclaimedUnadopted: UInt64) {
+        predictivePrefetch?.statistics ?? (0, 0, 0)
+    }
     public private(set) var totalIOQueueNanos: UInt64 = 0
     public private(set) var totalIOCompletionToFixupSubmitNanos: UInt64 = 0
     public private(set) var totalExpertIOHostWaits: UInt64 = 0
@@ -6759,12 +6763,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
         }
         if let predictivePrefetch, L + prefetchProbeDistance < cfg.numLayers {
+            let beginStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let target = L + prefetchProbeDistance
             let resident = Set(try model.routedExpertResidentIDs(layer: target))
             try predictivePrefetch.begin(
                 model: model, layer: target,
                 experts: Array(predictedNextLayer.prefix(predictivePrefetchTopM)),
                 resident: resident)
+            totalPrefetchBeginNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - beginStarted
         }
         decodeRoutedBufsScratch.removeAll(keepingCapacity: true)
         decodeRoutedOffsetsScratch.removeAll(keepingCapacity: true)
@@ -6836,9 +6842,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             storageOperation: eventLoad,
             overlapCompletionClock: eventLoad == nil ? nil : overlapCompletionClock,
             expectedOverlapCompletions: expectedOverlapCompletions,
-            kernelRole: hitSplitFixup
-                ? "moe_phase1_miss_fixup_phase2"
-                : "moe_phase1_2_routed",
+            kernelRole: !hitSplitFixup
+                ? "moe_phase1_2_routed"
+                : missCount == 0
+                    ? "moe_phase1_miss_fixup_phase2_adopted"
+                    : "moe_phase1_miss_fixup_phase2",
             encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
         transferredExpertLease = true
         totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart

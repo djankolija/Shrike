@@ -445,6 +445,10 @@ private struct RunnerCounterSnapshot {
     let loopProgress: UInt64
     let loopProduce: UInt64
     let cachePlan: UInt64
+    let prefetchBegin: UInt64
+    let prefetchIssued: UInt64
+    let prefetchAdopted: UInt64
+    let prefetchReclaimed: UInt64
     let ioQueue: UInt64
     let ioCompletionToFixup: UInt64
     let ioHostWaits: UInt64
@@ -1113,6 +1117,10 @@ public actor ServerModelSession: ServerInferenceBackend {
             loopProgress: runner.totalLoopProgressNanos,
             loopProduce: runner.totalLoopProduceNanos,
             cachePlan: runner.totalCachePlanNanos,
+            prefetchBegin: runner.totalPrefetchBeginNanos,
+            prefetchIssued: runner.prefetchStatistics.issued,
+            prefetchAdopted: runner.prefetchStatistics.adopted,
+            prefetchReclaimed: runner.prefetchStatistics.reclaimedUnadopted,
             ioQueue: runner.totalIOQueueNanos,
             ioCompletionToFixup: runner.totalIOCompletionToFixupSubmitNanos,
             ioHostWaits: runner.totalExpertIOHostWaits,
@@ -1991,7 +1999,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "expert_evictions=%llu expert_reloads=%llu expert_read_mib=%.1f "
                 + "expert_load_p50_ms=%.3f expert_load_p95_ms=%.3f "
                 + "expert_load_p99_ms=%.3f io_hidden_pct=%.2f hit_fixup_layers=%llu "
-                + "router_readback_ms=%.4f cache_plan_ms=%.4f io_queue_ms=%.4f "
+                + "router_readback_ms=%.4f cache_plan_ms=%.4f prefetch_begin_ms=%.4f "
+                + "prefetch_issued=%llu prefetch_adopted=%llu prefetch_reclaimed=%llu "
+                + "io_queue_ms=%.4f "
                 + "io_load_ms=%.4f io_fetch_ms=%.4f io_fixup_wake_ms=%.4f "
                 + "io_completion_to_fixup_ms=%.4f io_host_waits=%llu "
                 + "io_host_waits_avoided=%llu gpu_classified_hits=%llu "
@@ -2021,6 +2031,10 @@ public actor ServerModelSession: ServerInferenceBackend {
             hiddenPercent, runner.totalHitFixupLayers - snapshot.hitFixupLayers,
             ms(runner.totalRouterReadbackNanos, snapshot.routerReadback),
             ms(runner.totalCachePlanNanos, snapshot.cachePlan),
+            ms(runner.totalPrefetchBeginNanos, snapshot.prefetchBegin),
+            runner.prefetchStatistics.issued - snapshot.prefetchIssued,
+            runner.prefetchStatistics.adopted - snapshot.prefetchAdopted,
+            runner.prefetchStatistics.reclaimedUnadopted - snapshot.prefetchReclaimed,
             ms(runner.totalIOQueueNanos, snapshot.ioQueue),
             Double(expert.totalLoadNanos) / Double(tokens) / 1_000_000,
             Double(expert.fetchNanos) / Double(tokens) / 1_000_000,
@@ -2055,7 +2069,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             totalGPU,
             result.decodeSeconds > 0
                 ? totalGPU / (result.decodeSeconds * 1000) * 100 : 0))
-        for gap in runner.kernelGPUGaps().prefix(8) {
+        for gap in runner.kernelGPUGaps().prefix(12) {
             cacheDiag(String(
                 format: "Shrike gap %@ total_ms=%.1f per_token_ms=%.3f count=%d "
                     + "host_ms=%.1f driver_ms=%.1f queue_ms=%.1f",

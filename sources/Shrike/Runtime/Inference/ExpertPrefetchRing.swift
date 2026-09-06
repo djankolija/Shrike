@@ -19,6 +19,17 @@ final class ExpertPrefetchRing: @unchecked Sendable {
 
     private let lock = NSLock()
     private var slots: [Slot]
+    private var issuedCount: UInt64 = 0
+    private var adoptedCount: UInt64 = 0
+    private var reclaimedUnadoptedCount: UInt64 = 0
+
+    /// Lifetime totals: reads issued, slots adopted by an exact route, and
+    /// completed slots reclaimed without ever being adopted.
+    var statistics: (issued: UInt64, adopted: UInt64, reclaimedUnadopted: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (issuedCount, adoptedCount, reclaimedUnadoptedCount)
+    }
 
     init(device: MTLDevice, expertStride: Int, slotCount: Int) throws {
         guard expertStride > 0, slotCount > 0 else {
@@ -71,6 +82,7 @@ final class ExpertPrefetchRing: @unchecked Sendable {
                 layer: layer, experts: selectedExperts, into: buffers)
             lock.lock()
             for slot in selectedSlots { slots[slot].operation = operation }
+            issuedCount &+= UInt64(count)
             lock.unlock()
         } catch {
             lock.lock()
@@ -107,6 +119,7 @@ final class ExpertPrefetchRing: @unchecked Sendable {
             slots[index].layer = -1
             slots[index].expert = -1
             slots[index].operation = nil
+            adoptedCount &+= 1
         }
     }
 
@@ -114,6 +127,9 @@ final class ExpertPrefetchRing: @unchecked Sendable {
         for index in slots.indices where slots[index].layer != exceptLayer {
             switch slots[index].operation?.state {
             case .completed, .failed, .none:
+                if slots[index].expert >= 0, slots[index].operation?.state == .completed {
+                    reclaimedUnadoptedCount &+= 1
+                }
                 slots[index].layer = -1
                 slots[index].expert = -1
                 slots[index].operation = nil
