@@ -181,6 +181,103 @@ contention. T1's ring paid because it placed them beside the demand reads.
   `Run.swift:136`, `:173` carry the other knobs) and absent from the banner
   (`RealForwardRunner.swift:348-412`).
 
+## Task 1: the placement gate on the ring in the tree (commit d3da6f9)
+
+Every number MEASURED on the mini unless marked modelled; the plan's Task 1 carries
+the step list and the raw data lives at `~/.claude/handoffs/archive/shrike-v15-t1/`.
+
+**What was built.** The ring's batch is issued from the layer's demand batch's
+completion (`ExpertLoadOperation.onCompletion`, one hook on the operation's single
+terminal transition, run on the finishing thread after the event is published) or at
+an all-hit layer's plan time, and capped at an in-flight budget kept by the ring
+(`inFlightBudget`; a claimed slot counts until its read terminates, so the budget
+holds across the storage thread and the decode thread). `SHRIKE_PREFETCH_PLACEMENT`
+(`after`, the default; `beside`, v14 T1's shape) and `SHRIKE_PREFETCH_INFLIGHT`
+(1 to 8) join `SHRIKE_PREDICTIVE_PREFETCH`, `SHRIKE_PREFETCH_TOP_M`,
+`SHRIKE_PREFETCH_PROBE_DISTANCE` and `SHRIKE_PREFETCH_TRACE` in `RuntimePrefetch`,
+threaded into both binaries' two configurations, fail-closed on every bad value, and
+printed by the banner (`prefetch=on top_m=8 inflight=1 placement=after distance=1`).
+A slot `readyBuffers` hands to a plan is leased until `consume`, so a `begin` on a
+storage thread never reclaims a slot the decode thread is still copying (the
+review's finding, folded). Five counters join the runner line: `prefetch_deferred`
+(batches issued from a completion), `prefetch_overlapped` (demand batches submitted
+with a ring read in flight), `prefetch_late` (predictions still in flight when the
+exact route asked for them), `prefetch_refused` (predictions dropped for lack of
+budget or slot), `prefetch_hook_failed`. The probe's scales and bias now index
+`L + d` with its weights.
+
+**The arms (20 lifetimes, every answer identical, the follow-up turns and warm second
+prompts unmoved, golden identical at every cell on both boxes).**
+
+| cell (top-8) | card tok/s | the 300 | the 1k | reading layers, ms each (card / 300 / 1k) | late per token | adopted per token |
+| --- | ---: | ---: | ---: | --- | ---: | ---: |
+| prod (ring off) | 14.13 / 13.93 | 14.68 / 14.71 | 14.82 / 14.82 | 1.08 to 1.09 / 1.05 to 1.06 / 1.06 | 0 | 0 |
+| after, B = 1 | 14.80 / 14.49 (**+4.4 %**) | 15.61 / 15.61 (**+6.2 %**) | 15.43 / 15.45 (**+4.2 %**) | 1.03 to 1.11 / 0.97 to 0.98 / 0.98 | 0.46 to 0.79 | 8.9 to 10.0 |
+| after, B = 2 | 14.33 / 14.38 (+2.3 %) | 14.88 / 14.92 (+1.4 %) | 14.86 / 14.84 (+0.2 %) | 1.15 to 1.16 / 1.12 / 1.11 | 6.8 to 7.9 | 5.6 to 7.2 |
+| beside, B = 8 (T1's shape, card) | 13.19 (−6.0 %) | | | 1.63 | 5.35 | 11.1 |
+| beside, B = 1 (card) | 13.84 (−1.4 %) | | | 1.31 | 0.30 | 10.3 |
+
+The percentages are the cell's mean against the two bracketing prod runs; the sign
+held in both orders on every shape (+4.7 / +4.0, +6.3 / +6.1, +4.1 / +4.3 at B = 1)
+against a prod drift of −1.5 / +0.2 / 0.0 %.
+
+**Readings.**
+
+- **The placement rule holds in production.** With one read in flight issued after the
+  demand batch, the layers that still read cost production's per-read time or less:
+  1.03 to 1.11 ms each on the card, 0.97 to 0.98 on the 300 and the 1k, against
+  1.05 to 1.09 with the ring off. The probe's `burst` row on the box.
+- **The other placements land exactly where the probe put them.** `beside` at B = 8
+  reproduces T1's loss (−6.0 % against T1's −7.1 %) with the reading layers at 1.63
+  ms each, the probe's `cont` row; `beside` at B = 1 pays +0.23 per reading layer
+  (1.31 against 1.08), the probe's `cont` N = 1 row to the hundredth, and its
+  predictions all arrive in time (late 0.30): the trade the design doc named, priced
+  at −1.4 %. Two reads after the demand batch (B = 2) do not fit before the next
+  plan: late 6.8 to 7.9 per token, the following reads slowed to 1.11 to 1.16 (the
+  probe's tail cost), adoption down to 5.6 to 7.2.
+- **The lead at distance one is enough for one read.** The lead-time risk (0.8 to
+  0.9 ms before the next plan against a 0.8 ms read) resolved in the mechanism's
+  favour: late predictions are 0.46 to 0.79 per token of 20 to 21 issued, so 93 to
+  95 % of the correct ones are adopted, and 5.0 to 5.2 / 4.9 / 4.6 layers per token
+  stop reading. Misses per token fall from 30.5 / 30.2 / 28.1 to 20.6 / 20.4 / 19.2
+  and the miss window from 19.6 to 19.9 / 19.6 to 19.8 / 18.4 ms to 13.4 to 14.6 /
+  13.4 to 13.5 / 12.5 to 12.6.
+- **What the lever still pays, on the box.** The submit gap grows from 2.2 to 2.4 ms
+  per token to 3.4 to 3.7: the adoption's host copy at 0.12 ms per adopted expert
+  (8.9 to 10.0 per token) plus the begin path. That is Task 2's prize, measured. The
+  probe's second router GEMV (2.0 to 2.3 ms per token of GPU in v14's measurement) is
+  Task 3's.
+- **The probe's index defect is inert on ornith15.** The corrected distance-2 capture
+  is byte-identical to T1's: the Qwen-family runner binds one ones buffer as every
+  layer's effective scale and one zeros buffer as every layer's logit bias
+  (`RealForwardRunner.swift:1473-1533`), so T1's "two layers ahead costs 0.10 of p"
+  stands (top-8 coverage 0.367 / 0.342 / 0.337 at precision 0.29 to 0.34). The fix
+  matters for gpt-oss and Kimi, whose router bias is per layer.
+
+**The rule.** Real (the sign in both orders on all three shapes, above the drift) and
+free (the controls unmoved, golden identical): **the prefetch is on by default** at
+one read in flight, placed after the demand batch, `topM` the architecture's top-k;
+`SHRIKE_PREDICTIVE_PREFETCH=0` is the A/B. The per-read verdict passed, so Tasks 2 and
+3 are built.
+
+**After T1** (2026-09-07; the shipping default changed). Production on the mini
+runs the prefetch at the bare launch (the banner: `prefetch=on top_m=8 inflight=1
+placement=after distance=1`), and the confirmation arms on the deployed default
+(prod, off, prod per shape, `~/.claude/handoffs/archive/shrike-v15-t1/t1-confirm-summary.md`)
+put it at **14.44 / 14.57 then 14.81 / 14.76 on the card, 15.59 / 15.21 then 15.44 /
+15.55 on the 300, 15.54 / 15.54 then 15.34 / 15.59 on the 1k** (before and after the
+review's fold) against 13.92 / 13.93, 14.79 / 14.82, 14.89 / 14.94 with
+`SHRIKE_PREDICTIVE_PREFETCH=0` (the off cell −4.1 to −5.8 / −3.9 to −4.4 / −3.4 to
+−4.2 % against the bracketing default runs), every answer identical, the follow-ups
+unmoved, golden identical at the default and off on both boxes. From the chapter's opening rows (14.1 / 14.8 / 15.0),
+production is up 3 to 4 % on the card and the 1k and 3 to 5 % on the 300 with one
+lever landed. What remains of the miss window is 12.5 to 15.0 ms per token (13 to 14
+reading layers at production's per-read cost), the adoption copy in the submit gap
+(3.2 to 4.1 ms per token against 2.0 to 2.5 off), and the probe's GPU time. The
+chapter moves to the reserved-slot landing (Task 2), whose prize is now a measured
+1.2 to 1.5 ms per token in the submit gap plus the 0.5 to 1.0 late predictions per
+token the late join would rescue, then the fused probe (Task 3).
+
 ## Levers, ranked (modelled from the measured rows)
 
 Every prize is stated per token against the card's 71.3 ms (14.1 tok/s) unless
@@ -201,6 +298,8 @@ below 0.12 ms ([v14-decode.md](v14-decode.md) "Task 1").
   paid: **+0.2 to +1.7 ms per token, 0 to +2.5 %**, thin on purpose; the task's first
   verdict is whether the layers that still read return to production's 1.03 to 1.07
   ms each with the ring on, which is what decides whether (b) and (c) are built.
+  **Measured (Task 1): +4.4 / +6.2 / +4.2 % at B = 1, the reading layers at or below
+  production's per-read cost, the default flipped.**
 - **(b) The reserved-slot landing and the late join (Task 2).** The predicted read
   lands in a pool slot the planner reserves speculatively (a victim chosen as for a
   miss, the slot `loading` under a new generation, `resident` when the bytes land),

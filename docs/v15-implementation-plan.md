@@ -188,12 +188,17 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         golden identical at every cell on both boxes), so the prefetch is ON by
         default at one read in flight, placed after the demand batch, topM the
         architecture's top-k; `SHRIKE_PREDICTIVE_PREFETCH=0` is the A/B. Landed as
-        ff4cfc6; the flipped build golden identical at the default and off on both
+        d3da6f9; the flipped build golden identical at the default and off on both
         boxes (and at B = 2 on the M4 Pro); the confirmation arms on the deployed
-        default (prod, off, prod per shape,
-        `~/.claude/handoffs/archive/shrike-v15-t1/t1-confirm-summary.md`): **14.44 /
-        14.57, 15.59 / 15.21, 15.54 / 15.54 tok/s** against 13.92 / 14.79 / 14.89 off
-        (−4.1 / −3.9 / −4.2 %), every answer identical, the follow-ups unmoved.
+        default (prod, off, prod per shape, run before and again after the
+        review's fold, `~/.claude/handoffs/archive/shrike-v15-t1/t1-confirm-summary.md`
+        and `t1-confirm-review-summary.md`): **14.44 / 14.57 then 14.81 / 14.76 on the
+        card, 15.59 / 15.21 then 15.44 / 15.55 on the 300, 15.54 / 15.54 then 15.34 /
+        15.59 on the 1k** against 13.92 / 13.93, 14.79 / 14.82, 14.89 / 14.94 off
+        (the off cell −4.1 to −5.8 / −3.9 to −4.4 / −3.4 to −4.2 %), every answer
+        identical, the follow-ups unmoved; the fixed build's full suite 1294 tests,
+        its filtered sanitizer pass 50 tests, golden identical at the default and off
+        on both boxes.
   - [x] Step 6 (zero code beyond the fix): one trace capture per shape at distance 2
         on the corrected probe (`tools/decode-rig.sh` with `PREFETCH_TRACE=1` and
         `SERVER_ENV="SHRIKE_PREFETCH_PROBE_DISTANCE=2"`, `tools/prefetch-coverage.py`),
@@ -209,7 +214,7 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         index the same bytes; the fix matters for gpt-oss (a per-layer router bias)
         and Kimi (a per-layer correction bias). T1's "two layers ahead costs 0.10 of
         p" stands as measured; the candidate (e) is priced at that number.
-  - [ ] Step 7 (design doc): the Task 1 section, the After T1 block, the lever
+  - [x] Step 7 (design doc): the Task 1 section, the After T1 block, the lever
         entries updated with what was measured. Task review by a fresh reviewer,
         fixes folded into the owning commits. **The review (2026-09-07) found one
         real defect of this task and it was folded:** a storage-thread `begin`'s
