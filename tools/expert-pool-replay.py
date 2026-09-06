@@ -184,6 +184,7 @@ Usage:
 """
 import argparse
 import bisect
+import json
 import sys
 from collections import OrderedDict, defaultdict, deque
 
@@ -424,6 +425,23 @@ def parse_phase_policy(raw):
     return result
 
 
+def load_prefetch_fills(path, top_m):
+    """(target layer, position) -> the router probe's top-M prediction for that
+    layer, from a SHRIKE_PREFETCH_TRACE capture (one JSON line per decode plan;
+    the prediction at (position, L) names layer L + probe_distance). This is
+    what v15 Task 2's speculative landing would fill into the target's pool
+    before the target's own plan at that position."""
+    fills = {}
+    with open(path) as handle:
+        for raw in handle:
+            row = json.loads(raw)
+            prediction = row.get("next_layer_prediction") or []
+            if not prediction:
+                continue
+            fills[(row["layer"] + row["probe_distance"], row["position"])] = prediction[:top_m]
+    return fills
+
+
 def build_future_occurrences(expert_lists):
     """expert -> sorted list of plan indices (within this layer's own
     sequence) at which it is requested; used only by belady."""
@@ -451,6 +469,38 @@ class LayerPool:
         self.plans_done = 0
         self.compulsory = 0
         self.capacity = 0
+        self.last_assigned = set()
+        self.filled_unused = set()
+        self.fills = 0
+        self.useful_fills = 0
+        self.wasted_fills = 0
+
+    def fill(self, candidates, budget):
+        """Places up to `budget` predicted experts that are not resident into
+        victim slots chosen by the policy, resident at once with no plan's use
+        accounting (the exact route's later hit supplies it). The previous
+        plan's slots are ineligible, as the streamer's pinned slots are; a
+        filled expert evicted before any plan hits it counts as wasted."""
+        placed = 0
+        for expert in candidates:
+            if placed >= budget:
+                break
+            if expert in self.slot_expert:
+                continue
+            eligible = [slot for slot in range(self.slots) if slot not in self.last_assigned]
+            if not eligible:
+                break
+            eligible.sort(key=lambda slot: self._victim_key(slot, self.policy))
+            victim = eligible[0]
+            if victim in self.filled_unused:
+                self.wasted_fills += 1
+                self.filled_unused.discard(victim)
+            self.slot_expert[victim] = expert
+            self.slot_last_use[victim] = self.use_clock
+            self.filled_unused.add(victim)
+            self.fills += 1
+            placed += 1
+        return placed
 
     def _next_use_after(self, expert, index):
         occurrences = self.future_occurrences.get(expert)
@@ -503,6 +553,9 @@ class LayerPool:
                     assigned[i] = slot
                     reserved.add(slot)
                     hits += 1
+                    if slot in self.filled_unused:
+                        self.useful_fills += 1
+                        self.filled_unused.discard(slot)
                     break
 
         miss_indices = [i for i in range(len(experts)) if assigned[i] == -1]
@@ -530,11 +583,15 @@ class LayerPool:
                 self.compulsory += 1
             else:
                 self.capacity += 1
+            if slot in self.filled_unused:
+                self.wasted_fills += 1
+                self.filled_unused.discard(slot)
             self.slot_expert[slot] = experts[miss_i]
             self.slot_last_use[slot] = clock
             assigned[miss_i] = slot
 
         self.plans_done += 1
+        self.last_assigned = set(slot for slot in assigned if slot >= 0)
         return hits, len(miss_indices), assigned
 
 
@@ -933,8 +990,13 @@ def _retile_resident_first(tiles, resident, slots, head_factor):
 def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID_LOOKBACK,
            prefill_weight="one", sweep_order="index", sweep_carry=False,
            phase_policy=None, profile_window=None, protect="chunk",
-           sweep_tail=DEFAULT_SWEEP_TAIL, sweep_head_factor=DEFAULT_SWEEP_HEAD_FACTOR):
+           sweep_tail=DEFAULT_SWEEP_TAIL, sweep_head_factor=DEFAULT_SWEEP_HEAD_FACTOR,
+           fills=None, fill_budget=1, fill_stats=None):
     """Returns (stats, total_compulsory, settle_stats, settle_meta, profile).
+    `fills` ((layer, position) -> predicted experts, see load_prefetch_fills)
+    places up to `fill_budget` of them into the layer's pool before the
+    decode plan at that position; `fill_stats`, when a dict, receives the
+    totals (fills, useful, wasted, unused_at_end).
 
     stats[request_id] = {"prefill": [hits, misses, compulsory, capacity],
                           "decode": [hits, misses, compulsory, capacity]}
@@ -988,6 +1050,9 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
         future = build_future_occurrences(
             [experts for _k, _p, _t, experts, _rc, _lr, _l in layer_lines])
         pool = make_pool(slots, policy, future)
+        if fills is not None and not hasattr(pool, "fill"):
+            raise ValueError(f"speculative fills are modelled for the lru / lfu / aging-lfu / belady "
+                             f"pool only, not {policy.label()}")
         lookback = deque(maxlen=avoid_lookback) if avoid_lookback > 0 else deque()
         next_reverse = sweep_order in ("rows-desc", "last-desc")
 
@@ -995,6 +1060,10 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
             if item[0] == "decode":
                 _kind, position, experts, label = item
                 active = phase_policy["decode"] if phase_policy else None
+                if fills is not None:
+                    candidates = fills.get((layer, position))
+                    if candidates:
+                        pool.fill(candidates, fill_budget)
                 before = (pool.compulsory, pool.capacity)
                 hits, misses, _assigned = pool.plan(experts, policy_override=active)
                 _accumulate(stats, settle_stats, label, hits, misses,
@@ -1046,6 +1115,11 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
                            pool.compulsory - before[0], pool.capacity - before[1])
                 lookback.append((None, [slot for slot in assigned if slot >= 0]))
         total_compulsory += pool.compulsory
+        if fill_stats is not None and hasattr(pool, "fills"):
+            fill_stats["fills"] = fill_stats.get("fills", 0) + pool.fills
+            fill_stats["useful"] = fill_stats.get("useful", 0) + pool.useful_fills
+            fill_stats["wasted"] = fill_stats.get("wasted", 0) + pool.wasted_fills
+            fill_stats["unused_at_end"] = fill_stats.get("unused_at_end", 0) + len(pool.filled_unused)
 
     return stats, total_compulsory, settle_stats, settle_meta, profile
 
@@ -1140,6 +1214,23 @@ def self_test():
     check("lru misses", stats[1]["decode"][1], 4)
     check("lru compulsory", stats[1]["decode"][2], 3)
     check("lru capacity", stats[1]["decode"][3], 1)
+
+    # Speculative fills (v15 Task 2's pricing): layer 1 requests A, B, C at
+    # positions 0, 1, 2 with two slots; a right fill of B before position 1 is a
+    # hit there, a wrong fill of D takes the empty slot, survives B's miss (A
+    # is older) and is evicted by C's.
+    fill_trace = "\n".join(f"{i} 1 {letter_ids[expert]}" for i, expert in enumerate(["A", "B", "C"]))
+    fill_stats = {}
+    stats, _, _, _, _ = _run(fill_trace, slots=2, policy_raw="lru",
+                             fills={(1, 1): [letter_ids["B"]]}, fill_stats=fill_stats)
+    check("fill right hits", stats[1]["decode"][0], 1)
+    check("fill right misses", stats[1]["decode"][1], 2)
+    check("fill right counters", (fill_stats["fills"], fill_stats["useful"], fill_stats["wasted"]), (1, 1, 0))
+    fill_stats = {}
+    stats, _, _, _, _ = _run(fill_trace, slots=2, policy_raw="lru",
+                             fills={(1, 1): [4]}, fill_stats=fill_stats)
+    check("fill wrong misses", stats[1]["decode"][1], 3)
+    check("fill wrong counters", (fill_stats["fills"], fill_stats["useful"], fill_stats["wasted"]), (1, 0, 1))
 
     stats, _, _, _, _ = _run(decode_trace, slots=2, policy_raw="lfu")
     check("lfu hits", stats[1]["decode"][0], 4)
@@ -1759,6 +1850,16 @@ def main():
                          help="file of measured miss counts, one request per line "
                               "('prefill_misses decode_misses', or one integer for a "
                               "decode-only comparison), to print beside the replayed counts")
+    parser.add_argument("--speculative-fills", default=None, metavar="PREFETCH_TRACE",
+                        help="a SHRIKE_PREFETCH_TRACE capture from the same lifetime: the "
+                             "router probe's prediction for layer L + d at each position is "
+                             "filled into L + d's pool before its plan there (v15 Task 2's "
+                             "speculative landing, modelled)")
+    parser.add_argument("--fill-top-m", type=int, default=8,
+                        help="prefix of the prediction considered per layer (default 8)")
+    parser.add_argument("--fill-budget", type=int, default=1,
+                        help="fills placed per layer per position (default 1, the ring's "
+                             "one read in flight)")
     parser.add_argument("--self-test", action="store_true",
                          help="run the built-in synthetic-trace checks and exit")
     args = parser.parse_args()
@@ -1777,6 +1878,9 @@ def main():
 
     lines = load_trace(args.trace)
     policy = parse_policy(args.policy)
+    fills = load_prefetch_fills(args.speculative_fills, args.fill_top_m) \
+        if args.speculative_fills else None
+    fill_stats = {} if fills is not None else None
     phase_policy = None
     if args.phase_policy:
         try:
@@ -1789,12 +1893,18 @@ def main():
             lines, args.slots, policy, args.layer, args.avoid_lookback,
             args.prefill_weight, args.sweep_order, args.sweep_carry == "on",
             phase_policy, args.profile_window, protect=args.protect,
-            sweep_tail=args.sweep_tail, sweep_head_factor=args.sweep_head_factor)
+            sweep_tail=args.sweep_tail, sweep_head_factor=args.sweep_head_factor,
+            fills=fills, fill_budget=args.fill_budget, fill_stats=fill_stats)
     except ValueError as e:
         parser.error(str(e))
 
     print_report(stats, total_compulsory, policy, args.slots, args.layer,
                  args.avoid_lookback, settle_stats, settle_meta, protect=args.protect)
+    if fill_stats is not None:
+        print(f"  speculative fills (top-m={args.fill_top_m} budget={args.fill_budget}): "
+              f"placed={fill_stats.get('fills', 0)} useful={fill_stats.get('useful', 0)} "
+              f"wasted={fill_stats.get('wasted', 0)} "
+              f"unused_at_end={fill_stats.get('unused_at_end', 0)}")
     if args.profile_window:
         print_profile(profile, args.profile_window)
     if args.expect:
