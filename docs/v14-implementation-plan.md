@@ -177,7 +177,7 @@ moved under `tools/` by the first task that needs it in the tree).
     (`:908-929`). It is an approximation by construction: layer L+1's exact router
     input is layer L's output, which does not exist while layer L runs.
   - The staging path exists too. `ExpertPrefetchRing`
-    (`Sources/Shrike/Runtime/Inference/ExpertPrefetchRing.swift`, 125 lines) holds
+    (`sources/Shrike/Runtime/Inference/ExpertPrefetchRing.swift`, 125 lines) holds
     `topM` raw slots outside the authoritative cache (`:4-11`), `begin` stages only
     the predicted experts that are absent and not already queued (`:43-85`),
     `readyBuffers` hands the exact plan whatever has **completed** (`:87-100`), the
@@ -320,8 +320,8 @@ moved under `tools/` by the first task that needs it in the tree).
   join, the history-only baselines over a route trace, the modelled prize through
   step zero's coefficients, `--self-test`), and the step-zero streaming rig moved
   under `tools/`. Step 2, only if the stop passes:
-  `Sources/Shrike/Runtime/Inference/ExpertPrefetchRing.swift` (the awaiting join at
-  `:87-100`, the geometry), `Sources/Shrike/Runtime/Inference/RealForwardRunner.swift`
+  `sources/Shrike/Runtime/Inference/ExpertPrefetchRing.swift` (the awaiting join at
+  `:87-100`, the geometry), `sources/Shrike/Runtime/Inference/RealForwardRunner.swift`
   (`makePredictivePrefetch` `:908-929`, the `begin` call site moved from `:6738-6743`
   to just after the demand fetch is begun at `:6529-6537`,
   `prefillGapLeversDescription` `:377-408`, the prefetch counters if any).
@@ -334,7 +334,7 @@ moved under `tools/` by the first task that needs it in the tree).
 
   Steps:
 
-  - [x] Step 1 (measurement, no code in `Sources/`): the three offline arms above,
+  - [x] Step 1 (measurement, no code in `sources/`): the three offline arms above,
         (i) the history-only baselines on the three archived traces, (ii) one
         `SHRIKE_PREFETCH_TRACE` capture per shape on the mini and the coverage join,
         (iii) the zero-code `SHRIKE_PREDICTIVE_PREFETCH` A/B at top-M 4 and 8 on the
@@ -409,6 +409,25 @@ moved under `tools/` by the first task that needs it in the tree).
         first. Gates 1 to 4, plus a filtered ThreadSanitizer run over the ring's suite
         (the ring is lock-guarded shared state across the reader's threads, v13 Task
         2's precedent).
+        **The fix LANDED** (commit "decode: the fixup follows the GPU's residency
+        classification"): `ExpertCachePlan.adopted` (the indices the planner
+        counted as hits from prefetched bytes), `DecodeExpertPartition.populate`
+        taking them as fixup misses, and in the routed encoder the speculative
+        modes reading the GPU's miss list back as a fail-closed check, the hit
+        split running whenever the fixup has work, and the partition's miss count
+        driving the all-hit branch and `specAllHit` while the storage miss count
+        keeps the I/O bookkeeping; `gpu-residency`'s guard expects the plan's misses
+        plus the adopted set. Two host-only tests RED then GREEN
+        (`adoptedPrefetchesJoinTheFixupMisses`,
+        `plannedCacheReportsAdoptedPrefetchesBesideItsMisses`). Golden on the M4
+        Pro: speculative with the prefetch at top-8 short + long IDENTICAL (was a
+        mismatch on both), the default launch IDENTICAL, speculative-validate with
+        the prefetch IDENTICAL (was the cross-check throw). The speculative modes,
+        the shipping default included, now carry the fail-closed residency check
+        `gpu-residency` always had: a disagreement between the GPU's classification
+        and the plan beyond the adopted set fails the generation instead of running
+        a different partition. The mini's golden with the knob off and on is the
+        deploy's gate.
   - [ ] Step 3 (numerics): golden IDENTICAL on both profiles at every knob cell on
         the M4 Pro at each amend, and on the mini at the default and the candidate
         cells at each amend and at all cells at the landed commit. Plus one

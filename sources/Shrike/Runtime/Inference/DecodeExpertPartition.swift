@@ -6,15 +6,16 @@
 enum DecodeExpertPartition {
     static func populate(topK: Int,
                          missIndices: [Int],
+                         adoptedIndices: [Int] = [],
                          hits: inout [UInt32],
                          misses: inout [UInt32]) {
         hits.removeAll(keepingCapacity: true)
         misses.removeAll(keepingCapacity: true)
         hits.reserveCapacity(topK)
-        misses.reserveCapacity(missIndices.count)
+        misses.reserveCapacity(missIndices.count + adoptedIndices.count)
 
         for index in 0..<topK {
-            if missIndices.contains(index) {
+            if missIndices.contains(index) || adoptedIndices.contains(index) {
                 misses.append(UInt32(index))
             } else {
                 hits.append(UInt32(index))

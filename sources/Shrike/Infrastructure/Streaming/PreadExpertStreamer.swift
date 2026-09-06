@@ -53,16 +53,21 @@ public struct ExpertCachePlan: Sendable, Equatable {
     public let assignedGenerations: [UInt64]
     public let misses: [Int]
     public let hits: Int
+    /// Indices into `experts` counted as hits because the planner adopted
+    /// prefetched bytes for them; a GPU-side residency classification taken
+    /// before this plan still sees them as misses.
+    public let adopted: [Int]
 
     public init(experts: [Int], assignedSlots: [Int],
                 assignedGenerations: [UInt64], misses: [Int], hits: Int,
-                layer: Int = 0) {
+                layer: Int = 0, adopted: [Int] = []) {
         self.experts = experts
         self.assignedSlots = assignedSlots
         self.assignedGenerations = assignedGenerations
         self.misses = misses
         self.hits = hits
         self.layer = layer
+        self.adopted = adopted
     }
 }
 
@@ -731,6 +736,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
         var misses: [Int] = []
         var adoptedPrefetches: [Int] = []
+        var adoptedIndices: [Int] = []
         var victimOffset = 0
         for index in 0..<experts.count where assignedSlots[index] == -1 {
             let slot = victimSlotsScratch[victimOffset]
@@ -761,6 +767,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                                          state: ExpertResidencyEntry.resident,
                                          generation: slotGeneration[slot])
                 adoptedPrefetches.append(experts[index])
+                adoptedIndices.append(index)
             } else {
                 misses.append(index)
             }
@@ -782,7 +789,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             assignedGenerations: assignedSlots.map { slotGeneration[$0] },
             misses: misses,
             hits: experts.count - misses.count,
-            layer: layer)
+            layer: layer,
+            adopted: adoptedIndices)
     }
 
     public func executeExpertCachePlan(_ plan: ExpertCachePlan) throws

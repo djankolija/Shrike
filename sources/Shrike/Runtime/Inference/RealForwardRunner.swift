@@ -6577,10 +6577,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 for index in 0..<missCount {
                     decodeMissSlotsScratch.append(missPointer[index])
                 }
-                // CPU planning is still the eviction authority. A mismatch
-                // means metadata publication raced or became stale; fail
+                // CPU planning is still the eviction authority. The GPU's
+                // view predates this plan, so a prefetch the planner adopted
+                // is a miss there and a resident hit here; any other mismatch
+                // means metadata publication raced or became stale. Fail
                 // closed rather than executing a different partition.
-                guard decodeMissSlotsScratch.map(Int.init) == plan.misses else {
+                guard decodeMissSlotsScratch.map(Int.init)
+                    == (plan.misses + plan.adopted).sorted() else {
                     throw ModelError.internalInconsistency(
                         detail: "GPU residency classification disagrees with cache plan")
                 }
@@ -6588,11 +6591,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 totalGPUClassifiedMisses &+= UInt64(missCount)
                 if missCount == 0 { totalGPUResidencyAllHitLayers &+= 1 }
             } else {
+                let gpuClassified = decodeExpertExecution == .speculative
+                    || decodeExpertExecution == .speculativeValidate
                 DecodeExpertPartition.populate(
                     topK: cfg.topKExperts,
                     missIndices: plan.misses,
+                    adoptedIndices: gpuClassified ? plan.adopted : [],
                     hits: &decodeHitSlotsScratch,
                     misses: &decodeMissSlotsScratch)
+                if gpuClassified {
+                    // The spec command computed the GPU's partition, not the
+                    // plan's; the fixup must finish exactly what it skipped.
+                    let gpuMissCount = min(
+                        Int(residencyMissCount.contents().load(as: UInt32.self)),
+                        cfg.topKExperts)
+                    let gpuMisses = UnsafeBufferPointer(
+                        start: residencyMissPositions.contents()
+                            .bindMemory(to: UInt32.self, capacity: cfg.topKExperts),
+                        count: gpuMissCount)
+                    guard gpuMisses.elementsEqual(decodeMissSlotsScratch) else {
+                        throw ModelError.internalInconsistency(
+                            detail: "GPU residency classification disagrees with cache plan")
+                    }
+                }
             }
         }
         // Capture the populated arrays. Capturing them before `populate` made
@@ -6626,9 +6647,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 ioStatusOffset: ioStatusOffset)
         }
 
+        let fixupHasMisses = !phase1MissSlots.isEmpty
+            || plannedFetch.map { !$0.misses.isEmpty } == true
         if let plan = plannedFetch,
            plan.hits > 0,
-           !plan.misses.isEmpty {
+           fixupHasMisses {
             let plannedBlobs = try model.routedExpertBuffers(for: plan)
             for blob in plannedBlobs {
                 decodeHitSplitRoutedBufsScratch.append(blob.buffer)
@@ -6638,7 +6661,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 routedBlobs: decodeHitSplitRoutedBufsScratch,
                 topK: topK,
                 routedBufferOffsets: decodeHitSplitRoutedOffsetsScratch)
-            if let argBuf = phase1HitSplitArgBuf, plan.hits > 0, !plan.misses.isEmpty {
+            if let argBuf = phase1HitSplitArgBuf, plan.hits > 0, fixupHasMisses {
                 writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
                 guard let cb = ctx.queue.makeCommandBuffer() else {
                     throw ModelError.residentBufferWrapFailed
@@ -6659,6 +6682,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             cb.commit()
         }
         let missCount = plannedFetch?.misses.count ?? experts.count
+        let fixupMissCount = plannedFetch == nil
+            ? experts.count : max(missCount, phase1MissSlots.count)
         let completionClock = missCount > 0 ? overlapCompletionClock : nil
         let expectedOverlapCompletions = phase1HitCB == nil ? 1 : 2
         if plannedLoad == nil && rdadviseEnabled && rdadvisePolicyMode != .off {
@@ -6754,7 +6779,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // command; nothing classic gets encoded.
         if decodeExpertExecution == .speculative,
            let specCB,
-           plannedFetch?.misses.isEmpty == true {
+           plannedFetch != nil,
+           fixupMissCount == 0 {
             guard pendingRoutedCommand == nil else {
                 throw ModelError.internalInconsistency(
                     detail: "routed command-buffer pipeline not drained before queuing the next layer")
@@ -6803,7 +6829,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             sharedCB: sharedCB,
             phase1HitCB: phase1HitCB,
             specCB: specCB,
-            specAllHit: missCount == 0,
+            specAllHit: fixupMissCount == 0,
             specScratch: (specCB != nil && !specScratch.isEmpty)
                 ? specScratch[L % specScratch.count] : nil,
             expertLease: expertLease,

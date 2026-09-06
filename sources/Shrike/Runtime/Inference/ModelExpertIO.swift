@@ -9,6 +9,7 @@ public struct RoutedExpertFetchPlan: Sendable {
     public var misses: [Int] { cachePlan.misses }
     public var hits: Int { cachePlan.hits }
     public var assignedSlots: [Int] { cachePlan.assignedSlots }
+    public var adopted: [Int] { cachePlan.adopted }
 
     public init(layer: Int, cachePlan: ExpertCachePlan) {
         self.layer = layer

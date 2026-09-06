@@ -164,6 +164,30 @@ extension PreadExpertStreamerTests {
     }
   }
 
+  @Test func plannedCacheReportsAdoptedPrefetchesBesideItsMisses() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 4)
+    let staged = UnsafeMutableRawPointer.allocate(
+      byteCount: Self.expertStride, alignment: Self.pageSize)
+    defer { staged.deallocate() }
+    staged.initializeMemory(as: UInt8.self, repeating: Self.tagByte(1), count: Self.expertStride)
+
+    _ = try streamer.loadExpertsCached(experts: [0])
+    let experts = [0, 1, 2]
+    let plan = try streamer.planExpertsCached(experts: experts, prefetched: [1: staged])
+
+    #expect(plan.hits == 2)
+    #expect(plan.misses == [2])
+    #expect(plan.adopted == [1])
+
+    let results = try streamer.executeExpertCachePlan(plan)
+    let adopted = Self.bytes(of: results[1].buffer, offset: results[1].offset, count: Self.expertStride)
+    #expect(adopted.allSatisfy { $0 == Self.tagByte(1) })
+  }
+
   @Test func residentSnapshotExcludesLoadingEntries() throws {
     let url = try Self.writeSyntheticLayer()
     defer { try? FileManager.default.removeItem(at: url) }
