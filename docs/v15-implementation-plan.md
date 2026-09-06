@@ -271,13 +271,38 @@ the probe's sleeping host). The design doc carries the tables and the placement 
   only if Task 1's per-read verdict passes.**
 
   **Steps.**
-  - [ ] Step 0 (zero code): the replay tool prices the wasted fills. Extend
+  - [x] Step 0 (zero code): the replay tool prices the wasted fills. Extend
         `tools/expert-pool-replay.py` with a speculative-fill input (the archived
         `prefetch-*.jsonl` traces from T1 carry the predicted top-8 per decode layer)
         that fills predicted nonresident experts into victim slots at the placement
         rule's budget, and report the miss count against production's replay on the
         four archived traces. A miss-rate cost above what the copy's removal buys
-        lands the task as a candidate with its number.
+        lands the task as a candidate with its number. **DONE 2026-09-07 (the tool's
+        `--speculative-fills`, `~/.claude/handoffs/archive/shrike-v15-t2/step0/`),
+        MODELLED from T1's measured distance-1 captures (route and prefetch traces of
+        the same lifetimes) at production's pool (128 slots, aging-lfu; the baseline
+        replay reproduces production's decode misses exactly, 6689 / 9468 / 11398):**
+
+        | cell | card misses (per token) | the 300 | the 1k | useful / wasted fills per token (card) |
+        | --- | ---: | ---: | ---: | --- |
+        | production, no fills | 6689 (30.5) | 9468 (30.2) | 11398 (28.1) | |
+        | top-8, one fill per layer | 4309 (19.7) | 6261 (19.9) | 7666 (18.9) | 11.8 / 7.0 |
+        | top-8, two per layer | 4151 (19.0) | 6150 (19.6) | 7665 (18.9) | 12.7 / 13.6 |
+        | top-4, one per layer | 5258 (24.0) | 7545 (24.0) | 9090 (22.4) | 6.9 / 1.9 |
+
+        The misses saved per token at the ring's cell (10.9 / 10.2 / 9.2) fall short of
+        the useful fills (11.8 / 11.3 / 10.1) by **about one miss per token: the wrong
+        fills' evictions**, 0.85 ms per token at step zero's slope, against the copy's
+        1.2 to 1.5 ms. So the landing as designed nets 0.3 to 0.6 ms per token before
+        the late join (0.5 to 1.0 late predictions per token, each worth most of a
+        read), about +1 to +2 % in all. **The design fork, Davor's call:** (i) build
+        it as designed; (ii) keep T1's staging ring and have the fixup compute an
+        adopted expert straight from the ring's buffer, with the copy into the slot a
+        GPU blit encoded in the same command (no host copy, no speculative eviction,
+        the pool's accounting untouched; the GPU pays about 0.03 ms per adopted
+        expert); (iii) a buffer swap under the per-slot cache layout (no copy at all,
+        but the layout the T5 measurements did not choose). (ii) keeps the whole
+        1.2 to 1.5 ms and this session's recommendation.
   - [ ] Step 1 (tests RED first): the planner's speculative reservation (a slot
         claimed `loading` for a predicted expert, released or promoted, never
         double-claimed, protected experts and chunk protection respected, the
