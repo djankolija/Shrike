@@ -449,6 +449,11 @@ private struct RunnerCounterSnapshot {
     let prefetchIssued: UInt64
     let prefetchAdopted: UInt64
     let prefetchReclaimed: UInt64
+    let prefetchDeferred: UInt64
+    let prefetchOverlapped: UInt64
+    let prefetchLate: UInt64
+    let prefetchRefused: UInt64
+    let prefetchHookFailures: UInt64
     let pathPin: UInt64
     let pathSubmit: UInt64
     let pathArgBuf: UInt64
@@ -677,7 +682,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             expertIOSynchronization: try RuntimeExpertIOSynchronization.environmentValue(),
             expertIOSubmission: try RuntimeExpertIOSubmission.environmentValue(),
             specPhase1Coverage: try RuntimeSpecPhase1Coverage.environmentValue(),
-            routerWake: try RuntimeRouterWake.environmentValue())
+            routerWake: try RuntimeRouterWake.environmentValue(),
+            prefetch: try RuntimePrefetch.environmentValue())
         let slotOverride = ProcessInfo.processInfo.environment["SHRIKE_EXPERT_CACHE_SLOTS"]
             .flatMap(Int.init)
         // Precedence: --expert-cache-slots flag, then the env override, then a
@@ -735,6 +741,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             expertIOSubmission: loadRuntime.expertIOSubmission,
             specPhase1Coverage: loadRuntime.specPhase1Coverage,
             routerWake: loadRuntime.routerWake,
+            prefetch: loadRuntime.prefetch,
             kvCachePrecision: kvCachePrecision,
             ropeScalingMode: ropeScalingMode,
             yarnContextTokens: ropeScalingMode == .yarn
@@ -1135,6 +1142,11 @@ public actor ServerModelSession: ServerInferenceBackend {
             prefetchIssued: runner.prefetchStatistics.issued,
             prefetchAdopted: runner.prefetchStatistics.adopted,
             prefetchReclaimed: runner.prefetchStatistics.reclaimedUnadopted,
+            prefetchDeferred: runner.prefetchStatistics.deferred,
+            prefetchOverlapped: runner.prefetchStatistics.overlapped,
+            prefetchLate: runner.prefetchStatistics.late,
+            prefetchRefused: runner.prefetchStatistics.refused,
+            prefetchHookFailures: runner.prefetchStatistics.hookFailures,
             pathPin: runner.totalRoutedPinNanos,
             pathSubmit: runner.totalRoutedSubmitNanos,
             pathArgBuf: runner.totalHitSplitArgBufNanos,
@@ -2025,6 +2037,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "expert_load_p99_ms=%.3f io_hidden_pct=%.2f hit_fixup_layers=%llu "
                 + "router_readback_ms=%.4f cache_plan_ms=%.4f prefetch_begin_ms=%.4f "
                 + "prefetch_issued=%llu prefetch_adopted=%llu prefetch_reclaimed=%llu "
+                + "prefetch_deferred=%llu prefetch_overlapped=%llu prefetch_late=%llu "
+                + "prefetch_refused=%llu prefetch_hook_failed=%llu "
                 + "path_pin_ms=%.4f path_submit_ms=%.4f path_argbuf_ms=%.4f "
                 + "path_hit_encode_ms=%.4f path_fixup_build_ms=%.4f "
                 + "path_hit_commit_to_kernel_ms=%.4f path_hit_kernel_to_gpu_ms=%.4f "
@@ -2064,6 +2078,11 @@ public actor ServerModelSession: ServerInferenceBackend {
             runner.prefetchStatistics.issued - snapshot.prefetchIssued,
             runner.prefetchStatistics.adopted - snapshot.prefetchAdopted,
             runner.prefetchStatistics.reclaimedUnadopted - snapshot.prefetchReclaimed,
+            runner.prefetchStatistics.deferred - snapshot.prefetchDeferred,
+            runner.prefetchStatistics.overlapped - snapshot.prefetchOverlapped,
+            runner.prefetchStatistics.late - snapshot.prefetchLate,
+            runner.prefetchStatistics.refused - snapshot.prefetchRefused,
+            runner.prefetchStatistics.hookFailures - snapshot.prefetchHookFailures,
             ms(runner.totalRoutedPinNanos, snapshot.pathPin),
             ms(runner.totalRoutedSubmitNanos, snapshot.pathSubmit),
             ms(runner.totalHitSplitArgBufNanos, snapshot.pathArgBuf),

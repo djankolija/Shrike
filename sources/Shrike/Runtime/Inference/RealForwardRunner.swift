@@ -373,7 +373,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             expertIOParseFailure: boundedReaderFailure,
             cacheProtectMode: expertCacheProtectMode,
             specPhase1: specPhase1Coverage,
-            routerWake: hostWaitSpin ? routerWake : .status)
+            routerWake: hostWaitSpin ? routerWake : .status,
+            prefetch: prefetchConfiguration,
+            prefetchTopM: predictivePrefetchTopM)
     }
 
     static func prefillGapLeversDescription(
@@ -388,7 +390,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         expertIOParseFailure: String? = nil,
         cacheProtectMode: ExpertCacheProtectMode = .chunk,
         specPhase1: RuntimeSpecPhase1Coverage = .allHit,
-        routerWake: RuntimeRouterWake = .word
+        routerWake: RuntimeRouterWake = .word,
+        prefetch: RuntimePrefetch = .off,
+        prefetchTopM: Int = 4
     ) -> String {
         let residency: String
         if let residencyAllocationCount {
@@ -411,6 +415,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             + " protect=\(cacheProtectMode.rawValue)"
             + " spec_phase1=\(specPhase1.rawValue)"
             + " router_wake=\(routerWake.rawValue)"
+            + " prefetch=\(prefetchDescription(prefetch, topM: prefetchTopM))"
+    }
+
+    private static func prefetchDescription(_ prefetch: RuntimePrefetch, topM: Int) -> String {
+        guard prefetch.enabled else { return "off" }
+        return "on top_m=\(topM) inflight=\(prefetch.inFlight)"
+            + " placement=\(prefetch.placement.rawValue) distance=\(prefetch.distance)"
     }
 
     /// The prefill router kernel in force (`block` or `tiled tokens=N`) and its
@@ -769,6 +780,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let expertIOBackend: ExpertIOBackend
     private let expertCacheProtectMode: ExpertCacheProtectMode
     private let predictivePrefetch: ExpertPrefetchRing?
+    private let prefetchConfiguration: RuntimePrefetch
     private let anePrefill: ANEPrefillAttention?
     private let predictivePrefetchTopM: Int
     public let rdadviseEnabled: Bool
@@ -816,18 +828,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.routerWake = runtimeConfiguration.routerWake
         self.expertIOBackend = try ExpertIOBackend.environmentValue()
         self.expertCacheProtectMode = try ExpertCacheProtectMode.environmentValue()
+        self.prefetchConfiguration = runtimeConfiguration.prefetch
         let prefetch = try Self.makePredictivePrefetch(
-            model: model, device: context.device)
+            model: model, device: context.device,
+            configuration: runtimeConfiguration.prefetch)
         self.predictivePrefetchTopM = prefetch.topM
         self.predictivePrefetch = prefetch.ring
+        self.prefetchTraceFD = Self.openPrefetchTrace(runtimeConfiguration.prefetch.tracePath)
         self.anePrefill = try Self.makeANEPrefill(
             model: model, device: context.device)
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
-        self.rdadviseAdaptiveState = RDAdviceAdaptivePolicyState(
-            config: RDAdviceAdaptivePolicyConfig(
-                missCap: Self.rdadviseAdaptiveMissCap,
-                byteCap: Self.rdadviseAdaptiveByteCap,
-                slowCallNanos: Self.rdadviseAdaptiveSlowCallNanos))
+        self.rdadviseAdaptiveState = Self.makeRDAdviseAdaptiveState()
         self.rdadviseEnabled = runtimeConfiguration.rdadviseEnabled
         self.kv = try KVCacheManager(device: context.device,
                                      config: cfg,
@@ -927,26 +938,78 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     private static func makePredictivePrefetch(
-        model: Model, device: MTLDevice
+        model: Model, device: MTLDevice, configuration: RuntimePrefetch
     ) throws -> (topM: Int, ring: ExpertPrefetchRing?) {
         let cfg = model.config
-        let enabled = ProcessInfo.processInfo.environment[
-            "SHRIKE_PREDICTIVE_PREFETCH"] == "1"
-        // The built-in default clamps to the architecture's top-k (gpt-oss
-        // routes top-4, toys fewer); only an explicit override is validated.
-        let topM = ProcessInfo.processInfo.environment[
-            "SHRIKE_PREFETCH_TOP_M"].flatMap(Int.init) ?? min(4, cfg.topKExperts)
+        let topM = configuration.topM ?? cfg.topKExperts
         guard (1...cfg.topKExperts).contains(topM) else {
             throw ModelError.internalInconsistency(
                 detail: "SHRIKE_PREFETCH_TOP_M must be 1...\(cfg.topKExperts)")
         }
-        let ring = enabled
+        // In-flight reads hold slots beside the completed ones a later plan
+        // may still adopt, so the ring is sized for both.
+        let ring = configuration.enabled
             ? try ExpertPrefetchRing(
                 device: device,
                 expertStride: model.routedExpertByteStride(layer: 0),
-                slotCount: topM)
+                slotCount: topM + configuration.inFlight,
+                inFlightBudget: configuration.inFlight)
             : nil
         return (topM, ring)
+    }
+
+    private static func makeRDAdviseAdaptiveState() -> RDAdviceAdaptivePolicyState {
+        RDAdviceAdaptivePolicyState(
+            config: RDAdviceAdaptivePolicyConfig(
+                missCap: rdadviseAdaptiveMissCap,
+                byteCap: rdadviseAdaptiveByteCap,
+                slowCallNanos: rdadviseAdaptiveSlowCallNanos))
+    }
+
+    private static func openPrefetchTrace(_ path: String?) -> Int32 {
+        guard let path else { return -1 }
+        return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+    }
+
+    /// A refused speculative read is counted, never thrown into the decode.
+    private func schedulePredictivePrefetch(layer L: Int, predicted: [Int],
+                                            demand: ExpertLoadOperation?) {
+        guard let predictivePrefetch, L + prefetchProbeDistance < cfg.numLayers else { return }
+        let target = L + prefetchProbeDistance
+        let experts = Array(predicted.prefix(predictivePrefetchTopM))
+        let model = self.model
+        Self.schedulePrefetchIssue(placement: prefetchConfiguration.placement,
+                                   demand: demand) { deferred in
+            do {
+                let resident = Set(try model.routedExpertResidentIDs(layer: target))
+                try predictivePrefetch.begin(layer: target, experts: experts,
+                                             resident: resident, deferred: deferred) { experts, buffers in
+                    try model.beginRoutedExpertPrefetch(layer: target, experts: experts,
+                                                        into: buffers)
+                }
+            } catch {
+                if predictivePrefetch.noteHookFailure() {
+                    print("Shrike prefetch: a speculative read was refused and counted, not retried: \(error)")
+                }
+            }
+        }
+    }
+
+    /// `after` waits for the layer's demand batch so the ring's reads never
+    /// share the drive with it.
+    static func schedulePrefetchIssue(placement: RuntimePrefetchPlacement,
+                                      demand: ExpertLoadOperation?,
+                                      _ issue: @escaping (_ deferred: Bool) -> Void) {
+        guard placement == .after, let demand else {
+            issue(false)
+            return
+        }
+        switch demand.state {
+        case .completed, .failed:
+            issue(false)
+        case .submitted, .inFlight:
+            demand.onCompletion { issue(true) }
+        }
     }
 
     // Track A: the ANE prefill sidecar, opt-in. Only the qwen36 target
@@ -1924,7 +1987,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalLoopProgressNanos: UInt64 = 0
     public private(set) var totalLoopProduceNanos: UInt64 = 0
     public private(set) var totalCachePlanNanos: UInt64 = 0
-    public private(set) var totalPrefetchBeginNanos: UInt64 = 0
+    public var totalPrefetchBeginNanos: UInt64 { predictivePrefetch?.statistics.beginNanos ?? 0 }
     public private(set) var totalRoutedPinNanos: UInt64 = 0
     public private(set) var totalRoutedSubmitNanos: UInt64 = 0
     public private(set) var totalHitSplitArgBufNanos: UInt64 = 0
@@ -1935,8 +1998,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalFixupCommitToKernelNanos: UInt64 = 0
     public private(set) var totalRouterWakeNanos: UInt64 = 0
     public private(set) var totalRouterWakeFallbacks: UInt64 = 0
-    public var prefetchStatistics: (issued: UInt64, adopted: UInt64, reclaimedUnadopted: UInt64) {
-        predictivePrefetch?.statistics ?? (0, 0, 0)
+    public var prefetchStatistics: ExpertPrefetchStatistics {
+        predictivePrefetch?.statistics ?? ExpertPrefetchStatistics()
     }
     public private(set) var totalIOQueueNanos: UInt64 = 0
     public private(set) var totalIOCompletionToFixupSubmitNanos: UInt64 = 0
@@ -2052,11 +2115,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// It deliberately records only exact routing and authoritative cache
     /// residency before planning; enabling it cannot submit I/O or alter cache
     /// decisions. Kept separate from SHRIKE_ROUTE_TRACE for compatibility.
-    private let prefetchTraceFD: Int32 = {
-        guard let path = ProcessInfo.processInfo.environment["SHRIKE_PREFETCH_TRACE"],
-              !path.isEmpty else { return -1 }
-        return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
-    }()
+    private let prefetchTraceFD: Int32
 
     private var nextLayerPredictionEnabled: Bool {
         prefetchTraceFD >= 0 || predictivePrefetch != nil
@@ -2065,8 +2124,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// How many layers ahead the router probe predicts (1 = next layer).
     /// The recall-vs-distance curve gates the two-stage prefetch experiment
     /// (docs/architecture.md, "Predictive prefetch").
-    private let prefetchProbeDistance = max(1, ProcessInfo.processInfo
-        .environment["SHRIKE_PREFETCH_PROBE_DISTANCE"].flatMap(Int.init) ?? 1)
+    private var prefetchProbeDistance: Int { prefetchConfiguration.distance }
 
     public func resetKernelGPUTimings() {
         kernelGPUTimings.removeAll(keepingCapacity: true)
@@ -3522,11 +3580,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 scales: nextRouterW.buffer, scalesOffset: Int(nextRouterW.scaleOffset),
                 biases: nextRouterW.buffer, biasesOffset: Int(nextRouterW.biasOffset),
                 hidden: routedX,
-                effectiveScale: effectiveScaleBuffers[L + 1],
+                effectiveScale: effectiveScaleBuffers[L + prefetchProbeDistance],
                 perExpertScale: perExpertScale.buffer,
                 perExpertScaleOffset: perExpertScale.offset,
-                logitBias: routerLogitBias[L + 1].buffer,
-                logitBiasOffset: routerLogitBias[L + 1].offset,
+                logitBias: routerLogitBias[L + prefetchProbeDistance].buffer,
+                logitBiasOffset: routerLogitBias[L + prefetchProbeDistance].offset,
                 outIndices: prefetchPredictionIndices,
                 outWeights: prefetchPredictionWeights,
                 numExperts: UInt32(cfg.numExperts), d: D,
@@ -6782,6 +6840,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             : nil
         totalRoutedSubmitNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - submitStarted
+        if let plannedLoad, !plannedLoad.plan.misses.isEmpty {
+            predictivePrefetch?.noteDemandSubmission()
+        }
         var transferredExpertLease = false
         var phase1HitCB: MTLCommandBuffer?
         defer {
@@ -6988,6 +7049,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // The production deferred schedule still uses the split operation
             // so queueing and completion remain observable. It deliberately
             // begins here, after the independent hit work is committed.
+            if !plannedFetch.misses.isEmpty { predictivePrefetch?.noteDemandSubmission() }
             let deferredLoad = try model.beginFetchRoutedExperts(plan: plannedFetch)
             totalExpertIOHostWaits &+= plannedFetch.misses.isEmpty ? 0 : 1
             blobs = try await deferredLoad.completion()
@@ -7008,16 +7070,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
             }
         }
-        if let predictivePrefetch, L + prefetchProbeDistance < cfg.numLayers {
-            let beginStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let target = L + prefetchProbeDistance
-            let resident = Set(try model.routedExpertResidentIDs(layer: target))
-            try predictivePrefetch.begin(
-                model: model, layer: target,
-                experts: Array(predictedNextLayer.prefix(predictivePrefetchTopM)),
-                resident: resident)
-            totalPrefetchBeginNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - beginStarted
-        }
+        schedulePredictivePrefetch(layer: L, predicted: predictedNextLayer,
+                                   demand: plannedLoad?.storage)
         decodeRoutedBufsScratch.removeAll(keepingCapacity: true)
         decodeRoutedOffsetsScratch.removeAll(keepingCapacity: true)
         for blob in blobs {

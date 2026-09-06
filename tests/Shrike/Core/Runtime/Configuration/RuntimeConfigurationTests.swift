@@ -105,7 +105,45 @@ import Testing
         }
     }
 
+    @Test func prefetchEnvironmentIsFailClosed() throws {
+        #expect(try RuntimePrefetch.environmentValue([:]) == .production)
+        #expect(RuntimePrefetch.production
+            == RuntimePrefetch(enabled: true, topM: nil, inFlight: 1, placement: .after,
+                               distance: 1, tracePath: nil))
+        #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREDICTIVE_PREFETCH": "0"]) == .off)
+        #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREDICTIVE_PREFETCH": "1"]) == .production)
+        #expect(try RuntimePrefetch.environmentValue([
+            "SHRIKE_PREDICTIVE_PREFETCH": "1",
+            "SHRIKE_PREFETCH_TOP_M": "8",
+            "SHRIKE_PREFETCH_INFLIGHT": "2",
+            "SHRIKE_PREFETCH_PLACEMENT": "beside",
+            "SHRIKE_PREFETCH_PROBE_DISTANCE": "2",
+            "SHRIKE_PREFETCH_TRACE": "/tmp/prefetch.jsonl",
+        ]) == RuntimePrefetch(enabled: true, topM: 8, inFlight: 2, placement: .beside,
+                              distance: 2, tracePath: "/tmp/prefetch.jsonl"))
+        #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREFETCH_TRACE": ""]).tracePath == nil)
+        let bad: [[String: String]] = [
+            ["SHRIKE_PREDICTIVE_PREFETCH": "yes"],
+            ["SHRIKE_PREFETCH_TOP_M": "0"],
+            ["SHRIKE_PREFETCH_TOP_M": "many"],
+            ["SHRIKE_PREFETCH_INFLIGHT": "0"],
+            ["SHRIKE_PREFETCH_INFLIGHT": "9"],
+            ["SHRIKE_PREFETCH_PLACEMENT": "typo"],
+            ["SHRIKE_PREFETCH_PROBE_DISTANCE": "0"],
+            ["SHRIKE_PREFETCH_PROBE_DISTANCE": "far"],
+        ]
+        for environment in bad {
+            #expect(throws: RuntimeConfigurationError.self) {
+                try RuntimePrefetch.environmentValue(environment)
+            }
+        }
+    }
+
     @Test func configurationDefaultsMatchTheEnvironmentDefaults() throws {
+        #expect(RuntimeConfiguration.production.prefetch == .production)
+        #expect(RuntimeConfiguration.production.prefetch.enabled)
+        #expect(RuntimeConfiguration.production.prefetch
+            == (try RuntimePrefetch.environmentValue([:])))
         #expect(RuntimeConfiguration.production.routerWake == .word)
         #expect(RuntimeConfiguration.production.specPhase1Coverage == .allHit)
         #expect(RuntimeConfiguration.production.routerWake

@@ -95,12 +95,20 @@ the probe's sleeping host). The design doc carries the tables and the placement 
     chapter's standard.
 
   **Steps.**
-  - [ ] Step 0 (zero code): the production per-read baseline from the archived v14
-        arms' runner lines (`io_fetch_ms` per reading layer on the `prod` arms of
-        `~/.claude/handoffs/archive/shrike-v14-t2/step2-leverB/`, and on T1's
-        prefetch arms in `shrike-v14-t1/step2-fix/`), so the verdict has its two
-        anchors before the first arm runs: what a reading layer costs with the ring
-        off, and what it cost with the ring beside the demand reads.
+  - [x] Step 0 (zero code): the production per-read baseline from the archived v14
+        arms, so the verdict has its two anchors before the first arm runs.
+        **DONE 2026-09-06.** The measure is the `Shrike gap` block's miss window per
+        token over the reading layers per token (`hit_fixup_layers` less the
+        adopted-only layers from the kernel roles; the runner line's `io_fetch_ms` is
+        cumulative over the request and mixes prefill's fetches,
+        `ServerInference.swift:2078`). Ring off (the T1 A/B's prod arms and the
+        lever B prod arms on `4cc6e58`'s build): 18.1 to 20.3 ms over 17.4 to 18.7
+        layers, **1.03 to 1.07 ms per reading layer**, at 30.5 misses per token on
+        the card (`expert_misses_decode` 6689 over 219 tokens, `hit_fixup_layers`
+        3981). Ring beside the demand reads (T1's instrumented arms): **1.15 to 1.23
+        at top-4, 1.59 to 1.71 at top-8** ([v14-decode.md](v14-decode.md) "Task 1").
+        The drift on prod's tok/s across the T1 A/B: −1.2 / +0.3 / +0.6 % on the
+        three answers.
   - [ ] Step 1 (tests RED first): `RuntimePrefetch` in `RuntimeConfiguration.swift`
         (enabled, `topM`, `inFlight`, `placement` in `after` / `beside`, `distance`,
         `trace`) with `environmentValue()` fail-closed on every bad value, production
@@ -126,19 +134,45 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         flight), `prefetch_late` (predicted experts in flight at plan time that the
         plan then read again). Four gates; the filtered ThreadSanitizer pass on the
         streaming and runtime suites.
-  - [ ] Step 3 (numerics): golden IDENTICAL on both profiles on the M4 Pro at the
+  - [x] Step 3 (numerics): golden IDENTICAL on both profiles on the M4 Pro at the
         default, at `after` B = 1 and B = 2 at top-8, and at `beside` top-8; on the
         mini at the default and the candidate cells at each amend and at all cells at
-        the landed commit.
-  - [ ] Step 4 (the arms, mini): per shape the mirrored order prod, after-B1,
-        after-B2, after-B2, after-B1, prod at top-8 (18 lifetimes), plus one
-        `beside` top-8 lifetime on the card as the control that reproduces the
-        slowed reads on this binary. Readings per arm: `io_fetch_ms` per reading
-        layer, `prefetch_issued / adopted / reclaimed / deferred / overlapped /
-        late`, adopted-only layers per token (the kernel role), the miss window from
-        the `Shrike gap` block, the submit gap, and tok/s on the three answers with
+        the landed commit. **DONE 2026-09-06 on the task's build:** five cells
+        (default, after B = 1, after B = 2, beside B = 8, beside B = 1, all at
+        top-8), short and long, identical on the mini
+        (`ledger/t1-mini-golden.log`) and on the M4 Pro (`ledger/t1-local-golden.log`);
+        repeated at the landed commit if it is amended.
+  - [x] Step 4 (the arms, mini): per shape the mirrored order prod, after-B1,
+        after-B2, after-B2, after-B1, prod at top-8 (18 lifetimes), plus on the
+        card one `beside` at B = 8 (T1's shape, the control that reproduces the
+        slowed reads on this binary) and one `beside` at B = 1 (the bounded form
+        of T1's placement: every prediction in time, at the `cont` row's +0.23 on
+        the missing layer's own read). Readings per arm: the miss window per
+        reading layer from the `Shrike gap` block (`tools/decode-rows.py`), the
+        adopted-only layers per token (the `_adopted` role's gap count),
+        `prefetch_issued / adopted / reclaimed / deferred / overlapped / late /
+        hook_failed` per token, the submit gap, and tok/s on the three answers with
         the turns and the warm second prompts as controls.
-  - [ ] Step 5 (the rule, pre-registered): **the verdict on the rule** is the reading
+        **DONE 2026-09-06, 20 lifetimes, every answer identical** (the ledger's
+        23:58 entry, `~/.claude/handoffs/archive/shrike-v15-t1/t1-arms-summary.md`):
+
+        | cell (top-8) | card tok/s | the 300 | the 1k | reading layers, ms each (card / 300 / 1k) | late per token | adopted per token |
+        | --- | ---: | ---: | ---: | --- | ---: | ---: |
+        | prod (ring off) | 14.13 / 13.93 | 14.68 / 14.71 | 14.82 / 14.82 | 1.08 to 1.09 / 1.05 to 1.06 / 1.06 | 0 | 0 |
+        | after, B = 1 | 14.80 / 14.49 (+4.4 %) | 15.61 / 15.61 (+6.2 %) | 15.43 / 15.45 (+4.2 %) | 1.03 to 1.11 / 0.97 to 0.98 / 0.98 | 0.46 to 0.79 | 8.9 to 10.0 |
+        | after, B = 2 | 14.33 / 14.38 (+2.3 %) | 14.88 / 14.92 (+1.4 %) | 14.86 / 14.84 (+0.2 %) | 1.15 to 1.16 / 1.12 / 1.11 | 6.8 to 7.9 | 5.6 to 7.2 |
+        | beside, B = 8 (T1's shape, card) | 13.19 (−6.0 %) | | | 1.63 | 5.35 | 11.1 |
+        | beside, B = 1 (card) | 13.84 (−1.4 %) | | | 1.31 | 0.30 | 10.3 |
+
+        The reading layers cost production's per-read time or less with the ring on
+        at B = 1 (the placement rule holds on the box); the pair at B = 2 arrives
+        late and slows the reads it overlaps; `beside` at B = 8 reproduces T1's loss
+        and at B = 1 pays the probe's +0.23 per reading layer exactly. Misses per
+        token 30.5 / 30.2 / 28.1 to 20.6 / 20.4 / 19.2 at B = 1; the miss window 19.6
+        to 19.9 / 19.6 to 19.8 / 18.4 to 13.4 to 14.6 / 13.4 to 13.5 / 12.5 to 12.6 ms;
+        the submit gap 2.2 to 2.4 to 3.4 to 3.7 (the adoption copy, Task 2's prize);
+        the follow-up walls unmoved.
+  - [x] Step 5 (the rule, pre-registered): **the verdict on the rule** is the reading
         layers' per-read cost with the ring on at `after`: within the drift of the
         prod arms' 1.03 to 1.07 ms means the placement rule holds in production and
         Tasks 2 and 3 are built; above it by more than the drift means the drive's
@@ -147,16 +181,59 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         default**: real and free on the three answers flips
         `SHRIKE_PREDICTIVE_PREFETCH` on at the winning cell; otherwise the knobs land
         at their measured defaults with the prefetch off, as today.
-  - [ ] Step 6 (zero code beyond the fix): one trace capture per shape at distance 2
+        **DONE 2026-09-06: both verdicts pass.** The per-read verdict: at or below
+        production's on all three shapes, so Tasks 2 and 3 are built. The default:
+        real (4.0 to 6.3 % in both orders on every shape against a prod drift of
+        −1.5 to +0.2 %) and free (the turns and the warm second prompts unmoved,
+        golden identical at every cell on both boxes), so the prefetch is ON by
+        default at one read in flight, placed after the demand batch, topM the
+        architecture's top-k; `SHRIKE_PREDICTIVE_PREFETCH=0` is the A/B. Landed as
+        ff4cfc6; the flipped build golden identical at the default and off on both
+        boxes (and at B = 2 on the M4 Pro); the confirmation arms on the deployed
+        default (prod, off, prod per shape,
+        `~/.claude/handoffs/archive/shrike-v15-t1/t1-confirm-summary.md`): **14.44 /
+        14.57, 15.59 / 15.21, 15.54 / 15.54 tok/s** against 13.92 / 14.79 / 14.89 off
+        (−4.1 / −3.9 / −4.2 %), every answer identical, the follow-ups unmoved.
+  - [x] Step 6 (zero code beyond the fix): one trace capture per shape at distance 2
         on the corrected probe (`tools/decode-rig.sh` with `PREFETCH_TRACE=1` and
         `SERVER_ENV="SHRIKE_PREFETCH_PROBE_DISTANCE=2"`, `tools/prefetch-coverage.py`),
         the coverage and precision two layers ahead re-measured; recorded against the
-        candidate (e) in the design doc.
+        candidate (e) in the design doc. **DONE 2026-09-07:** the corrected capture is
+        BYTE-IDENTICAL to T1's archived distance-2 capture on the card and gives the
+        same join on all three shapes (top-8 coverage p 0.367 / 0.342 / 0.337,
+        precision 0.341 / 0.301 / 0.289, wasted reads 24 to 28 per token; distance 1:
+        0.462 / 0.442 / 0.428 at 0.471 / 0.423 / 0.407). The defect is real in the
+        code and inert on ornith15: the Qwen-family runner binds one shared ones
+        buffer as every layer's effective scale and one zeros buffer as every layer's
+        logit bias (`RealForwardRunner.swift:1473-1533`), so `L + 1` and `L + d`
+        index the same bytes; the fix matters for gpt-oss (a per-layer router bias)
+        and Kimi (a per-layer correction bias). T1's "two layers ahead costs 0.10 of
+        p" stands as measured; the candidate (e) is priced at that number.
   - [ ] Step 7 (design doc): the Task 1 section, the After T1 block, the lever
         entries updated with what was measured. Task review by a fresh reviewer,
-        fixes folded into the owning commits.
+        fixes folded into the owning commits. **The review (2026-09-07) found one
+        real defect of this task and it was folded:** a storage-thread `begin`'s
+        reclaim could free a completed slot of another layer while the decode thread
+        was still copying its bytes into the cache (between `readyBuffers` and
+        `consume`; at distance 2 the ordinary case, at distance 1 a delayed hook);
+        fixed by a lease on the slots `readyBuffers` hands out, cleared by `consume`,
+        skipped by the reclaim, with its test. Also folded: a `prefetch_refused`
+        counter for predictions dropped for lack of budget or slot, a one-time log of
+        the first refused speculative read, a cross-thread exactly-once test on the
+        hook, and the comment trims. Left as noted: a one-count overcount of
+        `deferred` when the batch finishes between the state read and the hook's
+        registration; the banner's `placement=after` under the host-wait and deferred
+        submission modes, where the batch is already awaited.
 
   **Risks and what falsifies the model.**
+  - **The lead at distance one after a demand completion is thin.** A read issued
+    when layer L's demand batch completes has L's fixup and L + 1's attention,
+    about 0.8 to 0.9 ms, before L + 1's plan asks for it, against a 0.8 ms read
+    (p90 0.9); on an all-hit layer it has the layer's whole compute. So under
+    `after` a share of the missing layers' predictions arrive late and are read
+    again by the demand batch (`prefetch_late`), which is the in-time fraction the
+    task measures; the remedies are the late join (Task 2) and distance two after
+    Step 6's re-measure, and the bounded `beside` arm prices the other trade.
   - **Production's gap is not the probe's.** The prefetch read must land before the
     next router readback resolves into a miss; `prefetch_overlapped` and
     `prefetch_late` say how often it does not, and a per-read cost above production's

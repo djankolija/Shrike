@@ -25,6 +25,8 @@ GAPS = {
 RUNNER = ["expert_hit_rate_decode", "expert_misses_decode", "hit_fixup_layers", "io_ms",
           "io_fixup_wake_ms", "io_fetch_ms", "io_hidden_pct", "cache_plan_ms",
           "prefetch_begin_ms", "prefetch_issued", "prefetch_adopted", "prefetch_reclaimed",
+          "prefetch_deferred", "prefetch_overlapped", "prefetch_late", "prefetch_refused",
+          "prefetch_hook_failed",
           "router_readback_ms", "path_pin_ms", "path_submit_ms", "path_argbuf_ms",
           "path_hit_encode_ms", "path_fixup_build_ms", "path_hit_commit_to_kernel_ms",
           "path_hit_kernel_to_gpu_ms", "path_fixup_commit_to_kernel_ms", "path_router_wake_ms",

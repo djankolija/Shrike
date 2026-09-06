@@ -133,7 +133,8 @@ public func run(args: Args,
             expertIOSynchronization: try RuntimeExpertIOSynchronization.environmentValue(),
             expertIOSubmission: try RuntimeExpertIOSubmission.environmentValue(),
             specPhase1Coverage: try RuntimeSpecPhase1Coverage.environmentValue(),
-            routerWake: try RuntimeRouterWake.environmentValue())
+            routerWake: try RuntimeRouterWake.environmentValue(),
+            prefetch: try RuntimePrefetch.environmentValue())
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
@@ -171,6 +172,7 @@ public func run(args: Args,
             expertIOSubmission: loadRuntime.expertIOSubmission,
             specPhase1Coverage: loadRuntime.specPhase1Coverage,
             routerWake: loadRuntime.routerWake,
+            prefetch: loadRuntime.prefetch,
             kvCachePrecision: args.kvCachePrecision,
             ropeScalingMode: args.ropeScalingMode,
             yarnContextTokens: args.ropeScalingMode == .yarn

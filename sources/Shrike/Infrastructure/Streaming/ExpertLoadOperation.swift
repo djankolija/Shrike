@@ -18,6 +18,7 @@ public final class ExpertLoadOperation: @unchecked Sendable {
     private var currentState: ExpertLoadOperationState = .submitted
     private var failure: (any Error)?
     private var continuations: [CheckedContinuation<Void, any Error>] = []
+    private var completionHooks: [() -> Void] = []
 
     public let submittedNanos: UInt64
     public let completionToken: ExpertIOCompletionToken?
@@ -103,6 +104,22 @@ public final class ExpertLoadOperation: @unchecked Sendable {
         }
     }
 
+    /// Runs `hook` once on the thread that completes the operation, after the
+    /// event is published and the waiters resumed, or at once when the
+    /// operation is already terminal. The hook's captures must be safe to use
+    /// from a storage thread.
+    func onCompletion(_ hook: @escaping () -> Void) {
+        condition.lock()
+        switch currentState {
+        case .submitted, .inFlight:
+            completionHooks.append(hook)
+            condition.unlock()
+        case .completed, .failed:
+            condition.unlock()
+            hook()
+        }
+    }
+
     func markInFlight() {
         condition.withLock {
             precondition(currentState == .submitted,
@@ -126,6 +143,8 @@ public final class ExpertLoadOperation: @unchecked Sendable {
         }
         let waiting = continuations
         continuations.removeAll(keepingCapacity: false)
+        let hooks = completionHooks
+        completionHooks.removeAll(keepingCapacity: false)
         condition.broadcast()
         condition.unlock()
 
@@ -153,6 +172,7 @@ public final class ExpertLoadOperation: @unchecked Sendable {
                 continuation.resume(throwing: error)
             }
         }
+        for hook in hooks { hook() }
     }
 }
 
