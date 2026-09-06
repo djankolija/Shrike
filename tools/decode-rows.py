@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""decode-rows.py <server log> [tokens-*.json ...]
+
+One row per request from a decode-rig.sh server log: the server's timing line
+(prefill_s, decode_s, decode_tok_s, completion), the runner's decode pool and
+I/O counters (expert_hit_rate_decode, expert_misses_decode, hit_fixup_layers,
+io_ms, io_fixup_wake_ms, io_fetch_ms, io_hidden_pct), and the two decode gaps
+that hold the miss window (moe_phase1_hit to moe_phase1_miss_fixup_phase2, and
+moe_spec_routed to moe_phase1_hit), per token. A tokens-*.json from
+decode-stream-client.py adds the streamed answer's wall per token (the mean of
+consecutive arrivals after the first chunk) as a separate line.
+"""
+import json
+import re
+import statistics
+import sys
+
+GAPS = {
+    "window": r"gap moe_phase1_hit->moe_phase1_miss_fixup_phase2 total_ms=\s*[\d.]+ per_token_ms=([\d.]+)",
+    "submit": r"gap moe_spec_routed->moe_phase1_hit total_ms=\s*[\d.]+ per_token_ms=([\d.]+)",
+}
+RUNNER = ["expert_hit_rate_decode", "expert_misses_decode", "hit_fixup_layers", "io_ms",
+          "io_fixup_wake_ms", "io_fetch_ms", "io_hidden_pct"]
+
+
+def grab(pattern, text, cast=float):
+    m = re.search(pattern, text)
+    return cast(m.group(1)) if m else None
+
+
+def fmt(value, digits=3):
+    return "n/a" if value is None else f"{value:.{digits}f}"
+
+
+log_path, token_paths = sys.argv[1], sys.argv[2:]
+lines = open(log_path, errors="ignore").read().splitlines()
+levers = next((m.group(0)[:160] for ln in lines
+               if (m := re.search(r"prefill_gap_levers=(\S+(?: \S+=\S+)*)", ln))), None)
+print(f"== {log_path.rsplit('/', 1)[-1]}  [{levers}]")
+
+blocks, cur = [], None
+for ln in lines:
+    if " request " in ln and " generating" in ln:
+        if cur:
+            blocks.append(cur)
+        cur = [ln]
+    elif cur is not None:
+        cur.append(ln)
+if cur:
+    blocks.append(cur)
+
+for block in blocks:
+    text = "\n".join(block)
+    prompt = grab(r"prompt=(\d+)", text, int)
+    cached = grab(r"cached=(\d+)", text, int)
+    completion = grab(r"completion=(\d+)", text, int)
+    wall = grab(r"completed in ([\d.]+)s", text)
+    prefill = grab(r"prefill_s=([\d.]+)", text)
+    decode = grab(r"decode_s=([\d.]+)", text)
+    tok_s = grab(r"decode_tok_s=([\d.]+)", text)
+    runner = {key: grab(rf"{key}=([\d.]+)", text) for key in RUNNER}
+    gaps = {key: grab(pattern, text) for key, pattern in GAPS.items()}
+    print(f"  prompt={prompt} cached={cached} completion={completion} wall={fmt(wall)}s "
+          f"prefill_s={fmt(prefill)} decode_s={fmt(decode)} decode_tok_s={fmt(tok_s, 2)} | "
+          f"hit_rate={fmt(runner['expert_hit_rate_decode'], 4)} "
+          f"misses={fmt(runner['expert_misses_decode'], 0)} "
+          f"fixup_layers={fmt(runner['hit_fixup_layers'], 0)} "
+          f"io_ms={fmt(runner['io_ms'])} wake_ms={fmt(runner['io_fixup_wake_ms'])} "
+          f"fetch_ms={fmt(runner['io_fetch_ms'])} hidden_pct={fmt(runner['io_hidden_pct'], 1)} | "
+          f"window_ms/tok={fmt(gaps['window'])} submit_ms/tok={fmt(gaps['submit'])}")
+
+for path in token_paths:
+    arrivals = [t[1] for t in json.load(open(path))["tokens"]]
+    if len(arrivals) < 3:
+        print(f"  {path.rsplit('/', 1)[-1]}: {len(arrivals)} tokens, no wall")
+        continue
+    walls = [b - a for a, b in zip(arrivals[1:], arrivals[2:])]
+    print(f"  {path.rsplit('/', 1)[-1]}: {len(arrivals)} tokens, first chunk {arrivals[0]:.0f} ms, "
+          f"wall/token mean {statistics.mean(walls):.2f} ms (median {statistics.median(walls):.2f}, "
+          f"{1000 / statistics.mean(walls):.2f} tok/s)")

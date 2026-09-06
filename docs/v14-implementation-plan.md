@@ -334,20 +334,81 @@ moved under `tools/` by the first task that needs it in the tree).
 
   Steps:
 
-  - [ ] Step 1 (measurement, no code in `sources/`): the three offline arms above,
-        (i) the history-only baselines on the four archived traces, (ii) one
+  - [x] Step 1 (measurement, no code in `Sources/`): the three offline arms above,
+        (i) the history-only baselines on the three archived traces, (ii) one
         `SHRIKE_PREFETCH_TRACE` capture per shape on the mini and the coverage join,
         (iii) the zero-code `SHRIKE_PREDICTIVE_PREFETCH` A/B at top-M 4 and 8 on the
         three answers, paired in both orders. Deliverable: the tool, one table per
         shape (recall, nonresident precision, full-layer coverage p at distance 1 and
         2, the modelled prize), and the stop applied in writing.
-  - [ ] Step 2 (code, only if the stop passes): the ring sized to the layer's top-k,
-        `begin` moved to plan time so the predicted reads run beside the demand read
-        (K = 2, the probe's own arm), and the in-flight join so a correct-but-late
-        prediction is awaited instead of re-read. Host tests RED first. Gates 1 to 4,
-        plus a filtered ThreadSanitizer run over the ring's suite (the ring is
-        lock-guarded shared state across the reader's threads, v13 Task 2's
-        precedent).
+        **DONE 2026-09-06.** (i) The router-free predictors are dead at 128 slots on
+        all three traces: full-layer coverage 0.000 for the previous token's set,
+        0.018 to 0.040 for the last-8 union, 0.019 to 0.023 for the previous layer's
+        set (the replay's decode misses 6,689 / 9,468 / 11,398 match the box).
+        (ii) MEASURED on the mini (the v13 close binary, `prefix(M)` exactly as the
+        runtime applies it; the probe costs ≈ 2 ms per token of wall and all six
+        answers were byte-identical to step zero's), card / 300 / 1k:
+
+        | distance, M | full-layer coverage p | per-miss recall | nonresident precision | fetches per token |
+        | --- | --- | --- | --- | --- |
+        | d = 1, M = 8 | **0.462 / 0.442 / 0.428** | 0.583 / 0.561 / 0.554 | 0.471 / 0.423 / 0.407 | 35.3 / 37.8 / 36.0 |
+        | d = 1, M = 4 | 0.169 / 0.164 / 0.158 | 0.298 / 0.279 / 0.283 | 0.692 / 0.625 / 0.625 | 12.3 / 12.7 / 12.0 |
+        | d = 2, M = 8 | 0.367 / 0.342 / 0.337 | 0.475 / 0.445 / 0.453 | 0.341 / 0.301 / 0.289 | 37.0 / 39.8 / 38.9 |
+        | d = 2, M = 4 | 0.153 / 0.143 / 0.138 | 0.253 / 0.233 / 0.240 | 0.525 / 0.454 / 0.450 | 12.8 / 13.8 / 13.3 |
+
+        Missing layers per token 18.3 / 18.8 / 17.4; absent-set sizes on the card
+        1: 2,401, 2: 919, 3: 373, 4: 176, 5 or more: 113. **The stop clears**: p is
+        above 0.10 and precision above 0.21 on all three shapes at both M and both
+        distances. The modelled prize (p x 11.5 ms, MODELLED) is 4.9 to 5.3 ms per
+        token at d = 1, M = 8 (7.1 to 7.2 % of the wall), 1.8 to 1.9 at M = 4; the
+        4-to-36 % spread of the draft closes at ≈ 7 %. (iii) carries **no verdict**:
+        every `SHRIKE_PREDICTIVE_PREFETCH=1` arm answered a different text (the
+        defect below), so its rows are the shipped scheme's timing floor only: on
+        the three answers top-4 cut the window 1 to 3 ms per token at −1 to +2 %
+        tok/s, top-8 added 1 to 4 ms at −7 to −10 % (its 37 ring reads per token
+        steal bandwidth from the demand reads); production repeated to 0.1 tok/s
+        with identical miss counts in both orders. Tool: `tools/prefetch-coverage.py`
+        (`join` and `history`, `--self-test`); the rig: `tools/decode-rig.sh`,
+        `tools/decode-stream-client.py`, `tools/decode-rows.py`. Raw captures, rows
+        and golden logs: `~/.claude/handoffs/archive/shrike-v14-t1/`.
+
+        **Step 1's finding: the shipped path is not output-identical.** Under the
+        default `SHRIKE_DECODE_EXPERT_EXECUTION=speculative`, `SHRIKE_PREDICTIVE_PREFETCH=1`
+        changes the answer on the mini (four arms, four texts, the route traces first
+        differing at the first decode position, layer 12) and fails
+        `tools/golden-baseline.sh --check` on the M4 Pro on both profiles, under the
+        pool and the per-slot cache layouts alike. Three golden runs pin the cause:
+        `hit-fixup` execution with the prefetch is IDENTICAL, `hit-fixup` alone is
+        IDENTICAL, and `speculative-validate` with the prefetch throws the runtime's
+        own cross-check, "speculative routed output diverged from the classic path".
+        The GPU classifies the layer's hits and misses from the residency table in
+        the attention tail (`encodeResidencyClassification`,
+        `RealForwardRunner.swift:3473-3487`) BEFORE the host's plan adopts the ring's
+        bytes (`PreadExpertStreamer.swift:756-763`, a memcpy at plan time); the host
+        then sets `specAllHit` from its own post-adoption miss count (`:6661`,
+        `:6806`) and takes the speculative command's result, which computed the
+        layer without the adopted expert. `gpu-residency` guards exactly this
+        disagreement and fails closed (`:6583-6586`); the speculative modes do not.
+        The bytes themselves are right (the offsets, the C reader's blocking
+        completion and the victim selection were each read and ruled out).
+        **Ruling (Davor, 2026-09-06): Step 2 opens with the fix, the fixup follows
+        the GPU's classification.**
+  - [ ] Step 2 (code; the stop passed): **first the fix**: in the speculative
+        modes the fixup's partition follows the GPU's classification (its misses are
+        the plan's misses plus the adopted experts, which the fixup computes from
+        their now-resident slots with no storage read; `specAllHit` only when the
+        GPU saw all hits; a fail-closed check that the two views differ by exactly
+        the adopted set, as `gpu-residency` already does), the plan carrying its
+        adopted indices, and the prize becoming the hidden read rather than the
+        speculative shortcut on adopted layers. RED first: a host-only test of the
+        reconciliation rule; the failing golden under the knob is the device-level
+        RED and turns IDENTICAL on both boxes. Then the ring sized to the layer's
+        top-k, `begin` moved to plan time so the predicted reads run beside the
+        demand read (K = 2, the probe's own arm), and the in-flight join so a
+        correct-but-late prediction is awaited instead of re-read. Host tests RED
+        first. Gates 1 to 4, plus a filtered ThreadSanitizer run over the ring's suite
+        (the ring is lock-guarded shared state across the reader's threads, v13 Task
+        2's precedent).
   - [ ] Step 3 (numerics): golden IDENTICAL on both profiles at every knob cell on
         the M4 Pro at each amend, and on the mini at the default and the candidate
         cells at each amend and at all cells at the landed commit. Plus one
