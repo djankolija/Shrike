@@ -442,6 +442,41 @@ def load_prefetch_fills(path, top_m):
     return fills
 
 
+def load_two_distance_queue(path_d1, path_d2, top_m, chained=False):
+    """The two-distance queue (v15's scheduled step zero): the window that opens
+    at layer L (its demand batch's completion or its all-hit plan) serves the
+    router probe's prediction for L + 1 (the d1 capture's line at (position, L))
+    when that prediction names an expert absent from L + 1's resident set (the
+    capture's own), else the prediction for L + 2 (the d2 capture's line at the
+    same (position, L)). Returns (target layer, position) -> candidates: the d1
+    prediction first, then the d2 prediction if the window two layers back was
+    free for it; `chained` lets every window serve both in sequence (the second
+    read still has two layers of lead)."""
+    d1 = {}
+    for raw in open(path_d1):
+        row = json.loads(raw)
+        d1[(row["position"], row["layer"])] = row
+    d2 = {}
+    for raw in open(path_d2):
+        row = json.loads(raw)
+        d2[(row["position"], row["layer"])] = row
+    fills = {}
+    for (position, layer), row in d1.items():
+        prediction = (row.get("next_layer_prediction") or [])[:top_m]
+        target = layer + row["probe_distance"]
+        if prediction:
+            fills.setdefault((target, position), []).extend(prediction)
+        # The window at L is free for L + 2 when L + 1's prediction is all resident.
+        next_row = d1.get((position, target))
+        window_free = chained or not prediction or (
+            next_row is not None and not (set(prediction) - set(next_row.get("resident", []))))
+        row2 = d2.get((position, layer))
+        prediction2 = (row2.get("next_layer_prediction") or [])[:top_m] if row2 else []
+        if window_free and prediction2:
+            fills.setdefault((layer + row2["probe_distance"], position), []).extend(prediction2)
+    return fills
+
+
 def build_future_occurrences(expert_lists):
     """expert -> sorted list of plan indices (within this layer's own
     sequence) at which it is requested; used only by belady."""
@@ -1231,6 +1266,22 @@ def self_test():
                              fills={(1, 1): [4]}, fill_stats=fill_stats)
     check("fill wrong misses", stats[1]["decode"][1], 3)
     check("fill wrong counters", (fill_stats["fills"], fill_stats["useful"], fill_stats["wasted"]), (1, 0, 1))
+    # The two-distance queue keys each capture's target by its own probe_distance:
+    # the second capture here is at distance 3, so its fill lands three layers on.
+    import os
+    import tempfile
+    d1_rows = [{"position": 0, "layer": 3, "probe_distance": 1, "next_layer_prediction": [7], "resident": []},
+               {"position": 0, "layer": 4, "probe_distance": 1, "next_layer_prediction": [9], "resident": [7]}]
+    d2_rows = [{"position": 0, "layer": 3, "probe_distance": 3, "next_layer_prediction": [11], "resident": []}]
+    with tempfile.TemporaryDirectory() as tmp:
+        path_d1 = os.path.join(tmp, "d1.jsonl")
+        path_d2 = os.path.join(tmp, "d2.jsonl")
+        with open(path_d1, "w") as handle:
+            handle.write("\n".join(json.dumps(row) for row in d1_rows) + "\n")
+        with open(path_d2, "w") as handle:
+            handle.write("\n".join(json.dumps(row) for row in d2_rows) + "\n")
+        queue = load_two_distance_queue(path_d1, path_d2, top_m=8)
+    check("queue targets by probe distance", dict(queue), {(4, 0): [7], (6, 0): [11], (5, 0): [9]})
 
     stats, _, _, _, _ = _run(decode_trace, slots=2, policy_raw="lfu")
     check("lfu hits", stats[1]["decode"][0], 4)
@@ -1855,6 +1906,14 @@ def main():
                              "router probe's prediction for layer L + d at each position is "
                              "filled into L + d's pool before its plan there (v15 Task 2's "
                              "speculative landing, modelled)")
+    parser.add_argument("--speculative-fills-2", default=None, metavar="PREFETCH_TRACE_D2",
+                        help="with --speculative-fills: the same lifetime's distance-2 capture; "
+                             "a layer's window serves its next layer's prediction, or the layer "
+                             "after that when the next needs nothing (the two-distance queue)")
+    parser.add_argument("--queue-mode", choices=["free", "chained"], default="free",
+                        help="with --speculative-fills-2: 'free' spends a window on the layer "
+                             "after next only when the next needs nothing, 'chained' spends every "
+                             "window on both in sequence (default free)")
     parser.add_argument("--fill-top-m", type=int, default=8,
                         help="prefix of the prediction considered per layer (default 8)")
     parser.add_argument("--fill-budget", type=int, default=1,
@@ -1878,8 +1937,13 @@ def main():
 
     lines = load_trace(args.trace)
     policy = parse_policy(args.policy)
-    fills = load_prefetch_fills(args.speculative_fills, args.fill_top_m) \
-        if args.speculative_fills else None
+    if args.speculative_fills and args.speculative_fills_2:
+        fills = load_two_distance_queue(args.speculative_fills, args.speculative_fills_2,
+                                        args.fill_top_m, chained=args.queue_mode == "chained")
+    elif args.speculative_fills:
+        fills = load_prefetch_fills(args.speculative_fills, args.fill_top_m)
+    else:
+        fills = None
     fill_stats = {} if fills is not None else None
     phase_policy = None
     if args.phase_policy:
