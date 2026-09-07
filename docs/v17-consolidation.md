@@ -1,0 +1,310 @@
+# v17: the consolidation
+
+v16 ([v16-landing.md](v16-landing.md)) closed with the ring merged into the pool's address
+space, the copy and blit adoption deleted, and production on the mini at 15.34 / 16.46 /
+16.12 tok/s on the card / the 300 / the 1k answers, the wall flat within the repeats' drift
+because the token's pace is the reading layers' SSD chain. Its closing block named the
+next chapter on Davor's direction of 2026-09-07: the consolidation series, four steps that
+each leave fewer states in the tree at no cost to the wall, before the reading layers are
+taken on from a smaller tree.
+
+Every number in this document is COUNTED from the tree at `e959d55` or MEASURED on the mini
+in the chapter it cites, unless marked modelled. The step zero's maps (the knob inventory,
+the residency writers, the stage maps) were taken from the tree on 2026-09-07 with zero
+runtime code.
+
+## The problem
+
+Sixteen chapters of measured levers left the tree carrying every arm they measured. At
+`e959d55`:
+
+| what | count |
+| --- | ---: |
+| `SHRIKE_*` environment knobs read under `sources/` | 66 |
+| of which retired names kept only to refuse their old value | 2 |
+| of which fail open (an unrecognised value silently takes the default) | 28 |
+| cases of the decode expert execution enum | 5 (production runs 1) |
+| expert cache layouts | 2 (production runs `pool`) |
+| expert readers | 3 (bounded pread, the legacy cached pread, the Metal IO backend) |
+| writers of the residency table | 14 |
+| generation spaces landing in the table's one field | 2 |
+| functions over 120 lines in the swiftlint baseline | 18 |
+| stale knob names in `docs/` with no reader | 4 |
+
+Each state has a price the chapters kept paying: a golden cell per mode on both boxes, a
+reviewer's attention on branches production never takes, the ThreadSanitizer run's 41
+minutes at v16's close, and a launch that silently takes a default when a stale script names
+a knob the tree no longer reads (the failure `CLAUDE.md` records for the `NVMAI_*` names).
+The chapter's object is the count in that table, driven down under one rule, with the wall
+and the answers unchanged.
+
+**The rule (Davor, 2026-09-07).** A knob is useful only if something actually uses it. A
+knob that exists as a fallback because there was uncertainty during implementation belongs
+in git history. The same rule reaches what a knob gates: a losing path deleted with its
+knob, a retired subsystem deleted with its switch.
+
+## Step zero (2026-09-07, zero runtime code): the three maps
+
+### 1. The knobs
+
+Sixty-six distinct names, read through `RuntimeConfiguration.environmentValue` and the same
+static shape in the streamer, the sampler, the MTP decoder and the ANE sidecar. The
+enum-valued knobs fail closed (an unknown value throws and the launch stops); twenty-eight
+knobs fail open (an unrecognised value silently takes the default; the per-knob table in
+`architecture.md` marks each). Two names are refused by name (`SHRIKE_PREFETCH_ADOPT`,
+`SHRIKE_PREFETCH_JOIN_US=0`). The banner prints the modes in effect from
+`RealForwardRunner.prefillGapLeversDescription`.
+
+By family, with the measured status that decides each disposition (the per-knob table with
+its read site, its users and its citation is Task 1's deliverable in
+[architecture.md](architecture.md)):
+
+| family | knobs | measured status | disposition |
+| --- | ---: | --- | --- |
+| decode execution: `SHRIKE_DECODE_EXPERT_EXECUTION`, `SHRIKE_SPEC_PHASE1`, `SHRIKE_HOST_WAIT`, `SHRIKE_ROUTER_WAKE`, `SHRIKE_EXPERT_IO_SYNC`, `SHRIKE_EXPERT_IO_SUBMISSION`, `SHRIKE_RDADVISE_POLICY` | 7 | v10 T5 made speculative, event, immediate and spin the defaults (f169f51); v14 lever B made the word wake the default and lever A (`hits`) a null; the rdadvise stage runs only under deferred submission | delete all seven; the enum becomes one case, the losing paths go, the rdadvise stage with its adaptive state goes |
+| the streamer: `SHRIKE_EXPERT_CACHE_LAYOUT`, `SHRIKE_EXPERT_IO_BACKEND`, `SHRIKE_BOUNDED_IO`, `SHRIKE_PARALLEL_IO`, `SHRIKE_EXPERT_IO_THREADS`, `SHRIKE_EXPERT_IO_BATCH_DEPTH`, `SHRIKE_EXPERT_CACHE_POLICY`, `SHRIKE_EXPERT_CACHE_PROTECT`, `SHRIKE_NO_PIN` | 9 | per-slot is v9's measured loss; the Metal IO backend lost its A/B on 2026-09-01 (rig wait 43.29 sd 9.2 % against pread's 38.68 sd 2.2 %, and the server died mid-prefill; `v10-implementation-plan.md`); four threads the knee and two batches v13's winner; aging-LFU and chunk protection v13's defaults | delete all nine; one layout, one reader, the thread and batch counts constants, one policy, protection always on |
+| the prefetch: `SHRIKE_PREDICTIVE_PREFETCH`, `SHRIKE_PREFETCH_TOP_M`, `SHRIKE_PREFETCH_INFLIGHT`, `SHRIKE_PREFETCH_PROBE_DISTANCE`, `SHRIKE_PREFETCH_JOIN_US`, `SHRIKE_PREFETCH_PLACEMENT`, `SHRIKE_PREFETCH_PROBE`, `SHRIKE_PREFETCH_ADOPT` | 8 | the ring won in v15 and v16 (the off control 14.0 / 14.5 / 14.6 tok/s against 15.3 / 16.5 / 16.1, misses 30.5 / 30.2 / 28.1 against 20.0 / 20.0 / 18.8; the replay reproduces the control to the tenth); placement after and the fused probe v15's winners; distance above one closed by the recall curve (`architecture.md`, 2026-08-31); the adopt knob already refused by name | delete all eight; top-m, in-flight, distance and the join bound become constants at their measured values (top-k, 1, 1, 400 us), the reclaim's distance window goes with the distance |
+| prefill and the kernels: `SHRIKE_ATTN_MATRIX_TILE`, `SHRIKE_MPP_TILE_N`, `SHRIKE_MPP_TILE_K`, `SHRIKE_MPP_DEQUANT_BUFFERS`, `SHRIKE_MPP_WEIGHT_LOADS`, `SHRIKE_PREFILL_ATTENTION`, `SHRIKE_PREFILL_ROUTER`, `SHRIKE_PREFILL_ROUTER_TOKENS`, `SHRIKE_PREFILL_ROUTED_GEMM`, `SHRIKE_PREFILL_ROUTE_OVERLAP`, `SHRIKE_PREFILL_POOL_RESIDENCY`, `SHRIKE_PREFILL_TAIL_TILE`, `SHRIKE_PREFILL_TILE_BATCH`, `SHRIKE_PREFILL_TILE_DEPTH`, `SHRIKE_PREFILL_FETCH_DEPTH`, `SHRIKE_PREFILL_MATRIX_MIN_ROWS`, `SHRIKE_PREFILL_SWEEP`, `SHRIKE_PREFILL_SWEEP_TAIL`, `SHRIKE_GDN_PREFILL_SCAN`, `SHRIKE_ATTN_FULL_CHUNKS`, `SHRIKE_SAMPLER_PATH` | 21 | each default is the winner of a v12 or v13 arm (the matrix path, the grouped routed GEMM, the resident sweep, fetch depth 2, matrix min rows 16, the tiled sampler); the losing variants are kernels with reference suites | delete all twenty-one; the default's value becomes a constant; where the knob selected a code path, the losing path and its reference tests go |
+| `SHRIKE_PREFILL_ANE` | 1 | off by default, an open candidate with its own record ([ane-prefill.md](ane-prefill.md)) | stays: the one switch the rule keeps, an A/B for a lever still open |
+| MTP: `SHRIKE_MTP_VERIFY`, `SHRIKE_MTP_EXPERT_SLOTS` | 2 | speculative decode retired at v12's P17 (rig acceptance 20.6 %, the verify pass at width 2) | delete with the subsystem: the draft runner, the verify pair, the sidecar load, the server's prompt-cache forcing |
+| product configuration: `SHRIKE_THINKING_MODE`, `SHRIKE_REASONING_EFFORT`, `SHRIKE_REASONING_RETENTION`, `SHRIKE_STRIP_CLI_PROMPT`, `SHRIKE_STRIP_TAGS`, `SHRIKE_CONCISE_MODE`, `SHRIKE_TOKENIZER_DIR`, `SHRIKE_MODEL`, `SHRIKE_EXPERT_CACHE_SLOTS` | 9 | selects product behaviour per launch, not an implementation fallback | eight stay; `SHRIKE_EXPERT_CACHE_SLOTS` goes, `--expert-cache-slots` already carries it |
+| diagnostics: `SHRIKE_RUNNER_STATS`, `SHRIKE_KERNEL_STATS`, `SHRIKE_ROUTE_TRACE`, `SHRIKE_PREFETCH_TRACE`, `SHRIKE_LAYER_TRACE`, `SHRIKE_GPU_CAPTURE_DIR`, `SHRIKE_CACHE_DIAG`, `SHRIKE_GEN_DIAG`, `SHRIKE_PHASES` | 9 | the first four are read by `tools/decode-rig.sh`, `tools/turn-rig.sh`, `tools/expert-pool-replay.py`, `tools/prefetch-coverage.py` and the parsers; the other five have no reader outside `docs/` | four stay; five go |
+
+Modelled from the table: 66 knobs become 13 (eight product, four diagnostic, the ANE
+switch). Task 1's per-knob table confirms or corrects each row with its citation before
+Task 2 deletes anything.
+
+The two refused names are replaced by one tripwire: any `SHRIKE_*` variable in the
+environment outside the surviving set fails the launch by name. A stale script can then
+never silently take defaults; the failure is loud on the mini and in the rig.
+
+### 2. The residency writers
+
+One table per layer, `ExpertResidencyEntry { slot, state, generation }` at 16 bytes,
+allocated shared in `PreadExpertStreamer.init` and read by `moe_classify_expert_residency`
+(and its speculative twin) at buffer index 1. The hit test is `state == resident &&
+slot != notResidentSlot`. Fourteen writers at `e959d55`, every one a single struct store
+under the streamer's `cacheLock` through `writeResidencyEntryUnlocked`:
+
+| # | writer | thread | trigger |
+| ---: | --- | --- | --- |
+| 1 | `init` | the streamers queue | the layer's first touch, the whole table `empty` |
+| 2 to 5 | `loadExpertUnlocked` (evict, reserve, complete, fail) | the caller's | the round-robin single-expert load; no production caller, tests only |
+| 6 | `makeExpertCachePlan`, the victim | the planner's (decode, prefill's union and tile planners, `loadExpertsCached`) | a miss needs a slot: the evicted expert `empty` at the slot's next generation |
+| 7 | `makeExpertCachePlan`, the cell swap | the planner's | a leased landing is resident: the slot takes the landing's cell, republished `resident` at the slot's bumped generation |
+| 8 | `makeExpertCachePlan`, the miss reservation | the planner's | `loading` at the slot's cell |
+| 9 | `markPlanMissesResident` | the storage thread (or the Metal completion thread, or inline) | the demand read completed: `resident` at the plan's assigned generation, re-validated |
+| 10 | `markStagedMetalPlanResident` | the runner's | the staged blit completed (Metal backend under event sync only) |
+| 11 | `resetLoadingMissesUnlocked` | three callers: the failed read, the abandoned prefill plan, the failed staged plan | `loading` back to `empty` |
+| 12 | `claimLanding` | the issuing thread (decode or storage) | a ring cell claimed: `loading` at the ring cell at the landing's own generation |
+| 13 | `completeLanding` | the storage thread | the speculative read landed: `resident` at the ring cell |
+| 14 | `dropLanding` / `failLanding` | the storage thread, the issuing thread, or the ring's reclaim | `empty`, only if the pool does not own the expert |
+
+Three facts the map settled, which v16's design doc had by assumption:
+
+- **The store is the publish.** There is no separate publish step, no memcpy and no
+  encode-time copy: the host writes the shared buffer and the GPU reads it at its next
+  dispatch (the kernel-boundary probe of v16 measured when).
+- **The "state word written last" ordering is not enforced, and does not need to be.**
+  The entry is stored as one 16-byte struct assignment; Swift does not order its fields.
+  The hit test needs both `state == resident` and `slot != notResidentSlot`, and no
+  transition changes the slot while the state stays resident (a swap keeps the cell, an
+  eviction goes through `empty`), so a torn read of any writer's store reads as a miss,
+  never as a hit at a wrong cell. A miss is always safe: the plan fails closed on it.
+- **The generation the classifier writes back is consumed by nobody.** The kernel emits
+  `resolved_generations`; neither the host nor the phase-1 and phase-2 kernels read it.
+  The generation is host bookkeeping (a stale completion must not publish over a newer
+  occupant) that happens to live in the GPU's buffer.
+
+Two generation spaces land in the same field: the slot's (`slotGeneration`, bumped at every
+plan) and the landing's (`landingGeneration`, a per-streamer counter), because a ring cell
+belongs to no slot until the swap. The swap republishes the swapped-in expert at the slot's
+generation to keep the eviction bookkeeping consistent, the v16 review's fold.
+
+### 3. The long functions
+
+The baseline's 18 entries, by stage count from the map (a stage is a sequential phase of
+the body producing local state a later phase consumes):
+
+| function | file | lines | stages | of which inline |
+| --- | --- | ---: | ---: | ---: |
+| `encodeDecodeRoutedMoE` | `RealForwardRunner.swift:6876` | 389 | 25 | 20 |
+| `produceToken` | `RealForwardRunner.swift:3151` | 229 | 9 (the layer loop 7 sub-stages) | 8 |
+| `executePrefillChunk` | `RealForwardRunner.swift:2681` | 225 | 12 | 8 |
+| `encodeRoutedMoEVerifyPair` | `RealForwardRunner.swift:5338` | 214 | 12 | 7 (MTP: deleted in Task 2) |
+| `encodeFullAttentionPrefill` | `RealForwardRunner.swift:4995` | 204 | 9 | 7 (no `self` mutation) |
+| `ServerInference.generate` | `ServerInference.swift:1112` | 284 | 21 | 13 (60 lines are one counter snapshot) |
+| `ServerInference.load` | `ServerInference.swift:642` | 189 | 13 | 9 |
+| `ServerArguments.parse` | `ServerArguments.swift:140` | 241 | a flag switch and 40 lines of cross-flag validation | |
+| `RemoteStreamingRepacker.runPrepared` | `RemoteStreamingRepacker.swift:197` | 231 | a sequential install pipeline | |
+| `RawCompletion.runRawCompletion` | `RawCompletion.swift:89` | 180 | prefill then the decode loop | |
+| `Entry.main` | `ShrikeDecodeService/Entry.swift:12` | 177 | a command switch with four cases | |
+| `Run.run` | `ShrikeCLI/Run.swift:50` | 176 | the CLI driver | |
+| `Args.parse` | `ShrikeCLI/Args.swift:139` | 170 | a flag switch and validation | |
+| `PreadExpertStreamer.init` | `PreadExpertStreamer.swift:375` | 167 | resource acquisition, a two-way layout branch, a three-way reader branch (Task 2 deletes both branches) | |
+| `Model.load` | `Model.swift:607` | 149 | a verify-then-map pipeline already sectioned by comments | |
+| `RealInferenceClient.run` | `RealInferenceClient.swift:288` | 126 | one `do` with three `catch` arms | |
+| `ShrikeBench.runMoE` | `ShrikeBench.swift:192` | 179 | a fixture then a kernel switch (Task 2 deletes the target) | |
+| `ShrikeBench.runGDN` | `ShrikeBench.swift:407` | 175 | the same shape | |
+
+The routed stage's 25 stages branch on seven mode knobs; Task 2 removes the three-way
+classification, the rdadvise stage and three of the five arms of the I/O acquisition
+before Task 4 decomposes what is left. The `lint:allow-long` marker some of these carry is
+prose only: `.swiftlint.yml` reads no such marker.
+
+### 4. What the chapter measures
+
+Real is counted: the table in "The problem" before and after each task. Free is measured
+on the mini: golden byte-identical on both boxes at the default (the only mode left), and
+tok/s and misses per token on the three shapes within the repeats' drift of v16's close
+(15.34 / 15.35, 16.46 / 16.48, 16.12 / 16.14 tok/s; 20.0 / 20.0 / 18.8 misses; drift 0 to
+3.3 % across v14 to v16's lifetimes). A loss outside the drift is a defect of the task,
+found and fixed, never a trade.
+
+## The four subsystems the rule reaches
+
+Named here because each is a whole subsystem, not a fallback; Davor's go of 2026-09-07
+covers all four with the design as presented.
+
+1. **MTP** (the draft runner `StreamingMTP`, `encodeRoutedMoEVerifyPair`, the sidecar load
+   in `ServerInference.load` and `Model.load`, `--mtp-model-dir`, the prompt cache forced to
+   single-prefix under MTP): retired at v12's P17 by measurement.
+2. **ShrikeBench** (the target and its eight files): its MoE mode measures a dispatch
+   production never uses (the hand-stuffed argument buffer, no `useResource`, no constants;
+   Davor's note of 2026-08-30), and nothing in `tools/` runs it. A microbench the reading
+   layers' chapter needs will be written against production's dispatch.
+3. **The prefetch's off switch**: the lever won three times; the replay's no-fills row
+   reproduces the off control to the tenth of a miss, so the control survives in the
+   instrument, not in the binary.
+4. **The Metal IO backend** (`MetalExpertReader`, the staging blit, `ExpertIOEventCoordinator`'s
+   staging path, `markStagedMetalPlanResident`, `failStagedMetalPlan`): lost its A/B on
+   2026-09-01 and killed the server.
+
+## Tasks
+
+### Task 1: the document
+
+[architecture.md](architecture.md) rewritten in place from the tree at `e959d55`: the
+decode path as the runner runs it (embed; per layer the held command, the speculative
+lookahead a layer ahead, the word wake on the classifier's readback, the routed stage with
+the plan, the landing's swap, the fixup and the deferred GPU records; the head), the
+residency table and its writers (the list above), the arena and the ring, the demand path's
+storage threads and the event-gated sync, prefill and the turn in summary with pointers to
+[v12-prefill-matrix-kernels.md](v12-prefill-matrix-kernels.md) and
+[v13-the-turn.md](v13-the-turn.md). Each surviving piece carries the number that keeps it
+and the chapter it came from; each candidate for removal carries its measured status. The
+four v4 invariants re-verified against the tree: the budget as input (still true), the
+streaming figures re-cited from production's per-read cost (the 2.83 GB/s and 66 to 72 %
+figures are rig-era), the round-trip section rewritten for the classifier and the fixup as
+they stand, the C99 line count re-counted. The prefetch section rewritten from v16's state,
+its history condensed to the two measured verdicts.
+
+The document holds the three tables Tasks 2 to 4 execute from: the per-knob table (read
+site, binaries, users, class, citation, disposition), the writer list, the stage maps.
+
+Real: one document that contradicts the tree becomes none. Free: no code; the link check is
+the gate.
+
+### Task 2: the knobs
+
+The dispositions of the family table applied, one commit per family (the decode modes, the
+streamer, the prefetch, prefill and the kernels with MTP and ShrikeBench, the product and
+diagnostic knobs with the tripwire). Per commit: the deleted knob's reader, its enum cases,
+the losing path and its tests gone; the winner's value inlined where the knob carried a
+number; the banner printing only what remains; the four gates; golden identical on both
+boxes and both profiles at the default. The arms on the mini once at the task's end.
+
+The tripwire: at launch, both binaries scan the environment for `SHRIKE_*` names outside
+the surviving set and fail by name with the list. The test names every deleted knob and
+expects the refusal; the refusal's message names the chapter that removed it.
+
+Real: the count of knobs, enum cases, layouts, readers, backends and kernels. Free: by
+construction for a path production never took, confirmed by the golden and the arms.
+
+### Task 3: one residency publish path
+
+After Task 2 the writers shrink by the test-only round-robin load (writers 2 to 5 go with
+`Model.routedExpert(layer:expert:)`, the tests moved to the plan path), the staged Metal
+publish and its failure clear (10 and one caller of 11). The design for the rest:
+
+- One state machine per arena cell (`empty`, `loading`, `resident`) with one generation
+  counter per cell, in place of the slot's and the landing's two spaces. A landing bumps
+  its cell's generation; the swap moves the cell and its generation under the slot with no
+  republish; the plan's re-validation at completion compares the cell's generation.
+- The table entry shrinks to what the GPU reads: `{ slot: UInt32, state: UInt32 }`, 8
+  bytes, written as one 64-bit atomic release store so the pair is never torn. The
+  generation stays host-side. The classifier's `resolved_generations` output and its buffer
+  go.
+- One function publishes: `publish(expert:cell:state:)` under the lock, called by the plan
+  (victim, swap, reservation), the completion (demand and landing), the reset and the
+  drop. No caller writes the buffer directly.
+
+Tests RED first on the transitions (a landing overtaken by the pool, a stale completion
+against a bumped generation, a swap followed by an eviction, a torn-store witness on the
+8-byte entry). The fail-closed cross-checks at the plan (the classifier's miss set against
+the plan's) stay as the tripwires.
+
+Real: the writers, the generation spaces, the entry's bytes. Free: golden by construction
+(the same experts are computed), the arms confirm.
+
+### Task 4: the runner decomposed
+
+Each function over 120 lines becomes a sequence of named stage calls over a small context
+struct carrying the locals the stages share, in the order the stage maps give. No new
+abstraction beyond the stages, no behaviour change, no reordering of commits or waits. The
+seams the map names first: the dense-layer body in `produceToken`; the classification, the
+hit-split encode and the I/O acquisition in the routed stage; the counter snapshot in the
+server's `generate` (a convenience init the app's client already has); the post-loop
+validation in both argument parsers; `Model.load`'s comment sections; the decode service's
+one handler per command. One commit per file; the baseline regenerated and diffed against
+HEAD's entry set at every commit until it is empty, then the file, the gate's `--baseline`
+flag and `CLAUDE.md`'s gate text go.
+
+Real: the baseline's entries, to zero. Free: golden per commit, the arms at the end.
+
+## Method
+
+v16's, with the chapter's own gates: the four gates per code commit; golden identical on
+both boxes and both profiles at the default; the turn rig's pair beside the golden at each
+task's end (the golden is single-turn; a decode followed by a prefill is where v16's review
+found its HIGH); the arms on the mini once per task (`tools/decode-rig.sh`, two production
+lifetimes per shape); a fresh reviewer per task, the fixes folded into the owning commits by
+amend; the full suite under ThreadSanitizer once at the close. The mini decides. Deploy
+leave is per session and asked for before any deploy.
+
+## Numerics policy
+
+Nothing in the chapter changes which experts are computed, which kernels compute them at
+the default, or the order of any reduction. Golden must stay byte-identical at every commit
+on both boxes and both profiles; a mismatch is a defect of the commit, never a reason to
+recapture. The one deliberate byte change is the residency entry's shrink in Task 3, which
+the classifier reads and whose output (hit and miss sets) must be identical; the golden and
+the plan's cross-checks are the witnesses.
+
+## Out of scope
+
+The reading layers' per-read cost (the next chapter); any new lever; the ANE prefill's
+promotion or removal; the second base for cells beyond one buffer (v16's candidate); the
+app targets' own structure beyond what a deleted path forces.
+
+## Risks
+
+- A deleted path load-bearing for a caller the golden never runs: the app targets
+  (`ShrikeMac`, `ShrikeDecodeService`) link the library and reach every knob; the turn's
+  second request; the CLI's messages-file path. Every deletion's callers are enumerated
+  before the delete, the app targets build in the release gate, the turn rig runs per task.
+- The swiftlint baseline's entries go stale whenever a long function's length changes
+  (v16's lesson): regenerated per commit and diffed against HEAD's set; a new entry means
+  decompose, not regenerate.
+- A constant inlined at the wrong value: the banner at `e959d55` prints every mode in
+  effect; the first commit of Task 2 records the bare launch's banner on both boxes, and
+  every later banner must print the same values for what remains.
+- The tripwire refusing a name the mini's launch or a tool sets: the surviving set is
+  checked against `tools/*.sh`, `tools/mini-deploy.sh`'s launch line and the rig's
+  `SERVER_ENV` before the tripwire lands.
+- Task 3's atomic store: Swift has no 64-bit atomic store on a raw pointer without the
+  `Synchronization` module or C; the C99 target already exists (`ShrikeKernelsC`) and takes
+  a one-line release store, matching the acquire loads the readback already uses.
+- The suite shrinks as modes and kernels go; a test deleted for a losing kernel must be
+  the kernel's own reference test, never a test of the surviving path that happened to
+  run under the knob.
