@@ -26,7 +26,10 @@ RUNNER = ["expert_hit_rate_decode", "expert_misses_decode", "hit_fixup_layers", 
           "io_fixup_wake_ms", "io_fetch_ms", "io_hidden_pct", "cache_plan_ms",
           "prefetch_begin_ms", "prefetch_issued", "prefetch_adopted", "prefetch_reclaimed",
           "prefetch_deferred", "prefetch_overlapped", "prefetch_late", "prefetch_refused",
-          "prefetch_joined", "prefetch_blit_experts", "prefetch_hook_failed",
+          "prefetch_joined", "prefetch_blit_experts", "prefetch_before_classify",
+          "prefetch_during_tail", "prefetch_during_lt50us", "prefetch_during_50_150us",
+          "prefetch_during_gt150us", "prefetch_after_classify", "prefetch_race_unknown",
+          "prefetch_hook_failed",
           "router_readback_ms", "path_pin_ms", "path_submit_ms", "path_argbuf_ms",
           "path_hit_encode_ms", "path_fixup_build_ms", "path_hit_commit_to_kernel_ms",
           "path_hit_kernel_to_gpu_ms", "path_fixup_commit_to_kernel_ms", "path_router_wake_ms",
@@ -112,6 +115,13 @@ for block in blocks:
               f"refused={fmt(runner['prefetch_refused'], 0)} deferred={fmt(runner['prefetch_deferred'], 0)} "
               f"overlapped={fmt(runner['prefetch_overlapped'], 0)} "
               f"blit_experts={fmt(runner['prefetch_blit_experts'], 0)} "
+              f"before_classify={fmt(runner['prefetch_before_classify'], 0)} "
+              f"during_tail={fmt(runner['prefetch_during_tail'], 0)} "
+              f"(lt50us={fmt(runner['prefetch_during_lt50us'], 0)} "
+              f"50_150us={fmt(runner['prefetch_during_50_150us'], 0)} "
+              f"gt150us={fmt(runner['prefetch_during_gt150us'], 0)}) "
+              f"after_classify={fmt(runner['prefetch_after_classify'], 0)} "
+              f"race_unknown={fmt(runner['prefetch_race_unknown'], 0)} "
               f"hook_failed={fmt(runner['prefetch_hook_failed'], 0)}")
 
 for path in token_paths:

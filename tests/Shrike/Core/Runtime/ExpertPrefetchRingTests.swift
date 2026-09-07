@@ -167,6 +167,26 @@ import Testing
         #expect(ring.statistics.reclaimedUnadopted == 0)
     }
 
+    @Test func completionNanosReportsCompletedPredictionsOnly() throws {
+        let ring = try makeRing(slots: 4, budget: 2)
+        let first = ExpertLoadOperation()
+        let second = ExpertLoadOperation()
+        try ring.begin(layer: 2, experts: [1], resident: []) { _, _ in first }
+        try ring.begin(layer: 2, experts: [5], resident: []) { _, _ in second }
+        let before = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        first.finish(.success(()))
+
+        let stamps = ring.completionNanos(layer: 2, experts: [1, 5, 9])
+        #expect(stamps.keys.sorted() == [1])
+        #expect(stamps[1]! >= before)
+        #expect(ring.completionNanos(layer: 3, experts: [1]).isEmpty)
+
+        second.finish(.failure(CocoaError(.fileReadUnknown)))
+        #expect(ring.completionNanos(layer: 2, experts: [5]).isEmpty)
+        ring.consume(layer: 2, experts: [1])
+        #expect(ring.completionNanos(layer: 2, experts: [1]).isEmpty)
+    }
+
     @Test func predictionsBeyondTheBudgetOrTheSlotsAreCountedAsRefused() throws {
         let ring = try makeRing(slots: 4, budget: 1)
         try ring.begin(layer: 2, experts: [1, 2, 3], resident: []) { _, _ in ExpertLoadOperation() }

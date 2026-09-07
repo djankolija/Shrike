@@ -195,6 +195,19 @@ final class ExpertPrefetchRing: @unchecked Sendable {
         }
     }
 
+    func completionNanos(layer: Int, experts: Set<Int>) -> [Int: UInt64] {
+        lock.withLock {
+            var stamps: [Int: UInt64] = [:]
+            for index in slots.indices where slots[index].layer == layer
+                && experts.contains(slots[index].expert) {
+                if let operation = slots[index].operation, operation.state == .completed {
+                    stamps[slots[index].expert] = operation.completedNanos
+                }
+            }
+            return stamps
+        }
+    }
+
     func unlease(layer: Int, experts: Set<Int>) {
         lock.withLock {
             for index in slots.indices where slots[index].layer == layer

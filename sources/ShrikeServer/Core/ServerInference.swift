@@ -455,6 +455,13 @@ private struct RunnerCounterSnapshot {
     let prefetchRefused: UInt64
     let prefetchJoined: UInt64
     let prefetchBlitExperts: UInt64
+    let prefetchBeforeClassify: UInt64
+    let prefetchDuringTail: UInt64
+    let prefetchDuringLastFifty: UInt64
+    let prefetchDuringFiftyToOneFifty: UInt64
+    let prefetchDuringEarlier: UInt64
+    let prefetchAfterClassify: UInt64
+    let prefetchRaceUnknown: UInt64
     let prefetchHookFailures: UInt64
     let pathPin: UInt64
     let pathSubmit: UInt64
@@ -1150,6 +1157,13 @@ public actor ServerModelSession: ServerInferenceBackend {
             prefetchRefused: runner.prefetchStatistics.refused,
             prefetchJoined: runner.prefetchStatistics.joined,
             prefetchBlitExperts: runner.totalPrefetchBlitExperts,
+            prefetchBeforeClassify: runner.totalPrefetchBeforeClassify,
+            prefetchDuringTail: runner.totalPrefetchDuringTail,
+            prefetchDuringLastFifty: runner.totalPrefetchDuringLastFifty,
+            prefetchDuringFiftyToOneFifty: runner.totalPrefetchDuringFiftyToOneFifty,
+            prefetchDuringEarlier: runner.totalPrefetchDuringEarlier,
+            prefetchAfterClassify: runner.totalPrefetchAfterClassify,
+            prefetchRaceUnknown: runner.totalPrefetchRaceUnknown,
             prefetchHookFailures: runner.prefetchStatistics.hookFailures,
             pathPin: runner.totalRoutedPinNanos,
             pathSubmit: runner.totalRoutedSubmitNanos,
@@ -2000,6 +2014,40 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
     }
 
+    private func prefetchRunnerLine(snapshot: RunnerCounterSnapshot, tokens: Int) -> String {
+        let stats = runner.prefetchStatistics
+        let beginNanos = runner.totalPrefetchBeginNanos
+        let beginMs = Double(beginNanos > snapshot.prefetchBegin ? beginNanos - snapshot.prefetchBegin : 0)
+            / Double(tokens) / 1_000_000
+        return String(
+            format: "prefetch_begin_ms=%.4f prefetch_issued=%llu prefetch_adopted=%llu "
+                + "prefetch_reclaimed=%llu prefetch_deferred=%llu prefetch_overlapped=%llu "
+                + "prefetch_late=%llu prefetch_refused=%llu prefetch_joined=%llu "
+                + "prefetch_blit_experts=%llu prefetch_before_classify=%llu "
+                + "prefetch_during_tail=%llu prefetch_during_lt50us=%llu "
+                + "prefetch_during_50_150us=%llu prefetch_during_gt150us=%llu "
+                + "prefetch_after_classify=%llu prefetch_race_unknown=%llu "
+                + "prefetch_hook_failed=%llu",
+            beginMs,
+            stats.issued - snapshot.prefetchIssued,
+            stats.adopted - snapshot.prefetchAdopted,
+            stats.reclaimedUnadopted - snapshot.prefetchReclaimed,
+            stats.deferred - snapshot.prefetchDeferred,
+            stats.overlapped - snapshot.prefetchOverlapped,
+            stats.late - snapshot.prefetchLate,
+            stats.refused - snapshot.prefetchRefused,
+            stats.joined - snapshot.prefetchJoined,
+            runner.totalPrefetchBlitExperts - snapshot.prefetchBlitExperts,
+            runner.totalPrefetchBeforeClassify - snapshot.prefetchBeforeClassify,
+            runner.totalPrefetchDuringTail - snapshot.prefetchDuringTail,
+            runner.totalPrefetchDuringLastFifty - snapshot.prefetchDuringLastFifty,
+            runner.totalPrefetchDuringFiftyToOneFifty - snapshot.prefetchDuringFiftyToOneFifty,
+            runner.totalPrefetchDuringEarlier - snapshot.prefetchDuringEarlier,
+            runner.totalPrefetchAfterClassify - snapshot.prefetchAfterClassify,
+            runner.totalPrefetchRaceUnknown - snapshot.prefetchRaceUnknown,
+            stats.hookFailures - snapshot.prefetchHookFailures)
+    }
+
     private func emitRunnerDiagnostics(
         result: RawDecodeResult,
         snapshot: RunnerCounterSnapshot,
@@ -2039,11 +2087,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "expert_evictions=%llu expert_reloads=%llu expert_read_mib=%.1f "
                 + "expert_load_p50_ms=%.3f expert_load_p95_ms=%.3f "
                 + "expert_load_p99_ms=%.3f io_hidden_pct=%.2f hit_fixup_layers=%llu "
-                + "router_readback_ms=%.4f cache_plan_ms=%.4f prefetch_begin_ms=%.4f "
-                + "prefetch_issued=%llu prefetch_adopted=%llu prefetch_reclaimed=%llu "
-                + "prefetch_deferred=%llu prefetch_overlapped=%llu prefetch_late=%llu "
-                + "prefetch_refused=%llu prefetch_joined=%llu prefetch_blit_experts=%llu "
-                + "prefetch_hook_failed=%llu "
+                + "router_readback_ms=%.4f cache_plan_ms=%.4f %@ "
                 + "path_pin_ms=%.4f path_submit_ms=%.4f path_argbuf_ms=%.4f "
                 + "path_hit_encode_ms=%.4f path_fixup_build_ms=%.4f "
                 + "path_hit_commit_to_kernel_ms=%.4f path_hit_kernel_to_gpu_ms=%.4f "
@@ -2079,17 +2123,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             hiddenPercent, runner.totalHitFixupLayers - snapshot.hitFixupLayers,
             ms(runner.totalRouterReadbackNanos, snapshot.routerReadback),
             ms(runner.totalCachePlanNanos, snapshot.cachePlan),
-            ms(runner.totalPrefetchBeginNanos, snapshot.prefetchBegin),
-            runner.prefetchStatistics.issued - snapshot.prefetchIssued,
-            runner.prefetchStatistics.adopted - snapshot.prefetchAdopted,
-            runner.prefetchStatistics.reclaimedUnadopted - snapshot.prefetchReclaimed,
-            runner.prefetchStatistics.deferred - snapshot.prefetchDeferred,
-            runner.prefetchStatistics.overlapped - snapshot.prefetchOverlapped,
-            runner.prefetchStatistics.late - snapshot.prefetchLate,
-            runner.prefetchStatistics.refused - snapshot.prefetchRefused,
-            runner.prefetchStatistics.joined - snapshot.prefetchJoined,
-            runner.totalPrefetchBlitExperts - snapshot.prefetchBlitExperts,
-            runner.prefetchStatistics.hookFailures - snapshot.prefetchHookFailures,
+            prefetchRunnerLine(snapshot: snapshot, tokens: tokens),
             ms(runner.totalRoutedPinNanos, snapshot.pathPin),
             ms(runner.totalRoutedSubmitNanos, snapshot.pathSubmit),
             ms(runner.totalHitSplitArgBufNanos, snapshot.pathArgBuf),
