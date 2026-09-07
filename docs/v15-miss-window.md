@@ -359,6 +359,67 @@ per-read cost) and the probe's GPU time (Task 3); the scheduled step zero on the
 two-distance queue (the candidate task) asks whether the idle half of every window
 can serve a layer further ahead.
 
+## Task 3: the fused probe (commit 2ff0e85)
+
+Every number MEASURED on the mini unless marked modelled; the plan's Task 3 carries
+the step list and the raw data lives at `~/.claude/handoffs/archive/shrike-v15-t3/`.
+
+**The prize, from the arms already run.** The next-layer router probe is a second
+router GEMV and a second top-k selection in the attention tail, and the kernel stats
+of Task 2's arms put it at **1.7 to 1.8 ms per token of GPU on the card**
+(`attn_layer_linear` 17.14 ms per token with the ring on against 15.44 off, the kv
+layers 9.76 against 9.67): 0.057 ms per linear layer, two dispatches whose launch is
+most of their cost.
+
+**What was built.** The probe rides the authoritative router's own two dispatches as
+a second grid row: `router_gemv_r4_pair` and `router_topk_select_k8_pair` (and the
+sigmoid pair for Kimi) take two operand sets and run the same body on
+`threadgroup_position_in_grid.y`, so the first row's arithmetic is the single
+kernel's exactly and the second row writes the prediction. `MoE.encodeRouterPair`
+has its own logits scratch and pipelines; `SHRIKE_PREFETCH_PROBE` (`fused` the
+default, `separate` the A/B) rides `RuntimePrefetch` and the banner. A kernel test
+holds the pair's first router to the single dispatch's indices and weights bit for
+bit and its second to the separate probe's. One thing Metal insisted on: every
+position attribute in a kernel shares its width, so the pair selects take
+two-component ids.
+
+**The arms (12 lifetimes, every answer identical, the follow-ups unmoved, golden
+identical at fused and separate on both boxes and at fused under
+`speculative-validate`).**
+
+| cell | card tok/s | the 300 | the 1k | wall ms per token |
+| --- | ---: | ---: | ---: | --- |
+| separate (Task 2's default) | 15.16 / 15.11 | 15.70 / 15.87 | 15.57 / 15.66 | 66.2 to 66.4 / 63.2 to 63.9 / 64.0 to 64.4 |
+| fused | 15.57 / 15.37 (**+2.2 %**) | 16.49 / 16.41 (**+4.3 %**) | 16.17 / 16.18 (**+3.6 %**) | 64.5 to 65.3 / 60.8 to 61.1 / 61.9 to 62.0 |
+
+**Readings.**
+
+- **The fusion takes 1.3 to 2.7 ms per token off the wall**, above the 1.7 modelled
+  on the card, because it removes two launches per layer (the GEMV's and the
+  select's), not one: 80 launches per token.
+- **Nothing about the prediction changed**: issued, adopted and late are the same
+  per token; `prefetch_joined` rises (0.7 to 1.3 on the card, 0.8 to 1.8 on the 300)
+  because the shorter tail brings the layer's plan sooner and more predictions are
+  caught at their end instead of after it.
+- **The sign held in both orders on every shape** (+2.7 / +1.7, +5.1 / +3.4, +3.9 /
+  +3.3 %) against repeats of −0.3 / +1.1 / +0.6.
+
+**The rule.** Real and free: **the probe is fused by default**;
+`SHRIKE_PREFETCH_PROBE=separate` is the A/B.
+
+**After T3** (2026-09-07; the shipping default changed). Production on the mini
+runs the fused probe at the bare launch (the banner: `adopt=blit join_us=400
+probe=fused`), and the confirmation arms on the deployed default (prod, separate,
+prod per shape, `~/.claude/handoffs/archive/shrike-v15-t3/t3-confirm-summary.md`)
+put it at **15.38 / 15.61, 16.30 / 16.29, 16.18 / 16.20 tok/s** on the card / the 300
+/ the 1k against 14.96 / 15.48 / 15.48 with the separate probe (−3.5 / −5.0 / −4.4 %;
+the repeats +1.5 / 0.0 / +0.1), every answer identical, the follow-ups unmoved. From
+the chapter's opening rows (14.1 / 14.8 / 15.0), production is at 15.4 to 15.6 /
+16.3 / 16.2 tok/s, **+9 to +11 / +10 / +8 % with three levers landed.** The miss
+window's remaining terms are the reading layers themselves (12.6 to 13.7 per token
+at production's per-read cost, 7.7 to 9.0 ms of GPU idle per token) and the
+prefill-to-decode boundary (Task 4).
+
 ## Levers, ranked (modelled from the measured rows)
 
 Every prize is stated per token against the card's 71.3 ms (14.1 tok/s) unless
@@ -395,7 +456,9 @@ below 0.12 ms ([v14-decode.md](v14-decode.md) "Task 1").
 - **(c) The fused probe (Task 3).** The second router GEMV runs on the same input as
   the authoritative one and is dispatch-bound (53 µs per layer, 2.0 to 2.3 ms per
   token of GPU in the attention tail): one dispatch scoring both routers.
-  **+1.5 to +2.0 ms, +2 to +3 %.**
+  **+1.5 to +2.0 ms, +2 to +3 %.** **Measured (Task 3): +2.2 / +4.3 / +3.6 %, 1.3 to
+  2.7 ms per token off the wall (two launches per layer, not one); the default
+  flipped.**
 - **(d) The prefill-to-decode boundary (Task 4, the companion).** Every answer's
   first window is its worst (42 misses per token, 11.9 tok/s) because the pool holds
   prefill's experts, not the answer's; v13 Task 5's resident-first sweep was the

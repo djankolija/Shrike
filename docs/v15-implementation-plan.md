@@ -454,7 +454,20 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         late unchanged, joined up (the shorter tail brings the plan sooner).
   - [x] Step 5 (the rule): real and free flips the default. **DONE 2026-09-07:** the
         default is `probe=fused`; `SHRIKE_PREFETCH_PROBE=separate` is the A/B.
-  - [ ] Step 6 (design doc, review).
+  - [x] Step 6 (design doc, review). **The review (2026-09-07) found no defect of
+        this task; one coverage gap and three lows were folded:** the sigmoid pair
+        for the Kimi family had no execution record anywhere (the kernel test built
+        the softmax `MoE`, the Kimi tests ran the single dispatch, the baselines are
+        one family); fixed by a kernel test that holds the sigmoid pair's two rows to
+        the single dispatches bit for bit at the Kimi shape on both the generic and
+        the specialized pipelines, beside the softmax pair on the specialized
+        pipeline and at top-4. The banner printed `prefetch=off` while the probe ran
+        for a trace alone; it now prints `off trace=on probe=<mode>` when the trace
+        file opened, with its expectation. A stale comment above the separate probe
+        deleted, two narrating comments trimmed. Left as noted: the pair pipelines
+        compile in every `MoE` init beside the single ones; the kernel stats' router
+        role now carries the probe, so the probe's GPU time reads from the ring on
+        against off, as Step 0 did.
 
 ### Task 4: the prefill-to-decode boundary (the companion)
 
