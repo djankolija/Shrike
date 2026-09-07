@@ -19,30 +19,15 @@ public struct AppRunnerDiagnostics: Equatable, Sendable {
     public var ioMillisecondsPerToken: Double
     public var cb2MillisecondsPerToken: Double
     public var headMillisecondsPerToken: Double
-    public var rdadviseMillisecondsPerToken: Double
-    public var rdadviseCallsPerToken: Double
-    public var rdadviseMegabytesPerToken: Double
-    public var rdadviseSkippedPerToken: Double
-    public var rdadviseFailures: UInt64
 
     public init(cb1MillisecondsPerToken: Double = 0,
                 ioMillisecondsPerToken: Double = 0,
                 cb2MillisecondsPerToken: Double = 0,
-                headMillisecondsPerToken: Double = 0,
-                rdadviseMillisecondsPerToken: Double = 0,
-                rdadviseCallsPerToken: Double = 0,
-                rdadviseMegabytesPerToken: Double = 0,
-                rdadviseSkippedPerToken: Double = 0,
-                rdadviseFailures: UInt64 = 0) {
+                headMillisecondsPerToken: Double = 0) {
         self.cb1MillisecondsPerToken = cb1MillisecondsPerToken
         self.ioMillisecondsPerToken = ioMillisecondsPerToken
         self.cb2MillisecondsPerToken = cb2MillisecondsPerToken
         self.headMillisecondsPerToken = headMillisecondsPerToken
-        self.rdadviseMillisecondsPerToken = rdadviseMillisecondsPerToken
-        self.rdadviseCallsPerToken = rdadviseCallsPerToken
-        self.rdadviseMegabytesPerToken = rdadviseMegabytesPerToken
-        self.rdadviseSkippedPerToken = rdadviseSkippedPerToken
-        self.rdadviseFailures = rdadviseFailures
     }
 }
 

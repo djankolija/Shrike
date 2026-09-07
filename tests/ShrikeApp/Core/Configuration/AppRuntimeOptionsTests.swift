@@ -10,7 +10,6 @@ import Shrike
         #expect(options.expertCachePolicy == .agingLFU)
         #expect(options.prefillEnabled)
         #expect(options.prefillChunkTokens == 4096)
-        #expect(options.rdadvisePolicy == .default)
         #expect(options.modelVerification == .fullSha256)
         #expect(options.kvCachePrecision == .int8)
         #expect(options.ropeScalingMode == .none)
@@ -20,10 +19,9 @@ import Shrike
         #expect(runtime.expertCacheSlots == RuntimeConfiguration.production.expertCacheSlots)
         #expect(runtime.expertCachePolicy == RuntimeConfiguration.production.expertCachePolicy)
         #expect(runtime.prefillConfig.chunkTokens == 4096)
-        #expect(runtime.rdadvisePolicy == RuntimeConfiguration.production.rdadvisePolicy)
         #expect(runtime.headPath == RuntimeConfiguration.production.headPath)
         #expect(options.resultSummary ==
-            "Cache 64 AGING-LFU, prefill 4096, 8-bit KV, native RoPE, thinking off, RDADVISE default, full SHA-256")
+            "Cache 64 AGING-LFU, prefill 4096, 8-bit KV, native RoPE, thinking off, full SHA-256")
     }
 
     @Test func everyPublicChoiceMapsToRuntime() throws {
@@ -36,11 +34,6 @@ import Shrike
             let runtime = try AppRuntimeOptions(prefillChunkTokens: chunk)
                 .resolvedRuntimeConfiguration(forceLogitsHead: false)
             #expect(runtime.prefillConfig.chunkTokens == chunk)
-        }
-        for policy in AppRDAdvicePolicy.allCases {
-            let runtime = try AppRuntimeOptions(rdadvisePolicy: policy)
-                .resolvedRuntimeConfiguration(forceLogitsHead: false)
-            #expect(runtime.rdadvisePolicy == policy.runtimeValue)
         }
         for precision in KVCachePrecision.allCases {
             let runtime = try AppRuntimeOptions(kvCachePrecision: precision)
@@ -55,12 +48,10 @@ import Shrike
             expertCachePolicy: .lru,
             prefillEnabled: false,
             prefillChunkTokens: 64,
-            rdadvisePolicy: .adaptive,
             modelVerification: .trustedInstall)
         let runtime = try options.resolvedRuntimeConfiguration(forceLogitsHead: true)
         #expect(runtime.modelExpertCachePolicy == .lru)
         #expect(runtime.prefillConfig == .off)
-        #expect(runtime.rdadvisePolicy == .adaptive)
         #expect(runtime.headPath == .logits)
         #expect(options.modelVerification.runtimeValue == .sizeCheckTrustedReceipt)
     }
@@ -84,7 +75,6 @@ import Shrike
         var value = base
         value.expertCacheSlots = 24; variants.append(value)
         value = base; value.expertCachePolicy = .lru; variants.append(value)
-        value = base; value.rdadvisePolicy = .bounded; variants.append(value)
         value = base; value.modelVerification = .trustedInstall; variants.append(value)
         value = base; value.kvCachePrecision = .int4; variants.append(value)
         value = base; value.ropeScalingMode = .yarn; variants.append(value)

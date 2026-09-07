@@ -18,7 +18,6 @@ import Testing
         #expect(!request.isPureGreedy)
         #expect(request.runtimeOptions.expertCacheSlots == 64)
         #expect(request.runtimeOptions.expertCachePolicy == .agingLFU)
-        #expect(request.runtimeOptions.rdadvisePolicy == .default)
         #expect(request.runtimeOptions.prefillEnabled)
     }
 
@@ -64,17 +63,6 @@ import Testing
     }
 
     @MainActor
-    @Test func adaptiveRDAdvicePolicySurvivesRequestCreation() throws {
-        let model = AppModel()
-        model.modelPathText = FileManager.default.temporaryDirectory.path
-        model.promptText = "go"
-        model.runtimeOptions.rdadvisePolicy = .adaptive
-
-        let request = try model.makeRequest()
-        #expect(request.runtimeOptions.rdadvisePolicy == .adaptive)
-    }
-
-    @MainActor
     @Test func loadAffectingRuntimeChangeMarksReadySessionStale() {
         let model = AppModel(client: MockLifecycleInferenceClient())
         let directory = FileManager.default.temporaryDirectory
@@ -82,7 +70,7 @@ import Testing
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
 
         #expect(!model.hasStaleLoadedRuntime)
-        model.runtimeOptions.rdadvisePolicy = .bounded
+        model.runtimeOptions.expertCachePolicy = .lru
         #expect(model.hasStaleLoadedRuntime)
     }
 
@@ -198,7 +186,7 @@ import Testing
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
 
         #expect(model.canRun)
-        model.runtimeOptions.rdadvisePolicy = .bounded
+        model.runtimeOptions.expertCachePolicy = .lru
         #expect(model.hasStaleLoadedRuntime)
         #expect(!model.canRun)
         #expect(model.canReloadModel)

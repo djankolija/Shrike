@@ -428,9 +428,6 @@ private struct RunnerCounterSnapshot {
     let cb2: UInt64
     let head: UInt64
     let headFused: UInt64
-    let rdadvise: UInt64
-    let rdadviseCalls: UInt64
-    let rdadviseBytes: UInt64
     let wait: UInt64
     let body: UInt64
     let missIo: UInt64
@@ -727,9 +724,6 @@ public actor ServerModelSession: ServerInferenceBackend {
         let runtime = try RuntimeConfiguration(
             expertCacheSlots: loadSlots,
             expertCachePolicy: loadRuntime.expertCachePolicy,
-            rdadvisePolicy: ProcessInfo.processInfo.environment["SHRIKE_RDADVISE_POLICY"]
-                .map(RDAdvicePolicyMode.parse)
-                ?? loadRuntime.rdadvisePolicy,
             prefillChunkTokens: requestedPrefillChunkTokens
                 ?? (model.config.family == .qwen36
                     ? RuntimeConfiguration.qwenLongPrefillChunkTokens
@@ -775,7 +769,6 @@ public actor ServerModelSession: ServerInferenceBackend {
         let runtimeIdentity = [
             String(runtime.expertCacheSlots),
             runtime.expertCachePolicy.rawValue,
-            runtime.rdadvisePolicy.rawValue,
             runtime.prefillPolicy.rawValue,
             String(runtime.prefillChunkTokens),
             runtime.headPath.rawValue,
@@ -1116,9 +1109,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             cb2: runner.totalCb2Nanos,
             head: runner.totalHeadNanos,
             headFused: runner.totalHeadFusedNanos,
-            rdadvise: runner.totalRDAdviseNanos,
-            rdadviseCalls: runner.totalRDAdviseCalls,
-            rdadviseBytes: runner.totalRDAdviseBytes,
             wait: runner.totalWaitNanos,
             body: runner.totalBodyNanos,
             missIo: runner.totalMissIoNanos,
@@ -2061,8 +2051,8 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
         cacheDiag(String(
             format: "Shrike runner cb1_ms=%.3f io_ms=%.3f cb2_ms=%.3f "
-                + "head_ms=%.3f head_fused_ms=%.3f rdadvise_ms=%.3f "
-                + "wait_ms=%.3f body_ms=%.3f rdadvise_calls=%llu rdadvise_mib=%.1f "
+                + "head_ms=%.3f head_fused_ms=%.3f "
+                + "wait_ms=%.3f body_ms=%.3f "
                 + "expert_hit_rate=%.4f expert_hits=%llu expert_misses=%llu "
                 + "expert_evictions=%llu expert_reloads=%llu expert_read_mib=%.1f "
                 + "expert_load_p50_ms=%.3f expert_load_p95_ms=%.3f "
@@ -2088,11 +2078,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             ms(runner.totalCb2Nanos, snapshot.cb2),
             ms(runner.totalHeadNanos, snapshot.head),
             ms(runner.totalHeadFusedNanos, snapshot.headFused),
-            ms(runner.totalRDAdviseNanos, snapshot.rdadvise),
             ms(runner.totalWaitNanos, snapshot.wait),
             ms(runner.totalBodyNanos, snapshot.body),
-            runner.totalRDAdviseCalls - snapshot.rdadviseCalls,
-            Double(runner.totalRDAdviseBytes - snapshot.rdadviseBytes) / 1_048_576,
             expert.hitRate, expert.hits, expert.misses, expert.evictions,
             expert.reloads, Double(expert.bytesRead) / 1_048_576,
             Double(expert.loadLatencyPercentile(0.50)) / 1_000_000,

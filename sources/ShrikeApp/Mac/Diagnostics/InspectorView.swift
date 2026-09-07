@@ -203,19 +203,6 @@ struct InspectorView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            VStack(alignment: .leading, spacing: 8) {
-                Text("RDADVISE")
-                Picker("RDADVISE", selection: $model.runtimeOptions.rdadvisePolicy) {
-                    ForEach(AppRDAdvicePolicy.allCases) { policy in
-                        Text(policy.label).tag(policy)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-            }
-            Text("RDADVISE is experimental. It may speed up short decodes but slow down long decodes.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
             if model.hasStaleLoadedRuntime {
                 Text("Reload required")
                     .font(.caption)

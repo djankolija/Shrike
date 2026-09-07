@@ -21,7 +21,6 @@ public struct Args: Equatable, Sendable {
     public var concise: Bool
     public var thinkingMode: ModelThinkingMode
     public var expertCacheSlots: Int
-    public var rdadvise: String
     public var prefillChunk: PrefillChunkChoice?
     public var kvCachePrecision: KVCachePrecision
     public var ropeScalingMode: RuntimeRoPEScalingMode
@@ -41,7 +40,6 @@ public struct Args: Equatable, Sendable {
                 concise: Bool = false,
                 thinkingMode: ModelThinkingMode = .off,
                 expertCacheSlots: Int = 64,
-                rdadvise: String = "default",
                 prefillChunk: PrefillChunkChoice? = nil,
                 kvCachePrecision: KVCachePrecision = .int8,
                 ropeScalingMode: RuntimeRoPEScalingMode = .none) {
@@ -55,7 +53,6 @@ public struct Args: Equatable, Sendable {
         self.topP = topP
         self.repetitionPenalty = repetitionPenalty
         self.expertCacheSlots = expertCacheSlots
-        self.rdadvise = rdadvise
         self.prefillChunk = prefillChunk
         self.kvCachePrecision = kvCachePrecision
         self.ropeScalingMode = ropeScalingMode
@@ -111,8 +108,6 @@ extension Args {
       --repetition-penalty <f>  Repetition penalty (default 1.0).
       --seed <uint64>           Deterministic sampling seed (default off).
       --stop <string>           Stop substring (repeatable).
-      --rdadvise <mode>         Expert read-ahead advice: off, default,
-                                bounded, or adaptive (default off).
       --expert-cache-slots <n>  Routed-expert cache slots per layer: 8, 16,
                                 24, 32, 64, 96, or 128 (default 64). More
                                 slots raise the hit rate but use more memory.
@@ -153,7 +148,6 @@ extension Args {
         var concise = false
         var thinkingMode: ModelThinkingMode = .off
         var expertCacheSlots = 64
-        var rdadvise = "default"
         var prefillChunk: PrefillChunkChoice?
         var kvCachePrecision: KVCachePrecision = .int8
         var ropeScalingMode: RuntimeRoPEScalingMode = .none
@@ -240,12 +234,6 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 expertCacheSlots = parsed
-            case "--rdadvise":
-                let value = try takeValue(argv, &index, flag: flag)
-                guard ["off", "default", "bounded", "adaptive"].contains(value) else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
-                }
-                rdadvise = value
             case "--prefill-chunk":
                 let value = try takeValue(argv, &index, flag: flag)
                 if value == "auto" {
@@ -305,7 +293,6 @@ extension Args {
                     concise: concise,
                     thinkingMode: thinkingMode,
                     expertCacheSlots: expertCacheSlots,
-                    rdadvise: rdadvise,
                     prefillChunk: prefillChunk,
                     kvCachePrecision: kvCachePrecision,
                     ropeScalingMode: ropeScalingMode)

@@ -10,25 +10,6 @@ public enum AppExpertCachePolicy: String, CaseIterable, Sendable, Identifiable {
     public var label: String { rawValue.uppercased() }
 }
 
-public enum AppRDAdvicePolicy: String, CaseIterable, Sendable, Identifiable {
-    case off
-    case `default`
-    case bounded
-    case adaptive
-
-    public var id: String { rawValue }
-    public var label: String { rawValue.capitalized }
-
-    var runtimeValue: RDAdvicePolicyMode {
-        switch self {
-        case .off: return .off
-        case .default: return .default
-        case .bounded: return .bounded
-        case .adaptive: return .adaptive
-        }
-    }
-}
-
 public enum AppModelVerification: String, CaseIterable, Sendable, Identifiable {
     case fullSha256 = "full-sha256"
     case trustedInstall = "trusted-install"
@@ -59,7 +40,6 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var expertCachePolicy: AppExpertCachePolicy
     public var prefillEnabled: Bool
     public var prefillChunkTokens: Int
-    public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
     public var conciseMode: Bool
     public var thinkingMode: ModelThinkingMode
@@ -70,7 +50,6 @@ public struct AppRuntimeOptions: Equatable, Sendable {
                 expertCachePolicy: AppExpertCachePolicy = .agingLFU,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = RuntimeConfiguration.qwenLongPrefillChunkTokens,
-                rdadvisePolicy: AppRDAdvicePolicy = .default,
                 modelVerification: AppModelVerification = .fullSha256,
                 conciseMode: Bool = false,
                 thinkingMode: ModelThinkingMode = .off,
@@ -80,7 +59,6 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         self.expertCachePolicy = expertCachePolicy
         self.prefillEnabled = prefillEnabled
         self.prefillChunkTokens = prefillChunkTokens
-        self.rdadvisePolicy = rdadvisePolicy
         self.modelVerification = modelVerification
         self.conciseMode = conciseMode
         self.thinkingMode = thinkingMode
@@ -107,7 +85,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         let prefill = prefillEnabled ? "prefill \(prefillChunkTokens)" : "prefill off"
         let verification = modelVerification == .fullSha256 ? "full SHA-256" : "trusted receipt"
         let scaling = ropeScalingMode == .yarn ? "YaRN" : "native RoPE"
-        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), \(kvCachePrecision.label) KV, \(scaling), thinking \(thinkingMode.rawValue), RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
+        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), \(kvCachePrecision.label) KV, \(scaling), thinking \(thinkingMode.rawValue), \(verification)"
     }
 
     public static func slotsLabel(for slots: Int) -> String {
@@ -131,7 +109,6 @@ public struct AppRuntimeOptions: Equatable, Sendable {
                 case .agingLFU: .agingLFU
                 }
             }(),
-            rdadvisePolicy: rdadvisePolicy.runtimeValue,
             prefillEnabled: prefillEnabled,
             prefillChunkTokens: prefillChunkTokens,
             forceLogitsHead: forceLogitsHead,
@@ -147,7 +124,6 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
     public var maxContextTokens: Int
     public var expertCacheSlots: Int
     public var expertCachePolicy: AppExpertCachePolicy
-    public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
     public var forceLogitsHead: Bool
     public var kvCachePrecision: KVCachePrecision
@@ -162,7 +138,6 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
         self.maxContextTokens = maxContextTokens
         self.expertCacheSlots = options.expertCacheSlots
         self.expertCachePolicy = options.expertCachePolicy
-        self.rdadvisePolicy = options.rdadvisePolicy
         self.modelVerification = options.modelVerification
         self.forceLogitsHead = forceLogitsHead
         self.kvCachePrecision = options.kvCachePrecision

@@ -4,38 +4,6 @@ import Metal
 import ShrikeKernelsC
 import Synchronization
 
-public struct ExpertIOAdviceResult: Sendable, Equatable {
-    public let requested: Int
-    public let failed: Int
-    public let calls: Int
-    public let bytes: UInt64
-    public let skipped: Int
-    public let maxCallNanos: UInt64
-
-    public init(requested: Int,
-                failed: Int,
-                calls: Int? = nil,
-                bytes: UInt64 = 0,
-                skipped: Int = 0,
-                maxCallNanos: UInt64 = 0) {
-        self.requested = requested
-        self.failed = failed
-        self.calls = calls ?? requested
-        self.bytes = bytes
-        self.skipped = skipped
-        self.maxCallNanos = maxCallNanos
-    }
-
-    public static func skipped(requested: Int, bytes: UInt64 = 0) -> ExpertIOAdviceResult {
-        ExpertIOAdviceResult(requested: requested,
-                             failed: 0,
-                             calls: 0,
-                             bytes: bytes,
-                             skipped: requested)
-    }
-
-}
-
 public struct ExpertCachePlan: Sendable, Equatable {
     /// K11: the layer the plan's pread offsets are computed against.
     ///
@@ -1177,60 +1145,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                         capacity: layout.expertsPerLayer)[expert]
     }
 
-    public func adviseExpertCachePlanMisses(_ plan: ExpertCachePlan) -> ExpertIOAdviceResult {
-        let experts = plan.misses.map { plan.experts[$0] }
-        return adviseRanges(expertAdviceRanges(experts: experts, layer: plan.layer),
-                            requested: experts.count)
-    }
-
-    public func adviseExperts(experts: [Int]) -> ExpertIOAdviceResult {
-        adviseRanges(expertAdviceRanges(experts: experts, layer: 0), requested: experts.count)
-    }
-
-    public func adviseExpertMisses(experts: [Int]) -> ExpertIOAdviceResult {
-        cacheLock.lock()
-        let misses = experts.filter { expert in
-            !slotExpert.indices.contains { slot in
-                slotState[slot] == .resident && slotExpert[slot] == expert
-            }
-        }
-        cacheLock.unlock()
-        return adviseRanges(expertAdviceRanges(experts: misses, layer: 0), requested: misses.count)
-    }
-
-    static func coalescedAdjacentAdviceRanges(_ ranges: [(offset: UInt64, count: UInt64)])
-        -> [(offset: UInt64, count: UInt64)] {
-        let sorted = ranges.filter { $0.count > 0 }.sorted {
-            $0.offset == $1.offset ? $0.count < $1.count : $0.offset < $1.offset
-        }
-        var result: [(offset: UInt64, count: UInt64)] = []
-        for range in sorted {
-            guard var last = result.popLast() else {
-                result.append(range)
-                continue
-            }
-            // K28: checked arithmetic — a wrapping `&+` could merge two
-            // huge ranges into a nonsense span. On overflow keep the ranges
-            // separate (the merge is an optimization, never a correctness
-            // requirement).
-            let (lastEnd, lastOverflow) = last.offset.addingReportingOverflow(last.count)
-            let (rangeEnd, rangeOverflow) = range.offset.addingReportingOverflow(range.count)
-            if lastOverflow || rangeOverflow {
-                result.append(last)
-                result.append(range)
-                continue
-            }
-            if range.offset <= lastEnd {
-                last.count = max(lastEnd, rangeEnd) - last.offset
-                result.append(last)
-            } else {
-                result.append(last)
-                result.append(range)
-            }
-        }
-        return result
-    }
-
     /// Fills the first `missCount` entries of `victimSlotsScratch` with the
     /// best eviction victims in comparator order, without the old
     /// filter+sort's allocations; an all-hit plan never calls this. Ties
@@ -1629,35 +1543,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     static func latencyBucketUpperBound(index: Int) -> UInt64 {
         guard index < 16 else { return UInt64.max }
         return 125_000 << UInt64(index)
-    }
-
-    private func expertAdviceRanges(experts: [Int],
-                                    layer: Int) -> [(offset: UInt64, count: UInt64)] {
-        experts.compactMap { expert in
-            let regionOffset = layout.expertOffset(layer: layer, expert: expert)
-            guard regionOffset + layout.expertStride <= layout.streamSize else { return nil }
-            return (layout.streamOffset + regionOffset, layout.expertStride)
-        }
-    }
-
-    private func adviseRanges(_ ranges: [(offset: UInt64, count: UInt64)],
-                              requested: Int) -> ExpertIOAdviceResult {
-        let coalesced = Self.coalescedAdjacentAdviceRanges(ranges)
-        var failed = 0
-        var bytes: UInt64 = 0
-        var maxCallNanos: UInt64 = 0
-        for range in coalesced {
-            let result = RDAdvice.call(fd: fd, offset: range.offset, byteCount: range.count)
-            if !result.succeeded { failed += 1 }
-            bytes &+= result.requestedBytes
-            maxCallNanos = max(maxCallNanos, result.elapsedNanos)
-        }
-        return ExpertIOAdviceResult(
-            requested: requested,
-            failed: failed,
-            calls: coalesced.count,
-            bytes: bytes,
-            maxCallNanos: maxCallNanos)
     }
 
     private func readFull(into destination: UnsafeMutableRawPointer,

@@ -5,7 +5,6 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     public var expertCachePolicy: String
     public var prefillEnabled: Bool
     public var prefillChunkTokens: Int
-    public var rdadvisePolicy: String
     public var modelVerification: String
     public var conciseMode: Bool
     public var thinkingMode: String
@@ -16,7 +15,6 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
                 expertCachePolicy: String = "aging-lfu",
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
-                rdadvisePolicy: String = "default",
                 modelVerification: String = "full-sha256",
                 conciseMode: Bool = false,
                 thinkingMode: String = "off",
@@ -26,7 +24,6 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
         self.expertCachePolicy = expertCachePolicy
         self.prefillEnabled = prefillEnabled
         self.prefillChunkTokens = prefillChunkTokens
-        self.rdadvisePolicy = rdadvisePolicy
         self.modelVerification = modelVerification
         self.conciseMode = conciseMode
         self.thinkingMode = thinkingMode
@@ -114,30 +111,15 @@ public struct DecodeRunnerDiagnostics: Codable, Sendable, Equatable {
     public var ioMillisecondsPerToken: Double
     public var cb2MillisecondsPerToken: Double
     public var headMillisecondsPerToken: Double
-    public var rdadviseMillisecondsPerToken: Double
-    public var rdadviseCallsPerToken: Double
-    public var rdadviseMegabytesPerToken: Double
-    public var rdadviseSkippedPerToken: Double
-    public var rdadviseFailures: UInt64
 
     public init(cb1MillisecondsPerToken: Double,
                 ioMillisecondsPerToken: Double,
                 cb2MillisecondsPerToken: Double,
-                headMillisecondsPerToken: Double,
-                rdadviseMillisecondsPerToken: Double,
-                rdadviseCallsPerToken: Double,
-                rdadviseMegabytesPerToken: Double,
-                rdadviseSkippedPerToken: Double,
-                rdadviseFailures: UInt64) {
+                headMillisecondsPerToken: Double) {
         self.cb1MillisecondsPerToken = cb1MillisecondsPerToken
         self.ioMillisecondsPerToken = ioMillisecondsPerToken
         self.cb2MillisecondsPerToken = cb2MillisecondsPerToken
         self.headMillisecondsPerToken = headMillisecondsPerToken
-        self.rdadviseMillisecondsPerToken = rdadviseMillisecondsPerToken
-        self.rdadviseCallsPerToken = rdadviseCallsPerToken
-        self.rdadviseMegabytesPerToken = rdadviseMegabytesPerToken
-        self.rdadviseSkippedPerToken = rdadviseSkippedPerToken
-        self.rdadviseFailures = rdadviseFailures
     }
 }
 

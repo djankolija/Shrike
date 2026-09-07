@@ -45,21 +45,11 @@ import Testing
             cb1MillisecondsPerToken: 1,
             ioMillisecondsPerToken: 2,
             cb2MillisecondsPerToken: 3,
-            headMillisecondsPerToken: 4,
-            rdadviseMillisecondsPerToken: 5,
-            rdadviseCallsPerToken: 6,
-            rdadviseMegabytesPerToken: 7,
-            rdadviseSkippedPerToken: 8,
-            rdadviseFailures: 9)
+            headMillisecondsPerToken: 4)
 
         #expect(diagnostics.cb1MillisecondsPerToken == 1)
         #expect(diagnostics.ioMillisecondsPerToken == 2)
         #expect(diagnostics.cb2MillisecondsPerToken == 3)
         #expect(diagnostics.headMillisecondsPerToken == 4)
-        #expect(diagnostics.rdadviseMillisecondsPerToken == 5)
-        #expect(diagnostics.rdadviseCallsPerToken == 6)
-        #expect(diagnostics.rdadviseMegabytesPerToken == 7)
-        #expect(diagnostics.rdadviseSkippedPerToken == 8)
-        #expect(diagnostics.rdadviseFailures == 9)
     }
 }

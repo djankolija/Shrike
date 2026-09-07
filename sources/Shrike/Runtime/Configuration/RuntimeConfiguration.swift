@@ -283,7 +283,6 @@ public struct RuntimeConfiguration: Sendable, Equatable {
 
     public let expertCacheSlots: Int
     public let expertCachePolicy: RuntimeExpertCachePolicy
-    public let rdadvisePolicy: RDAdvicePolicyMode
     public let prefillPolicy: RuntimePrefillPolicy
     public let prefillChunkTokens: Int
     public let prefillAttentionPath: RuntimePrefillAttentionPath
@@ -295,7 +294,6 @@ public struct RuntimeConfiguration: Sendable, Equatable {
 
     public init(expertCacheSlots: Int = 64,
                 expertCachePolicy: RuntimeExpertCachePolicy = .agingLFU,
-                rdadvisePolicy: RDAdvicePolicyMode = .default,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .causalMatrix,
@@ -315,7 +313,6 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         }
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
-        self.rdadvisePolicy = rdadvisePolicy
         self.prefillPolicy = prefillEnabled ? .chunked : .off
         self.prefillChunkTokens = prefillChunkTokens
         self.prefillAttentionPath = prefillAttentionPath
@@ -357,7 +354,6 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// would let two processes disagree about the layout of a persisted KV
     /// snapshot. Read-only here is the guarantee, not an oversight.
     public var fp16RingEnabled: Bool { true }
-    public var rdadviseEnabled: Bool { rdadvisePolicy != .off }
     public var prefillConfig: PrefillRuntimeConfig {
         switch prefillPolicy {
         case .off:

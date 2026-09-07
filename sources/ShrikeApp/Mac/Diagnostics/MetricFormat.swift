@@ -42,14 +42,6 @@ enum MetricFormat {
         String(format: "%.1f%%", locale: posixLocale, value)
     }
 
-    static func perToken(_ value: Double) -> String {
-        "\(value.formatted(.number.precision(.fractionLength(1))))/tok"
-    }
-
-    static func megabytesPerToken(_ value: Double) -> String {
-        "\(value.formatted(.number.precision(.fractionLength(1)))) MB/tok"
-    }
-
     static func memory(_ bytes: UInt64?) -> String {
         guard let bytes else { return "\u{2014}" }
         return memoryFormatter.string(fromByteCount: Int64(bytes))

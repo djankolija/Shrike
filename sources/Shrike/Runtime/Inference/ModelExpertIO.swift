@@ -97,21 +97,6 @@ extension Model {
         packedExpertsLayout.layers[layer].experts.map(\.offset)
     }
 
-    public func adviseRoutedExperts(layer: Int,
-                                    experts: [Int]) throws -> ExpertIOAdviceResult {
-        try ensureLayerOpened(layer)
-        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
-        return streamer.adviseExpertMisses(experts: experts)
-    }
-
-    public func routedExpertAdviceByteEstimate(layer: Int,
-                                               missCount: Int) throws -> UInt64 {
-        guard missCount > 0 else { return 0 }
-        try ensureLayerOpened(layer)
-        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
-        return UInt64(missCount) * streamer.layout.expertStride
-    }
-
     public func planRoutedExperts(layer: Int,
                                   experts: [Int],
                                   avoidingSlots: Set<Int> = [],
@@ -233,12 +218,6 @@ extension Model {
         try ensureLayerOpened(plan.layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
         return RoutedExpertLease(cacheLease: try streamer.pin(plan.cachePlan))
-    }
-
-    public func adviseRoutedExperts(plan: RoutedExpertFetchPlan) throws -> ExpertIOAdviceResult {
-        try ensureLayerOpened(plan.layer)
-        let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
-        return streamer.adviseExpertCachePlanMisses(plan.cachePlan)
     }
 
     public func fetchRoutedExperts(plan: RoutedExpertFetchPlan) async throws -> [TensorView] {

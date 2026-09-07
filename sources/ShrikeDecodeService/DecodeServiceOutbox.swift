@@ -167,11 +167,6 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             cb1MillisecondsPerToken: value.cb1MillisecondsPerToken,
             ioMillisecondsPerToken: value.ioMillisecondsPerToken,
             cb2MillisecondsPerToken: value.cb2MillisecondsPerToken,
-            headMillisecondsPerToken: value.headMillisecondsPerToken,
-            rdadviseMillisecondsPerToken: value.rdadviseMillisecondsPerToken,
-            rdadviseCallsPerToken: value.rdadviseCallsPerToken,
-            rdadviseMegabytesPerToken: value.rdadviseMegabytesPerToken,
-            rdadviseSkippedPerToken: value.rdadviseSkippedPerToken,
-            rdadviseFailures: value.rdadviseFailures)
+            headMillisecondsPerToken: value.headMillisecondsPerToken)
     }
 }

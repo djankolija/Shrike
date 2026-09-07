@@ -2,7 +2,7 @@ import Darwin
 import Testing
 @testable import Shrike
 
-@Suite struct RDAdviceProbeTests {
+@Suite struct RDAdviceCallTests {
     @Test func clipsByteCountToRadvisoryIntLimit() {
         #expect(RDAdvice.clippedByteCount(0) == 0)
         #expect(RDAdvice.clippedByteCount(64) == 64)

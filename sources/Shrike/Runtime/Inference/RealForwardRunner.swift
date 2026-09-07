@@ -1,78 +1,6 @@
 import Foundation
 import Metal
 
-public enum RDAdvicePolicyMode: String, Codable, Sendable, Equatable {
-    case `default`
-    case off
-    case bounded
-    case adaptive
-
-    public static func parse(_ raw: String?) -> RDAdvicePolicyMode {
-        switch raw?.lowercased() {
-        case "off", "none", "disabled":
-            return .off
-        case "bounded":
-            return .bounded
-        case "adaptive":
-            return .adaptive
-        default:
-            return .default
-        }
-    }
-}
-
-public struct RDAdviceAdaptivePolicyConfig: Sendable, Equatable {
-    public var missCap: Int
-    public var byteCap: UInt64
-    public var slowCallNanos: UInt64
-
-    public init(missCap: Int,
-                byteCap: UInt64,
-                slowCallNanos: UInt64) {
-        self.missCap = missCap
-        self.byteCap = byteCap
-        self.slowCallNanos = slowCallNanos
-    }
-
-    public static let conservative = RDAdviceAdaptivePolicyConfig(
-        missCap: 12,
-        byteCap: 384 * 1_048_576,
-        slowCallNanos: 1_000_000)
-}
-
-struct RDAdviceAdaptivePolicyState: Sendable, Equatable {
-    var config: RDAdviceAdaptivePolicyConfig
-    private var skipUntilPosition: Int = -1
-    private(set) var recentSlowCallNanos: UInt64 = 0
-
-    init(config: RDAdviceAdaptivePolicyConfig = .conservative) {
-        self.config = config
-    }
-
-    mutating func reset() {
-        skipUntilPosition = -1
-        recentSlowCallNanos = 0
-    }
-
-    func shouldSkip(position: Int,
-                    requestedMisses: Int,
-                    estimatedBytes: UInt64,
-                    canOverlapUsefulGPUWork: Bool) -> Bool {
-        position <= skipUntilPosition ||
-        !canOverlapUsefulGPUWork ||
-        requestedMisses > config.missCap ||
-        estimatedBytes > config.byteCap
-    }
-
-    mutating func update(after result: ExpertIOAdviceResult,
-                                position: Int) {
-        recentSlowCallNanos = max(recentSlowCallNanos, result.maxCallNanos)
-        if result.maxCallNanos >= config.slowCallNanos {
-            skipUntilPosition = max(skipUntilPosition, position)
-        }
-    }
-}
-
 /// Compatible Qwen3.5-MoE real-forward decode pass.
 ///
 /// Composes the production kernels against the `.gturbo` model:
@@ -550,11 +478,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var decodeRoutedBufsScratch: [MTLBuffer] = []
     private var decodeRoutedOffsetsScratch: [Int] = []
 
-    private static let rdadviseBoundedMissCap = 12
-    private static let rdadviseBoundedMaxCallNanos: UInt64 = 250_000
-    private static let rdadviseAdaptiveMissCap = 12
-    private static let rdadviseAdaptiveByteCap: UInt64 = 384 * 1_048_576
-    private static let rdadviseAdaptiveSlowCallNanos: UInt64 = 1_000_000
     private let prefillRoutedTileSchedulerConfig: PrefillRoutedTileSchedulerConfig
     /// `SHRIKE_PREFILL_ROUTED_GEMM=per-expert` keeps the P3 per-expert GEMMs
     /// for the same-binary A/B; anything else takes the grouped dispatch.
@@ -764,7 +687,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     public let maxContext: Int
 
-    /// Per-instance head and RDADVISE modes. The fused head (default) skips the
+    /// Per-instance head mode. The fused head (default) skips the
     /// 512 KB logits write and leaves a greedy argmax in `lastGreedyToken`;
     /// callers that sample from the logits buffer (non-greedy configs) must pass
     /// `forceLogitsHead: true` or they read a never-written buffer.
@@ -780,12 +703,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let prefetchConfiguration: RuntimePrefetch
     private let anePrefill: ANEPrefillAttention?
     private let predictivePrefetchTopM: Int
-    public let rdadviseEnabled: Bool
-    public let rdadvisePolicyMode: RDAdvicePolicyMode
-    private var rdadviseSkipUntilPosition: Int = -1
-    private var rdadviseAdaptiveState: RDAdviceAdaptivePolicyState
-    private var rdadviseAdaptivePosition: Int = -1
-    private var rdadviseAdaptivePositionBytes: UInt64 = 0
     public init(model: Model, context: MetalContext, maxContext: Int,
                 runtimeConfiguration: RuntimeConfiguration = .production,
                 enableSpeculativeGDN: Bool = false) throws {
@@ -828,9 +745,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.prefetchTraceFD = try Self.openPrefetchTrace(runtimeConfiguration.prefetch.tracePath)
         self.anePrefill = try Self.makeANEPrefill(
             model: model, device: context.device)
-        self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
-        self.rdadviseAdaptiveState = Self.makeRDAdviseAdaptiveState()
-        self.rdadviseEnabled = runtimeConfiguration.rdadviseEnabled
         self.kv = try KVCacheManager(device: context.device,
                                      config: cfg,
                                      maxContext: maxContext,
@@ -948,14 +862,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             model.dropRoutedExpertLanding(layer: layer, expert: expert, cell: cell)
         }
         return (topM, ring)
-    }
-
-    private static func makeRDAdviseAdaptiveState() -> RDAdviceAdaptivePolicyState {
-        RDAdviceAdaptivePolicyState(
-            config: RDAdviceAdaptivePolicyConfig(
-                missCap: rdadviseAdaptiveMissCap,
-                byteCap: rdadviseAdaptiveByteCap,
-                slowCallNanos: rdadviseAdaptiveSlowCallNanos))
     }
 
     static func openPrefetchTrace(_ path: String?) throws -> Int32 {
@@ -2018,10 +1924,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     private func resetTransientState() {
         prefillChunkState.reset()
-        rdadviseSkipUntilPosition = -1
-        rdadviseAdaptiveState.reset()
-        rdadviseAdaptivePosition = -1
-        rdadviseAdaptivePositionBytes = 0
     }
 
     public private(set) var totalIoNanos: UInt64 = 0
@@ -2032,7 +1934,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // Overlap-analysis counters (SHRIKE_RUNNER_STATS): the per-layer wall spent
     // waiting on the attention+router command buffer (covers the previous
     // layer's routed CB plus this layer's cb1 on the GPU) and the per-layer
-    // loop-body wall. body = cb1 + wait + readback/plan + rdadvise + io + cb2.
+    // loop-body wall. body = cb1 + wait + readback/plan + io + cb2.
     public private(set) var totalWaitNanos: UInt64 = 0
     public private(set) var totalBodyNanos: UInt64 = 0
     public private(set) var totalMissIoNanos: UInt64 = 0
@@ -2078,11 +1980,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalExpertIOHostWaitsAvoided: UInt64 = 0
     public private(set) var lastGreedyToken: UInt32 = 0
     public var usesFusedGreedyHead: Bool { useFusedGreedyHead }
-    public private(set) var totalRDAdviseNanos: UInt64 = 0
-    public private(set) var totalRDAdviseCalls: UInt64 = 0
-    public private(set) var totalRDAdviseBytes: UInt64 = 0
-    public private(set) var totalRDAdviseFailures: UInt64 = 0
-    public private(set) var totalRDAdviseSkipped: UInt64 = 0
 
     public func expertStreamingStatistics() -> ExpertStreamingStatistics {
         model.routedExpertStatistics()
@@ -2097,14 +1994,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         totalLoopDetokNanos &+= detok
         totalLoopProgressNanos &+= progress
         totalLoopProduceNanos &+= produce
-    }
-
-    private func recordRDAdvice(_ result: ExpertIOAdviceResult, wallNanos: UInt64) {
-        totalRDAdviseNanos &+= wallNanos
-        totalRDAdviseCalls &+= UInt64(result.calls)
-        totalRDAdviseBytes &+= result.bytes
-        totalRDAdviseFailures &+= UInt64(result.failed)
-        totalRDAdviseSkipped &+= UInt64(result.skipped)
     }
 
     // MARK: - Per-command-buffer GPU timing (SHRIKE_KERNEL_STATS)
@@ -2402,58 +2291,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             if count <= 0 { break }
             written += count
-        }
-    }
-
-    private func shouldSkipRDAdvice(position: Int,
-                                    requestedMisses: Int,
-                                    estimatedBytes: UInt64,
-                                    canOverlapUsefulGPUWork: Bool) -> ExpertIOAdviceResult? {
-        switch rdadvisePolicyMode {
-        case .bounded:
-            if position <= rdadviseSkipUntilPosition {
-                return ExpertIOAdviceResult.skipped(requested: requestedMisses,
-                                                    bytes: estimatedBytes)
-            }
-            if requestedMisses > Self.rdadviseBoundedMissCap {
-                return ExpertIOAdviceResult.skipped(requested: requestedMisses,
-                                                    bytes: estimatedBytes)
-            }
-            return nil
-        case .adaptive:
-            if position != rdadviseAdaptivePosition {
-                rdadviseAdaptivePosition = position
-                rdadviseAdaptivePositionBytes = 0
-            }
-            let cumulativeEstimatedBytes = rdadviseAdaptivePositionBytes &+ estimatedBytes
-            let shouldSkip = rdadviseAdaptiveState.shouldSkip(
-                position: position,
-                requestedMisses: requestedMisses,
-                estimatedBytes: cumulativeEstimatedBytes,
-                canOverlapUsefulGPUWork: canOverlapUsefulGPUWork)
-            rdadviseAdaptivePositionBytes = cumulativeEstimatedBytes
-            guard shouldSkip else { return nil }
-            return ExpertIOAdviceResult.skipped(requested: requestedMisses,
-                                                bytes: estimatedBytes)
-        case .default, .off:
-            return nil
-        }
-    }
-
-    private func updateRDAdvicePolicy(after result: ExpertIOAdviceResult,
-                                      position: Int) {
-        switch rdadvisePolicyMode {
-        case .bounded:
-            // Skip window is inclusive of `position`, matching the adaptive
-            // policy (`position <= skipUntilPosition`), so both policies
-            // suppress advice for the same token window after a slow call.
-            if result.maxCallNanos > Self.rdadviseBoundedMaxCallNanos {
-                rdadviseSkipUntilPosition = max(rdadviseSkipUntilPosition, position)
-            }
-        case .adaptive:
-            rdadviseAdaptiveState.update(after: result, position: position)
-        case .default, .off:
-            break
         }
     }
 
@@ -6964,29 +6801,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ? experts.count : max(missCount, phase1MissSlots.count)
         let completionClock = missCount > 0 ? overlapCompletionClock : nil
         let expectedOverlapCompletions = phase1HitCB == nil ? 1 : 2
-        if plannedLoad == nil && rdadviseEnabled && rdadvisePolicyMode != .off {
-            let requestedMisses = missCount
-            let estimatedAdviceBytes = try model.routedExpertAdviceByteEstimate(
-                layer: L,
-                missCount: requestedMisses)
-            if let skipped = shouldSkipRDAdvice(position: position,
-                                                requestedMisses: requestedMisses,
-                                                estimatedBytes: estimatedAdviceBytes,
-                                                canOverlapUsefulGPUWork: true) {
-                recordRDAdvice(skipped, wallNanos: 0)
-            } else {
-                let tAdvice = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-                let result: ExpertIOAdviceResult
-                if let plannedFetch {
-                    result = try model.adviseRoutedExperts(plan: plannedFetch)
-                } else {
-                    result = try model.adviseRoutedExperts(layer: L, experts: experts)
-                }
-                let wallNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tAdvice
-                recordRDAdvice(result, wallNanos: wallNanos)
-                updateRDAdvicePolicy(after: result, position: position)
-            }
-        }
 
         // Routed-expert pread — overlaps the shared MLP GPU work above.
         let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)

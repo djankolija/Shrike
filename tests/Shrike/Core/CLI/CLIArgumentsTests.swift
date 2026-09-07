@@ -143,7 +143,7 @@ import Testing
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--help",
-            "--rdadvise", "--expert-cache-slots", "--prefill-chunk", "--concise",
+            "--expert-cache-slots", "--prefill-chunk", "--concise",
             "--kv-bits", "--rope-scaling", "--thinking",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }

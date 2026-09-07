@@ -9,7 +9,6 @@ import ShrikeDecodeProtocol
             expertCachePolicy: "lru",
             prefillEnabled: false,
             prefillChunkTokens: 64,
-            rdadvisePolicy: "adaptive",
             modelVerification: "trusted-install",
             thinkingMode: "on")
         let request = DecodeLoadRequest(
@@ -38,12 +37,7 @@ import ShrikeDecodeProtocol
             cb1MillisecondsPerToken: 0.6,
             ioMillisecondsPerToken: 12,
             cb2MillisecondsPerToken: 0.4,
-            headMillisecondsPerToken: 1.7,
-            rdadviseMillisecondsPerToken: 0,
-            rdadviseCallsPerToken: 0,
-            rdadviseMegabytesPerToken: 0,
-            rdadviseSkippedPerToken: 0,
-            rdadviseFailures: 0)
+            headMillisecondsPerToken: 1.7)
         let event = DecodeServiceEvent(
             kind: .finished,
             generationID: UUID(),

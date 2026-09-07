@@ -291,7 +291,6 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
         let draftRuntime = try RuntimeConfiguration(
             expertCacheSlots: StreamingMTPMemoryPlan.expertSlots,
             expertCachePolicy: runtimeConfiguration.expertCachePolicy,
-            rdadvisePolicy: runtimeConfiguration.rdadvisePolicy,
             prefillEnabled: true,
             prefillChunkTokens: 32,
             prefillAttentionPath: runtimeConfiguration.prefillAttentionPath,

@@ -68,18 +68,14 @@ struct RunnerDiagnosticsSection: View {
                 DiagnosticRow("Unsupported reason", reason, multiline: true)
             }
         }
-        if let failures = diagnostics.runner?.rdadviseFailures, failures > 0 {
-            DiagnosticRow("RDADVISE failures", "\(failures)")
-        }
     }
 
     private func hasIssues(_ diagnostics: AppDiagnostics) -> Bool {
-        let prefillHasIssue = diagnostics.prefill.map {
+        diagnostics.prefill.map {
             $0.requestedMode.rawValue != $0.executedMode.rawValue
                 || $0.chunkCompleteness != .complete
                 || !($0.unsupportedReason?.isEmpty ?? true)
         } ?? false
-        return prefillHasIssue || (diagnostics.runner?.rdadviseFailures ?? 0) > 0
     }
 
     private func groupLabel(_ title: String) -> some View {
@@ -99,23 +95,8 @@ private struct AdvancedRunnerDiagnosticsView: View {
             DiagnosticRow("cb1 / token", MetricFormat.milliseconds(runner.cb1MillisecondsPerToken))
             DiagnosticRow("cb2 / token", MetricFormat.milliseconds(runner.cb2MillisecondsPerToken))
             DiagnosticRow("Head / token", MetricFormat.milliseconds(runner.headMillisecondsPerToken))
-            if hasRDAdviceActivity {
-                DiagnosticRow("RDADVISE / token",
-                              MetricFormat.milliseconds(runner.rdadviseMillisecondsPerToken))
-                DiagnosticRow("RDADVISE calls", MetricFormat.perToken(runner.rdadviseCallsPerToken))
-                DiagnosticRow("RDADVISE data",
-                              MetricFormat.megabytesPerToken(runner.rdadviseMegabytesPerToken))
-                DiagnosticRow("RDADVISE skipped", MetricFormat.perToken(runner.rdadviseSkippedPerToken))
-            }
         }
         .frame(maxWidth: .infinity)
-    }
-
-    private var hasRDAdviceActivity: Bool {
-        runner.rdadviseMillisecondsPerToken > 0
-            || runner.rdadviseCallsPerToken > 0
-            || runner.rdadviseMegabytesPerToken > 0
-            || runner.rdadviseSkippedPerToken > 0
     }
 }
 

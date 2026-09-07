@@ -127,7 +127,6 @@ public func run(args: Args,
             extraStopTokens: [])
         let loadRuntime = try RuntimeConfiguration(
             expertCacheSlots: args.expertCacheSlots,
-            rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             forceLogitsHead: !config.isPureGreedy,
             prefetch: try RuntimePrefetch.environmentValue())
 
@@ -158,7 +157,6 @@ public func run(args: Args,
         let runtime = try RuntimeConfiguration(
             expertCacheSlots: loadRuntime.expertCacheSlots,
             expertCachePolicy: loadRuntime.expertCachePolicy,
-            rdadvisePolicy: loadRuntime.rdadvisePolicy,
             prefillChunkTokens: prefillChunkTokens,
             prefillAttentionPath: loadRuntime.prefillAttentionPath,
             forceLogitsHead: !config.isPureGreedy,

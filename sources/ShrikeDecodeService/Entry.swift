@@ -295,11 +295,6 @@ import ShrikeDecodeProtocol
             throw AppInferenceError.invalidRequest(
                 "unknown expert cache policy \(options.expertCachePolicy)")
         }
-        guard let rdadvisePolicy = AppRDAdvicePolicy(
-            rawValue: options.rdadvisePolicy) else {
-            throw AppInferenceError.invalidRequest(
-                "unknown RDADVISE policy \(options.rdadvisePolicy)")
-        }
         guard let modelVerification = AppModelVerification(
             rawValue: options.modelVerification) else {
             throw AppInferenceError.invalidRequest(
@@ -323,7 +318,6 @@ import ShrikeDecodeProtocol
             expertCachePolicy: cachePolicy,
             prefillEnabled: options.prefillEnabled,
             prefillChunkTokens: options.prefillChunkTokens,
-            rdadvisePolicy: rdadvisePolicy,
             modelVerification: modelVerification,
             conciseMode: options.conciseMode,
             thinkingMode: thinkingMode,

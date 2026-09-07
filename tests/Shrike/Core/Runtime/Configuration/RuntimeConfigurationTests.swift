@@ -14,7 +14,6 @@ import Testing
         let runtime = try RuntimeConfiguration(
             expertCacheSlots: 16,
             expertCachePolicy: .lfu,
-            rdadvisePolicy: .off,
             prefillEnabled: true,
             prefillChunkTokens: 128,
             prefillAttentionPath: .fullTensorOps2DPreferred,
@@ -22,8 +21,6 @@ import Testing
         #expect(runtime.fp16RingEnabled)
         #expect(runtime.expertCacheSlots == 16)
         #expect(runtime.expertCachePolicy == .lfu)
-        #expect(runtime.rdadvisePolicy == .off)
-        #expect(!runtime.rdadviseEnabled)
         #expect(runtime.prefillPolicy == .chunked)
         #expect(runtime.prefillChunkTokens == 128)
         #expect(runtime.prefillAttentionPath == .fullTensorOps2DPreferred)
@@ -50,14 +47,12 @@ import Testing
         let runtime = try RuntimeConfiguration(
             expertCacheSlots: 32,
             expertCachePolicy: .lru,
-            rdadvisePolicy: .adaptive,
             prefillEnabled: false,
             prefillChunkTokens: 64,
             prefillAttentionPath: .causalTiled,
             forceLogitsHead: true)
         #expect(runtime.expertCacheSlots == 32)
         #expect(runtime.modelExpertCachePolicy == .lru)
-        #expect(runtime.rdadviseEnabled)
         #expect(runtime.prefillConfig == .off)
         #expect(runtime.prefillAttentionPath == .causalTiled)
         #expect(runtime.headPath == .logits)
