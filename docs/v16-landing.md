@@ -141,9 +141,71 @@ are archived with the step zero.
   `poolSlotStride`), the per-slot arrays, `selectVictimSlots` and `shouldEvictSlot`, the
   pin lease.
 
+## Task 1: the instrument (commit c9b79cb)
+
+Every number MEASURED on the mini; the plan's Task 1 carries the step list and the raw
+data lives at `~/.claude/handoffs/archive/shrike-v16-t1/` (the four cuts, `race-cut1`
+to `race-cut4`, the fourth the reading).
+
+**What was built.** At a layer's plan, every adopted prediction's read completion (the
+load operation's `CLOCK_UPTIME_RAW` stamp, through `ExpertPrefetchRing.completionNanos`)
+is set against the GPU window of the command whose last kernel is the classifier (in
+production the attention command, into which the tail is folded): `before` its GPU start,
+`during` it, binned by the margin before its end at 50 and 150 µs, `after` its end,
+`unknown` when the GPU times were never reported. Under the word wake the plan runs
+before the command reports its times, so the race rides the runner's deferred GPU
+records and is settled by their drain once the command has completed. Seven counters
+on the server's runner line and in `decode-rows.py`; the split is a pure function with
+its tests. Three cuts preceded the reading, each archived: the first compared against
+`kernelStartTime`, the driver's scheduling start, set at the top of the layer's
+iteration before the previous layer's demand read completes, so every prediction landed
+after by construction; the second counted at the plan and found the GPU times unreported
+for 91 % of adoptions; the third settled every race but could not place the during
+bucket without the bins.
+
+**The reading** (six lifetimes at production's default, every answer identical, golden
+identical at the default on both boxes):
+
+| shape | adopted per token | before | during: under 50 / 50 to 150 / over 150 µs before the end | after | surely won | likely won | at most |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| card | 10.4 | 326 | 613 / 613 / 1705 | 1297 | 0.072 | **0.446** | 0.581 |
+| the 300 | 10.1 | 464 | 1094 / 1092 / 1167 | 2553 | 0.073 | **0.256** | 0.427 |
+| the 1k | 9.2 | 514 | 996 / 1231 / 2335 | 2355 | 0.069 | **0.383** | 0.549 |
+
+Counts over both lifetimes. "Surely won" is the before share; "likely won" adds the
+completions more than 150 µs before the command's end (the command is 0.4 to 0.5 ms wide
+and the classifier its last tens of microseconds); "at most" adds the 50 to 150 µs bin,
+which the instrument cannot place.
+
+**Readings.**
+
+- **The race is a real race, mostly lost on the 300 and split on the other two.** A
+  prediction is issued at the previous layer's demand completion and takes about 0.8 ms;
+  the classifier executes after that layer's fixup and the next layer's attention, about
+  as long. Only 7 % of adoptions beat the attention command outright.
+- **The shape decides**: the 300 loses most (its fixups are shorter, so the classifier
+  comes sooner), the card wins most.
+- **The joined predictions sit in "after" by construction** (1.2 to 1.9 per token: a join
+  completes inside the plan's bounded wait, after the classifier), and they are lost for
+  the landing too; "after" less `prefetch_joined` is the count lost outright. An adopted
+  prediction without a completion stamp would count as unknown, so the seven buckets
+  total the adoptions (the review's finding; none occurred).
+- **Nothing about production changed**: adopted, misses, the adopted-only fixup layers
+  and tok/s are Task 3's rows, the counters cost nothing visible.
+
+**After T1: the named stop.** The landing's priced prize, MODELLED as the adopted-only
+fixup layers (5.4 / 5.1 / 4.8 per token) times the likely-won share times 0.5 to 0.65 ms
+per such layer: **1.2 to 1.6 / 0.7 to 0.9 / 0.9 to 1.2 ms per token on the card / the 300
+/ the 1k, about +2 / +1.3 / +1.7 %**; at most 1.6 to 2.0 / 1.1 to 1.4 / 1.3 to 1.7 ms if
+the middle bin wins too; the surely-won share alone 0.2 ms, negligible. The estimate
+assumes one adoption per adopted-only layer and the replay's finding that the landing
+keeps today's miss count. The smallest of the chapter's candidates against v15's levers
+(+2 to +6 % each); Davor rules on Task 2.
+
 ## Levers, ranked (modelled from the measured rows)
 
-- **(a) The instrument (Task 1).** No prize of its own; it prices (b).
+- **(a) The instrument (Task 1).** No prize of its own; it prices (b). **Measured: the
+  likely-won share 0.45 / 0.26 / 0.38, the prize of (b) +2 / +1.3 / +1.7 % modelled.**
 - **(b) The landing in the pool's own slot (Task 2).** Up to 2.7 to 3.5 ms per token on
   the card, +4 to +5 %, times the race's fraction; no RAM; today's miss count on the
   replay; the ring's buffers (15.9 MB) and the blit retired when it lands. Built only on
