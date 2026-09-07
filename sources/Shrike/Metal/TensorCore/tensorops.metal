@@ -269,9 +269,6 @@ kernel void NAME(                                                              \
 }
 
 MPP_AFFINE_KERNEL(mpp_prefill_affine_threadgroup_f16, 32, 64, 1)
-MPP_AFFINE_KERNEL(mpp_prefill_affine_threadgroup_f16_n32b2, 32, 64, 2)
-MPP_AFFINE_KERNEL(mpp_prefill_affine_threadgroup_f16_n64b1, 64, 64, 1)
-MPP_AFFINE_KERNEL(mpp_prefill_affine_threadgroup_f16_n64b2, 64, 64, 2)
 MPP_AFFINE_KERNEL(mpp_prefill_affine_threadgroup_f16_n32k128b1, 32, 128, 1)
 MPP_AFFINE_KERNEL(mpp_prefill_affine_threadgroup_f16_n32k256b1, 32, 256, 1)
 
@@ -330,9 +327,6 @@ kernel void NAME(                                                              \
 }
 
 MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16, 64, 32, 64, 1)
-MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n32b2, 64, 32, 64, 2)
-MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n64b1, 64, 64, 64, 1)
-MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n64b2, 64, 64, 64, 2)
 MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n32k128b1, 64, 32, 128, 1)
 MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n32k256b1, 64, 32, 256, 1)
 MPP_GROUPED_KERNEL(mpp_prefill_affine_grouped_f16_n32k256b1_m32, 32, 32, 256, 1)

@@ -21,14 +21,6 @@ enum PrefillRoutedRowBlockBufferIndex {
     static let rowTileBlock = 5
 }
 
-struct PrefillRoutedRowBlockParams: Equatable, Sendable {
-    var pairStart: UInt32
-    var rows: UInt32
-    var d: UInt32
-    var topK: UInt32
-    var hiddenStrideElements: UInt32
-}
-
 struct PrefillRoutedGroupedParams: Equatable, Sendable {
     var paddedRows: UInt32
     var d: UInt32
@@ -727,8 +719,6 @@ enum PrefillGroupedRoutedMoEError: Error, Equatable, CustomStringConvertible {
 final class PrefillGroupedRoutedMoE {
     private let batchedPhase1PSO: MTLComputePipelineState
     private let batchedDownPSO: MTLComputePipelineState
-    private let gatherRowsPSO: MTLComputePipelineState
-    private let scatterRowsPSO: MTLComputePipelineState
     private let groupedGatherRowsPSO: MTLComputePipelineState
     private let groupedScatterRowsPSO: MTLComputePipelineState
     private let activationPSO: MTLComputePipelineState
@@ -736,11 +726,11 @@ final class PrefillGroupedRoutedMoE {
     private let weightBits: Int
     private let supportsMatrixPath: Bool
 
-    /// Below this an expert's pairs do not fill one GEMM tile, so the scalar
-    /// microbatch path still wins.
+    /// A chunk of this many tokens or fewer stays on the scalar microbatch
+    /// path; `PrefillChunkScratchLayout.usesRoutedExpertMatrixPath` is the gate.
     static let matrixPathMinimumRows = 32
 
-    /// The MPP instance `encodeExpertGEMMs` may use, or nil when this runtime
+    /// The MPP instance the grouped GEMMs may use, or nil when this runtime
     /// belongs on the scalar path: no MPP object, a pipeline that failed to
     /// compile, a bit width the GEMM cannot read, an epilogue the GEMM path
     /// cannot reproduce (gpt-oss additive biases, clamped SwiGLU), or a
@@ -816,8 +806,6 @@ final class PrefillGroupedRoutedMoE {
             constants: [MetalFunctionConstant(index: 78,
                                                value: .uint32(UInt32(weightBits)))]
                 + biasConstants)
-        self.gatherRowsPSO = try context.pipeline("prefill_routed_gather_rows")
-        self.scatterRowsPSO = try context.pipeline("prefill_routed_scatter_rows")
         self.groupedGatherRowsPSO = try context.pipeline("prefill_routed_gather_rows_grouped")
         self.groupedScatterRowsPSO = try context.pipeline("prefill_routed_scatter_rows_grouped")
         self.activationPSO = try context.pipeline(
@@ -931,124 +919,6 @@ final class PrefillGroupedRoutedMoE {
             microbatchCount += 1
         }
         return microbatchCount
-    }
-
-    /// Per expert in the tile: gather its pair rows into contiguous staging,
-    /// run gate / up / down as GEMMs over the packed expert slot, and scatter
-    /// the result into the same per-pair `routePartials` rows the scalar path
-    /// writes, unweighted — the router weight stays in the reduce. Experts
-    /// with fewer than `minimumRows` pairs come back untouched for the scalar
-    /// path.
-    func encodeExpertGEMMs(commandBuffer: MTLCommandBuffer,
-                           mpp: MPPPrefillInt4QMM,
-                           hidden: MTLBuffer,
-                           hiddenOffset: Int = 0,
-                           sortedPairs: MTLBuffer,
-                           sortedPairsOffset: Int = 0,
-                           routePartials: MTLBuffer,
-                           routePartialsOffset: Int = 0,
-                           binding: PrefillStreamedTileBinding,
-                           ranges: [PrefillExpertPairRange],
-                           staging: PrefillExpertStaging,
-                           params: PrefillGroupedRoutedMoEStreamedParams,
-                           minimumRows: Int = PrefillGroupedRoutedMoE.matrixPathMinimumRows) throws
-        -> [PrefillExpertPairRange] {
-        guard staging.rowBlock > 0,
-              staging.hiddenSize >= Int(params.d),
-              staging.intermediate >= Int(params.routedIntermediate) else {
-            throw PrefillGroupedRoutedMoEError.stagingTooSmall(
-                "\(staging.rowBlock) rows of \(staging.hiddenSize)/\(staging.intermediate)"
-                    + " cannot hold \(params.d)/\(params.routedIntermediate)")
-        }
-        var leftovers: [PrefillExpertPairRange] = []
-        for range in ranges {
-            guard range.pairCount >= minimumRows,
-                  let slot = binding.localSlot(for: range.expert) else {
-                leftovers.append(range)
-                continue
-            }
-            var consumed = 0
-            while consumed < range.pairCount {
-                let rows = min(staging.rowBlock, range.pairCount - consumed)
-                try encodeExpertRowBlock(
-                    commandBuffer: commandBuffer,
-                    mpp: mpp,
-                    hidden: hidden,
-                    hiddenOffset: hiddenOffset,
-                    sortedPairs: sortedPairs,
-                    sortedPairsOffset: sortedPairsOffset,
-                    routePartials: routePartials,
-                    routePartialsOffset: routePartialsOffset,
-                    view: binding.views[slot],
-                    staging: staging,
-                    params: params,
-                    pairStart: range.pairStart + consumed,
-                    rows: rows)
-                consumed += rows
-            }
-        }
-        return leftovers
-    }
-
-    private func encodeExpertRowBlock(commandBuffer: MTLCommandBuffer,
-                                      mpp: MPPPrefillInt4QMM,
-                                      hidden: MTLBuffer,
-                                      hiddenOffset: Int,
-                                      sortedPairs: MTLBuffer,
-                                      sortedPairsOffset: Int,
-                                      routePartials: MTLBuffer,
-                                      routePartialsOffset: Int,
-                                      view: TensorView,
-                                      staging: PrefillExpertStaging,
-                                      params: PrefillGroupedRoutedMoEStreamedParams,
-                                      pairStart: Int,
-                                      rows: Int) throws {
-        let d = Int(params.d)
-        let f = Int(params.routedIntermediate)
-        var block = PrefillRoutedRowBlockParams(pairStart: UInt32(pairStart),
-                                                rows: UInt32(rows),
-                                                d: UInt32(d),
-                                                topK: params.topK,
-                                                hiddenStrideElements: params.hiddenStrideElements)
-        try encodeRowBlockCopy(pso: gatherRowsPSO,
-                               commandBuffer: commandBuffer,
-                               source: hidden,
-                               sourceOffset: hiddenOffset,
-                               sortedPairs: sortedPairs,
-                               sortedPairsOffset: sortedPairsOffset,
-                               destination: staging.hidden,
-                               destinationOffset: 0,
-                               params: &block,
-                               width: d)
-        try project(mpp: mpp, on: commandBuffer, view: view,
-                    weightsOffset: Int(params.gateWOff),
-                    scalesOffset: Int(params.gateSOff),
-                    biasesOffset: Int(params.gateBOff),
-                    x: staging.hidden, y: staging.gate, m: rows, n: f, k: d)
-        try project(mpp: mpp, on: commandBuffer, view: view,
-                    weightsOffset: Int(params.upWOff),
-                    scalesOffset: Int(params.upSOff),
-                    biasesOffset: Int(params.upBOff),
-                    x: staging.hidden, y: staging.up, m: rows, n: f, k: d)
-        try encodeActivation(commandBuffer: commandBuffer,
-                             gate: staging.gate,
-                             up: staging.up,
-                             count: rows * f)
-        try project(mpp: mpp, on: commandBuffer, view: view,
-                    weightsOffset: Int(params.downWOff),
-                    scalesOffset: Int(params.downSOff),
-                    biasesOffset: Int(params.downBOff),
-                    x: staging.gate, y: staging.down, m: rows, n: d, k: f)
-        try encodeRowBlockCopy(pso: scatterRowsPSO,
-                               commandBuffer: commandBuffer,
-                               source: staging.down,
-                               sourceOffset: 0,
-                               sortedPairs: sortedPairs,
-                               sortedPairsOffset: sortedPairsOffset,
-                               destination: routePartials,
-                               destinationOffset: routePartialsOffset,
-                               params: &block,
-                               width: d)
     }
 
     /// Six dispatches per wave whatever its expert count.
@@ -1294,30 +1164,6 @@ final class PrefillGroupedRoutedMoE {
         encoder.endEncoding()
     }
 
-    private func project(mpp: MPPPrefillInt4QMM,
-                         on commandBuffer: MTLCommandBuffer,
-                         view: TensorView,
-                         weightsOffset: Int,
-                         scalesOffset: Int,
-                         biasesOffset: Int,
-                         x: MTLBuffer,
-                         y: MTLBuffer,
-                         m: Int,
-                         n: Int,
-                         k: Int) throws {
-        let base = Int(view.offset)
-        try mpp.encode(commandBuffer: commandBuffer,
-                       weights: view.buffer, weightsOffset: base + weightsOffset,
-                       scales: view.buffer, scalesOffset: base + scalesOffset,
-                       biases: view.buffer, biasesOffset: base + biasesOffset,
-                       x: x,
-                       y: y,
-                       m: m,
-                       n: n,
-                       k: k,
-                       required: true)
-    }
-
     /// The activation folds back into the gate block, as the shared expert's
     /// chunk path does: the kernel reads and writes only its own element.
     private func encodeActivation(commandBuffer: MTLCommandBuffer,
@@ -1336,34 +1182,6 @@ final class PrefillGroupedRoutedMoE {
         let width = min(activationPSO.maxTotalThreadsPerThreadgroup, 256)
         encoder.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
-        encoder.endEncoding()
-    }
-
-    private func encodeRowBlockCopy(pso: MTLComputePipelineState,
-                                    commandBuffer: MTLCommandBuffer,
-                                    source: MTLBuffer,
-                                    sourceOffset: Int,
-                                    sortedPairs: MTLBuffer,
-                                    sortedPairsOffset: Int,
-                                    destination: MTLBuffer,
-                                    destinationOffset: Int,
-                                    params: inout PrefillRoutedRowBlockParams,
-                                    width: Int) throws {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
-        encoder.setComputePipelineState(pso)
-        encoder.setBuffer(source, offset: sourceOffset,
-                          index: PrefillRoutedRowBlockBufferIndex.source)
-        encoder.setBuffer(sortedPairs, offset: sortedPairsOffset,
-                          index: PrefillRoutedRowBlockBufferIndex.sortedPairs)
-        encoder.setBuffer(destination, offset: destinationOffset,
-                          index: PrefillRoutedRowBlockBufferIndex.destination)
-        encoder.setBytes(&params,
-                         length: MemoryLayout<PrefillRoutedRowBlockParams>.stride,
-                         index: PrefillRoutedRowBlockBufferIndex.params)
-        encoder.dispatchThreads(MTLSize(width: width, height: Int(params.rows), depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: 32, height: 8, depth: 1))
         encoder.endEncoding()
     }
 }

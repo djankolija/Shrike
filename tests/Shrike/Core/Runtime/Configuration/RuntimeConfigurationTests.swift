@@ -15,13 +15,11 @@ import Testing
             expertCacheSlots: 16,
             prefillEnabled: true,
             prefillChunkTokens: 128,
-            prefillAttentionPath: .fullTensorOps2DPreferred,
             forceLogitsHead: false)
         #expect(runtime.fp16RingEnabled)
         #expect(runtime.expertCacheSlots == 16)
         #expect(runtime.prefillPolicy == .chunked)
         #expect(runtime.prefillChunkTokens == 128)
-        #expect(runtime.prefillAttentionPath == .fullTensorOps2DPreferred)
         #expect(runtime.headPath == .fusedRows)
         #expect(runtime.kvCachePrecision == .int8)
         #expect(runtime.ropeScalingMode == .none)
@@ -46,11 +44,9 @@ import Testing
             expertCacheSlots: 32,
             prefillEnabled: false,
             prefillChunkTokens: 64,
-            prefillAttentionPath: .causalTiled,
             forceLogitsHead: true)
         #expect(runtime.expertCacheSlots == 32)
         #expect(runtime.prefillConfig == .off)
-        #expect(runtime.prefillAttentionPath == .causalTiled)
         #expect(runtime.headPath == .logits)
     }
 

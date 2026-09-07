@@ -181,17 +181,13 @@ import ShrikeValidationSupport
         #expect(got == ref)
     }
 
-    @Test(arguments: [64, 33], MPPPrefillInt4QMM.TileVariant.allCases)
-    func chunkSharedExpertMatchesRowLoop(rows: Int, variant: MPPPrefillInt4QMM.TileVariant) throws {
-        try Self.runChunkSharedExpertMatchesRowLoop(rows: rows, variant: variant)
-    }
-
-    @Test func chunkSharedExpertMatchesRowLoopWithVectorLoads() throws {
-        try Self.runChunkSharedExpertMatchesRowLoop(rows: 33, variant: .n32b1, weightLoads: .vector)
+    @Test(arguments: [64, 33])
+    func chunkSharedExpertMatchesRowLoop(rows: Int) throws {
+        try Self.runChunkSharedExpertMatchesRowLoop(rows: rows)
     }
 
     @Test func chunkSharedExpertMatchesRowLoopAtALoweredMinimum() throws {
-        try Self.runChunkSharedExpertMatchesRowLoop(rows: 21, variant: .n32b1, minimumRows: 16)
+        try Self.runChunkSharedExpertMatchesRowLoop(rows: 21, minimumRows: 16)
     }
 
     @Test func sharedExpertMatrixPathHonoursALoweredMinimum() throws {
@@ -380,14 +376,12 @@ import ShrikeValidationSupport
     }
 
     private static func runChunkSharedExpertMatchesRowLoop(rows: Int,
-                                                           variant: MPPPrefillInt4QMM.TileVariant,
-                                                           weightLoads: MPPPrefillInt4QMM.WeightLoads = .byte,
                                                            minimumRows: Int = PrefillSharedExpert.matrixPathMinimumRows) throws {
         var rng = SeedTree(0xC0FFEE).key("prefill-shared-expert-chunk-\(rows)")
         let ctx = try MetalContext()
         let prefill = try PrefillSharedExpert(context: ctx, weightBits: 4, siluActivation: true)
-        let mpp = MPPPrefillInt4QMM(context: ctx, weightBits: 4, variant: variant, weightLoads: weightLoads)
-        #expect(mpp.isAvailable, "Requires runtime MPP TensorOps support (\(variant))")
+        let mpp = MPPPrefillInt4QMM(context: ctx, weightBits: 4)
+        #expect(mpp.isAvailable, "Requires runtime MPP TensorOps support")
         let d = chunkD
         let f = chunkF
 

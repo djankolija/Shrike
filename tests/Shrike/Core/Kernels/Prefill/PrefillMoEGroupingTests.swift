@@ -114,189 +114,6 @@ import Testing
         }
     }
 
-    @Test func groupingCanOrderTilesByDescendingExpertSortKeysWhileKeepingPairRangesContiguous() throws {
-        let pairs = [
-            Self.pair(token: 0, expert: 1, rank: 0, weightBits: 10),
-            Self.pair(token: 0, expert: 2, rank: 1, weightBits: 20),
-            Self.pair(token: 1, expert: 3, rank: 0, weightBits: 30),
-            Self.pair(token: 1, expert: 1, rank: 1, weightBits: 11),
-            Self.pair(token: 2, expert: 2, rank: 0, weightBits: 21),
-            Self.pair(token: 2, expert: 3, rank: 1, weightBits: 31),
-        ]
-
-        let grouped = try PrefillMoEGrouping.groupTokenExpertPairs(
-            pairs,
-            queryCount: 3,
-            topK: 2,
-            numExperts: 4,
-            tileExpertCount: 2,
-            expertSortKeys: [0, 30, 10, 20],
-            descending: true)
-
-        #expect(grouped.groups.map(\.expert) == [1, 3, 2])
-        #expect(grouped.sortedPairs.map(\.expert) == [1, 1, 3, 3, 2, 2])
-        #expect(grouped.perExpertOffsets == [UInt32.max, 0, 4, 2])
-        #expect(grouped.tiles == [
-            PrefillMoETile(groupStart: 0, groupCount: 2, pairStart: 0, pairCount: 4),
-            PrefillMoETile(groupStart: 2, groupCount: 1, pairStart: 4, pairCount: 2),
-        ])
-        for tile in grouped.tiles {
-            let slice = grouped.sortedPairs[Int(tile.pairStart)..<Int(tile.pairStart + tile.pairCount)]
-            let tileExperts = grouped.groups[Int(tile.groupStart)..<Int(tile.groupStart + tile.groupCount)]
-                .map(\.expert)
-            #expect(Set(slice.map(\.expert)) == Set(tileExperts))
-        }
-        for group in grouped.groups {
-            let slice = grouped.sortedPairs[Int(group.pairStart)..<Int(group.pairStart + group.pairCount)]
-            var previous: (token: UInt32, rank: UInt32)?
-            for pair in slice {
-                if let previous {
-                    #expect(previous.token < pair.token
-                        || (previous.token == pair.token && previous.rank < pair.rank))
-                }
-                previous = (pair.token, pair.rank)
-            }
-        }
-    }
-
-    @Test func groupingWithDescendingFalseMatchesDefaultBehavior() throws {
-        let pairs = [
-            Self.pair(token: 0, expert: 1, rank: 0, weightBits: 10),
-            Self.pair(token: 0, expert: 2, rank: 1, weightBits: 20),
-            Self.pair(token: 1, expert: 3, rank: 0, weightBits: 30),
-            Self.pair(token: 1, expert: 1, rank: 1, weightBits: 11),
-            Self.pair(token: 2, expert: 2, rank: 0, weightBits: 21),
-            Self.pair(token: 2, expert: 3, rank: 1, weightBits: 31),
-        ]
-
-        let defaulted = try PrefillMoEGrouping.groupTokenExpertPairs(
-            pairs,
-            queryCount: 3,
-            topK: 2,
-            numExperts: 4,
-            tileExpertCount: 2,
-            expertSortKeys: [0, 30, 10, 20])
-        let explicit = try PrefillMoEGrouping.groupTokenExpertPairs(
-            pairs,
-            queryCount: 3,
-            topK: 2,
-            numExperts: 4,
-            tileExpertCount: 2,
-            expertSortKeys: [0, 30, 10, 20],
-            descending: false)
-
-        #expect(defaulted == explicit)
-    }
-
-    @Test func chunkSweepParityAlternatesByChunkIndex() throws {
-        let chunkTokens = 4_096
-        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
-            startPosition: 0, chunkTokens: chunkTokens) == false)
-        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
-            startPosition: 4_095, chunkTokens: chunkTokens) == false)
-        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
-            startPosition: 4_096, chunkTokens: chunkTokens) == true)
-        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
-            startPosition: 8_191, chunkTokens: chunkTokens) == true)
-        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
-            startPosition: 8_192, chunkTokens: chunkTokens) == false)
-        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
-            startPosition: 2_048, chunkTokens: 2_048) == true)
-        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
-            startPosition: 4_096, chunkTokens: 2_048) == false)
-    }
-
-    @Test func carriedSweepStartsOppositeThePreviousRequestsLastChunk() throws {
-        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
-            mode: .carry, carried: true, startPosition: 0, chunkTokens: 4_096) == false)
-        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
-            mode: .carry, carried: false, startPosition: 0, chunkTokens: 4_096) == true)
-    }
-
-    @Test func carriedSweepAlternatesFromTheCarriedStart() throws {
-        // The runner reads back what it just wrote, so each chunk's result
-        // must feed forward as the next chunk's `carried`, not a fixed carry
-        // stepped across positions.
-        let chunkTokens = 4_096
-        let initialCarries: [Bool?] = [nil, true, false]
-        for initial in initialCarries {
-            let d0 = RealForwardRunner.prefillChunkSweepIsDescending(
-                mode: .carry, carried: initial, startPosition: 0, chunkTokens: chunkTokens)
-            let d1 = RealForwardRunner.prefillChunkSweepIsDescending(
-                mode: .carry, carried: d0, startPosition: chunkTokens, chunkTokens: chunkTokens)
-            #expect(d1 == !d0)
-            let d2 = RealForwardRunner.prefillChunkSweepIsDescending(
-                mode: .carry, carried: d1, startPosition: 2 * chunkTokens, chunkTokens: chunkTokens)
-            #expect(d2 == !d1)
-            #expect(d2 == d0)
-        }
-    }
-
-    @Test func nonParticipatingCallsAlwaysComputeAlternateBehaviour() throws {
-        let chunkTokens = 4_096
-        let modes: [PrefillSweepMode] = [.alternate, .fixed, .carry]
-        let carriedValues: [Bool?] = [nil, true, false]
-        for mode in modes {
-            for carried in carriedValues {
-                for startPosition in stride(from: 0, through: 3 * chunkTokens, by: chunkTokens) {
-                    #expect(RealForwardRunner.prefillChunkSweepIsDescending(
-                        mode: mode, carried: carried, startPosition: startPosition,
-                        chunkTokens: chunkTokens, participatesInCarry: false)
-                        == RealForwardRunner.prefillChunkSweepIsDescending(
-                            startPosition: startPosition, chunkTokens: chunkTokens))
-                }
-            }
-        }
-    }
-
-    @Test func carriedSweepWithNoHistoryIsAscending() throws {
-        #expect(RealForwardRunner.prefillChunkSweepIsDescending(
-            mode: .carry, carried: nil, startPosition: 0, chunkTokens: 4_096) == false)
-    }
-
-    @Test func alternateModeIgnoresTheCarriedDirection() throws {
-        let chunkTokens = 4_096
-        let carriedValues: [Bool?] = [nil, true, false]
-        for carried in carriedValues {
-            for startPosition in stride(from: 0, through: 3 * chunkTokens, by: chunkTokens) {
-                #expect(RealForwardRunner.prefillChunkSweepIsDescending(
-                    mode: .alternate, carried: carried,
-                    startPosition: startPosition, chunkTokens: chunkTokens)
-                    == RealForwardRunner.prefillChunkSweepIsDescending(
-                        startPosition: startPosition, chunkTokens: chunkTokens))
-            }
-        }
-    }
-
-    @Test func fixedModeIsAscendingAtEveryChunkAndCarry() throws {
-        let chunkTokens = 4_096
-        let carriedValues: [Bool?] = [nil, true, false]
-        for carried in carriedValues {
-            for startPosition in stride(from: 0, through: 3 * chunkTokens, by: chunkTokens) {
-                #expect(RealForwardRunner.prefillChunkSweepIsDescending(
-                    mode: .fixed, carried: carried,
-                    startPosition: startPosition, chunkTokens: chunkTokens) == false)
-            }
-        }
-    }
-
-    @Test func computedSweepOrderRequiresBothAComputedModeAndCarryParticipation() throws {
-        let computedModes: [PrefillSweepMode] = [.recency, .resident]
-        let indexModes: [PrefillSweepMode] = [.alternate, .fixed, .carry]
-        for mode in computedModes {
-            #expect(RealForwardRunner.prefillChunkUsesComputedSweepOrder(
-                mode: mode, participatesInCarry: true) == true)
-            #expect(RealForwardRunner.prefillChunkUsesComputedSweepOrder(
-                mode: mode, participatesInCarry: false) == false)
-        }
-        for mode in indexModes {
-            #expect(RealForwardRunner.prefillChunkUsesComputedSweepOrder(
-                mode: mode, participatesInCarry: true) == false)
-            #expect(RealForwardRunner.prefillChunkUsesComputedSweepOrder(
-                mode: mode, participatesInCarry: false) == false)
-        }
-    }
-
     @Test func groupingRejectsInvalidMetadataBeforeKernelUse() throws {
         #expect {
             _ = try PrefillMoEGrouping.groupTokenExpertPairs(
@@ -385,27 +202,14 @@ import Testing
         }
     }
 
-    @Test func recencyOrdersByLastRowAscending() throws {
-        #expect(PrefillSweepOrder.recency(lastRowByExpert: [8: 2, 3: 1, 5: 3]) == [3, 8, 5])
-    }
-
-    @Test func recencyBreaksTiesByExpertIdAscending() throws {
-        #expect(PrefillSweepOrder.recency(lastRowByExpert: [5: 4, 2: 4, 9: 1]) == [9, 2, 5])
-    }
-
-    @Test func recencyHandlesASingleExpertChunk() throws {
-        #expect(PrefillSweepOrder.recency(lastRowByExpert: [42: 7]) == [42])
-    }
-
-    @Test func groupingCanOrderTilesByRecencyWhileKeepingPairRangesContiguous() throws {
+    @Test func groupingCanOrderTilesByASweepOrderWhileKeepingPairRangesContiguous() throws {
         let pairs = [
             Self.pair(token: 0, expert: 8, rank: 0, weightBits: 80),
             Self.pair(token: 1, expert: 3, rank: 0, weightBits: 10),
             Self.pair(token: 2, expert: 8, rank: 0, weightBits: 81),
             Self.pair(token: 3, expert: 5, rank: 0, weightBits: 50),
         ]
-        let order = PrefillSweepOrder.recency(lastRowByExpert: [8: 2, 3: 1, 5: 3])
-        #expect(order == [3, 8, 5])
+        let order: [UInt32] = [3, 8, 5]
         let sortKeys = PrefillSweepOrder.expertSortKeys(forOrder: order, numExperts: 9)
 
         let grouped = try PrefillMoEGrouping.groupTokenExpertPairs(
@@ -439,61 +243,6 @@ import Testing
         #expect(keys.count == 9)
         #expect(keys[3] == 0)
         #expect(keys[5] == 2)
-    }
-
-    @Test func recencyBalancedSplitsHeadAndTailByTail() throws {
-        let lastRowByExpert: [UInt32: Int] = [1: 0, 2: 1, 3: 2, 4: 3, 5: 4]
-        let rowsByExpert: [UInt32: Int] = [1: 10, 2: 10, 3: 10, 4: 10, 5: 10]
-
-        let balanced = PrefillSweepOrder.recencyBalanced(
-            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert, tail: 2, tileWidth: 8)
-
-        #expect(balanced.order == [1, 2, 3, 4, 5])
-        #expect(balanced.tileExpertCounts == [3, 2])
-    }
-
-    @Test func recencyBalancedHeadIsEmptyWhenChunkHasAtMostTailExperts() throws {
-        let lastRowByExpert: [UInt32: Int] = [1: 0, 2: 1, 3: 2]
-        let rowsByExpert: [UInt32: Int] = [1: 5, 2: 5, 3: 5]
-
-        let balanced = PrefillSweepOrder.recencyBalanced(
-            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert, tail: 96, tileWidth: 8)
-
-        #expect(balanced.order == [1, 2, 3])
-        #expect(balanced.tileExpertCounts == [3])
-    }
-
-    @Test func recencyBalancedPacksTilesCloseToEvenByRowWeight() throws {
-        var lastRowByExpert: [UInt32: Int] = [:]
-        var rowsByExpert: [UInt32: Int] = [:]
-        for id in UInt32(1)...20 {
-            lastRowByExpert[id] = Int(id)
-            rowsByExpert[id] = Int(21 - id)
-        }
-
-        let balanced = PrefillSweepOrder.recencyBalanced(
-            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert, tail: 20, tileWidth: 8)
-
-        #expect(balanced.order.count == 20)
-        #expect(Set(balanced.order) == Set((1...20).map { UInt32($0) }))
-        #expect(balanced.tileExpertCounts.count == 3)
-        #expect(balanced.tileExpertCounts.reduce(0, +) == 20)
-        #expect(balanced.tileExpertCounts.allSatisfy { $0 <= 8 })
-
-        var totals: [Int] = []
-        var cursor = 0
-        for count in balanced.tileExpertCounts {
-            let tileExperts = balanced.order[cursor..<(cursor + count)]
-            totals.append(tileExperts.reduce(0) { $0 + (rowsByExpert[$1] ?? 0) })
-            cursor += count
-        }
-        let heaviestWeight = rowsByExpert.values.max() ?? 0
-        let maxTotal = totals.max() ?? 0
-        let minTotal = totals.min() ?? 0
-        #expect((maxTotal - minTotal) <= heaviestWeight)
-
-        let firstTileExperts = balanced.order[0..<balanced.tileExpertCounts[0]]
-        #expect(firstTileExperts.contains(1))
     }
 
     @Test func residentFirstBalancedSpreadsAbsentUniformlyPreservesRecencyAndBreaksResidentTiesToTheLowerTileIndex() throws {
@@ -572,39 +321,6 @@ import Testing
         #expect(order == [5, 3])
     }
 
-    @Test func residentFirstBalancedWithEmptyResidentMatchesRecencyBalancedExactly() throws {
-        let rowsByExpert: [UInt32: Int] = [1: 10, 2: 10, 3: 10, 4: 10, 5: 10]
-        let lastRowByExpert: [UInt32: Int] = [1: 0, 2: 1, 3: 2, 4: 3, 5: 4]
-
-        let recencyOnly = PrefillSweepOrder.recencyBalanced(
-            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert, tail: 96, tileWidth: 8)
-        let residentFirst = PrefillSweepOrder.residentFirstBalanced(
-            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert,
-            resident: [], slots: 128, tileWidth: 8)
-
-        #expect(residentFirst == recencyOnly.order)
-    }
-
-    @Test func residentFirstBalancedWithEmptyResidentPastTheFallbackTailDivergesFromRecencyBalanced() throws {
-        var rowsByExpert: [UInt32: Int] = [5: 10, 50: 1]
-        var lastRowByExpert: [UInt32: Int] = [5: 0, 50: 0]
-        for offset in 0..<95 {
-            let id = UInt32(200 + offset)
-            rowsByExpert[id] = 1
-            lastRowByExpert[id] = offset + 1
-        }
-
-        let recencyOnly = PrefillSweepOrder.recencyBalanced(
-            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert, tail: 96, tileWidth: 8)
-        let residentFirst = PrefillSweepOrder.residentFirstBalanced(
-            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert,
-            resident: [], slots: 128, tileWidth: 8)
-
-        #expect(Set(residentFirst) == Set(rowsByExpert.keys))
-        #expect(residentFirst.count == 97)
-        #expect(residentFirst != recencyOnly.order)
-    }
-
     @Test func residentFirstBalancedHandlesAResidentArrayShorterThanNumExpertsWithoutTrapping() throws {
         let rowsByExpert: [UInt32: Int] = [3: 1, 99: 1]
         let lastRowByExpert: [UInt32: Int] = [3: 0, 99: 1]
@@ -669,77 +385,6 @@ import Testing
         let headResidents = Set<UInt32>([1, 2, 3, 4, 5, 6, 7, 8])
         let firstTileExperts = Set(grouped.groups[0..<Int(grouped.tiles[0].groupCount)].map(\.expert))
         #expect(headResidents == firstTileExperts)
-    }
-
-    @Test func groupingHonoursExplicitExpertTileCounts() throws {
-        let pairs = [
-            Self.pair(token: 0, expert: 8, rank: 0, weightBits: 80),
-            Self.pair(token: 1, expert: 3, rank: 0, weightBits: 10),
-            Self.pair(token: 2, expert: 8, rank: 0, weightBits: 81),
-            Self.pair(token: 3, expert: 5, rank: 0, weightBits: 50),
-        ]
-
-        let grouped = try PrefillMoEGrouping.groupTokenExpertPairs(
-            pairs,
-            queryCount: 4,
-            topK: 1,
-            numExperts: 9,
-            tileExpertCount: 2,
-            expertSortKeys: PrefillSweepOrder.expertSortKeys(forOrder: [3, 8, 5], numExperts: 9),
-            expertTileCounts: [1, 2])
-
-        #expect(grouped.groups.map(\.expert) == [3, 8, 5])
-        #expect(grouped.tiles == [
-            PrefillMoETile(groupStart: 0, groupCount: 1, pairStart: 0, pairCount: 1),
-            PrefillMoETile(groupStart: 1, groupCount: 2, pairStart: 1, pairCount: 3),
-        ])
-    }
-
-    @Test func groupingThrowsOnExpertTileCountsMismatch() throws {
-        let pairs = [
-            Self.pair(token: 0, expert: 8, rank: 0, weightBits: 80),
-            Self.pair(token: 1, expert: 3, rank: 0, weightBits: 10),
-        ]
-
-        #expect {
-            _ = try PrefillMoEGrouping.groupTokenExpertPairs(
-                pairs,
-                queryCount: 2,
-                topK: 1,
-                numExperts: 9,
-                expertTileCounts: [1])
-        } throws: { error in
-            if case PrefillMoEGroupingError.expertTileCountsMismatch(expected: 2, actual: 1) = error {
-                return true
-            }
-            return false
-        }
-    }
-
-    @Test func groupingReproducesRecencyBalancedTilesEndToEnd() throws {
-        let pairs = [
-            Self.pair(token: 0, expert: 8, rank: 0, weightBits: 80),
-            Self.pair(token: 1, expert: 3, rank: 0, weightBits: 10),
-            Self.pair(token: 2, expert: 8, rank: 0, weightBits: 81),
-            Self.pair(token: 3, expert: 5, rank: 0, weightBits: 50),
-        ]
-        let lastRowByExpert: [UInt32: Int] = [8: 2, 3: 1, 5: 3]
-        let rowsByExpert: [UInt32: Int] = [8: 2, 3: 1, 5: 1]
-
-        let balanced = PrefillSweepOrder.recencyBalanced(
-            rowsByExpert: rowsByExpert, lastRowByExpert: lastRowByExpert, tail: 96, tileWidth: 2)
-
-        let grouped = try PrefillMoEGrouping.groupTokenExpertPairs(
-            pairs,
-            queryCount: 4,
-            topK: 1,
-            numExperts: 9,
-            tileExpertCount: 2,
-            expertSortKeys: PrefillSweepOrder.expertSortKeys(forOrder: balanced.order, numExperts: 9),
-            expertTileCounts: balanced.tileExpertCounts)
-
-        #expect(grouped.tiles.map { Int($0.groupCount) } == balanced.tileExpertCounts)
-        #expect(grouped.tiles.reduce(0) { $0 + Int($1.pairCount) } == pairs.count)
     }
 
     private static func pair(token: UInt32,

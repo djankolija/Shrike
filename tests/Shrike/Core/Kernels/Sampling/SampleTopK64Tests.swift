@@ -33,20 +33,6 @@ import Testing
         try GenerationConfig(temperature: 0, topK: nil, topP: 0.95).validate()
     }
 
-    @Test func samplerPathControlDefaultsToTiledAndFailsClosed() throws {
-        #expect(try RuntimeSamplerPath.environmentValue([:]) == .tiled)
-        #expect(try RuntimeSamplerPath.environmentValue(
-            ["SHRIKE_SAMPLER_PATH": "tiled"]) == .tiled)
-        #expect(try RuntimeSamplerPath.environmentValue(
-            ["SHRIKE_SAMPLER_PATH": "generic"]) == .generic)
-        #expect(throws: GeneratorError.self) {
-            try RuntimeSamplerPath.environmentValue(["SHRIKE_SAMPLER_PATH": "fast"])
-        }
-        #expect(throws: GeneratorError.self) {
-            try RuntimeSamplerPath.environmentValue(["SHRIKE_SAMPLER_PATH": ""])
-        }
-    }
-
     private final class Rig {
         let context: MetalContext
         let current: Sample

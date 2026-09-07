@@ -60,7 +60,6 @@ enum PrefillMoEGroupingError: Error, Equatable, CustomStringConvertible {
     case expertOutOfRange(UInt32)
     case duplicateTokenRank(token: UInt32, rank: UInt32)
     case expertSortKeyCountMismatch(expected: Int, actual: Int)
-    case expertTileCountsMismatch(expected: Int, actual: Int)
 
     public var description: String {
         switch self {
@@ -84,50 +83,12 @@ enum PrefillMoEGroupingError: Error, Equatable, CustomStringConvertible {
             return "duplicate route pair for token \(token), rank \(rank)"
         case .expertSortKeyCountMismatch(let expected, let actual):
             return "expected \(expected) expert sort keys, got \(actual)"
-        case .expertTileCountsMismatch(let expected, let actual):
-            return "expert tile counts summed to \(actual), expected \(expected)"
         }
     }
 }
 
-/// One `recencyBalanced` result: a flat expert order and the per-tile
-/// expert counts consecutive runs of it are sliced into.
-struct PrefillSweepBalancedOrder: Equatable {
-    let order: [UInt32]
-    let tileExpertCounts: [Int]
-}
-
-/// `SHRIKE_PREFILL_SWEEP=recency|resident`'s expert orders.
+/// The resident-first sweep's expert order (v13 T5).
 enum PrefillSweepOrder {
-    /// Ascending by last row in the chunk, ties by expert id ascending.
-    static func recency(lastRowByExpert: [UInt32: Int]) -> [UInt32] {
-        lastRowByExpert
-            .sorted { lhs, rhs in
-                if lhs.value != rhs.value { return lhs.value < rhs.value }
-                return lhs.key < rhs.key
-            }
-            .map(\.key)
-    }
-
-    /// Splits the chunk's ranked experts into a head and a tail of the last
-    /// `tail` (the decode-adjacent set), then packs each group's own tiles
-    /// of at most `tileWidth` experts by total row weight, heaviest first
-    /// into the lightest open tile, ties to the lower tile index.
-    static func recencyBalanced(rowsByExpert: [UInt32: Int],
-                                lastRowByExpert: [UInt32: Int],
-                                tail: Int,
-                                tileWidth: Int) -> PrefillSweepBalancedOrder {
-        let ranked = recency(lastRowByExpert: lastRowByExpert)
-        let tailCount = min(tail, ranked.count)
-        let headCount = ranked.count - tailCount
-        let head = packByRows(Array(ranked[0..<headCount]), rowsByExpert: rowsByExpert,
-                              tileWidth: tileWidth)
-        let tailGroup = packByRows(Array(ranked[headCount...]), rowsByExpert: rowsByExpert,
-                                   tileWidth: tileWidth)
-        return PrefillSweepBalancedOrder(order: head.order + tailGroup.order,
-                                         tileExpertCounts: head.tileExpertCounts + tailGroup.tileExpertCounts)
-    }
-
     /// The tile multiplier `residentFirstBalanced`'s head rule protects
     /// against starving; the replay tool's `--sweep-head-factor` mirror,
     /// fixed here rather than a knob (v13 T5 step 2, fix-up 1).
@@ -135,16 +96,13 @@ enum PrefillSweepOrder {
 
     /// The absent group's most recent experts packed as their own tail
     /// when `residentFirstBalanced` falls back to the resident/head/tail
-    /// split (an empty resident or absent group this chunk); independent
-    /// of `SHRIKE_PREFILL_SWEEP_TAIL`, which sizes `recencyBalanced`'s own
-    /// tail for `.recency` only.
+    /// split (an empty resident or absent group this chunk).
     private static let residentFirstFallbackTail = 96
 
     /// Ascending by last row in the chunk, ties by rows ascending then
     /// expert id: `resident-first`'s own ranking key, matching the replay
-    /// tool's `last-asc`. `recency(lastRowByExpert:)` above ties by expert
-    /// id alone, which under-specifies the order once a last-row tie
-    /// decides which tile an absent expert lands in.
+    /// tool's `last-asc`; a tie by expert id alone would under-specify the
+    /// order once a last-row tie decides which tile an absent expert lands in.
     private static func residentFirstRanked(rowsByExpert: [UInt32: Int],
                                             lastRowByExpert: [UInt32: Int]) -> [UInt32] {
         lastRowByExpert.keys.sorted { lhs, rhs in
@@ -166,11 +124,7 @@ enum PrefillSweepOrder {
     /// residents heaviest-first; an empty `resident`, a chunk the pool
     /// already holds in full, or a head search that never finds room falls
     /// back to the resident/head/tail split packed and concatenated at
-    /// `residentFirstFallbackTail` (matches `recencyBalanced`'s own order
-    /// only when `resident` is empty and the chunk routes at most
-    /// `residentFirstFallbackTail` experts, since both then reduce to one
-    /// packed group over the same set; past that bound the two orders are
-    /// not asserted identical, only verified against the replayed
+    /// `residentFirstFallbackTail` (verified against the replayed
     /// acceptance traces).
     static func residentFirstBalanced(rowsByExpert: [UInt32: Int],
                                       lastRowByExpert: [UInt32: Int],
@@ -236,7 +190,7 @@ enum PrefillSweepOrder {
                               tileWidth: tileWidth)
         let tailGroup = packByRows(Array(absentGroup[headCount...]), rowsByExpert: rowsByExpert,
                                    tileWidth: tileWidth)
-        return residentPacked.order + head.order + tailGroup.order
+        return residentPacked + head + tailGroup
     }
 
     /// `order`'s rank per expert id, `numExperts`-sized so it takes
@@ -252,8 +206,8 @@ enum PrefillSweepOrder {
     }
 
     private static func packByRows(_ experts: [UInt32], rowsByExpert: [UInt32: Int],
-                                   tileWidth: Int) -> (order: [UInt32], tileExpertCounts: [Int]) {
-        guard !experts.isEmpty else { return ([], []) }
+                                   tileWidth: Int) -> [UInt32] {
+        guard !experts.isEmpty else { return [] }
         let tileCount = (experts.count + tileWidth - 1) / tileWidth
         var bins: [(total: Int, experts: [UInt32])] = Array(repeating: (0, []), count: tileCount)
         let heaviestFirst = experts.sorted { lhs, rhs in
@@ -275,7 +229,7 @@ enum PrefillSweepOrder {
             bins[bestIndex].experts.append(expert)
             bins[bestIndex].total += rowsByExpert[expert] ?? 0
         }
-        return (bins.flatMap(\.experts), bins.map { $0.experts.count })
+        return bins.flatMap(\.experts)
     }
 
     /// `packByRows`, pre-seeded: `preseeded`'s bins (already tiled, at most
@@ -318,9 +272,7 @@ enum PrefillMoEGrouping {
         topK: Int,
         numExperts: Int,
         tileExpertCount: Int = 16,
-        expertSortKeys: [UInt64]? = nil,
-        descending: Bool = false,
-        expertTileCounts: [Int]? = nil
+        expertSortKeys: [UInt64]? = nil
     ) throws -> PrefillMoEGroupedRoutes {
         guard queryCount >= 0 else {
             throw PrefillMoEGroupingError.invalidQueryCount(queryCount)
@@ -367,9 +319,9 @@ enum PrefillMoEGrouping {
             if let expertSortKeys {
                 let lhsKey = expertSortKeys[Int($0.expert)]
                 let rhsKey = expertSortKeys[Int($1.expert)]
-                if lhsKey != rhsKey { return descending ? lhsKey > rhsKey : lhsKey < rhsKey }
+                if lhsKey != rhsKey { return lhsKey < rhsKey }
             }
-            if $0.expert != $1.expert { return descending ? $0.expert > $1.expert : $0.expert < $1.expert }
+            if $0.expert != $1.expert { return $0.expert < $1.expert }
             if $0.token != $1.token { return $0.token < $1.token }
             return $0.rank < $1.rank
         }
@@ -394,41 +346,19 @@ enum PrefillMoEGrouping {
                                           pairCount: UInt32(count)))
         }
 
-        if let expertTileCounts {
-            let suppliedTotal = expertTileCounts.reduce(0, +)
-            guard suppliedTotal == groups.count else {
-                throw PrefillMoEGroupingError.expertTileCountsMismatch(expected: groups.count,
-                                                                       actual: suppliedTotal)
-            }
-        }
-
         var tiles: [PrefillMoETile] = []
-        if let expertTileCounts {
-            var groupStart = 0
-            for count in expertTileCounts where count > 0 {
-                let groupEnd = groupStart + count
-                let first = groups[groupStart]
-                let last = groups[groupEnd - 1]
-                tiles.append(PrefillMoETile(groupStart: UInt32(groupStart),
-                                            groupCount: UInt32(count),
-                                            pairStart: first.pairStart,
-                                            pairCount: last.pairStart + last.pairCount - first.pairStart))
-                groupStart = groupEnd
-            }
-        } else {
-            var groupStart = 0
-            while groupStart < groups.count {
-                let groupEnd = min(groups.count, groupStart + tileExpertCount)
-                let first = groups[groupStart]
-                let last = groups[groupEnd - 1]
-                let pairStart = first.pairStart
-                let pairEnd = last.pairStart + last.pairCount
-                tiles.append(PrefillMoETile(groupStart: UInt32(groupStart),
-                                            groupCount: UInt32(groupEnd - groupStart),
-                                            pairStart: pairStart,
-                                            pairCount: pairEnd - pairStart))
-                groupStart = groupEnd
-            }
+        var groupStart = 0
+        while groupStart < groups.count {
+            let groupEnd = min(groups.count, groupStart + tileExpertCount)
+            let first = groups[groupStart]
+            let last = groups[groupEnd - 1]
+            let pairStart = first.pairStart
+            let pairEnd = last.pairStart + last.pairCount
+            tiles.append(PrefillMoETile(groupStart: UInt32(groupStart),
+                                        groupCount: UInt32(groupEnd - groupStart),
+                                        pairStart: pairStart,
+                                        pairCount: pairEnd - pairStart))
+            groupStart = groupEnd
         }
 
         return PrefillMoEGroupedRoutes(sortedPairs: sortedPairs,

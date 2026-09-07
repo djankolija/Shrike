@@ -16,7 +16,6 @@ enum GeneratorError: Error, CustomStringConvertible, Equatable {
     case invalidGenerationConfig(String)
     case invalidContinuation(String)
     case emptyPrompt
-    case invalidSamplerPath(String)
 
     public var description: String {
         switch self {
@@ -28,8 +27,6 @@ enum GeneratorError: Error, CustomStringConvertible, Equatable {
             return reason
         case .emptyPrompt:
             return "empty prompt"
-        case .invalidSamplerPath(let value):
-            return "unsupported sampler path '\(value)'; allowed: tiled, generic"
         }
     }
 }

@@ -93,10 +93,6 @@ extension Model {
             downABOff: offset("down_bias"))
     }
 
-    public func routedExpertPhysicalOffsets(layer: Int) -> [UInt64] {
-        packedExpertsLayout.layers[layer].experts.map(\.offset)
-    }
-
     public func planRoutedExperts(layer: Int,
                                   experts: [Int],
                                   avoidingSlots: Set<Int> = [],

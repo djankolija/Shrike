@@ -39,8 +39,6 @@ internal enum PrefillProjectionDispatch: Sendable, Equatable {
 }
 
 internal enum PrefillProjectionDispatchPolicy {
-    /// The fixed threshold the runner's parsed default (16) and the A/B
-    /// (`SHRIKE_PREFILL_MATRIX_MIN_ROWS=32`) both derive from.
     static let fixedMinimumRows = 32
 
     static func selectedDispatch(for family: PrefillProjectionFamily,
@@ -55,34 +53,6 @@ internal enum PrefillProjectionDispatchPolicy {
         case .kv, .o:
             return .qmm
         }
-    }
-}
-
-/// `SHRIKE_PREFILL_SWEEP` mode: `alternate` reverses the sweep on odd-parity
-/// chunks; `fixed` keeps every chunk ascending; `carry` starts each
-/// request's first chunk opposite the previous request's last chunk and
-/// alternates from there (v13 T0's mini A/B winner, kept as the A/B);
-/// `recency` splits the chunk's experts into a head and a tail of the last
-/// `SHRIKE_PREFILL_SWEEP_TAIL` by last-row-in-chunk, then packs each
-/// group's own tiles by row weight; it consults neither the direction nor
-/// the carry state, and honours `participatesInCarry: false` the same as
-/// the direction switch, so a chunk outside the carry keeps index
-/// tiling under the knob (v13 T4 step 2, fix-up 1; fix round 1); `resident`
-/// sweeps the chunk's pool-resident experts first, then the absent ones by
-/// the same recency split, all three groups packed by row weight and tiled
-/// flat (v13 T5 step 2, today's default).
-internal enum PrefillSweepMode: String, Sendable, Equatable, CaseIterable {
-    case alternate
-    case fixed
-    case carry
-    case recency
-    case resident
-
-    /// `.recency` and `.resident` build their own per-layer order in
-    /// `buildPrefillRoutes`, never reading the direction switch or the
-    /// carry state.
-    var usesComputedOrder: Bool {
-        self == .recency || self == .resident
     }
 }
 
@@ -179,135 +149,31 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let prefillMoE: PrefillMoE
     private let prefillFinalRowHead: PrefillFinalRowHeadInt4
 
-    public var prefillProjectionPath: String {
-        guard let mpp = prefillMPPAffineInt4 else { return "unavailable" }
-        return "affine-threadgroup-f16 tile_n=\(mpp.tileN) tile_k=\(mpp.variant.tileK)"
-            + " buffers=\(mpp.variant.dequantBuffers) loads=\(mpp.weightLoads.rawValue)"
+    public var prefillDescription: String {
+        Self.prefillDescription(routerBits: prefillRouter.weightBits,
+                                poolResidencyUnavailableReason: poolResidencyUnavailableReason,
+                                prefetchTrace: prefetchTraceFD >= 0)
     }
 
-    public var prefillAttentionPathDescription: String {
-        let available = prefillAttention.matrixPathAvailable
-        var description = "\(prefillAttentionPath.rawValue) matrix_available=\(available)"
-            + " tile=\(prefillAttention.tile.rawValue)"
-        if !available {
-            description += " reason=\(prefillAttention.matrixUnavailableReason)"
+    static func prefillDescription(routerBits: Int,
+                                   poolResidencyUnavailableReason: String?,
+                                   prefetchTrace: Bool) -> String {
+        var description = "prefill_router_bits=\(routerBits)"
+        if let poolResidencyUnavailableReason {
+            description += " prefill_pool_residency=unavailable reason=\(poolResidencyUnavailableReason)"
+        }
+        if prefetchTrace {
+            description += " prefetch_trace=on"
         }
         return description
     }
 
-    /// `chunked` applies to chunks of 64+ rows; shorter chunks take the serial
-    /// kernel regardless.
-    public var prefillGDNScanPathDescription: String {
-        guard let gdn else { return "none" }
-        guard gdn.chunkedScanAvailable else {
-            return "serial reason=\(gdn.chunkedScanUnavailableReason ?? "unavailable")"
-        }
-        return gdnPrefillScanChunked ? "chunked" : "serial"
-    }
-
-    /// Requested routed tiles per command buffer, the width actually in force
-    /// once the streamed cache is fitted, the per-tile expert count that
-    /// fitting leaves (`width=0 experts=0` = the cache admits neither), and the
-    /// requested pending-tile depth — `fitting` never narrows it, so one value
-    /// suffices.
-    public var prefillTileBatchDescription: String {
-        let requested = prefillRoutedTileSchedulerConfig
-        let depth = Self.prefillTileDepthDescription(requested)
-        let fetch = Self.prefillFetchDepthDescription(requested)
-        guard let slotCount = model.routedExpertCacheSlotCount() else {
-            return "tiles=\(requested.tilesPerCommandBuffer)"
-                + " width=\(requested.tilesPerCommandBuffer) experts=\(requested.tileExperts) \(depth) \(fetch)"
-        }
-        guard let fitted = requested.fitting(slotCount: slotCount) else {
-            return "tiles=\(requested.tilesPerCommandBuffer) width=0 experts=0 \(depth) \(fetch)"
-        }
-        return "tiles=\(requested.tilesPerCommandBuffer)"
-            + " width=\(fitted.tilesPerCommandBuffer) experts=\(fitted.tileExperts) \(depth) \(fetch)"
-    }
-
-    static func prefillTileDepthDescription(_ config: PrefillRoutedTileSchedulerConfig) -> String {
-        "depth=\(config.maxPendingDepth)"
-    }
-
-    public var prefillMatrixMinRowsDescription: String {
-        Self.prefillMatrixMinRowsDescription(prefillMatrixMinRows)
-    }
-
-    static func prefillMatrixMinRowsDescription(_ rows: Int) -> String {
-        "prefill_matrix_min_rows=\(rows)"
-    }
-
-    static func prefillFetchDepthDescription(_ config: PrefillRoutedTileSchedulerConfig) -> String {
-        "fetch=\(config.fetchLookahead + 1)"
-    }
-
-    /// Which routed-expert GEMM a prefill chunk on the matrix path takes:
-    /// `grouped`, `per-expert` (P3) or `scalar`; a chunk of
-    /// `matrixPathMinimumRows` tokens or fewer takes the scalar path regardless.
-    public var prefillRoutedGEMMDescription: String {
-        let cfg = model.config
-        guard let mpp = prefillGroupedMoE.matrixPath(
-            for: prefillMPPAffineInt4,
-            d: cfg.hiddenSize,
-            intermediate: cfg.moeIntermediateSize) else {
-            return "scalar"
-        }
-        guard prefillRoutedGEMMGrouped else { return "per-expert" }
-        guard prefillGroupedMoE.groupedPathAvailable(for: mpp) else { return "per-expert reason=grouped-unavailable" }
-        return "grouped tail_tile=\(tailTileInForce(for: mpp) == 0 ? "off" : "32")"
-    }
-
-    /// The tail tile in force for a GEMM instance: the knob, unless the
-    /// selected variant has no 32-row instantiation for this model's K's.
+    /// The tail tile in force for a GEMM instance: 32 unless the kernel has
+    /// no 32-row instantiation for this model's K's.
     private func tailTileInForce(for mpp: MPPPrefillInt4QMM) -> Int {
-        guard prefillTailTile != 0,
-              mpp.groupedRowTile32Available(forK: cfg.hiddenSize),
+        guard mpp.groupedRowTile32Available(forK: cfg.hiddenSize),
               mpp.groupedRowTile32Available(forK: cfg.moeIntermediateSize) else { return 0 }
-        return prefillTailTile
-    }
-
-    /// The P12 gap levers in force: the shared expert committed before the
-    /// router wait, and the expert pools held in a queue residency set, with
-    /// `allocations=` reported rather than inferred from the holder's mere
-    /// existence; `sweep=recency` also prints `tail=` (v13 T4 step 2 fix-up 1).
-    public var prefillGapLeversDescription: String {
-        Self.prefillGapLeversDescription(
-            overlap: prefillRouteOverlap,
-            residencyAllocationCount: poolResidency?.allocationCount,
-            poolResidencyUnavailableReason: poolResidencyUnavailableReason,
-            sweepMode: prefillSweepMode,
-            sweepTail: prefillSweepTail,
-            prefetchTrace: prefetchTraceFD >= 0)
-    }
-
-    static func prefillGapLeversDescription(
-        overlap: Bool,
-        residencyAllocationCount: Int?,
-        poolResidencyUnavailableReason: String?,
-        sweepMode: PrefillSweepMode,
-        sweepTail: Int = prefillSweepTailDefault,
-        prefetchTrace: Bool = false
-    ) -> String {
-        let residency: String
-        if let residencyAllocationCount {
-            residency = "set allocations=\(residencyAllocationCount)"
-        } else if let reason = poolResidencyUnavailableReason {
-            residency = "unavailable reason=\(reason)"
-        } else {
-            residency = "none"
-        }
-        let sweep = sweepMode == .recency
-            ? "sweep=\(sweepMode.rawValue) tail=\(sweepTail)"
-            : "sweep=\(sweepMode.rawValue)"
-        return "overlap=\(overlap ? "on" : "off") residency=\(residency)"
-            + " \(sweep)"
-            + (prefetchTrace ? " prefetch_trace=on" : "")
-    }
-
-    /// The prefill router kernel in force (`block` or `tiled tokens=N`) and its
-    /// weight bits.
-    public var prefillRouterDescription: String {
-        prefillRouter.description
+        return Self.prefillTailTile
     }
 
     // Scratch — preallocated per spec'd D / F / vocab.
@@ -398,203 +264,31 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var decodeRoutedBufsScratch: [MTLBuffer] = []
     private var decodeRoutedOffsetsScratch: [Int] = []
 
-    private let prefillRoutedTileSchedulerConfig: PrefillRoutedTileSchedulerConfig
-    /// `SHRIKE_PREFILL_ROUTED_GEMM=per-expert` keeps the P3 per-expert GEMMs
-    /// for the same-binary A/B; anything else takes the grouped dispatch.
-    private let prefillRoutedGEMMGrouped: Bool
-    /// `SHRIKE_PREFILL_ROUTE_OVERLAP=off` keeps the shared expert after the
-    /// host routing for the same-binary A/B; anything else commits it before.
-    private let prefillRouteOverlap: Bool
-    /// `SHRIKE_PREFILL_POOL_RESIDENCY=none` leaves the expert pools to
-    /// per-buffer residency for the same-binary A/B.
+    /// Two routed tiles pending, one per command buffer, the next tile's
+    /// fetch begun before the current one is awaited (v12 P16, v13 T3).
+    private static let prefillRoutedTileSchedulerConfig = PrefillRoutedTileSchedulerConfig(
+        maxPendingDepth: 2,
+        tilesPerCommandBuffer: 1,
+        fetchLookahead: 1)
+    /// The expert pools held in a queue residency set (v12 P12), nil with
+    /// the reason when the device refused one.
     private let poolResidency: ExpertPoolResidency?
     private let poolResidencyUnavailableReason: String?
-    /// `SHRIKE_PREFILL_SWEEP=alternate|fixed|carry|recency|resident` selects the
-    /// `PrefillSweepMode`; unset takes `prefillSweepModeDefault`, `resident`,
-    /// v13 T5's measured winner, with `carry` kept as the A/B; an unknown
-    /// value fails at launch like the knob's siblings.
-    private let prefillSweepMode: PrefillSweepMode
-    private static let prefillSweepModeDefault = PrefillSweepMode.resident
-    /// `SHRIKE_PREFILL_SWEEP_TAIL=<n>` sizes `recency`'s tail group, clamped
-    /// to 8 ... the layer's expert count; unset or unparsable takes
-    /// `prefillSweepTailDefault` (96), itself clamped the same way.
-    private let prefillSweepTail: Int
-    private static let prefillSweepTailDefault = 96
-    /// The last direction a carry-participating prefill chunk swept, read by
-    /// `carry` mode's next request; `reset()` must not clear it, since the
-    /// expert pool it describes lives on `ModelExpertIO`, not on this
-    /// runner. Written before the chunk executes, so a chunk that throws
-    /// still records its direction (a lost optimisation, never a wrong
-    /// result).
-    private var prefillLastChunkDescending: Bool?
-    /// `SHRIKE_PREFILL_TAIL_TILE=32` packs each expert block's remainder of
-    /// ≤ 32 rows into a 32-row tile instead of a padded 64-row one; `=off`
-    /// keeps every block on 64-row tiles; unset takes `prefillTailTileDefault`.
-    private let prefillTailTile: Int
-    private static let prefillTailTileDefault = 32
-    private let prefillMatrixMinRows: Int
-
-    static func parsePrefillSweepMode(_ raw: String?) throws -> PrefillSweepMode {
-        guard let raw, !raw.isEmpty else { return prefillSweepModeDefault }
-        guard let mode = PrefillSweepMode(rawValue: raw) else {
-            throw ModelError.internalInconsistency(
-                detail: "unsupported SHRIKE_PREFILL_SWEEP '\(raw)'; allowed: "
-                    + PrefillSweepMode.allCases.map(\.rawValue).joined(separator: ", "))
-        }
-        return mode
-    }
-
-    private static func environmentPrefillSweepMode() throws -> PrefillSweepMode {
-        try parsePrefillSweepMode(ProcessInfo.processInfo.environment["SHRIKE_PREFILL_SWEEP"])
-    }
-
-    private static func environmentPrefillAttentionPath(
-        default fallback: RuntimePrefillAttentionPath
-    ) -> RuntimePrefillAttentionPath {
-        switch ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ATTENTION"] {
-        case "tiled": return .causalTiled
-        case "matrix": return .causalMatrix
-        default: return fallback
-        }
-    }
-
-    static func parsePrefillSweepTail(_ raw: String?, expertCount: Int) throws -> Int {
-        let upperBound = max(8, expertCount)
-        guard let raw else { return min(prefillSweepTailDefault, upperBound) }
-        guard let n = Int(raw.trimmingCharacters(in: .whitespaces)), n >= 8, n <= upperBound else {
-            throw ModelError.internalInconsistency(
-                detail: "unsupported SHRIKE_PREFILL_SWEEP_TAIL '\(raw)'; allowed: 8...\(upperBound)")
-        }
-        return n
-    }
-
-    private static func environmentPrefillSweepTail(expertCount: Int) throws -> Int {
-        try parsePrefillSweepTail(ProcessInfo.processInfo.environment["SHRIKE_PREFILL_SWEEP_TAIL"],
-                                  expertCount: expertCount)
-    }
-
-    private static func environmentPrefillTailTile() -> Int {
-        switch ProcessInfo.processInfo.environment["SHRIKE_PREFILL_TAIL_TILE"] {
-        case "32": return 32
-        case "off": return 0
-        default: return prefillTailTileDefault
-        }
-    }
-
-    /// `SHRIKE_PREFILL_MATRIX_MIN_ROWS=<n>` (3…32) lowers the row-count floor
-    /// below which the attention, projection and shared-expert matrix kernels
-    /// fall back to their scalar paths; unset or unparsable takes
-    /// `prefillMatrixMinRowsDefault` (16 — the matrix attention, projection
-    /// and shared-expert paths down to 16 rows, so the 21-row follow-up turn
-    /// runs on them), and `=32` restores today's fixed thresholds as the A/B.
-    /// The floor of 3 keeps the prompt cache's settle on today's kernels.
-    private static let prefillMatrixMinRowsDefault = 16
-
-    static func parsePrefillMatrixMinRows(_ raw: String?) -> Int {
-        guard let raw, let rows = Int(raw.trimmingCharacters(in: .whitespaces)) else {
-            return prefillMatrixMinRowsDefault
-        }
-        return max(3, min(32, rows))
-    }
-
-    private static func environmentPrefillMatrixMinRows() -> Int {
-        parsePrefillMatrixMinRows(ProcessInfo.processInfo.environment["SHRIKE_PREFILL_MATRIX_MIN_ROWS"])
-    }
+    /// Each expert block's remainder of ≤ 32 rows packed into a 32-row tile
+    /// instead of a padded 64-row one.
+    private static let prefillTailTile = 32
+    /// The row-count floor below which the attention, projection and
+    /// shared-expert matrix kernels fall back to their scalar paths (v13 T3:
+    /// the 21-row follow-up turn runs on the matrix kernels).
+    private static let prefillMatrixMinRows = 16
 
     private static func makePoolResidency(context: MetalContext)
         -> (holder: ExpertPoolResidency?, unavailableReason: String?) {
-        guard ProcessInfo.processInfo.environment["SHRIKE_PREFILL_POOL_RESIDENCY"] != "none" else {
-            return (nil, nil)
-        }
         do {
             return (try ExpertPoolResidency(device: context.device, queue: context.queue), nil)
         } catch {
             return (nil, "\(error)")
         }
-    }
-
-    private static func environmentPrefillTileBatch() -> Int {
-        guard let raw = ProcessInfo.processInfo.environment["SHRIKE_PREFILL_TILE_BATCH"],
-              let width = Int(raw.trimmingCharacters(in: .whitespaces)) else {
-            return 1
-        }
-        return max(1, min(16, width))
-    }
-
-    /// `SHRIKE_PREFILL_TILE_DEPTH=<n>` (1…8) sets the routed tile pipeline's
-    /// pending-tile depth; unset or unparsable takes `prefillTileDepthDefault`
-    /// (P16 sweep: depth 2 beat depth 1 on the mini's 12k wall, hits unmoved).
-    private static let prefillTileDepthDefault = 2
-
-    static func parsePrefillTileDepth(_ raw: String?) -> Int {
-        guard let raw, let depth = Int(raw.trimmingCharacters(in: .whitespaces)) else {
-            return prefillTileDepthDefault
-        }
-        return max(1, min(8, depth))
-    }
-
-    private static func environmentPrefillTileDepth() -> Int {
-        parsePrefillTileDepth(ProcessInfo.processInfo.environment["SHRIKE_PREFILL_TILE_DEPTH"])
-    }
-
-    /// `SHRIKE_PREFILL_FETCH_DEPTH=<n>` (1…2) sets how many routed tile
-    /// fetches run in flight; unset or unparsable takes
-    /// `prefillFetchDepthDefault` (2, the next tile's fetch begun before the
-    /// current one is awaited); `=1` is the A/B that restores the
-    /// single-fetch loop.
-    private static let prefillFetchDepthDefault = 2
-
-    static func parsePrefillFetchDepth(_ raw: String?) -> Int {
-        guard let raw, let depth = Int(raw.trimmingCharacters(in: .whitespaces)) else {
-            return prefillFetchDepthDefault
-        }
-        return max(1, min(2, depth))
-    }
-
-    private static func environmentPrefillFetchDepth() -> Int {
-        parsePrefillFetchDepth(ProcessInfo.processInfo.environment["SHRIKE_PREFILL_FETCH_DEPTH"])
-    }
-
-    /// `PrefillChunkPlanner.spans` lays chunks out contiguously from
-    /// `startPosition`, so this is the chunk index's parity within the prompt.
-    static func prefillChunkSweepIsDescending(startPosition: Int, chunkTokens: Int) -> Bool {
-        (startPosition / chunkTokens) % 2 == 1
-    }
-
-    /// `.fixed` is always ascending, `.alternate` ignores `carried` and
-    /// matches the two-argument overload above, and `.carry` flips the
-    /// previous chunk's direction (`nil` meaning ascending) — the per-chunk
-    /// write already tracks position, so no further parity term belongs
-    /// here; `participatesInCarry: false` forces `.alternate` behaviour
-    /// regardless of `mode`, for a chunk that must neither read nor
-    /// influence the request-level carry.
-    static func prefillChunkSweepIsDescending(mode: PrefillSweepMode, carried: Bool?,
-                                              startPosition: Int, chunkTokens: Int,
-                                              participatesInCarry: Bool = true) -> Bool {
-        guard participatesInCarry else {
-            return prefillChunkSweepIsDescending(startPosition: startPosition, chunkTokens: chunkTokens)
-        }
-        switch mode {
-        case .fixed:
-            return false
-        case .alternate:
-            return prefillChunkSweepIsDescending(startPosition: startPosition, chunkTokens: chunkTokens)
-        case .carry:
-            return carried == false
-        case .recency, .resident:
-            // Both build their own per-layer order in `buildPrefillRoutes`
-            // and never read this value; kept only for exhaustiveness.
-            return false
-        }
-    }
-
-    /// Whether a chunk should sweep by a computed order: `.recency` or
-    /// `.resident`, and (matching the direction switch's own isolation)
-    /// only when the chunk participates in carry, so a chunk outside the
-    /// carry keeps index tiling under the knob.
-    static func prefillChunkUsesComputedSweepOrder(mode: PrefillSweepMode,
-                                                   participatesInCarry: Bool) -> Bool {
-        mode.usesComputedOrder && participatesInCarry
     }
 
     /// Per-layer `router.scale * D^-0.5` pre-folded into one BF16 buffer
@@ -610,8 +304,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// callers that sample from the logits buffer (non-greedy configs) must pass
     /// `forceLogitsHead: true` or they read a never-written buffer.
     private let useFusedGreedyHead: Bool
-    private let prefillAttentionPath: RuntimePrefillAttentionPath
-    private let gdnPrefillScanChunked: Bool
     private var routerReadbackTag: UInt32 = 0
     /// Bookkeeping that needs a command's GPU stamps, which the word wake reads before they exist.
     private var deferredGPURecords: [DeferredGPURecord] = []
@@ -629,22 +321,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
             && model.lmHeadWeightBits == 4
             && model.attentionWeightBits == 4
-        self.prefillAttentionPath = Self.environmentPrefillAttentionPath(
-            default: runtimeConfiguration.prefillAttentionPath)
-        self.gdnPrefillScanChunked =
-            ProcessInfo.processInfo.environment["SHRIKE_GDN_PREFILL_SCAN"] != "serial"
-        self.prefillRoutedTileSchedulerConfig = PrefillRoutedTileSchedulerConfig(
-            maxPendingDepth: Self.environmentPrefillTileDepth(),
-            tilesPerCommandBuffer: Self.environmentPrefillTileBatch(),
-            fetchLookahead: Self.environmentPrefillFetchDepth() - 1)
-        self.prefillRoutedGEMMGrouped =
-            ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTED_GEMM"] != "per-expert"
-        self.prefillRouteOverlap =
-            ProcessInfo.processInfo.environment["SHRIKE_PREFILL_ROUTE_OVERLAP"] != "off"
-        self.prefillSweepMode = try Self.environmentPrefillSweepMode()
-        self.prefillSweepTail = try Self.environmentPrefillSweepTail(expertCount: self.cfg.numExperts)
-        self.prefillTailTile = Self.environmentPrefillTailTile()
-        self.prefillMatrixMinRows = Self.environmentPrefillMatrixMinRows()
         let residency = Self.makePoolResidency(context: context)
         self.poolResidency = residency.holder
         self.poolResidencyUnavailableReason = residency.unavailableReason
@@ -1920,8 +1596,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      logits: MTLBuffer,
                                      scratch: PrefillChunkScratchBuffers,
                                      config: PrefillRuntimeConfig,
-                                     writeFinalHead: Bool,
-                                     participatesInCarry: Bool = true) async throws {
+                                     writeFinalHead: Bool) async throws {
         guard !tokens.isEmpty else { return }
         guard kv != nil else {
             throw PrefillError.chunkedUnsupported("chunked prefill attention requires a KV cache")
@@ -2023,15 +1698,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         var prefillTileNanos: UInt64 = 0
         var prefillTailNanos: UInt64 = 0
         var prefillActiveExperts: UInt64 = 0
-        let prefillDescendingSweep = Self.prefillChunkSweepIsDescending(
-            mode: prefillSweepMode,
-            carried: prefillLastChunkDescending,
-            startPosition: startPosition,
-            chunkTokens: config.chunkTokens,
-            participatesInCarry: participatesInCarry)
-        if participatesInCarry, !prefillSweepMode.usesComputedOrder {
-            prefillLastChunkDescending = prefillDescendingSweep
-        }
 
         for L in 0..<cfg.numLayers {
             try Task.checkCancellation()
@@ -2117,8 +1783,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     cb: &cb, layer: L, views: views, scratch: scratch,
                     tokenCount: t, hiddenSize: D,
                     startPosition: startPosition,
-                    descendingSweep: prefillDescendingSweep,
-                    participatesInCarry: participatesInCarry,
                     layerStart: prefillLayerStart,
                     routeNanos: &prefillRouteNanos,
                     tileNanos: &prefillTileNanos,
@@ -3569,7 +3233,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                               tokenCount: Int,
                               xStrideElements: Int,
                               yStrideElements: Int) throws {
-        if tokenCount >= prefillMatrixMinRows,
+        if tokenCount >= Self.prefillMatrixMinRows,
            family == .q || family == .kv || family == .o,
            let candidate = prefillMPPAffineInt4 {
             let path = try candidate.encode(
@@ -3592,7 +3256,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if PrefillProjectionDispatchPolicy.selectedDispatch(
                 for: family,
                 chunkTokens: tokenCount,
-                minimumRows: prefillMatrixMinRows) == .qmm {
+                minimumRows: Self.prefillMatrixMinRows) == .qmm {
             try prefillQMM.encode(commandBuffer: commandBuffer,
                               weights: weights.buffer,
                               weightsOffset: Int(weights.offset),
@@ -3777,16 +3441,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     /// Gated-DeltaNet (linear attention) branch of one chunked-prefill layer.
     ///
-    /// The chunked scan (v12 P4) when the runner, the kernels and the scratch
-    /// all allow it; the serial kernel for a chunk below `GDN.chunkTokens`
-    /// rows, an uncompiled shape, or `SHRIKE_GDN_PREFILL_SCAN=serial`.
+    /// The chunked scan (v12 P4) when the kernels and the scratch allow it;
+    /// the serial kernel for a chunk below `GDN.chunkTokens` rows or an
+    /// uncompiled shape.
     private func encodeGDNDeltaStep(
         cb: MTLCommandBuffer, gdn: GDN, gdnState: GDNStateManager, layer L: Int,
         scratch: PrefillChunkScratchBuffers,
         aLog: MTLBuffer, aLogOffset: Int, dtBias: MTLBuffer, dtBiasOffset: Int,
         rows t: Int
     ) throws {
-        if gdnPrefillScanChunked, gdn.chunkedScanAvailable,
+        if gdn.chunkedScanAvailable,
            let factors = scratch.gdnChunkFactors, t >= GDN.chunkTokens {
             try gdn.encodeDeltaStepPrefillChunked(commandBuffer: cb,
                                                   convOut: scratch.gdnConvOut,
@@ -4268,8 +3932,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                               kvRingCapacity: activeRingCapacity,
                                               sinks: sinks?.buffer,
                                               sinksOffset: sinks.map { Int($0.offset) } ?? 0,
-                                              path: prefillAttentionPath,
-                                              minimumQueries: UInt32(prefillMatrixMinRows))
+                                              minimumQueries: UInt32(Self.prefillMatrixMinRows))
         } else {
             throw PrefillError.chunkedUnsupported(
                 "chunked prefill attention requires a KV cache")
@@ -4417,9 +4080,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// host work that runs while the shared expert's command buffer is on the GPU.
     private func buildPrefillRoutes(layer L: Int,
                                     tokenCount t: Int,
-                                    scratch: PrefillChunkScratchBuffers,
-                                    descendingSweep: Bool,
-                                    participatesInCarry: Bool) throws -> PrefillRouting {
+                                    scratch: PrefillChunkScratchBuffers) throws -> PrefillRouting {
         let routeCount = t * cfg.topKExperts
         let idPtr = scratch.routeIDs.contents()
             .bindMemory(to: UInt32.self, capacity: routeCount)
@@ -4441,63 +4102,40 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                        topK: cfg.topKExperts)
         let schedulerConfig: PrefillRoutedTileSchedulerConfig
         if let slotCount = model.routedExpertCacheSlotCount() {
-            guard let fitted = prefillRoutedTileSchedulerConfig.fitting(slotCount: slotCount) else {
+            guard let fitted = Self.prefillRoutedTileSchedulerConfig.fitting(slotCount: slotCount) else {
                 throw PrefillError.chunkedUnsupported(
                     "prefill routed tiles cannot fit the \(slotCount)-slot expert cache")
             }
             schedulerConfig = fitted
         } else {
-            schedulerConfig = prefillRoutedTileSchedulerConfig
+            schedulerConfig = Self.prefillRoutedTileSchedulerConfig
         }
-        var expertTileCounts: [Int]?
-        var sortKeys = model.routedExpertPhysicalOffsets(layer: L)
-        var sortDescending = descendingSweep
-        if Self.prefillChunkUsesComputedSweepOrder(mode: prefillSweepMode,
-                                                   participatesInCarry: participatesInCarry) {
-            var lastRowByExpert: [UInt32: Int] = [:]
-            var rowsByExpert: [UInt32: Int] = [:]
-            lastRowByExpert.reserveCapacity(min(pairs.count, cfg.numExperts))
-            rowsByExpert.reserveCapacity(min(pairs.count, cfg.numExperts))
-            for pair in pairs {
-                let row = Int(pair.token)
-                lastRowByExpert[pair.expert] = max(lastRowByExpert[pair.expert] ?? row, row)
-                rowsByExpert[pair.expert, default: 0] += 1
-            }
-            if prefillSweepMode == .recency {
-                let balanced = PrefillSweepOrder.recencyBalanced(
-                    rowsByExpert: rowsByExpert,
-                    lastRowByExpert: lastRowByExpert,
-                    tail: prefillSweepTail,
-                    tileWidth: schedulerConfig.tileExperts)
-                // The array path `groupTokenExpertPairs` already takes for
-                // `alternate`/`fixed`/`carry`: one sort key per expert id, no
-                // per-comparison dictionary lookup.
-                sortKeys = PrefillSweepOrder.expertSortKeys(forOrder: balanced.order, numExperts: cfg.numExperts)
-                expertTileCounts = balanced.tileExpertCounts
-            } else {
-                let order = PrefillSweepOrder.residentFirstBalanced(
-                    rowsByExpert: rowsByExpert,
-                    lastRowByExpert: lastRowByExpert,
-                    resident: try residentExpertMask(layer: L),
-                    slots: model.routedExpertCacheSlotCount() ?? 0,
-                    tileWidth: schedulerConfig.tileExperts)
-                sortKeys = PrefillSweepOrder.expertSortKeys(forOrder: order, numExperts: cfg.numExperts)
-            }
-            sortDescending = false
+        var lastRowByExpert: [UInt32: Int] = [:]
+        var rowsByExpert: [UInt32: Int] = [:]
+        lastRowByExpert.reserveCapacity(min(pairs.count, cfg.numExperts))
+        rowsByExpert.reserveCapacity(min(pairs.count, cfg.numExperts))
+        for pair in pairs {
+            let row = Int(pair.token)
+            lastRowByExpert[pair.expert] = max(lastRowByExpert[pair.expert] ?? row, row)
+            rowsByExpert[pair.expert, default: 0] += 1
         }
+        let order = PrefillSweepOrder.residentFirstBalanced(
+            rowsByExpert: rowsByExpert,
+            lastRowByExpert: lastRowByExpert,
+            resident: try residentExpertMask(layer: L),
+            slots: model.routedExpertCacheSlotCount() ?? 0,
+            tileWidth: schedulerConfig.tileExperts)
         let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
             pairs,
             queryCount: t,
             topK: cfg.topKExperts,
             numExperts: cfg.numExperts,
             tileExpertCount: schedulerConfig.tileExperts,
-            expertSortKeys: sortKeys,
-            descending: sortDescending,
-            expertTileCounts: expertTileCounts)
+            expertSortKeys: PrefillSweepOrder.expertSortKeys(forOrder: order, numExperts: cfg.numExperts))
         return PrefillRouting(routes: routes, schedulerConfig: schedulerConfig)
     }
 
-    /// `.resident`'s per-chunk snapshot of layer `L`'s pool-resident
+    /// The resident-first sweep's per-chunk snapshot of layer `L`'s pool-resident
     /// experts: `prefillResidentExpertScratch` is allocated once to
     /// `cfg.numExperts` and cleared in place on every later call, so the
     /// sweep never allocates per chunk; empty when the model streams with
@@ -4532,7 +4170,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                              queryCount: t,
                                              d: D,
                                              intermediate: cfg.intermediateSize,
-                                             minimumRows: prefillMatrixMinRows)
+                                             minimumRows: Self.prefillMatrixMinRows)
             : nil
         if cfg.hasSharedExpert {
             let sharedProj = sharedExpertProjections[L]
@@ -4550,7 +4188,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     queryCount: t,
                     d: D,
                     intermediate: cfg.intermediateSize,
-                    minimumRows: prefillMatrixMinRows)
+                    minimumRows: Self.prefillMatrixMinRows)
             } else {
                 try prefillSharedExpert.encodeBlock(
                     commandBuffer: sharedCB,
@@ -4701,8 +4339,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         tokenCount t: Int,
         hiddenSize D: Int,
         startPosition: Int,
-        descendingSweep: Bool,
-        participatesInCarry: Bool,
         layerStart prefillLayerStart: UInt64,
         routeNanos prefillRouteNanos: inout UInt64,
         tileNanos prefillTileNanos: inout UInt64,
@@ -4754,7 +4390,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 // One queue runs buffers in commit order, so sharedCB's read of
                 // routedX is ordered after cb; committing it before the wait lets
                 // its GPU time cover the host routing below.
-                if prefillRouteOverlap { sharedCB.commit() }
+                sharedCB.commit()
                 try waitForCompletion(cb)
                 // Prefill had no occupancy instrumentation at all: these buffers
                 // never reached recordKernelGPU, so SHRIKE_KERNEL_STATS reported
@@ -4767,9 +4403,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 recordKernelGPU(role: cfg.layerIsLinear(L) ? "prefill_gdn_router"
                                     : "prefill_attn_router", cb)
 
-                let routing = try buildPrefillRoutes(layer: L, tokenCount: t, scratch: scratch,
-                                                     descendingSweep: descendingSweep,
-                                                     participatesInCarry: participatesInCarry)
+                let routing = try buildPrefillRoutes(layer: L, tokenCount: t, scratch: scratch)
                 let routes = routing.routes
                 let schedulerConfig = routing.schedulerConfig
                 prefillRouteEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
@@ -4781,7 +4415,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 // first row already pulled in or pays for its own.
                 prefillActiveExperts &+= UInt64(routes.groups.count)
 
-                if !prefillRouteOverlap { sharedCB.commit() }
                 try waitForCompletion(sharedCB)
                 recordKernelGPU(role: "prefill_shared_expert", sharedCB)
 
@@ -5028,9 +4661,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
-    /// One routed tile's experts: the grouped GEMMs over every expert, else
-    /// the per-expert GEMMs with the scalar microbatch path for the experts
-    /// below the tile threshold, else the scalar path whole.
+    /// One routed tile's experts: the grouped GEMMs over every expert when
+    /// the matrix path is in force, else the scalar microbatch path whole.
     private func encodeRoutedTileExperts(
         commandBuffer tileCB: MTLCommandBuffer,
         scratch: PrefillChunkScratchBuffers,
@@ -5065,49 +4697,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
               let mpp = prefillGroupedMoE.matrixPath(
                 for: prefillMPPAffineInt4,
                 d: Int(params.d),
-                intermediate: Int(params.routedIntermediate)) else {
+                intermediate: Int(params.routedIntermediate)),
+              prefillGroupedMoE.groupedPathAvailable(for: mpp) else {
             try encodeScalar(pairStart: tile.pairStart, pairCount: tile.pairCount)
             return
         }
-        if prefillRoutedGEMMGrouped, prefillGroupedMoE.groupedPathAvailable(for: mpp) {
-            let tailTile = tailTileInForce(for: mpp)
-            let waves = try PrefillGroupedRoutedMoE.planExpertWaves(
-                ranges: ranges,
-                binding: binding,
-                stagingRows: scratch.routedExpertStaging.rowBlock,
-                tailTile: tailTile)
-            try prefillGroupedMoE.encodeGroupedExpertGEMMs(
-                commandBuffer: tileCB,
-                mpp: mpp,
-                hidden: scratch.routedX,
-                sortedPairs: sortedPairs,
-                routePartials: scratch.routePartials,
-                binding: binding,
-                argumentBuffer: argumentBuffer,
-                waves: waves,
-                staging: scratch.routedExpertStaging,
-                params: params,
-                tailTile: tailTile)
-            return
-        }
-        let leftovers = try prefillGroupedMoE.encodeExpertGEMMs(
+        let tailTile = tailTileInForce(for: mpp)
+        let waves = try PrefillGroupedRoutedMoE.planExpertWaves(
+            ranges: ranges,
+            binding: binding,
+            stagingRows: scratch.routedExpertStaging.rowBlock,
+            tailTile: tailTile)
+        try prefillGroupedMoE.encodeGroupedExpertGEMMs(
             commandBuffer: tileCB,
             mpp: mpp,
             hidden: scratch.routedX,
             sortedPairs: sortedPairs,
             routePartials: scratch.routePartials,
             binding: binding,
-            ranges: ranges,
+            argumentBuffer: argumentBuffer,
+            waves: waves,
             staging: scratch.routedExpertStaging,
-            params: params)
-        guard leftovers.count < ranges.count else {
-            try encodeScalar(pairStart: tile.pairStart, pairCount: tile.pairCount)
-            return
-        }
-        for leftover in leftovers {
-            try encodeScalar(pairStart: UInt32(leftover.pairStart),
-                             pairCount: UInt32(leftover.pairCount))
-        }
+            params: params,
+            tailTile: tailTile)
     }
 
     /// Attention stage of one decode layer: the gated-DeltaNet branch or the

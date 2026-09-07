@@ -50,10 +50,10 @@ here:
     checked before the halved plan's own hit/miss accounting (:664-670).
   - one plan per tile in prefill, one plan per layer per token in decode.
   - a prefill tile's `avoidingSlots` is the held slots of the open and
-    pending batches at fetch depth 2. With the shipped defaults
-    (`SHRIKE_PREFILL_TILE_DEPTH` unset -> maxPendingDepth 2,
-    `SHRIKE_PREFILL_TILE_BATCH` unset -> 1 tile per batch,
-    `SHRIKE_PREFILL_FETCH_DEPTH` unset -> fetchLookahead 1), tracing the
+    pending batches at fetch depth 2. With production's constants (the
+    replay's tile depth is production's maxPendingDepth 2, its tile batch
+    production's 1 tile per batch, its fetch depth production's
+    fetchLookahead 1), tracing the
     lookahead's own avoidingSlots union shows the held set reaches
     `maxPendingDepth + 1` = 3 preceding tiles at steady state. `--avoid-
     lookback` exposes this (default 3). A chunk boundary (a tile index
@@ -83,15 +83,15 @@ here:
     holding whichever experts the prompt's own final tokens routed to,
     approximating the ideal post-sweep state without needing decode's own
     future. `--sweep-carry on` alternates the sort direction chunk to
-    chunk within a layer (matching `PrefillSweepMode.carry`'s per-chunk
-    flip, which never resets across a request boundary); `off` (default)
+    chunk within a layer (matching the resident sweep's per-chunk carry,
+    whose flip never resets across a request boundary); `off` (default)
     uses the same direction for every chunk. This re-tiling cannot
     reproduce the real scheduler's own tile composition (which follows the
     routed groups' natural order and packs by slot-budget fit, not a fixed
     width of 8) or its `avoidingSlots` (recomputed here from the new,
     synthetic tile boundaries, not the real batch/commit schedule).
-  - `resident` is production's default `SHRIKE_PREFILL_SWEEP` value since
-    v13 T5 step 2; `carry` is kept as the A/B. `--sweep-order resident-first`
+  - `resident` is production's only sweep order since v13 T5 step 2 (the
+    replay keeps `carry` for comparison). `--sweep-order resident-first`
     re-tiles each chunk from the pool's own state at the moment the chunk
     begins (per layer): the chunk's experts ranked `last-asc` (ties by
     rows ascending then expert id),
@@ -125,7 +125,7 @@ here:
     matches `index`'s exactly. This head rule assumes the production tile
     width of 8 (`RETILE_SIZE` against the Swift's `schedulerConfig.tileExperts`,
     which the fitting step can shrink below 8 on a tight slot budget). This
-    is what `PrefillSweepMode.carry`
+    is what the resident sweep's per-chunk carry
     approximates by alternating direction chunk to chunk, made exact
     through the pool's residency, with every layer's misses spread across
     its tiles instead of collected in the chunk's last ones. `--sweep-
@@ -140,8 +140,8 @@ here:
     concatenation. `--sweep-carry` has no effect on any of the three
     orders (residency read off the pool's live `slot_expert` when the
     chunk's first tile is planned).
-  - `--protect chunk` (default, matching `SHRIKE_EXPERT_CACHE_PROTECT=chunk`
-    since v13 T4): while a chunk's tiles are replayed, a slot holding an
+  - `--protect chunk` (default, matching production's chunk protection,
+    always on since v13 T4): while a chunk's tiles are replayed, a slot holding an
     expert one of the chunk's not-yet-replayed tiles still needs is
     ineligible as a victim, in addition to `avoiding`. Modelled the same
     way `RealForwardRunner.PrefillChunkExpertProtection` maintains it: the
@@ -190,7 +190,7 @@ from collections import OrderedDict, defaultdict, deque
 
 DEFAULT_SLOTS = 128
 DEFAULT_AGING_PERIOD = 1024
-# maxPendingDepth (2, unset SHRIKE_PREFILL_TILE_DEPTH) + 1, the steady-state
+# production's maxPendingDepth (2) + 1, the steady-state
 # held-tile count at 1 tile per batch and fetch depth 2 (see module docstring).
 DEFAULT_AVOID_LOOKBACK = 3
 DEFAULT_SLRU_PROTECTED_SHARE = 0.5
@@ -582,7 +582,7 @@ class LayerPool:
     def plan(self, experts, avoiding=frozenset(), protect=frozenset(),
              policy_override=None, weights=None):
         """Places `experts`, returns (hits, misses, assigned_slots). `protect`
-        (SHRIKE_EXPERT_CACHE_PROTECT=chunk) is dropped first when too few
+        (the replay's chunk protection) is dropped first when too few
         slots are eligible, matching the streamer's own graded fallback for
         `protectedExperts`; `avoiding` (the modelled avoidingSlots) is
         dropped next if that still is not enough, this tool's own
@@ -1956,7 +1956,7 @@ def main():
     parser.add_argument("--sweep-tail", type=int, default=DEFAULT_SWEEP_TAIL,
                          help="the absent group's most recent experts packed as their own "
                               f"group under --sweep-order resident-first-grouped (default "
-                              f"{DEFAULT_SWEEP_TAIL}, SHRIKE_PREFILL_SWEEP_TAIL's mirror); "
+                              f"{DEFAULT_SWEEP_TAIL}, the replay's own sweep tail); "
                               "must be a positive integer")
     parser.add_argument("--sweep-head-factor", type=int, default=DEFAULT_SWEEP_HEAD_FACTOR,
                          help="the tile multiplier --sweep-order resident-first's head rule "
@@ -1968,8 +1968,8 @@ def main():
                          help="chunk (default, matching production): a prefill tile's victim "
                               "selection also excludes a slot holding an expert the chunk's "
                               "not-yet-replayed tiles still need, with the streamer's own "
-                              "graded fallback; off replays pre-SHRIKE_EXPERT_CACHE_PROTECT "
-                              "captures")
+                              "graded fallback; off replays captures from before chunk "
+                              "protection (v13 T4)")
     parser.add_argument("--phase-policy", default=None,
                          help="prefill=<policy>,decode=<policy>, restricted to "
                               f"{sorted(PHASE_POLICY_ALLOWED)}")

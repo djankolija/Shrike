@@ -23,37 +23,28 @@ final class MPPPrefillInt4QMM {
     }
 
     static let tileM = 64
-    /// The grouped kernel's row tile: 64 is every variant's; 32 exists for the
-    /// default variant only and is chosen per dispatch.
+    static let tileN = 32
+    /// The grouped kernel's row tile: 32 exists for the kernel's own K tile
+    /// only and is chosen per dispatch.
     enum GroupedRowTile: Int, Sendable {
         case m64 = 64
         case m32 = 32
     }
     /// The matrix path's admission unit (`PrefillSharedExpert` and
     /// `PrefillGroupedRoutedMoE` refuse a `d`/`intermediate` that is not a
-    /// multiple of it), not the kernel's K tile: a wide-K variant carries the
+    /// multiple of it), not the kernel's K tile: the kernel carries the
     /// narrower rungs and picks per dispatch.
     static let tileK = Quantization.groupSize
-    /// `SHRIKE_MPP_TILE_N` (32|64), `SHRIKE_MPP_TILE_K` (64|128|256) and
-    /// `SHRIKE_MPP_DEQUANT_BUFFERS` (1|2) name the variant; anything
-    /// unrecognised — including a wide K with N 64 or two buffers, which
-    /// is what `SHRIKE_MPP_TILE_N=64` alone asks for against this default —
-    /// keeps the measured choice.
-    static let tileVariant: TileVariant = {
-        let environment = ProcessInfo.processInfo.environment
-        return TileVariant(tileN: environment["SHRIKE_MPP_TILE_N"],
-                           tileK: environment["SHRIKE_MPP_TILE_K"],
-                           buffers: environment["SHRIKE_MPP_DEQUANT_BUFFERS"],
-                           fallback: .n32k256b1) ?? .n32k256b1
-    }()
-    /// `SHRIKE_MPP_WEIGHT_LOADS` (byte|vector) is a per-dispatch override;
-    /// the vector body runs only when the weight base is 16-byte aligned.
-    static let weightLoads: WeightLoads =
-        ProcessInfo.processInfo.environment["SHRIKE_MPP_WEIGHT_LOADS"]
-            .flatMap(WeightLoads.init(rawValue:)) ?? .vector
-    let variant: TileVariant
-    let weightLoads: WeightLoads
-    var tileN: Int { variant.tileN }
+    /// `n32k256b1`: one 32 × 256 weight tile per threadgroup, dequantized
+    /// into one buffer.
+    static let kernelTileK = 256
+    static let kernelName = "mpp_prefill_affine_threadgroup_f16_n32k256b1"
+    static let groupedKernelName = "mpp_prefill_affine_grouped_f16_n32k256b1"
+    /// Widest first; gpt-oss's K 2880 and Kimi's 128-wide low-rank legs need them.
+    private static let narrowerRungs: [(tileK: Int, kernelName: String, groupedKernelName: String)] = [
+        (128, "mpp_prefill_affine_threadgroup_f16_n32k128b1", "mpp_prefill_affine_grouped_f16_n32k128b1"),
+        (64, "mpp_prefill_affine_threadgroup_f16", "mpp_prefill_affine_grouped_f16"),
+    ]
     /// Bounds a grouped dispatch's grid height and its block count: 64 tiles
     /// is 2,048 rows at the 32-row tile, above the 1,024-row block the caller's
     /// staging loops over.
@@ -82,13 +73,9 @@ final class MPPPrefillInt4QMM {
     /// reusing this instance for another tensor must match it.
     let weightBits: Int
 
-    init(context: MetalContext, weightBits: Int = 4,
-         variant: TileVariant = MPPPrefillInt4QMM.tileVariant,
-         weightLoads: WeightLoads = MPPPrefillInt4QMM.weightLoads) {
+    init(context: MetalContext, weightBits: Int = 4) {
         precondition([4, 8].contains(weightBits))
         self.weightBits = weightBits
-        self.variant = variant
-        self.weightLoads = weightLoads
         let constants = MTLFunctionConstantValues()
         var bits = UInt32(weightBits)
         constants.setConstantValue(&bits, type: .uint, index: 78)
@@ -96,7 +83,7 @@ final class MPPPrefillInt4QMM {
         do {
             library = try Self.compileTensorOpsLibrary(device: context.device)
             self.pipeline = try Self.makePipeline(
-                library: library, name: variant.kernelName, constants: constants).pipeline
+                library: library, name: Self.kernelName, constants: constants).pipeline
             self.unavailableReason = ""
         } catch {
             // Capability probe: this path is optional on non-Apple10 hardware,
@@ -107,7 +94,7 @@ final class MPPPrefillInt4QMM {
         }
         do {
             let grouped = try Self.makePipeline(
-                library: library, name: variant.groupedKernelName, constants: constants)
+                library: library, name: Self.groupedKernelName, constants: constants)
             self.groupedPipeline = grouped.pipeline
             self.groupedArgumentEncodedLength =
                 grouped.function.makeArgumentEncoder(bufferIndex: 0).encodedLength
@@ -119,13 +106,13 @@ final class MPPPrefillInt4QMM {
         }
         do {
             self.groupedPipelineM32 = try Self.makePipeline(
-                library: library, name: variant.groupedKernelName + "_m32", constants: constants).pipeline
+                library: library, name: Self.groupedKernelName + "_m32", constants: constants).pipeline
             self.groupedM32UnavailableReason = ""
         } catch {
             self.groupedPipelineM32 = nil
             self.groupedM32UnavailableReason = "\(error)"
         }
-        self.narrowRungs = variant.narrowerRungs.map { rung in
+        self.narrowRungs = Self.narrowerRungs.map { rung in
             Rung(tileK: rung.tileK,
                  pipeline: try? Self.makePipeline(
                      library: library, name: rung.kernelName, constants: constants).pipeline,
@@ -136,24 +123,24 @@ final class MPPPrefillInt4QMM {
 
     /// `tilesPerRow` is `K / TILE_K`: a tile wider than `k` divides would drop the K tail.
     private func pipeline(forK k: Int) -> MTLComputePipelineState? {
-        if k.isMultiple(of: variant.tileK) { return pipeline }
+        if k.isMultiple(of: Self.kernelTileK) { return pipeline }
         return narrowRungs.first { k.isMultiple(of: $0.tileK) && $0.pipeline != nil }?.pipeline
     }
 
     private func groupedPipeline(forK k: Int, rowTile: GroupedRowTile) -> MTLComputePipelineState? {
         switch rowTile {
         case .m64:
-            if k.isMultiple(of: variant.tileK) { return groupedPipeline }
+            if k.isMultiple(of: Self.kernelTileK) { return groupedPipeline }
             return narrowRungs.first { k.isMultiple(of: $0.tileK) && $0.grouped != nil }?.grouped
         case .m32:
-            return k.isMultiple(of: variant.tileK) ? groupedPipelineM32 : nil
+            return k.isMultiple(of: Self.kernelTileK) ? groupedPipelineM32 : nil
         }
     }
 
-    /// The 32-row grouped instantiation exists for the variant's own K tile
+    /// The 32-row grouped instantiation exists for the kernel's own K tile
     /// only; a ragged K has no narrow rung at 32 rows.
     func groupedRowTile32Available(forK k: Int) -> Bool {
-        groupedPipelineM32 != nil && k.isMultiple(of: variant.tileK)
+        groupedPipelineM32 != nil && k.isMultiple(of: Self.kernelTileK)
     }
 
     private static func makePipeline(library: MTLLibrary?,
@@ -234,7 +221,7 @@ final class MPPPrefillInt4QMM {
         var loads = vectorLoadsFlag(weightsOffset: weightsOffset)
         encoder.setBytes(&loads, length: MemoryLayout<UInt32>.size, index: 8)
         encoder.dispatchThreadgroups(
-            MTLSize(width: (n + tileN - 1) / tileN,
+            MTLSize(width: (n + Self.tileN - 1) / Self.tileN,
                     height: (m + Self.tileM - 1) / Self.tileM,
                     depth: 1),
             threadsPerThreadgroup: MTLSize(width: pipeline.threadExecutionWidth * 4,
@@ -306,7 +293,7 @@ final class MPPPrefillInt4QMM {
             if required {
                 throw MPPPrefillInt4QMMError.pipelineUnavailable(
                     reason: rowTile == .m32
-                        ? "no 32-row grouped instantiation for \(variant) at K \(k)"
+                        ? "no 32-row grouped instantiation at K \(k)"
                             + (groupedM32UnavailableReason.isEmpty ? "" : ": \(groupedM32UnavailableReason)")
                         : groupedUnavailableReason.isEmpty
                         ? "MPP grouped pipeline failed to compile"
@@ -337,7 +324,7 @@ final class MPPPrefillInt4QMM {
                                  scalesOffset: scalesOffset, biasesOffset: biasesOffset,
                                  paddedRows: paddedRows)
         encoder.dispatchThreadgroups(
-            MTLSize(width: (n + tileN - 1) / tileN,
+            MTLSize(width: (n + Self.tileN - 1) / Self.tileN,
                     height: rowTiles,
                     depth: 1),
             threadsPerThreadgroup: MTLSize(width: groupedPipeline.threadExecutionWidth * 4,
@@ -379,96 +366,10 @@ final class MPPPrefillInt4QMM {
     /// The row stride is already a multiple of 16 (from the `k % 64` guard), so
     /// the base offset alone decides whether the vector body may run.
     private func vectorLoadsFlag(weightsOffset: Int) -> UInt32 {
-        weightLoads == .vector && weightsOffset.isMultiple(of: 16) ? 1 : 0
+        weightsOffset.isMultiple(of: 16) ? 1 : 0
     }
 
     private static func compileTensorOpsLibrary(device: MTLDevice) throws -> MTLLibrary {
         try MetalContext.moduleLibrary(device: device, module: "tensorops")
-    }
-}
-
-extension MPPPrefillInt4QMM {
-    /// `n<tileN>[k<tileK>]b<buffers>`: the N and K widths of one weight tile
-    /// and how many weight tiles the threadgroup alternates between. `n32b1`
-    /// is the kernel P6 shipped and keeps its bare names; the numbers restate
-    /// the Metal instantiations' template arguments.
-    enum TileVariant: String, CaseIterable, Sendable {
-        case n32b1, n32b2, n64b1, n64b2, n32k128b1, n32k256b1
-
-        var tileN: Int {
-            switch self {
-            case .n32b1, .n32b2, .n32k128b1, .n32k256b1: 32
-            case .n64b1, .n64b2: 64
-            }
-        }
-        var tileK: Int {
-            switch self {
-            case .n32b1, .n32b2, .n64b1, .n64b2: 64
-            case .n32k128b1: 128
-            case .n32k256b1: 256
-            }
-        }
-        var dequantBuffers: Int {
-            switch self {
-            case .n32b1, .n64b1, .n32k128b1, .n32k256b1: 1
-            case .n32b2, .n64b2: 2
-            }
-        }
-        /// Widest first; gpt-oss's K 2880 and Kimi's 128-wide low-rank legs need them.
-        var narrowerRungs: [TileVariant] {
-            switch self {
-            case .n32k256b1: [.n32k128b1, .n32b1]
-            case .n32k128b1: [.n32b1]
-            case .n32b1, .n32b2, .n64b1, .n64b2: []
-            }
-        }
-        var kernelName: String {
-            self == .n32b1
-                ? "mpp_prefill_affine_threadgroup_f16"
-                : "mpp_prefill_affine_threadgroup_f16_\(rawValue)"
-        }
-        var groupedKernelName: String {
-            self == .n32b1
-                ? "mpp_prefill_affine_grouped_f16"
-                : "mpp_prefill_affine_grouped_f16_\(rawValue)"
-        }
-
-        /// A missing value takes the fallback's; an unrecognised one — or a
-        /// 128- or 256-wide K tile with anything but N 32 / one buffer — rejects
-        /// the whole selection so a typo cannot pick a variant by accident.
-        init?(tileN: String?, tileK: String?, buffers: String?, fallback: TileVariant) {
-            let width: Int
-            switch tileN {
-            case nil: width = fallback.tileN
-            case "32"?: width = 32
-            case "64"?: width = 64
-            default: return nil
-            }
-            let depth: Int
-            switch tileK {
-            case nil: depth = fallback.tileK
-            case "64"?: depth = 64
-            case "128"?: depth = 128
-            case "256"?: depth = 256
-            default: return nil
-            }
-            let count: Int
-            switch buffers {
-            case nil: count = fallback.dequantBuffers
-            case "1"?: count = 1
-            case "2"?: count = 2
-            default: return nil
-            }
-            if depth != 64 {
-                guard width == 32, count == 1 else { return nil }
-                self = depth == 128 ? .n32k128b1 : .n32k256b1
-                return
-            }
-            self.init(rawValue: "n\(width)b\(count)")
-        }
-    }
-
-    enum WeightLoads: String, CaseIterable, Sendable {
-        case byte, vector
     }
 }

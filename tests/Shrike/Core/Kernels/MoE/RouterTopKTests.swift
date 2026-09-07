@@ -532,8 +532,7 @@ import ShrikeValidationSupport
                 "the promoted expert's weight must reflect its original sigmoid score, not the bias")
     }
 
-    @Test(arguments: [PrefillRouter.Kind.block, .tiled])
-    func sigmoidPrefillRouterMatchesReference(kind: PrefillRouter.Kind) throws {
+    @Test func sigmoidPrefillRouterMatchesReference() throws {
         let fixtureA = Self.makeSigmoidFixture(seed: 0x516_0003)
         let fixtureB = Self.makeSigmoidFixture(seed: 0x516_0004)
         let rows = [fixtureA.hidden, fixtureB.hidden]
@@ -541,8 +540,7 @@ import ShrikeValidationSupport
         let kernel = try PrefillRouter(context: context,
                                        weightBits: 8,
                                        sigmoidRouterScores: true,
-                                       routedScalingFactor: Self.kimiScaling,
-                                       kind: kind)
+                                       routedScalingFactor: Self.kimiScaling)
         let buffers = try Self.makeSigmoidBuffers(
             context, weights: fixtureA.weights,
             hidden: rows.flatMap { $0 }, bias: fixtureA.bias)

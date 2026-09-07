@@ -74,11 +74,11 @@ ssh macmini '
     sleep 3
   done
   echo "server ready after $((tries * 3))s"
-  logged_path=""
+  logged_bits=""
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    logged_path=$(grep -a -o "prefill_projection_path=[a-z0-9-]*" /tmp/ornith.log | head -n 1)
-    [ -n "$logged_path" ] && break
+    logged_bits=$(grep -a -o "prefill_router_bits=[0-9]*" /tmp/ornith.log | head -n 1)
+    [ -n "$logged_bits" ] && break
     sleep 2
   done
-  echo "${logged_path:-prefill_projection_path=NOT-LOGGED}"
+  echo "${logged_bits:-prefill_router_bits=NOT-LOGGED}"
 '

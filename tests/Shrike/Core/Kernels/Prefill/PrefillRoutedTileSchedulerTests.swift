@@ -305,51 +305,16 @@ import Testing
             == .drainBeforeIssue(reason: .maxPendingDepthReached))
     }
 
-    @Test func parsePrefillTileDepthClampsToOneThroughEight() {
-        #expect(RealForwardRunner.parsePrefillTileDepth(nil) == 2)
-        #expect(RealForwardRunner.parsePrefillTileDepth("") == 2)
-        #expect(RealForwardRunner.parsePrefillTileDepth("not-a-number") == 2)
-        #expect(RealForwardRunner.parsePrefillTileDepth("0") == 1)
-        #expect(RealForwardRunner.parsePrefillTileDepth("-3") == 1)
-        #expect(RealForwardRunner.parsePrefillTileDepth("1") == 1)
-        #expect(RealForwardRunner.parsePrefillTileDepth(" 4 ") == 4)
-        #expect(RealForwardRunner.parsePrefillTileDepth("8") == 8)
-        #expect(RealForwardRunner.parsePrefillTileDepth("9") == 8)
-        #expect(RealForwardRunner.parsePrefillTileDepth("100") == 8)
-    }
-
-    @Test func prefillTileDepthDescriptionReportsTheRequestedValueOnly() {
-        #expect(RealForwardRunner.prefillTileDepthDescription(
-            PrefillRoutedTileSchedulerConfig(maxPendingDepth: 1)) == "depth=1")
-        #expect(RealForwardRunner.prefillTileDepthDescription(
-            PrefillRoutedTileSchedulerConfig(maxPendingDepth: 4, tileExperts: 2, tilesPerCommandBuffer: 3))
-            == "depth=4")
-    }
-
-    @Test func prefillGapLeversDescriptionReportsResidencyAllocations() {
-        #expect(RealForwardRunner.prefillGapLeversDescription(
-            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed)
-            == "overlap=on residency=set allocations=24 sweep=fixed")
-        #expect(RealForwardRunner.prefillGapLeversDescription(
-            overlap: false, residencyAllocationCount: 0, poolResidencyUnavailableReason: nil,
-            sweepMode: .alternate)
-            == "overlap=off residency=set allocations=0 sweep=alternate")
-        #expect(RealForwardRunner.prefillGapLeversDescription(
-            overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: "boom",
-            sweepMode: .alternate)
-            == "overlap=on residency=unavailable reason=boom sweep=alternate")
-        #expect(RealForwardRunner.prefillGapLeversDescription(
-            overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed)
-            == "overlap=on residency=none sweep=fixed")
-    }
-
-    @Test func prefillGapLeversDescriptionReportsThePrefetchTrace() {
-        #expect(RealForwardRunner.prefillGapLeversDescription(
-            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed, prefetchTrace: true)
-            == "overlap=on residency=set allocations=24 sweep=fixed prefetch_trace=on")
+    @Test func prefillDescriptionReportsTheRouterBitsTheResidencyFailureAndTheTrace() {
+        #expect(RealForwardRunner.prefillDescription(
+            routerBits: 8, poolResidencyUnavailableReason: nil, prefetchTrace: false)
+            == "prefill_router_bits=8")
+        #expect(RealForwardRunner.prefillDescription(
+            routerBits: 4, poolResidencyUnavailableReason: "boom", prefetchTrace: false)
+            == "prefill_router_bits=4 prefill_pool_residency=unavailable reason=boom")
+        #expect(RealForwardRunner.prefillDescription(
+            routerBits: 8, poolResidencyUnavailableReason: nil, prefetchTrace: true)
+            == "prefill_router_bits=8 prefetch_trace=on")
     }
 
     @Test func prefetchTraceOpensFailClosed() throws {
@@ -363,57 +328,6 @@ import Testing
         #expect(descriptor >= 0)
         close(descriptor)
         try FileManager.default.removeItem(atPath: path)
-    }
-
-    @Test func sweepModeParsesItsFiveValuesAndFailsClosed() throws {
-        #expect(try RealForwardRunner.parsePrefillSweepMode("alternate") == .alternate)
-        #expect(try RealForwardRunner.parsePrefillSweepMode("fixed") == .fixed)
-        #expect(try RealForwardRunner.parsePrefillSweepMode("carry") == .carry)
-        #expect(try RealForwardRunner.parsePrefillSweepMode("recency") == .recency)
-        #expect(try RealForwardRunner.parsePrefillSweepMode("resident") == .resident)
-        #expect(try RealForwardRunner.parsePrefillSweepMode(nil) == .resident)
-        #expect(try RealForwardRunner.parsePrefillSweepMode("") == .resident)
-        #expect(throws: ModelError.self) {
-            try RealForwardRunner.parsePrefillSweepMode("carrry")
-        }
-    }
-
-    @Test func prefillGapLeversDescriptionReportsTheSweepMode() {
-        #expect(RealForwardRunner.prefillGapLeversDescription(
-            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .carry)
-            == "overlap=on residency=set allocations=24 sweep=carry")
-        #expect(RealForwardRunner.prefillGapLeversDescription(
-            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .recency, sweepTail: 96)
-            == "overlap=on residency=set allocations=24 sweep=recency tail=96")
-        #expect(RealForwardRunner.prefillGapLeversDescription(
-            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .recency, sweepTail: 48)
-            == "overlap=on residency=set allocations=24 sweep=recency tail=48")
-        #expect(RealForwardRunner.prefillGapLeversDescription(
-            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed, sweepTail: 48)
-            == "overlap=on residency=set allocations=24 sweep=fixed")
-        #expect(RealForwardRunner.prefillGapLeversDescription(
-            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .resident, sweepTail: 96)
-            == "overlap=on residency=set allocations=24 sweep=resident")
-    }
-
-    @Test func sweepTailDefaultsAndFailsClosed() throws {
-        #expect(try RealForwardRunner.parsePrefillSweepTail(nil, expertCount: 256) == 96)
-        #expect(try RealForwardRunner.parsePrefillSweepTail("128", expertCount: 256) == 128)
-        #expect(try RealForwardRunner.parsePrefillSweepTail("8", expertCount: 256) == 8)
-        #expect(try RealForwardRunner.parsePrefillSweepTail("256", expertCount: 256) == 256)
-        #expect(try RealForwardRunner.parsePrefillSweepTail(nil, expertCount: 64) == 64)
-        #expect(try RealForwardRunner.parsePrefillSweepTail("64", expertCount: 64) == 64)
-
-        for invalid in ["", "not-a-number", "4", "999"] {
-            #expect(throws: (any Error).self) {
-                _ = try RealForwardRunner.parsePrefillSweepTail(invalid, expertCount: 256)
-            }
-        }
     }
 
     @Test func chunkExpertProtectionClearsThePlannedTileInPlace() {
@@ -519,31 +433,6 @@ import Testing
             afterTileIndex: 2, tileCount: 3, avoidingSlotPlanAvailable: true))
     }
 
-    @Test func parsePrefillFetchDepthClampsToOneThroughTwo() {
-        #expect(RealForwardRunner.parsePrefillFetchDepth(nil) == 2)
-        #expect(RealForwardRunner.parsePrefillFetchDepth("") == 2)
-        #expect(RealForwardRunner.parsePrefillFetchDepth("not-a-number") == 2)
-        #expect(RealForwardRunner.parsePrefillFetchDepth("0") == 1)
-        #expect(RealForwardRunner.parsePrefillFetchDepth("-3") == 1)
-        #expect(RealForwardRunner.parsePrefillFetchDepth("1") == 1)
-        #expect(RealForwardRunner.parsePrefillFetchDepth(" 2 ") == 2)
-        #expect(RealForwardRunner.parsePrefillFetchDepth("3") == 2)
-        #expect(RealForwardRunner.parsePrefillFetchDepth("9") == 2)
-        #expect(RealForwardRunner.parsePrefillFetchDepth("100") == 2)
-    }
-
-    @Test func prefillTileBatchDescriptionReportsTheFetchDepth() {
-        let single = PrefillRoutedTileSchedulerConfig(fetchLookahead: 0)
-        let lookahead = PrefillRoutedTileSchedulerConfig(fetchLookahead: 1)
-
-        #expect(RealForwardRunner.prefillFetchDepthDescription(single) == "fetch=1")
-        #expect(RealForwardRunner.prefillFetchDepthDescription(lookahead) == "fetch=2")
-        #expect(RealForwardRunner.prefillFetchDepthDescription(single.fitting(slotCount: 128) ?? single)
-            == "fetch=1")
-        #expect(RealForwardRunner.prefillFetchDepthDescription(lookahead.fitting(slotCount: 128) ?? lookahead)
-            == "fetch=2")
-    }
-
     @Test func matrixPathAcceptsHonoursALoweredMinimum() {
         let params = PrefillAttentionParams(
             startPosition: 0, queryCount: 21, headDim: 256, numQHeads: 16, numKVHeads: 2,
@@ -578,24 +467,6 @@ import Testing
             for: .o, chunkTokens: 15, minimumRows: 16) == .repeatedGEMV)
         #expect(PrefillProjectionDispatchPolicy.selectedDispatch(
             for: .q, chunkTokens: 15, minimumRows: 16) == .repeatedGEMV)
-    }
-
-    @Test func parsePrefillMatrixMinRowsClampsToTheSupportedRange() {
-        #expect(RealForwardRunner.parsePrefillMatrixMinRows(nil) == 16)
-        #expect(RealForwardRunner.parsePrefillMatrixMinRows("") == 16)
-        #expect(RealForwardRunner.parsePrefillMatrixMinRows("not-a-number") == 16)
-        #expect(RealForwardRunner.parsePrefillMatrixMinRows("16") == 16)
-        #expect(RealForwardRunner.parsePrefillMatrixMinRows("0") == 3)
-        #expect(RealForwardRunner.parsePrefillMatrixMinRows("2") == 3)
-        #expect(RealForwardRunner.parsePrefillMatrixMinRows("3") == 3)
-        #expect(RealForwardRunner.parsePrefillMatrixMinRows(" 16 ") == 16)
-        #expect(RealForwardRunner.parsePrefillMatrixMinRows("32") == 32)
-        #expect(RealForwardRunner.parsePrefillMatrixMinRows("99") == 32)
-    }
-
-    @Test func prefillMatrixMinRowsDescriptionReportsTheThreshold() {
-        #expect(RealForwardRunner.prefillMatrixMinRowsDescription(32) == "prefill_matrix_min_rows=32")
-        #expect(RealForwardRunner.prefillMatrixMinRowsDescription(16) == "prefill_matrix_min_rows=16")
     }
 
     @Test func routeTraceLineFormatsPrefillAndDecode() {

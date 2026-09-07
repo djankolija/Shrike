@@ -133,18 +133,17 @@ import ShrikeValidationSupport
             slidingWindow: 0, kvTokenStrideElements: UInt32(kvRow),
             qTokenStrideElements: UInt32(qRow), oTokenStrideElements: UInt32(qRow),
             scale: Attention.defaultScale(headDim: UInt32(headDim)))
-        try attention.encodeCausal(commandBuffer: commandBuffer, q: qBuffer,
-                                   k: kBuffer, v: vBuffer, out: fp16Output,
-                                   params: baseParams, path: .causalTiled)
+        try attention.encodeTiled(commandBuffer: commandBuffer, q: qBuffer,
+                                  k: kBuffer, v: vBuffer, out: fp16Output,
+                                  params: baseParams)
         var quantizedParams = baseParams
         quantizedParams.kvBits = UInt32(precision.rawValue)
         quantizedParams.kvTokenStrideBytes = UInt32(keyView.stride)
         quantizedParams.kvValueBytes = UInt32(keyView.valueBytes)
         quantizedParams.kvGroupSize = UInt32(keyView.groupSize)
-        try attention.encodeCausal(commandBuffer: commandBuffer, q: qBuffer,
-                                   k: keyView.buffer, v: valueView.buffer,
-                                   out: quantizedOutput, params: quantizedParams,
-                                   path: .causalTiled)
+        try attention.encodeTiled(commandBuffer: commandBuffer, q: qBuffer,
+                                  k: keyView.buffer, v: valueView.buffer,
+                                  out: quantizedOutput, params: quantizedParams)
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         #expect(commandBuffer.error == nil)

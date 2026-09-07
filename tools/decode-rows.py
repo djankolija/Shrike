@@ -60,9 +60,9 @@ def fmt(value, digits=3):
 
 log_path, token_paths = sys.argv[1], sys.argv[2:]
 lines = open(log_path, errors="ignore").read().splitlines()
-levers = next((m.group(0) for ln in lines
-               if (m := re.search(r"prefill_gap_levers=(\S+(?: \S+=\S+)*)", ln))), None)
-print(f"== {log_path.rsplit('/', 1)[-1]}  [{levers}]")
+prefill = next((m.group(0) for ln in lines
+                if (m := re.search(r"prefill_router_bits=(\S+(?: \S+=\S+)*)", ln))), None)
+print(f"== {log_path.rsplit('/', 1)[-1]}  [{prefill}]")
 
 blocks, cur = [], None
 for ln in lines:

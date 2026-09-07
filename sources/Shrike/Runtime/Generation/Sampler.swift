@@ -87,31 +87,6 @@ enum SamplePath: Sendable, Equatable {
 
 /// Which Top-K implementation serves a `1...64` sampled request.
 ///
-/// `tiled` is production: a three-stage reduction that keeps the top 64 of
-/// every 1,024-entry tile, so the whole vocabulary reaches one final tile in
-/// three dispatches. `generic` forces the older single-threadgroup kernel that
-/// extracts Top-K in k full vocabulary passes.
-///
-/// The two are required to agree token-for-token — `SampleTopK64Tests` pins
-/// that across k, temperature, and seed — so this exists to measure the
-/// difference, not to choose behavior. It is the control arm that made the
-/// +30.07% (4-bit) / +11.36% (8-bit) qualification an interleaved same-binary
-/// A/B instead of a comparison against a separately-built baseline.
-public enum RuntimeSamplerPath: String, Codable, Sendable {
-    case tiled
-    case generic
-
-    public static func environmentValue(
-        _ environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> RuntimeSamplerPath {
-        guard let raw = environment["SHRIKE_SAMPLER_PATH"] else { return .tiled }
-        guard let value = RuntimeSamplerPath(rawValue: raw) else {
-            throw GeneratorError.invalidSamplerPath(raw)
-        }
-        return value
-    }
-}
-
 /// Turns `GenerationConfig` + a logits buffer into one token id, staying
 /// GPU-resident wherever the kernels allow.
 ///
@@ -134,7 +109,6 @@ final class Sampler {
     private let softcapTiled: LogitSoftcapSoftmaxTiled?
     private let sampleKernel: Sample
     private let topK64Kernel: SampleTopK64
-    private let samplerPath: RuntimeSamplerPath
     let vocab: Int
     private let logitSoftcap: Float
 
@@ -157,7 +131,6 @@ final class Sampler {
         self.softcapTiled = try LogitSoftcapSoftmaxTiled(context: context, vocab: vocab)
         self.sampleKernel = try Sample(context: context)
         self.topK64Kernel = try SampleTopK64(context: context, vocab: vocab)
-        self.samplerPath = try RuntimeSamplerPath.environmentValue()
         self.vocab = vocab
         self.logitSoftcap = logitSoftcap
     }
@@ -183,10 +156,7 @@ final class Sampler {
                                           history: history,
                                           penalty: config.repetitionPenalty)
         }
-        // The tiled front-end follows the same path selection as the Top-K
-        // half: `generic` forces the single-threadgroup pair so an A/B
-        // measures both halves of the sampler, not one.
-        if samplerPath == .tiled, let softcapTiled {
+        if let softcapTiled {
             try softcapTiled.encode(commandBuffer: commandBuffer,
                                     logits: logits, probs: probs, v: v,
                                     softcap: logitSoftcap)
@@ -208,8 +178,7 @@ final class Sampler {
         // the head_logits->embed gap falling from 15.45 ms to 1.41 ms/token.
         // k > 64, k == 0 (top-k disabled, k becomes 256), and greedy stay on
         // the generic path, which remains the reference implementation.
-        if samplerPath == .tiled,
-           config.temperature > 0,
+        if config.temperature > 0,
            let requestedK = config.topK,
            (1...64).contains(requestedK) {
             try topK64Kernel.encode(commandBuffer: commandBuffer,

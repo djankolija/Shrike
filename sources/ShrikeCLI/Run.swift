@@ -156,7 +156,6 @@ public func run(args: Args,
         let runtime = try RuntimeConfiguration(
             expertCacheSlots: loadRuntime.expertCacheSlots,
             prefillChunkTokens: prefillChunkTokens,
-            prefillAttentionPath: loadRuntime.prefillAttentionPath,
             forceLogitsHead: !config.isPureGreedy,
             prefetchTracePath: loadRuntime.prefetchTracePath,
             kvCachePrecision: args.kvCachePrecision,

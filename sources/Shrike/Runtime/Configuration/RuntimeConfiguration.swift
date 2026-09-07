@@ -10,13 +10,6 @@ public enum RuntimePrefillPolicy: String, Codable, Sendable {
     case chunked
 }
 
-public enum RuntimePrefillAttentionPath: String, Codable, Sendable {
-    case causalTiled = "causal-tiled"
-    case fullTensorOps2DPreferred = "full-tensorops-2d-preferred"
-    case fullTensorOps2DValidityV2 = "full-tensorops-2d-validity-v2"
-    case causalMatrix = "causal-matrix"
-}
-
 /// Storage precision for the autoregressive attention key/value cache.
 /// Quantized modes use affine groups of 64 values and keep their scale and
 /// bias alongside each token row; model weights are unaffected.
@@ -152,7 +145,6 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let expertCacheSlots: Int
     public let prefillPolicy: RuntimePrefillPolicy
     public let prefillChunkTokens: Int
-    public let prefillAttentionPath: RuntimePrefillAttentionPath
     public let headPath: RuntimeHeadPath
     public let prefetchTracePath: String?
     public let kvCachePrecision: KVCachePrecision
@@ -162,7 +154,6 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public init(expertCacheSlots: Int = 64,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
-                prefillAttentionPath: RuntimePrefillAttentionPath = .causalMatrix,
                 forceLogitsHead: Bool = false,
                 prefetchTracePath: String? = nil,
                 kvCachePrecision: KVCachePrecision = .int8,
@@ -180,7 +171,6 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.expertCacheSlots = expertCacheSlots
         self.prefillPolicy = prefillEnabled ? .chunked : .off
         self.prefillChunkTokens = prefillChunkTokens
-        self.prefillAttentionPath = prefillAttentionPath
         self.headPath = forceLogitsHead ? .logits : .fusedRows
         self.prefetchTracePath = prefetchTracePath
         self.kvCachePrecision = kvCachePrecision

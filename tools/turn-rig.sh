@@ -39,7 +39,7 @@
 # 8; the long-answer follow-up arm sets it to 512, e.g. `TURN2_MAX_TOKENS=512`).
 # SERVER_ENV
 # (optional env): prepended to the server launch's env assignments, e.g.
-# SERVER_ENV="SHRIKE_PREFILL_SWEEP=carry" for the A/B. REUSE=<dir> (optional
+# SERVER_ENV="SHRIKE_PREFILL_ANE=on" for the A/B. REUSE=<dir> (optional
 # env, `turns-live` only): instead of building turn 2 and turn 3 from this
 # run's own live responses, copy the already-built payload-*-turn2.json and
 # payload-*-turn3.json found in <dir> (another run's <outdir>) and send those
