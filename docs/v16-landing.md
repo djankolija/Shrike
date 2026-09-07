@@ -206,13 +206,176 @@ keeps today's miss count. The smallest of the chapter's candidates against v15's
 
 - **(a) The instrument (Task 1).** No prize of its own; it prices (b). **Measured: the
   likely-won share 0.45 / 0.26 / 0.38, the prize of (b) +2 / +1.3 / +1.7 % modelled.**
-- **(b) The landing in the pool's own slot (Task 2).** Up to 2.7 to 3.5 ms per token on
-  the card, +4 to +5 %, times the race's fraction; no RAM; today's miss count on the
-  replay; the ring's buffers (15.9 MB) and the blit retired when it lands. Built only on
-  Davor's ruling with the race's number.
+- **(b) The landing (Task 2, built as the merge, variant D below).** Up to 2.7 to 3.5 ms
+  per token on the card, +4 to +5 %, times the race's fraction; no RAM; today's miss count
+  on the replay; the ring's buffers (15.9 MB) and the blit retired when it lands. **Ruled
+  2026-09-07: built, as the merge, with the "at most" share: +2.5 to +3 / +2 / +2.5 %
+  modelled. Measured: the mechanism real (the adopted-only fixups down 56 to 69 %), the wall
+  flat; the merge kept as a subtraction (Task 2).**
 - **(c) The exchange at plan time.** The blit's copy alone; not scheduled (a likely null).
 - **(d) The reading layers themselves.** 12.6 to 13.7 per token at production's per-read
   cost, 7.7 to 9.0 ms of GPU idle per token; no lever named in this chapter.
+
+## Task 2's step zero, part 3: the merge (2026-09-07, zero runtime code)
+
+The ruling of 12:40 was to build the landing and let the arms decide. The discussion
+that preceded and followed it reframed the task: the fixup is a host-built second
+command for the layer, not a fetch; the classifier is the GPU's one-read directory
+lookup while the host keeps the tagged side for eviction; the ring beside the cache is
+where the chapter's accretion lives (adoption, copy, blit, join, guard), and the landing
+as first designed would extend it. Davor's direction: a consolidation series, the ring
+merged into the cache's address space as its first step, sequenced so it answers the
+landing's question. This part prices the merge; the raw data lives at
+`~/.claude/handoffs/archive/shrike-v16-t2-step0/` (`merge-step0-notes.md`,
+`boundary-probe/`, `replay/`).
+
+**The kernel-boundary probe (MEASURED, both boxes).** The instrument's likely-won share
+assumed the classifier, a later dispatch of the attention command's single compute
+encoder, sees a residency write the host makes while that command runs; v14's probe had
+shown only that a running kernel never does. A standalone Metal program (one command,
+one encoder, dispatch A then dispatch B reading a flag once; the host writes the flag
+during A; every write classified against the command's own GPU window and binned by its
+margin before the end) ran 300 iterations per cell:
+
+| cell, the mini | seen by the later dispatch |
+| --- | --- |
+| write before the commit / no write | 300/300, 0/300 |
+| write after the commit, before the GPU start | 206/206 |
+| A pure ALU, no memory traffic (same line, fresh page-strided line, atomic load, second encoder, memory barrier) | 0/264, 0/274, 0/275, 0/270, 0/284 |
+| A streams 1 / 4 / 16 MB after the write | 274/274, 285/285, 281/281 |
+| A streams 64 MB before the write, then quiet, by margin under 50 / 50 to 150 / 150 to 300 / 300 to 1000 µs | 20/20, 37/37, 47/47, 315/316 |
+| the write inside a 256 MB stream, every bin | 898/898 |
+| the write after the command's end | 0/142 |
+
+A later dispatch sees the host's write immediately, the under 50 µs bin included, once
+the command has moved 1 MB through memory (4 MB on the M4 Pro); never when it has not.
+Production's attention command streams the attention projections and two router GEMVs
+on both sides of any write, so the winnable share is the instrument's "at most" row,
+0.581 / 0.427 / 0.549, and the prize +2.5 to +3 / +2 / +2.5 % modelled. The mechanism was
+not chased.
+
+**Retention (MEASURED offline, deterministic over the recorded routes).** The replay
+gained `--fill-mode pool|ring|ring-retain`; v15 T1's captures, 128 slots, aging-lfu,
+one top-8 fill per layer per position; decode misses per token:
+
+| mode | card | the 300 | the 1k |
+| --- | ---: | ---: | ---: |
+| no fills | 30.5 | 30.2 | 28.1 |
+| pool: a fill evicts a victim at issue and stays (variant B) | 19.7 | 19.9 | 18.9 |
+| ring: a fill beside the pool until its plan, nothing retained | 24.1 | 22.4 | 21.5 |
+| ring-retain: a hit fill then takes a victim slot (production today) | 19.9 | 19.8 | 18.7 |
+| production, measured (Task 1's cut 4) | 20.0 | 20.0 | 18.8 |
+
+The retain row reproduces production within 0.2, so the model holds. A ring that keeps
+nothing costs 2.6 to 4.4 misses per token, more than the landing's prize: the merge must
+retain. A victim per right prediction (retain) and a victim per prediction (pool) cost
+the same on these routes.
+
+**Retention without a copy (MEASURED: the device limit).** Retained without the blit, a
+landed cell must become the layer's cell and the victim's cell the ring's, an index swap,
+which needs every cell the classifier can name in one Metal buffer (the kernels address
+one base plus a cell times the stride). The mini's `maxBufferLength` is 8.88 GiB (the
+M4 Pro's 28.08); the pool at the 8G budget is 128 x 40 x 1,769,472 bytes, 8.438 GiB,
+8.453 with the ring's nine cells: it fits with 0.43 GiB of headroom. A larger budget on
+the mini would not; the kernels' second base is that day's fallback (a candidate).
+
+**The merge (variant D, the design).** One allocation and one buffer for every cell, 40 x
+128 owned by the layers and 9 by the ring, one stride; a layer owns a set of cells, not
+a range, and a layer's residency table names a global cell, so the classifier and the
+kernels are unchanged. Issue claims a free ring cell, no victim; the read lands there;
+the storage thread publishes `resident` at that cell. The layer's plan resolves its
+landings: wanted (a GPU hit, or a GPU miss the fixup computes from the cell, `adopted`,
+no blit), the cell joins the layer and an evicted victim cell joins the ring; unwanted,
+the entry is emptied and the cell stays the ring's; still loading, joined to completion.
+Deleted: the copy and blit adoption modes, the transfer, the guard's transfer branch, the
+blit counter, the nine standalone buffers. The wrong prediction evicts nothing, the right
+one evicts at the plan as today. The miss profile is the retain row's; the prize is the
+landing's; three concepts leave. The merge carries no knob (its point is the
+alternative's deletion): its A/B is build against build and its rollback the previous
+deploy, a recorded deviation from the chapter's rule.
+
+The variants table above gains its fourth row:
+
+| variant | RAM | the classifier can see the hit | the wrong prediction's cost | verdict |
+| --- | --- | --- | --- | --- |
+| (D) the ring's cells in the pool's address space, the swap at the plan | none (the ring's 15.9 MB move into the one buffer) | yes, when the read completes first | none | **built as Task 2** |
+
+## Task 2: the merge (commit 7652fb6)
+
+Every number MEASURED on the mini; the plan's Task 2 carries the step list, the raw data
+lives at `~/.claude/handoffs/archive/shrike-v16-t2/` (the arms, the ledger, the scripts).
+
+**What was built.** One allocation and one Metal buffer for every expert cell
+(`ExpertCellArena`, 40 x 128 pool cells and the ring's nine at the page-rounded stride,
+8.45 GiB at the 8G budget under the mini's 8.88 GiB limit), allocated at the first layer's
+opening; a layer's pool is a set of the arena's cells and its residency table names
+global cells, so the classifier and the kernels are unchanged. A prediction's read is a
+landing: claimed into a free ring cell with the table entry `loading`, published
+`resident` from the storage thread when the bytes land, discarded if the pool's own read
+of the expert overtook it. The plan that wants a landing swaps its cell into a pool slot
+(the slot's old cell returns to the ring, the entry republished at the same cell under
+the slot's next generation, no copy) and reports it `adopted` only when the classifier had missed it, so
+the fixup computes it from the cell; an unwanted landing stays resident until the ring
+reclaims the cell and drops it from the table. A wanted prediction still in flight is
+awaited to completion, since its cell is claimed. Deleted: the copy and blit adoption
+modes and `SHRIKE_PREFETCH_ADOPT` (set, the launch fails by name), the transfer, the
+guard, the blit counter, the nine standalone buffers. `prefetch_landed_hits` counts the
+landings the classifier saw resident. The merge carries no knob: its A/B is build against
+build (T1's rows at c9b79cb against the merge's) and its rollback the previous deploy,
+the recorded deviation from the chapter's rule. Golden byte-identical on both boxes at the
+default and with the prefetch off, and locally under `speculative-validate`,
+`gpu-residency` and the per-slot layout (where the prefetch is off and the banner says so).
+
+**The arms** (two lifetimes per shape at the bare launch, T1's cut 4 as the reference,
+every answer identical; the prefetch-off control one lifetime):
+
+| shape | arm | tok/s | adopted per token | landed hits per token | adopted-only fixup layers | fixup commands per token | misses per token |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| card | T1 at c9b79cb | 15.56 / 15.05 | 10.5 / 10.3 | | 5.43 / 5.28 | 18.2 | 20.0 / 20.3 |
+| card | the merge | 15.34 / 15.35 | 10.6 / 10.6 | 7.38 / 7.23 | 1.68 / 1.76 | 14.4 | 20.0 / 20.0 |
+| card | the merge, prefetch off | 14.01 | 0 | 0 | 0 | 18.2 | 30.5 |
+| the 300 | T1 at c9b79cb | 16.54 / 16.54 | 10.2 / 10.1 | | 5.14 / 5.12 | 18.7 | 20.0 / 20.0 |
+| the 300 | the merge | 16.46 / 16.48 | 10.2 / 10.2 | 6.05 / 5.91 | 2.18 / 2.25 | 15.8 | 20.0 / 20.0 |
+| the 300 | the merge, prefetch off | 14.46 | 0 | 0 | 0 | 18.7 | 30.2 |
+| the 1k | T1 at c9b79cb | 16.01 / 16.39 | 9.0 / 9.3 | | 4.62 / 4.77 | 17.4 | 19.1 / 18.8 |
+| the 1k | the merge | 16.12 / 16.14 | 9.3 / 9.4 | 6.39 / 6.44 | 1.53 / 1.52 | 14.1 | 18.8 / 18.8 |
+| the 1k | the merge, prefetch off | 14.59 | 0 | 0 | 0 | 17.4 | 28.1 |
+
+**Readings.**
+
+- **The mechanism works, above the instrument's share.** The classifier saw 70 / 59 /
+  69 % of the landed predictions resident (the instrument's "at most" was 58 / 43 / 55 %,
+  its bins placed against the command's end rather than the classifier's own read); the
+  adopted-only fixup layers fell 66 to 69 % on the card, 56 to 58 % on the 300 and 67 to
+  68 % on the 1k, 3.0 to 3.8 host-built commands per token gone; misses per token unchanged to the tenth, as the replay said; the
+  prefetch-off control's misses are the replay's no-fills rows to the tenth (30.5 / 30.2 /
+  28.1), the model validated a third time.
+- **The wall did not move.** tok/s within the repeats' drift on all three shapes, no
+  loss. The runner line says why: the read terms are unchanged (the card's io 14.69 to
+  14.67 ms per token, fetch 56.7 to 56.6, hidden 32.7 to 33.4 %), the fixup submit per
+  token fell 2.55 to 1.91 ms and the fixup's commit-to-kernel 0.51 to 0.34 (fewer
+  commands), but the window on each reading layer, from the hit-split command's end to
+  the fixup's first kernel, grew from 0.61 / 0.59 / 0.60 to 1.04 / 0.97 / 0.98 ms. The GPU
+  reaches every reading layer sooner and waits longer for the same read. The removed
+  round trips were paid under the drive: the token's pace is the reading layers' SSD
+  chain (fetch 56.6 / 38.7 / 36.0 ms of a 65 / 61 / 62 ms token), and the model that
+  priced the landing at 0.5 to 0.65 ms per adopted-only layer assumed those commands sat
+  on the critical path. They did not. The fixup's wake after the I/O event also grew,
+  1.23 to 2.41 ms per token; its mechanism was not chased.
+- **The merge stays, by the rule.** Real (the mechanism on all three shapes, misses at
+  today's) and free (golden identical everywhere, tok/s within drift): a subtraction of
+  three concepts and a knob at no cost, and the chapter's second measured result on the
+  landing: it can be won, and winning it buys nothing on this box because the drive sets
+  the pace.
+
+**After T2.** Production on the mini at the merge: 15.34 / 15.35, 16.46 / 16.48, 16.12 /
+16.14 tok/s on the card / the 300 / the 1k, flat against 15.56 / 15.05, 16.54 / 16.54,
+16.01 / 16.39 at c9b79cb; the same answers; the same misses. The landing's question is
+closed both ways: the race can be won on the hardware (the kernel-boundary probe, the
+landed hits), and the prize is not where the model put it. What remains is what every
+chapter since v13 has circled: the reading layers themselves, 12.6 to 13.6 per token at
+production's per-read cost, the drive's chain. The consolidation series (the plan's
+Candidates) continues from a tree with one address space and no adoption.
 
 ## Method
 

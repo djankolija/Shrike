@@ -21,7 +21,7 @@ record. Every number is measured on the mini unless marked modelled.
 
 ### Task 1: the instrument (the race measured)
 
-- [ ] **T1: how many adopted predictions complete before their layer's classifier
+- [x] **T1: how many adopted predictions complete before their layer's classifier
   runs.** The prize of the landing is the adopted-only fixup layers (5.44 / 5.1 / 4.8 per
   token on the card / the 300 / the 1k, 2.7 to 3.5 ms per token modelled on the card) times
   the fraction of adopted predictions whose read completed before classify(L) executed.
@@ -109,54 +109,158 @@ record. Every number is measured on the mini unless marked modelled.
         design doc. A name nit left, a comment trimmed; the boundary tests and the ring's
         exclusion tests added.
 
-### Task 2: the landing in the pool's own slot (on the ruling)
+### Task 2: the merge (the ring's cells in the pool's address space, on the ruling)
 
-- [ ] **T2: the ring's read lands in a victim slot of the target layer's slab at issue,
-  the slot `loading` from the issue, `resident` at the read's completion from the storage
-  thread, so the classifier can count the expert a hit.** The ring keeps its budget and
-  placement (v15 Task 1) and its join (Task 2), but its slots become (layer, slot index)
-  claimed through the target layer's streamer under its lock instead of nine separate
-  buffers; the adoption becomes either a hit (the classifier saw it) or today's path
-  without a blit (the slot is already the expert's; the plan reserves it as `loading`
-  and the fixup computes it). A failed read returns the slot to `empty`. The knob:
-  `SHRIKE_PREFETCH_LANDING` (`ring` | `slot`, the default `ring` until the arms; `slot`
-  retires the blit's copy on that path), fail-closed, on the banner as `landing=`.
-  Modelled prize: the adopted-only fixups times the race's fraction, no RAM, today's miss
-  count on the replay (`~/.claude/handoffs/archive/shrike-v15-close/index-swap-step0/swap-replay-*`).
+- [x] **T2: one address space for every expert cell, the ring's nine included, so a
+  prefetched read lands where the classifier can already see it and is retained by an
+  index swap instead of a copy.** Today a layer's pool is its own slab and Metal buffer,
+  the ring nine standalone buffers beside every slab; a right prediction is adopted at
+  the plan by a GPU blit into a victim slot and published resident when the fixup
+  command completes, always after the classifier ran. Under the merge one allocation and
+  one Metal buffer hold 40 x 128 cells owned by the layers and 9 owned by the ring, one
+  stride; a layer's residency table names a GLOBAL cell, so the classifier and the
+  kernels are unchanged (the same base, a wider index). Issue claims a free ring cell
+  (no victim); the read lands there; the storage thread publishes `resident` for (layer,
+  expert) at that cell; the layer's plan resolves its landings: wanted and classified a
+  hit, or wanted and classified a miss (the lost race, the fixup computes it from the
+  cell, `adopted`, no blit), the cell joins the layer and an evicted victim cell joins
+  the ring; not wanted, the entry is emptied and the cell stays the ring's; still
+  loading, joined (the wait now runs to completion or failure, `prefetch_late` counting
+  the waits past the bound). Only the landings the ring leased to the plan are swapped,
+  so the lease and the cell exchange are one transaction; the swap republishes the entry
+  at the same cell under the slot's next generation (the review's fold). Deleted: the copy and blit adoption modes and
+  `SHRIKE_PREFETCH_ADOPT` (set, it fails the launch by name), `PrefetchAdoptionTransfer`,
+  the guard's transfer branch, `prefetch_blit_experts`, the nine standalone buffers. The
+  prefetch requires the pool layout; under `per-slot` it is off and the banner says so.
+  **No knob**: the merge's point is the alternative's deletion, so its A/B is build
+  against build (T1's production rows, six lifetimes at c9b79cb, against the merge's at
+  the bare launch, plus the merge with the prefetch off as the control) and its rollback
+  is the previous deploy; the deviation from the chapter's knob rule is deliberate and
+  recorded here. Step zero's pricing: retention is required (a non-retaining ring costs
+  2.6 to 4.4 misses per token, the replay), the swap's miss profile is today's (19.9 /
+  19.8 / 18.7 against 20.0 / 20.0 / 18.8 measured), the single buffer fits the mini's
+  8.88 GiB limit at 8.45 GiB with 0.43 GiB of headroom, and the classifier sees a
+  mid-command publish (the kernel-boundary probe, 100 % at every margin bin once the
+  command has streamed 1 MB). Modelled prize: the adopted-only fixups times the race's
+  "at most" share, +2.5 to +3 / +2 / +2.5 %.
+
+  **Files.** New `Sources/Shrike/Infrastructure/Streaming/ExpertCellArena.swift` (one
+  allocation, one buffer, `cellCount`, `stride`, `buffer`, `pointer(cell:)`,
+  `offset(cell:)`, `cell(atOffset:)`); `PreadExpertStreamer.swift` (the `.pool` layout
+  takes its cells from the arena; `slotBuffers`, `slotBufferOffsets`, `slotPointers`
+  rewritten at a swap so every reader stays as it is; `publishResidencyUnlocked` writes
+  the global cell, `slotBufferOffsets[slot] / poolSlotStride`; the landings:
+  `claimLanding(expert:cell:)`, `completeLanding(expert:cell:)`, `failLanding`,
+  `dropLanding`, the resolution inside `makeExpertCachePlan` given the GPU's missed
+  experts, `ExpertCachePlan.freedCells`); `Model.swift` (the arena created once at the
+  first layer's opening from the budget's slot count and the ring's cell count, the ring
+  cells handed to the runner); `ExpertPrefetchRing.swift` (a slot carries a cell, not a
+  buffer; `readyCells`, `consume(layer:experts:freedCells:)`, the join to completion, the
+  reclaim's drop callback); `ModelExpertIO.swift` (`beginRoutedExpertPrefetch` by cells;
+  `planRoutedExperts(..., gpuMissedExperts:)`; the adoption bridge and the finalize and
+  fail hooks removed); `RealForwardRunner.swift` (the issue by cells, the plan with the
+  readback's missed experts, the consume with the freed cells, the transfer and blit
+  removed from the fixup build, `prefetch_landed_hits`); `RuntimeConfiguration.swift`
+  (`RuntimePrefetchAdoption` and `SHRIKE_PREFETCH_ADOPT` removed, the name refused);
+  `ServerInference.swift`, `Run.swift`, `decode-rows.py` (the counters); the tests below;
+  `PrefetchAdoptionTransfer.swift`, `PrefetchAdoptionGuard.swift` and their tests deleted
+  (the guard's remaining duty, the ring lease returned when the plan throws, is
+  `ring.unlease`).
 
   **Steps.**
   - [x] Step 0 (zero code): the replay's pricing at 128 and 119 slots, the headroom under
-        load. **DONE 2026-09-07** (the design doc's step zero, part 2).
-  - [ ] Step 1 (tests RED first): the streamer claims a landing slot for a prediction
-        (a victim by the same rule as a demand miss, `loading`, its expert published at
-        the claim, not a victim for the same layer's plan, not a hit before the bytes
-        land); a completed landing is `resident` and a hit at the next plan with no
-        adoption; a landing still in flight at plan time is adopted as `loading` (the
-        fixup path, no blit) or joined within the bound; a failed read frees the slot
-        (`empty`) and counts `prefetch_failed`; the ring's slots carry (layer, slot) and
-        `readyBuffers` becomes `readySlots`; the reclaim of a completed, unadopted
-        landing leaves the expert resident (the LFU evicts it in its turn) and frees the
-        ring entry; the knob's parse and the banner; the guard's `abandon` under the
-        landing (nothing to release but the ring entry).
-  - [ ] Step 2 (the code): the ring keyed by (layer, slot), the streamer's claim and the
-        completion publish on the storage thread (the state word last), the plan's hit
-        scan unchanged, `PrefetchAdoption.landed` beside the copy and the blit, the
-        reader's destination the slab slot's pointer; the four gates.
-  - [ ] Step 3 (numerics): golden IDENTICAL on both boxes and both profiles at `slot` and
-        `ring`, and at `slot` under `speculative-validate` and `gpu-residency`.
-  - [ ] Step 4 (the arms, mini): `ring` against `slot` at production's defaults, mirrored
-        (prod, slot, slot, prod per shape, the follow-ups as controls); the readings: the
-        adopted-only fixup layers per token, `prefetch_before_classify`, misses per token,
-        the wall and tok/s.
-  - [ ] Step 5 (the rule): real (both orders on all three shapes above the repeats' drift)
-        and free (the controls unmoved, golden identical) flips the default to `slot`.
-  - [ ] Step 6 (design doc, review).
+        load. **DONE 2026-09-07** (the design doc's step zero, part 2). The kernel-boundary
+        probe and the merge's pricing (retention by the replay, the device's buffer limit).
+        **DONE 2026-09-07** (the design doc's step zero, part 3; the archive
+        `~/.claude/handoffs/archive/shrike-v16-t2-step0/`).
+  - [x] Step 1 (tests RED first). `ExpertCellArenaTests`: cells non-overlapping at the
+        stride, one buffer, `offset(cell:)` and `cell(atOffset:)` inverse, the pointer at
+        the offset. `PreadExpertStreamerTests+Landing`: a claimed landing publishes
+        `loading` at its global cell and is neither a hit nor a victim for the plan; a
+        completed landing publishes `resident` at the cell and the next plan hits it with
+        the swap (the expert's plan buffer at the landing's cell, the victim's cell in
+        `freedCells`, the victim's expert `empty`, the entry republished under the slot's
+        next generation); a
+        completed landing the GPU missed is `adopted`, not a miss, and swapped the same;
+        an unwanted completed landing is dropped at the plan (`empty`, its cell still the
+        ring's and absent from `freedCells`); a
+        landing still loading at the plan is joined and then swapped; a failed landing
+        is `empty` and counts nothing resident; a landing for an expert the pool already
+        holds is discarded at completion; `dropLanding` publishes `empty`; every
+        residency entry's slot is the global cell. `ExpertPrefetchRingTests`: a slot
+        carries a cell; `consume` with `freedCells` moves the entry to the freed cell;
+        `readyCells` waits to completion and counts past-bound waits as late; the reclaim
+        calls the drop callback before a cell is reused. `RuntimeConfigurationTests`:
+        `SHRIKE_PREFETCH_ADOPT` set is refused by name; the banner without `adopt=`.
+        The two deleted suites removed. Run the touched suites: RED. **DONE 2026-09-07**
+        (RED as a compile failure: the API absent, the deleted sources still referenced by
+        the runner; the loader test's offset expectation, a property of the per-layer slab,
+        rewritten to the arena's cell in Step 2).
+  - [x] Step 2 (the code): the arena, the streamer, the ring, the model, the runner, the
+        configuration, the counters, the deletions; the touched suites GREEN; the four
+        gates (the swiftlint baseline must not gain an entry: decompose). **DONE 2026-09-07**
+        (7652fb6; 121 targeted tests GREEN after two counting fixes, a joined batch counting
+        every prediction it carried and the banner's second expectation; the release build
+        clean, swiftlint strict clean with the baseline regenerated for two grown entries,
+        the streamer's init and the decode routed function, 18 entries before and after, none
+        added; 67 markdown files 0 broken links; the full suite 1322 tests GREEN).
+  - [x] Step 3 (numerics): golden IDENTICAL on both boxes and both profiles at the
+        default, with `SHRIKE_PREDICTIVE_PREFETCH=0`, under `speculative-validate` and
+        under `gpu-residency`; the per-slot layout's golden with the prefetch refused.
+        **DONE 2026-09-07** (IDENTICAL on both profiles: locally at the default, prefetch off,
+        speculative-validate, gpu-residency and per-slot under hit-fixup; on the mini at the
+        default and prefetch off).
+  - [x] Step 4 (the arms, mini): the merge at the bare launch, two lifetimes per shape
+        through the rig (`v16t2-prod-*`), against T1's cut 4 rows at c9b79cb; the merge
+        with the prefetch off, one lifetime per shape, as the control; the readings: the
+        adopted-only fixup layers per token (expected to fall by the race's share),
+        `prefetch_landed_hits` and the race counters, misses per token (today's 20.0 /
+        20.0 / 18.8), the wall and tok/s. **DONE 2026-09-07** (the design doc's Task 2 table:
+        landed hits 7.3 / 6.0 / 6.4 of 10.6 / 10.2 / 9.4 adopted per token, the adopted-only
+        fixup layers 5.4 / 5.1 / 4.7 to 1.7 / 2.2 / 1.5, misses unchanged, tok/s 15.34 / 15.35,
+        16.46 / 16.48, 16.12 / 16.14 against T1's, every answer identical; the prefetch-off
+        control 14.01 / 14.46 / 14.59 at the replay's no-fills misses).
+  - [x] Step 5 (the rule): real (the adopted-only fixup layers fall on all three shapes,
+        the misses per token at today's within 0.3, tok/s above T1's rows beyond the
+        repeats' drift or within it with the fixup layers' fall as the mechanism's proof)
+        and free (golden identical everywhere above) keeps the merge; a loss on any shape
+        reverts by deploy and the chapter closes on the instrument and the step zero.
+        **DONE 2026-09-07: the merge STAYS.** Real by the mechanism (the fixup layers' fall on
+        all three shapes, misses at today's) and free (golden, no loss); the wall flat within
+        the drift, the removed round trips paid under the drive (the design doc's readings).
+  - [x] Step 6 (design doc, review). **DONE 2026-09-07** (the design doc's Task 2 section
+        and After T2 block; two fresh reviewers on 7652fb6, a correctness reviewer and a
+        silent-failure hunter, archived at `~/.claude/handoffs/archive/shrike-v16-t2/`: one
+        HIGH, the swap ran for every planner of the layer while only the decode path returned
+        the freed cell, so a prefill plan could leave the ring a cell the pool owned, folded by
+        swapping only the landings the ring leased to the plan; MEDIUMs folded: the pool
+        layout's unwind, the reclaim window at probe distances above one, JOIN_US=0 refused,
+        the arena sized by the routed layers, refused claims no longer counted as adoptions,
+        prefetch_failed; LOWs folded: the swap's generation and republish, landed hits from
+        the plan's swaps, a pool-owned cell refused, consume dropping what it does not
+        exchange, the comments; the whole-branch review verified every fold, found no code
+        defect blocking the merge, and its three documentation errors and five naming
+        cleanups were folded; every fold amended into 7652fb6, the four gates and the golden
+        cells rerun on the final tree).
 
 ## Candidates (not scheduled)
 
-- **The exchange at plan time (variant C).** The blit's copy alone, 10 x 1.77 MB per token
-  of GPU under the demand wait; a likely null. Priced only if Task 2 is ruled out and the
-  blit's own GPU time is ever isolated in the kernel stats.
+- **The landing in the pool's own slot (variant B, Task 2 as first designed).** A victim
+  claimed at issue for every prediction, wrong ones included; the replay prices its misses
+  at the swap's (19.7 / 19.9 / 18.9 against 19.9 / 19.8 / 18.7). Superseded by the merge,
+  which evicts only for a right prediction and deletes the copy; kept as the record.
+- **The exchange at plan time (variant C).** The blit's copy alone; retired with the blit
+  by the merge.
+- **A second base for cells beyond one buffer.** The merge's single buffer fits the mini's
+  8.88 GiB limit only up to about 128 slots at the production stride; a larger budget
+  there needs the kernels given a second base and the cell index split across the two.
+- **The consolidation series (a following chapter, Davor's direction of 2026-09-07).**
+  After the merge: the architecture document the repo lacks (the decode path as it stands,
+  each surviving piece annotated by the measurement that keeps it); the knobs pruned by
+  measured status (losers and nulls deleted with git as their record, winners as defaults
+  without a switch, an A/B only for a lever still open); one residency publish path; the
+  runner decomposed into explicit stages (the baseline's eighteen long functions). Each
+  step real (fewer states) and free (golden identical, the arms unmoved).
 - **The reading layers themselves.** 12.6 to 13.7 per token at production's per-read
   cost; no lever named.
 
