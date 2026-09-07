@@ -326,27 +326,23 @@ import Testing
             == "depth=4")
     }
 
-    @Test func prefillGapLeversDescriptionReportsResidencyAllocationsAndCacheLayout() {
+    @Test func prefillGapLeversDescriptionReportsResidencyAllocations() {
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
-            == "overlap=on residency=set allocations=24 sweep=fixed cache_layout=pool"
-                + " expert_io=threads=4 batch_depth=1 protect=chunk prefetch=off")
+            sweepMode: .fixed)
+            == "overlap=on residency=set allocations=24 sweep=fixed prefetch=off")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: false, residencyAllocationCount: 0, poolResidencyUnavailableReason: nil,
-            sweepMode: .alternate, cacheLayout: .perSlot, expertIOThreads: 4, expertIOBatchDepth: 1)
-            == "overlap=off residency=set allocations=0 sweep=alternate cache_layout=per-slot"
-                + " expert_io=threads=4 batch_depth=1 protect=chunk prefetch=off")
+            sweepMode: .alternate)
+            == "overlap=off residency=set allocations=0 sweep=alternate prefetch=off")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: "boom",
-            sweepMode: .alternate, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
-            == "overlap=on residency=unavailable reason=boom sweep=alternate cache_layout=pool"
-                + " expert_io=threads=4 batch_depth=1 protect=chunk prefetch=off")
+            sweepMode: .alternate)
+            == "overlap=on residency=unavailable reason=boom sweep=alternate prefetch=off")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
-            == "overlap=on residency=none sweep=fixed cache_layout=pool"
-                + " expert_io=threads=4 batch_depth=1 protect=chunk prefetch=off")
+            sweepMode: .fixed)
+            == "overlap=on residency=none sweep=fixed prefetch=off")
     }
 
     @Test func prefillGapLeversDescriptionReportsThePrefetchInEffect() {
@@ -354,23 +350,22 @@ import Testing
                                  distance: 2, tracePath: nil, joinMicros: 400, probe: .fused)
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1,
+            sweepMode: .fixed,
             prefetch: on, prefetchTopM: 8)
-            == "overlap=on residency=set allocations=24 sweep=fixed cache_layout=pool"
-                + " expert_io=threads=4 batch_depth=1 protect=chunk"
+            == "overlap=on residency=set allocations=24 sweep=fixed"
                 + " prefetch=on top_m=8 inflight=2 placement=beside distance=2 join_us=400 probe=fused")
         let architectureTopM = RuntimePrefetch(enabled: true, topM: nil, inFlight: 1,
                                                placement: .after, distance: 1, tracePath: nil)
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1,
+            sweepMode: .fixed,
             prefetch: architectureTopM, prefetchTopM: 4)
             .hasSuffix(" prefetch=on top_m=4 inflight=1 placement=after distance=1 join_us=400 probe=fused"))
         let traceOnly = RuntimePrefetch(enabled: false, topM: nil, inFlight: 1, placement: .after,
                                         distance: 1, tracePath: "/tmp/prefetch-trace.jsonl")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1,
+            sweepMode: .fixed,
             prefetch: traceOnly, prefetchTopM: 4)
             .hasSuffix(" prefetch=off trace=on probe=fused"))
     }
@@ -401,42 +396,27 @@ import Testing
         }
     }
 
-    @Test func prefillGapLeversDescriptionReportsAnInvalidReaderParse() {
-        let line = RealForwardRunner.prefillGapLeversDescription(
-            overlap: true, residencyAllocationCount: 1, poolResidencyUnavailableReason: nil,
-            sweepMode: .resident, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1,
-            expertIOParseFailure: "unsupported SHRIKE_EXPERT_IO_THREADS 'many'")
-
-        #expect(line.contains("expert_io=invalid(unsupported SHRIKE_EXPERT_IO_THREADS 'many')"))
-        #expect(!line.contains("threads=4"))
-    }
-
     @Test func prefillGapLeversDescriptionReportsTheSweepMode() {
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .carry, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
-            == "overlap=on residency=set allocations=24 sweep=carry cache_layout=pool"
-                + " expert_io=threads=4 batch_depth=1 protect=chunk prefetch=off")
+            sweepMode: .carry)
+            == "overlap=on residency=set allocations=24 sweep=carry prefetch=off")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .recency, sweepTail: 96, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
-            == "overlap=on residency=set allocations=24 sweep=recency tail=96 cache_layout=pool"
-                + " expert_io=threads=4 batch_depth=1 protect=chunk prefetch=off")
+            sweepMode: .recency, sweepTail: 96)
+            == "overlap=on residency=set allocations=24 sweep=recency tail=96 prefetch=off")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .recency, sweepTail: 48, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
-            == "overlap=on residency=set allocations=24 sweep=recency tail=48 cache_layout=pool"
-                + " expert_io=threads=4 batch_depth=1 protect=chunk prefetch=off")
+            sweepMode: .recency, sweepTail: 48)
+            == "overlap=on residency=set allocations=24 sweep=recency tail=48 prefetch=off")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed, sweepTail: 48, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
-            == "overlap=on residency=set allocations=24 sweep=fixed cache_layout=pool"
-                + " expert_io=threads=4 batch_depth=1 protect=chunk prefetch=off")
+            sweepMode: .fixed, sweepTail: 48)
+            == "overlap=on residency=set allocations=24 sweep=fixed prefetch=off")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .resident, sweepTail: 96, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 1)
-            == "overlap=on residency=set allocations=24 sweep=resident cache_layout=pool"
-                + " expert_io=threads=4 batch_depth=1 protect=chunk prefetch=off")
+            sweepMode: .resident, sweepTail: 96)
+            == "overlap=on residency=set allocations=24 sweep=resident prefetch=off")
     }
 
     @Test func sweepTailDefaultsAndFailsClosed() throws {

@@ -290,11 +290,6 @@ import ShrikeDecodeProtocol
 
     private static func appRuntimeOptions(_ options: DecodeRuntimeOptions) throws
         -> AppRuntimeOptions {
-        guard let cachePolicy = AppExpertCachePolicy(
-            rawValue: options.expertCachePolicy) else {
-            throw AppInferenceError.invalidRequest(
-                "unknown expert cache policy \(options.expertCachePolicy)")
-        }
         guard let modelVerification = AppModelVerification(
             rawValue: options.modelVerification) else {
             throw AppInferenceError.invalidRequest(
@@ -315,7 +310,6 @@ import ShrikeDecodeProtocol
         }
         let resolved = AppRuntimeOptions(
             expertCacheSlots: options.expertCacheSlots,
-            expertCachePolicy: cachePolicy,
             prefillEnabled: options.prefillEnabled,
             prefillChunkTokens: options.prefillChunkTokens,
             modelVerification: modelVerification,

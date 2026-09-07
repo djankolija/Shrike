@@ -212,7 +212,6 @@ actor RealInferenceSession {
                 device: context.device,
                 expecting: expectedArch,
                 streamingMode: .pread(slotCount: runtimeConfiguration.expertCacheSlots),
-                expertCachePolicy: runtimeConfiguration.modelExpertCachePolicy,
                 integrityPolicy: key.options.modelVerification.runtimeValue)
             try Task.checkCancellation()
 

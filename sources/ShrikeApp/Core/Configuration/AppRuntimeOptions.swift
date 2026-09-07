@@ -1,15 +1,6 @@
 import Foundation
 import Shrike
 
-public enum AppExpertCachePolicy: String, CaseIterable, Sendable, Identifiable {
-    case lfu
-    case lru
-    case agingLFU = "aging-lfu"
-
-    public var id: String { rawValue }
-    public var label: String { rawValue.uppercased() }
-}
-
 public enum AppModelVerification: String, CaseIterable, Sendable, Identifiable {
     case fullSha256 = "full-sha256"
     case trustedInstall = "trusted-install"
@@ -37,7 +28,6 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         RuntimeConfiguration.allowedPrefillChunkTokens
 
     public var expertCacheSlots: Int
-    public var expertCachePolicy: AppExpertCachePolicy
     public var prefillEnabled: Bool
     public var prefillChunkTokens: Int
     public var modelVerification: AppModelVerification
@@ -47,7 +37,6 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var ropeScalingMode: RuntimeRoPEScalingMode
 
     public init(expertCacheSlots: Int = 64,
-                expertCachePolicy: AppExpertCachePolicy = .agingLFU,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = RuntimeConfiguration.qwenLongPrefillChunkTokens,
                 modelVerification: AppModelVerification = .fullSha256,
@@ -56,7 +45,6 @@ public struct AppRuntimeOptions: Equatable, Sendable {
                 kvCachePrecision: KVCachePrecision = .int8,
                 ropeScalingMode: RuntimeRoPEScalingMode = .none) {
         self.expertCacheSlots = expertCacheSlots
-        self.expertCachePolicy = expertCachePolicy
         self.prefillEnabled = prefillEnabled
         self.prefillChunkTokens = prefillChunkTokens
         self.modelVerification = modelVerification
@@ -85,7 +73,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         let prefill = prefillEnabled ? "prefill \(prefillChunkTokens)" : "prefill off"
         let verification = modelVerification == .fullSha256 ? "full SHA-256" : "trusted receipt"
         let scaling = ropeScalingMode == .yarn ? "YaRN" : "native RoPE"
-        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), \(kvCachePrecision.label) KV, \(scaling), thinking \(thinkingMode.rawValue), \(verification)"
+        return "Cache \(expertCacheSlots), \(prefill), \(kvCachePrecision.label) KV, \(scaling), thinking \(thinkingMode.rawValue), \(verification)"
     }
 
     public static func slotsLabel(for slots: Int) -> String {
@@ -102,13 +90,6 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         try validate()
         return try RuntimeConfiguration(
             expertCacheSlots: expertCacheSlots,
-            expertCachePolicy: {
-                switch expertCachePolicy {
-                case .lru: .lru
-                case .lfu: .lfu
-                case .agingLFU: .agingLFU
-                }
-            }(),
             prefillEnabled: prefillEnabled,
             prefillChunkTokens: prefillChunkTokens,
             forceLogitsHead: forceLogitsHead,
@@ -123,7 +104,6 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
     public var modelDirectory: URL
     public var maxContextTokens: Int
     public var expertCacheSlots: Int
-    public var expertCachePolicy: AppExpertCachePolicy
     public var modelVerification: AppModelVerification
     public var forceLogitsHead: Bool
     public var kvCachePrecision: KVCachePrecision
@@ -137,7 +117,6 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
         self.modelDirectory = modelDirectory.standardizedFileURL
         self.maxContextTokens = maxContextTokens
         self.expertCacheSlots = options.expertCacheSlots
-        self.expertCachePolicy = options.expertCachePolicy
         self.modelVerification = options.modelVerification
         self.forceLogitsHead = forceLogitsHead
         self.kvCachePrecision = options.kvCachePrecision

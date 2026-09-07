@@ -132,8 +132,8 @@ selected their losers (`SHRIKE_DECODE_EXPERT_EXECUTION`, `SHRIKE_EXPERT_IO_SYNC`
 `tools/decode-measure.sh` and the `tools/parse-*-stats.py` parsers.
 **`--ram-budget 8G` is the measured optimum on the 16 GB mini** (snaps to 128
 expert slots ≈ 9.06 GB actually allocated; leaves ~11 % free, watch pressure).
-If the pool slab allocation ever fails at startup, the error is loud —
-`SHRIKE_EXPERT_CACHE_LAYOUT=per-slot` is the explicit fallback.
+If the pool slab allocation ever fails at startup, the error is loud; the pool
+is the only layout since v17 (per-slot was v9's measured loss).
 
 ## Where documents go
 

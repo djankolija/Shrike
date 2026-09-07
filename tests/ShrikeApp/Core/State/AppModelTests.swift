@@ -17,7 +17,6 @@ import Testing
         #expect(request.repetitionPenalty == 1)
         #expect(!request.isPureGreedy)
         #expect(request.runtimeOptions.expertCacheSlots == 64)
-        #expect(request.runtimeOptions.expertCachePolicy == .agingLFU)
         #expect(request.runtimeOptions.prefillEnabled)
     }
 
@@ -70,7 +69,7 @@ import Testing
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
 
         #expect(!model.hasStaleLoadedRuntime)
-        model.runtimeOptions.expertCachePolicy = .lru
+        model.runtimeOptions.expertCacheSlots = 32
         #expect(model.hasStaleLoadedRuntime)
     }
 
@@ -186,7 +185,7 @@ import Testing
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
 
         #expect(model.canRun)
-        model.runtimeOptions.expertCachePolicy = .lru
+        model.runtimeOptions.expertCacheSlots = 32
         #expect(model.hasStaleLoadedRuntime)
         #expect(!model.canRun)
         #expect(model.canReloadModel)

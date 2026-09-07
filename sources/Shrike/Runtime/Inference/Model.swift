@@ -38,7 +38,6 @@ public struct Model {
     public let device: MTLDevice
     public let config: ArchConfig
     public let streamingMode: ExpertStreamingMode
-    public let expertCachePolicy: ExpertCachePolicy
     public let integrityPolicy: ModelIntegrityPolicy
     public var modelID: String { manifest.modelID }
     public var sourceSnapshotHash: String? { manifest.sourceSnapshotHash }
@@ -88,15 +87,8 @@ public struct Model {
     final class StreamersBox: @unchecked Sendable {
         var streamers: [PreadExpertStreamer?]
         var layerVerified: [Bool]
-        /// One staging ring is shared by every lazy layer streamer. Allocating
-        /// one per layer would turn a small event bridge into hundreds of MiB
-        /// of undeclared working set.
-        var metalStagingPool: MetalExpertStagingPool?
-        /// Layer files need separate handles, but not separate MTLIO queues.
-        /// One queue prevents prefill from exhausting Metal-I/O worker threads.
-        var metalIOService: MetalExpertIOService?
         /// One arena for every layer's pool cells and the ring's, allocated
-        /// at the first layer's opening under the pool layout.
+        /// at the first layer's opening.
         var arena: ExpertCellArena?
         var prefetchCellCount = 0
         var prefetchCells: [Int] = []
@@ -109,7 +101,6 @@ public struct Model {
     init(device: MTLDevice,
          config: ArchConfig,
          streamingMode: ExpertStreamingMode,
-         expertCachePolicy: ExpertCachePolicy,
          integrityPolicy: ModelIntegrityPolicy,
          residentBuffer: ResidentBuffer,
          residentIndex: ResidentIndex,
@@ -121,7 +112,6 @@ public struct Model {
         self.device = device
         self.config = config
         self.streamingMode = streamingMode
-        self.expertCachePolicy = expertCachePolicy
         self.integrityPolicy = integrityPolicy
         self.residentBuffer = residentBuffer
         self.residentIndex = residentIndex
@@ -264,7 +254,6 @@ public struct Model {
         return Model(device: device,
                      config: config,
                      streamingMode: streamingMode,
-                     expertCachePolicy: expertCachePolicy,
                      integrityPolicy: integrityPolicy,
                      residentBuffer: residentBuffer,
                      residentIndex: residentIndex,
@@ -533,58 +522,28 @@ public struct Model {
         case .pread(let configuredSlotCount):
             slotCount = configuredSlotCount
         }
-        let metalStagingPool: MetalExpertStagingPool?
-        let metalIOService: MetalExpertIOService?
-        if try ExpertIOBackend.environmentValue() == .metal {
-            if streamersBox.metalStagingPool == nil {
-                streamersBox.metalStagingPool = try MetalExpertStagingPool(
-                    device: device,
-                    byteCount: Int(packedExpertsLayout.expertStride),
-                    // Decode routes at most top-8 experts. A single exclusive
-                    // lease keeps native MTLIO shared-event values ordered.
-                    slotCapacity: 8)
-            }
-            if streamersBox.metalIOService == nil {
-                streamersBox.metalIOService = try MetalExpertIOService(
-                    device: device, maximumCommandsInFlight: 4)
-            }
-            metalStagingPool = streamersBox.metalStagingPool
-            metalIOService = streamersBox.metalIOService
-        } else {
-            metalStagingPool = nil
-            metalIOService = nil
+        // Dense layers own no cells: the arena is sized by the routed layers.
+        let routedLayers = packedExpertsLayout.layers.indices.filter {
+            !packedExpertsLayout.layers[$0].experts.isEmpty
         }
-        var arena: ExpertCellArena?
-        var cellRange: Range<Int>?
-        if try ExpertCacheLayout.environmentValue() == .pool {
-            // Dense layers own no cells: the arena is sized by the routed layers.
-            let routedLayers = packedExpertsLayout.layers.indices.filter {
-                !packedExpertsLayout.layers[$0].experts.isEmpty
-            }
-            if streamersBox.arena == nil {
-                let pageSize = Int(getpagesize())
-                let stride = ((Int(packedExpertsLayout.expertStride) + pageSize - 1) / pageSize) * pageSize
-                let poolCells = routedLayers.count * slotCount
-                streamersBox.arena = try ExpertCellArena(
-                    device: device,
-                    cellCount: poolCells + streamersBox.prefetchCellCount,
-                    stride: stride)
-                streamersBox.prefetchCells = Array(poolCells..<(poolCells + streamersBox.prefetchCellCount))
-            }
-            arena = streamersBox.arena
-            let ordinal = routedLayers.firstIndex(of: L) ?? 0
-            cellRange = (ordinal * slotCount)..<((ordinal + 1) * slotCount)
+        if streamersBox.arena == nil {
+            let pageSize = Int(getpagesize())
+            let stride = ((Int(packedExpertsLayout.expertStride) + pageSize - 1) / pageSize) * pageSize
+            let poolCells = routedLayers.count * slotCount
+            streamersBox.arena = try ExpertCellArena(
+                device: device,
+                cellCount: poolCells + streamersBox.prefetchCellCount,
+                stride: stride)
+            streamersBox.prefetchCells = Array(poolCells..<(poolCells + streamersBox.prefetchCellCount))
         }
+        let ordinal = routedLayers.firstIndex(of: L) ?? 0
         streamersBox.streamers[L] = try PreadExpertStreamer(
             layout: layout,
             device: device,
             slotCount: slotCount,
-            cachePolicy: expertCachePolicy,
             eventCoordinator: expertIOEventCoordinator,
-            metalStagingPool: metalStagingPool,
-            metalIOService: metalIOService,
-            arena: arena,
-            cellRange: cellRange)
+            arena: streamersBox.arena,
+            cellRange: (ordinal * slotCount)..<((ordinal + 1) * slotCount))
     }
 
     /// Test hook: how many layer files have been opened so far.
@@ -608,7 +567,6 @@ extension Model {
                             device: MTLDevice,
                             expecting: ArchConfig = .qwen36_35B_A3B,
                             streamingMode: ExpertStreamingMode = .pread(slotCount: 32),
-                            expertCachePolicy: ExpertCachePolicy = PreadExpertStreamer.cachePolicyDefault,
                             integrityPolicy: ModelIntegrityPolicy? = nil,
                             loadStats: UnsafeMutablePointer<ModelLoadStats>? = nil) throws -> Model {
         var stats = ModelLoadStats()
@@ -786,7 +744,6 @@ extension Model {
             device: device,
             config: expecting,
             streamingMode: streamingMode,
-            expertCachePolicy: expertCachePolicy,
             integrityPolicy: resolvedIntegrityPolicy,
             residentBuffer: residentBuffer,
             residentIndex: residentIndex,

@@ -2,7 +2,6 @@ import Darwin
 import Foundation
 import Metal
 import ShrikeKernelsC
-import Synchronization
 
 public struct ExpertCachePlan: Sendable, Equatable {
     /// K11: the layer the plan's pread offsets are computed against.
@@ -144,107 +143,14 @@ public struct ExpertStreamingStatistics: Sendable, Equatable {
     }
 }
 
-public enum ExpertCachePolicy: String, Sendable {
-    case lru
-    case lfu
-    case agingLFU = "aging-lfu"
-}
-
-/// `SHRIKE_EXPERT_CACHE_PROTECT`: `chunk` keeps a slot holding an expert a
-/// later tile of the same layer-chunk still needs out of the victim set,
-/// falling back to `off`'s eligibility when too few slots remain; `chunk`
-/// is the v13 T4 measured winner and today's default, `off` the A/B.
-public enum ExpertCacheProtectMode: String, Sendable {
-    case off
-    case chunk
-
-    static func environmentValue(
-        _ environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> ExpertCacheProtectMode {
-        guard let raw = environment["SHRIKE_EXPERT_CACHE_PROTECT"] else { return .chunk }
-        guard let mode = ExpertCacheProtectMode(rawValue: raw) else {
-            throw ModelError.internalInconsistency(
-                detail: "unsupported SHRIKE_EXPERT_CACHE_PROTECT '\(raw)'; allowed: off, chunk")
-        }
-        return mode
-    }
-}
-
-public enum ExpertIOBackend: String, Sendable {
-    case pread
-    case metal
-
-    static func environmentValue(
-        _ environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> ExpertIOBackend {
-        guard let raw = environment["SHRIKE_EXPERT_IO_BACKEND"] else { return .pread }
-        guard let backend = ExpertIOBackend(rawValue: raw) else {
-            throw ModelError.internalInconsistency(
-                detail: "unsupported SHRIKE_EXPERT_IO_BACKEND '\(raw)'; allowed: pread, metal")
-        }
-        return backend
-    }
-}
-
-public enum ExpertCacheLayout: String, Sendable {
-    case perSlot = "per-slot"
-    case pool
-
-    static func environmentValue(
-        _ environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> ExpertCacheLayout {
-        guard let raw = environment["SHRIKE_EXPERT_CACHE_LAYOUT"] else { return .pool }
-        guard let layout = ExpertCacheLayout(rawValue: raw) else {
-            throw ModelError.internalInconsistency(
-                detail: "unsupported SHRIKE_EXPERT_CACHE_LAYOUT '\(raw)'; allowed: per-slot, pool")
-        }
-        return layout
-    }
-}
-
-struct BoundedReaderConfiguration: Sendable, Equatable {
+enum BoundedReaderConfiguration {
     static let defaultThreads = 4
-    /// Unset `SHRIKE_EXPERT_IO_BATCH_DEPTH` takes 2 (two published batches,
-    /// the v13 T2 winner); `=1` restores the single-batch reader as the A/B.
+    /// Two published batches, the v13 T2 winner.
     static let defaultBatchDepth = 2
-
-    let threads: Int
-    let batchDepth: Int
-
-    static func environmentValue(
-        _ environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> BoundedReaderConfiguration {
-        BoundedReaderConfiguration(
-            threads: try parseThreads(environment["SHRIKE_EXPERT_IO_THREADS"]),
-            batchDepth: try parseBatchDepth(environment["SHRIKE_EXPERT_IO_BATCH_DEPTH"]))
-    }
-
-    private static func parseThreads(_ raw: String?) throws -> Int {
-        guard let raw else { return defaultThreads }
-        let range = 1...Int(SHRIKE_IO_MAX_THREADS)
-        guard let value = Int(raw), range.contains(value) else {
-            throw ModelError.internalInconsistency(
-                detail: "unsupported SHRIKE_EXPERT_IO_THREADS '\(raw)'; allowed: \(range.lowerBound)-\(range.upperBound)")
-        }
-        return value
-    }
-
-    private static func parseBatchDepth(_ raw: String?) throws -> Int {
-        guard let raw else { return defaultBatchDepth }
-        let range = 1...Int(SHRIKE_IO_MAX_BATCHES)
-        guard let value = Int(raw), range.contains(value) else {
-            throw ModelError.internalInconsistency(
-                detail: "unsupported SHRIKE_EXPERT_IO_BATCH_DEPTH '\(raw)'; allowed: \(range.lowerBound)-\(range.upperBound)")
-        }
-        return value
-    }
 }
 
-/// Raw staging pointers are allocated by Metal and remain valid until the
-/// owning prefetch ring releases them. This wrapper makes that lifetime
-/// invariant explicit at the scheduler boundary.
-/// unchecked-invariant: the ring retains every backing MTLBuffer until this
-/// request has reached a terminal state.
+/// unchecked-invariant: the destinations are `ExpertCellArena` cells (v16),
+/// alive for the model's lifetime, so the raw pointers outlive this request.
 private final class PrefetchDestinations: @unchecked Sendable {
     let values: [UnsafeMutableRawPointer]
 
@@ -254,24 +160,17 @@ private final class PrefetchDestinations: @unchecked Sendable {
 }
 
 /// SSD-backed routed-expert streamer with a fixed per-layer slot cache.
-/// unchecked-invariant: the expert cache bookkeeping is guarded by `cacheLock`,
-/// which is what lets `DispatchQueue.concurrentPerform` fan the misses out
-/// across threads. Slot state is published only after all direct reads finish,
-/// so concurrent planners never treat partial bytes as resident.
+/// unchecked-invariant: the expert cache bookkeeping is guarded by `cacheLock`.
+/// Slot state is published only after a read finishes, so concurrent planners
+/// never treat partial bytes as resident.
 public final class PreadExpertStreamer: @unchecked Sendable {
-    public static let scratchAlignment = 2 * 1024 * 1024
-    public static var cachePolicyDefault: ExpertCachePolicy { .agingLFU }
-
     public let layout: StreamLayout
     public let slotCount: Int
-    public let cachePolicy: ExpertCachePolicy
-    public let ioBackend: ExpertIOBackend
-    public let cacheLayout: ExpertCacheLayout
     public let poolSlotStride: Int
 
     private let fd: Int32
 
-    /// Bounded-footprint reader. On by default; `SHRIKE_BOUNDED_IO=0` opts out.
+    /// Bounded-footprint reader.
     ///
     /// Opens its own F_NOCACHE descriptors so expert reads never enter the unified
     /// buffer cache. That makes the slot budget the machine's true footprint,
@@ -286,15 +185,12 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// memory it never declares: process RSS looks smaller while the OS holds the
     /// difference, so "a 35B model in 1 GB" stops being true. A footprint you can
     /// account for is the product; throughput is what is being traded for it.
-    private let boundedReader: ParallelExpertReader?
-    private let metalReader: MetalExpertReader?
+    private let boundedReader: ParallelExpertReader
     private let eventCoordinator: ExpertIOEventCoordinator?
-    private let metalStagingPool: MetalExpertStagingPool?
-    private let metalIOService: MetalExpertIOService?
     private var slotPointers: [UnsafeMutableRawPointer]
     private var slotBuffers: [MTLBuffer]
     private var slotBufferOffsets: [UInt64]
-    private let arena: ExpertCellArena?
+    private let arena: ExpertCellArena
     private let residencyTable: MTLBuffer
 
     private struct Landing {
@@ -343,10 +239,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public init(layout: StreamLayout,
                 device: MTLDevice,
                 slotCount: Int,
-                cachePolicy: ExpertCachePolicy = .agingLFU,
                 eventCoordinator: ExpertIOEventCoordinator? = nil,
-                metalStagingPool: MetalExpertStagingPool? = nil,
-                metalIOService: MetalExpertIOService? = nil,
                 arena: ExpertCellArena? = nil,
                 cellRange: Range<Int>? = nil) throws {
         precondition(slotCount > 0, "slotCount must be positive")
@@ -354,20 +247,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.reservedSlots = Array(repeating: false, count: slotCount)
         self.victimSlotsScratch = Array(repeating: -1, count: slotCount)
         self.slotCount = slotCount
-        if let rawPolicy = ProcessInfo.processInfo.environment["SHRIKE_EXPERT_CACHE_POLICY"] {
-            guard let experimentalPolicy = ExpertCachePolicy(rawValue: rawPolicy) else {
-                throw ModelError.internalInconsistency(
-                    detail: "unsupported SHRIKE_EXPERT_CACHE_POLICY '\(rawPolicy)'; allowed: lfu, lru, aging-lfu")
-            }
-            self.cachePolicy = experimentalPolicy
-        } else {
-            self.cachePolicy = cachePolicy
-        }
         self.eventCoordinator = eventCoordinator
-        self.metalStagingPool = metalStagingPool
-        self.metalIOService = metalIOService
-        self.ioBackend = try ExpertIOBackend.environmentValue()
-        self.cacheLayout = try ExpertCacheLayout.environmentValue()
         let pageSize = Int(getpagesize())
 
         let openedFD = open(layout.path, O_RDONLY)
@@ -419,108 +299,47 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             residencyEntries[expert] = ExpertResidencyEntry()
         }
 
-        var ownedPointers: [UnsafeMutableRawPointer] = []
-        func unwind() {
-            for index in ownedPointers.indices where index >= buffers.count {
-                free(ownedPointers[index])
+        let cells: ExpertCellArena
+        let range: Range<Int>
+        if let arena {
+            guard arena.stride == poolSlotStride else {
+                close(openedFD)
+                throw ModelError.internalInconsistency(
+                    detail: "expert cell arena stride \(arena.stride) differs from the pool's \(poolSlotStride)")
             }
+            guard let cellRange, cellRange.count == slotCount,
+                  cellRange.lowerBound >= 0, cellRange.upperBound <= arena.cellCount else {
+                close(openedFD)
+                throw ModelError.internalInconsistency(
+                    detail: "expert cell range \(String(describing: cellRange)) does not fit \(slotCount) slots of a \(arena.cellCount)-cell arena")
+            }
+            cells = arena
+            range = cellRange
+        } else {
+            do {
+                cells = try ExpertCellArena(device: device, cellCount: slotCount, stride: poolSlotStride)
+            } catch {
+                close(openedFD)
+                throw error
+            }
+            range = 0..<slotCount
+        }
+        self.arena = cells
+        for cell in range {
+            pointers.append(cells.pointer(cell: cell))
+            buffers.append(cells.buffer)
+            bufferOffsets.append(cells.offset(cell: cell))
+        }
+
+        do {
+            self.boundedReader = try ParallelExpertReader(
+                path: layout.path,
+                expertStride: Int(layout.expertStride),
+                threads: BoundedReaderConfiguration.defaultThreads,
+                batchDepth: BoundedReaderConfiguration.defaultBatchDepth)
+        } catch {
             close(openedFD)
-        }
-
-        if cacheLayout == .pool {
-            let cells: ExpertCellArena
-            let range: Range<Int>
-            if let arena {
-                guard arena.stride == poolSlotStride else {
-                    close(openedFD)
-                    throw ModelError.internalInconsistency(
-                        detail: "expert cell arena stride \(arena.stride) differs from the pool's \(poolSlotStride)")
-                }
-                guard let cellRange, cellRange.count == slotCount,
-                      cellRange.lowerBound >= 0, cellRange.upperBound <= arena.cellCount else {
-                    close(openedFD)
-                    throw ModelError.internalInconsistency(
-                        detail: "expert cell range \(String(describing: cellRange)) does not fit \(slotCount) slots of a \(arena.cellCount)-cell arena")
-                }
-                cells = arena
-                range = cellRange
-            } else {
-                do {
-                    cells = try ExpertCellArena(device: device, cellCount: slotCount, stride: poolSlotStride)
-                } catch {
-                    close(openedFD)
-                    throw error
-                }
-                range = 0..<slotCount
-            }
-            self.arena = cells
-            for cell in range {
-                pointers.append(cells.pointer(cell: cell))
-                buffers.append(cells.buffer)
-                bufferOffsets.append(cells.offset(cell: cell))
-            }
-        } else {
-            self.arena = nil
-            for _ in 0..<slotCount {
-                var raw: UnsafeMutableRawPointer?
-                let result = posix_memalign(&raw, Self.scratchAlignment, allocationSize)
-                guard result == 0, let pointer = raw else {
-                    unwind()
-                    throw StreamerError.allocFailed(errno: result)
-                }
-                pointers.append(pointer)
-                ownedPointers.append(pointer)
-                nonisolated(unsafe) let capturedPointer = pointer
-                guard let buffer = device.makeBuffer(
-                    bytesNoCopy: pointer,
-                    length: allocationSize,
-                    options: .storageModeShared,
-                    deallocator: { _, _ in free(capturedPointer) })
-                else {
-                    unwind()
-                    throw StreamerError.bufferWrapFailed
-                }
-                buffers.append(buffer)
-                bufferOffsets.append(0)
-            }
-        }
-
-        // Fail closed when bounded I/O was requested. Falling through to an
-        // ordinary descriptor would silently create an unbounded second cache
-        // in the macOS page cache and invalidate the declared RAM budget.
-        if ioBackend == .metal {
-            do {
-                if let metalIOService {
-                    self.metalReader = try MetalExpertReader(
-                        path: layout.path, device: device, service: metalIOService)
-                } else {
-                    // Direct construction remains useful for focused tests;
-                    // Model opens pass the one shared service above.
-                    self.metalReader = try MetalExpertReader(
-                        path: layout.path, device: device, maximumCommandsInFlight: 4)
-                }
-            } catch {
-                unwind()
-                throw error
-            }
-            self.boundedReader = nil
-        } else if ProcessInfo.processInfo.environment["SHRIKE_BOUNDED_IO"] != "0" {
-            self.metalReader = nil
-            do {
-                let boundedReaderConfiguration = try BoundedReaderConfiguration.environmentValue()
-                self.boundedReader = try ParallelExpertReader(
-                    path: layout.path,
-                    expertStride: Int(layout.expertStride),
-                    threads: boundedReaderConfiguration.threads,
-                    batchDepth: boundedReaderConfiguration.batchDepth,
-                    bypassCache: true)
-            } catch {
-                unwind()
-                throw error
-            }
-        } else {
-            self.metalReader = nil
-            self.boundedReader = nil
+            throw error
         }
 
         self.slotPointers = pointers
@@ -655,7 +474,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             // requested expert set) is recoverable — throw instead of
             // crashing; the runner already handles thrown errors.
             throw ModelError.expertCacheUnplaceable(
-                detail: "\(experts.count) experts do not fit in \(slotCount) cache slots (policy \(cachePolicy.rawValue), avoiding \(avoidingSlots.count) slots)")
+                detail: "\(experts.count) experts do not fit in \(slotCount) cache slots (avoiding \(avoidingSlots.count) slots)")
         }
         return plan
     }
@@ -697,8 +516,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
 
         let clock = useClock + 1
-        if cachePolicy == .agingLFU,
-           statisticsPlans > 0,
+        if statisticsPlans > 0,
            statisticsPlans.isMultiple(of: 1_024) {
             for i in 0..<expertUseCount.count {
                 expertUseCount[i] >>= 1
@@ -761,7 +579,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                                          generation: nextGeneration)
             }
             if leasedLandings.contains(experts[index]),
-               let landing = landings[experts[index]], landing.resident, let arena {
+               let landing = landings[experts[index]], landing.resident {
                 landings[experts[index]] = nil
                 freedCells[experts[index]] = cellIndexUnlocked(slot)
                 slotPointers[slot] = arena.pointer(cell: landing.cell)
@@ -835,15 +653,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
         if !plan.misses.isEmpty {
             let fetchStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            if let metalReader {
-                try executeMetalReads(plan, reader: metalReader)
-            } else if let boundedReader {
-                try executeBoundedReads(plan, reader: boundedReader)
-            } else {
-                let parallel = ProcessInfo.processInfo.environment["SHRIKE_PARALLEL_IO"] != "0"
-                    && plan.misses.count > 1
-                try executeCachedPreads(plan, parallel: parallel)
-            }
+            try executeBoundedReads(plan, reader: boundedReader)
             fetchNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - fetchStarted
             try markPlanMissesResident(plan)
         }
@@ -872,65 +682,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         guard !plan.misses.isEmpty else {
             let operation = ExpertLoadOperation(
                 completionToken: token,
-                eventCoordinator: eventCoordinator,
-                backendSignalsEvent: false)
+                eventCoordinator: eventCoordinator)
             operation.finish(.success(()))
-            return operation
-        }
-        if let metalReader {
-            if eventDriven {
-                return try beginEventDrivenMetalReads(
-                    plan, reader: metalReader, token: token)
-            }
-            let operation = ExpertLoadOperation(
-                completionToken: token,
-                eventCoordinator: eventCoordinator,
-                backendSignalsEvent: false)
-            operation.markInFlight()
-            let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            do {
-                try beginMetalReads(
-                    plan,
-                    reader: metalReader,
-                    // A native MTLIO signal cross-queued with a waiting compute
-                    // buffer deadlocked on the qualification M3. Keep Metal I/O
-                    // nonblocking, but bridge its completion handler through
-                    // the same proven coordinator used by bounded pread.
-                    completionToken: nil) { [self, operation] result in
-                        switch result {
-                        case .success:
-                            do {
-                                try markPlanMissesResident(plan)
-                                finishPlanExecution(
-                                    plan,
-                                    succeeded: true,
-                                    elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
-                                operation.finish(.success(()))
-                            } catch {
-                                finishPlanExecution(
-                                    plan,
-                                    succeeded: false,
-                                    elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
-                                operation.finish(.failure(error))
-                            }
-                        case .failure(let error):
-                            finishPlanExecution(
-                                plan,
-                                succeeded: false,
-                                elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
-                            operation.finish(.failure(error))
-                        }
-                    }
-            } catch {
-                finishPlanExecution(plan, succeeded: false, elapsedNanos: 0)
-                operation.finish(.failure(error))
-            }
             return operation
         }
         let operation = ExpertLoadOperation(
             completionToken: token,
-            eventCoordinator: eventCoordinator,
-            backendSignalsEvent: false)
+            eventCoordinator: eventCoordinator)
         ExpertIOScheduler.shared.submit { [self, operation] in
             operation.markInFlight()
             do {
@@ -941,134 +699,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             }
         }
         return operation
-    }
-
-    private func beginEventDrivenMetalReads(
-        _ plan: ExpertCachePlan,
-        reader: MetalExpertReader,
-        token: ExpertIOCompletionToken?
-    ) throws -> ExpertLoadOperation {
-        guard let token,
-              let stagingLease = metalStagingPool?.tryAcquire(count: plan.misses.count)
-        else {
-            throw ModelError.internalInconsistency(
-                detail: "event-driven Metal I/O staging ring is unavailable")
-        }
-        let transfer = try makeMetalStagingTransfer(plan: plan, stagingLease: stagingLease)
-        let operation = ExpertLoadOperation(
-            completionToken: token,
-            eventCoordinator: eventCoordinator,
-            // MTLIO writes the status word and signals the event in command
-            // order. Its handler records terminal state but never wakes the
-            // decode task to encode a fixup.
-            backendSignalsEvent: true,
-            metalStagingTransfer: transfer,
-            requiresGPUFinalization: true)
-        operation.markInFlight()
-        let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        do {
-            try beginMetalReads(
-                plan,
-                reader: reader,
-                destinations: stagingLease.buffers,
-                destinationOffsets: [Int](repeating: 0, count: stagingLease.buffers.count),
-                completionToken: token) { [self, operation] result in
-                    switch result {
-                    case .success:
-                        // Cache slots remain LOADING. The runner publishes
-                        // RESIDENT only after its event-gated blit completes.
-                        finishPlanExecution(
-                            plan,
-                            succeeded: true,
-                            elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
-                        operation.finish(.success(()))
-                    case .failure(let error):
-                        finishPlanExecution(
-                            plan,
-                            succeeded: false,
-                            elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
-                        operation.finish(.failure(error))
-                    }
-                }
-        } catch {
-            finishPlanExecution(plan, succeeded: false, elapsedNanos: 0)
-            operation.releaseStagingTransfer()
-            operation.finish(.failure(error))
-        }
-        return operation
-    }
-
-    private func executeMetalReads(_ plan: ExpertCachePlan,
-                                   reader: MetalExpertReader) throws {
-        var offsets: [UInt64] = []
-        var destinations: [MTLBuffer] = []
-        offsets.reserveCapacity(plan.misses.count)
-        destinations.reserveCapacity(plan.misses.count)
-        for index in plan.misses {
-            offsets.append(try fileOffset(plan: plan, index: index))
-            destinations.append(slotBuffers[plan.assignedSlots[index]])
-        }
-        try reader.fetch(
-            offsets: offsets,
-            into: destinations,
-            byteCount: Int(layout.expertStride),
-            destinationOffsets: plan.misses.map {
-                Int(slotBufferOffsets[plan.assignedSlots[$0]])
-            })
-    }
-
-    private func beginMetalReads(
-        _ plan: ExpertCachePlan,
-        reader: MetalExpertReader,
-        destinations explicitDestinations: [MTLBuffer]? = nil,
-        destinationOffsets explicitDestinationOffsets: [Int]? = nil,
-        completionToken: ExpertIOCompletionToken?,
-        completion: @escaping @Sendable (Result<Void, any Error>) -> Void
-    ) throws {
-        var offsets: [UInt64] = []
-        var destinations: [MTLBuffer] = []
-        offsets.reserveCapacity(plan.misses.count)
-        destinations.reserveCapacity(plan.misses.count)
-        for index in plan.misses {
-            offsets.append(try fileOffset(plan: plan, index: index))
-            destinations.append(slotBuffers[plan.assignedSlots[index]])
-        }
-        let finalDestinations = explicitDestinations ?? destinations
-        let finalDestinationOffsets = explicitDestinationOffsets ?? plan.misses.map {
-            Int(slotBufferOffsets[plan.assignedSlots[$0]])
-        }
-        try reader.beginFetch(
-            offsets: offsets,
-            into: finalDestinations,
-            byteCount: Int(layout.expertStride),
-            destinationOffsets: finalDestinationOffsets,
-            completionToken: completionToken,
-            completion: completion)
-    }
-
-    private func makeMetalStagingTransfer(
-        plan: ExpertCachePlan,
-        stagingLease: MetalExpertStagingLease
-    ) throws -> MetalExpertStagingTransfer {
-        var destinations: [MTLBuffer] = []
-        var destinationOffsets: [Int] = []
-        destinations.reserveCapacity(plan.misses.count)
-        destinationOffsets.reserveCapacity(plan.misses.count)
-        for index in plan.misses {
-            let slot = plan.assignedSlots[index]
-            guard slot >= 0, slot < slotBuffers.count else {
-                stagingLease.release()
-                throw ModelError.internalInconsistency(
-                    detail: "Metal I/O staging transfer references an invalid cache slot")
-            }
-            destinations.append(slotBuffers[slot])
-            destinationOffsets.append(Int(slotBufferOffsets[slot]))
-        }
-        return MetalExpertStagingTransfer(
-            lease: stagingLease,
-            destinations: destinations,
-            destinationOffsets: destinationOffsets,
-            byteCount: Int(layout.expertStride))
     }
 
     private func executeBoundedReads(_ plan: ExpertCachePlan,
@@ -1082,30 +712,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             destinations.append(slotPointers[plan.assignedSlots[index]])
         }
         try reader.fetch(offsets: offsets, into: destinations)
-    }
-
-    private func executeCachedPreads(_ plan: ExpertCachePlan,
-                                     parallel: Bool) throws {
-        if parallel {
-            let firstError = Mutex<Error?>(nil)
-            DispatchQueue.concurrentPerform(iterations: plan.misses.count) { offset in
-                do {
-                    try readPlanMiss(plan, index: plan.misses[offset])
-                } catch {
-                    firstError.withLock { if $0 == nil { $0 = error } }
-                }
-            }
-            if let error = firstError.withLock({ $0 }) { throw error }
-            return
-        }
-        for index in plan.misses { try readPlanMiss(plan, index: index) }
-    }
-
-    private func readPlanMiss(_ plan: ExpertCachePlan, index: Int) throws {
-        try readFull(
-            into: slotPointers[plan.assignedSlots[index]],
-            fileOffset: try fileOffset(plan: plan, index: index),
-            count: Int(layout.expertStride))
     }
 
     private func fileOffset(plan: ExpertCachePlan, index: Int) throws -> UInt64 {
@@ -1130,7 +736,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public func expertResidencyResources() -> ExpertResidencyResources {
         ExpertResidencyResources(
             table: residencyTable,
-            expertPool: arena?.buffer,
+            expertPool: arena.buffer,
             poolSlotStride: UInt64(poolSlotStride),
             expertStride: layout.expertStride,
             expertCount: layout.expertsPerLayer)
@@ -1150,8 +756,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// filter+sort's allocations; an all-hit plan never calls this. Ties
     /// resolve to the lower slot index, which the unstable sort left
     /// unspecified. Returns false when fewer than `missCount` slots are
-    /// eligible. `protectedExperts` (non-nil only under
-    /// `SHRIKE_EXPERT_CACHE_PROTECT=chunk`), a `[Bool]` sized `expertsPerLayer`,
+    /// eligible. `protectedExperts`, a `[Bool]` sized `expertsPerLayer`,
     /// excludes a slot whose expert reads `true`, exactly like loading,
     /// pinned, and already-reserved slots, at one array read and no hashing;
     /// the caller retries with `nil` once this returns false. Caller must
@@ -1188,9 +793,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     }
 
     private func shouldEvictSlot(_ lhs: Int, before rhs: Int) -> Bool {
-        if cachePolicy == .lru {
-            return slotLastUse[lhs] < slotLastUse[rhs]
-        }
         let lhsExpert = slotExpert[lhs]
         let rhsExpert = slotExpert[rhs]
         if lhsExpert < 0 || rhsExpert < 0 {
@@ -1276,7 +878,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// classifier, neither a hit nor a victim for a plan. Refused when the
     /// pool holds or is loading the expert, or a landing for it exists.
     public func claimLanding(expert: Int, cell: Int) -> Bool {
-        guard let arena, expert >= 0, expert < layout.expertsPerLayer,
+        guard expert >= 0, expert < layout.expertsPerLayer,
               cell >= 0, cell < arena.cellCount else { return false }
         cacheLock.lock()
         defer { cacheLock.unlock() }
@@ -1330,7 +932,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     /// Whether `cell` backs one of this layer's pool slots.
     private func ownsCell(_ cell: Int) -> Bool {
-        guard let arena else { return false }
         cacheLock.lock()
         defer { cacheLock.unlock() }
         return slotBufferOffsets.contains(arena.offset(cell: cell))
@@ -1344,10 +945,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// an inconsistency and throws. Demand work is always scheduled at
     /// higher priority.
     public func beginPrefetch(experts: [Int], cells: [Int]) throws -> ExpertLoadOperation {
-        guard let arena else {
-            throw ModelError.internalInconsistency(
-                detail: "a prefetch landing requires SHRIKE_EXPERT_CACHE_LAYOUT=pool")
-        }
         guard experts.count == cells.count else {
             throw ModelError.internalInconsistency(
                 detail: "prefetch experts and cells differ in count")
@@ -1378,14 +975,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         ExpertIOScheduler.shared.submit(priority: .speculative) { [self, operation, safeDestinations] in
             operation.markInFlight()
             do {
-                if let boundedReader {
-                    try boundedReader.fetch(offsets: readOffsets, into: safeDestinations.values)
-                } else {
-                    for (offset, destination) in zip(readOffsets, safeDestinations.values) {
-                        try readFull(into: destination, fileOffset: offset,
-                                     count: Int(layout.expertStride))
-                    }
-                }
+                try boundedReader.fetch(offsets: readOffsets, into: safeDestinations.values)
                 for entry in landings { _ = completeLanding(expert: entry.expert, cell: entry.cell) }
                 operation.finish(.success(()))
             } catch {
@@ -1434,23 +1024,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
     }
 
-    /// The Metal staging route copies into cache slots on the GPU after the
-    /// MTLIO event. Its slots cannot become resident until that command buffer
-    /// has completed, otherwise a later layer could read bytes still owned by
-    /// the blit engine.
-    func markStagedMetalPlanResident(_ plan: ExpertCachePlan) throws {
-        try markPlanMissesResident(plan)
-    }
-
-    /// Clears a staged load if its event-gated transfer command fails. This is
-    /// intentionally separate from `finishPlanExecution`: I/O may have
-    /// succeeded and been accounted for, while the GPU copy did not complete.
-    func failStagedMetalPlan(_ plan: ExpertCachePlan) {
-        cacheLock.lock()
-        defer { cacheLock.unlock() }
-        resetLoadingMissesUnlocked(plan)
-    }
-
     /// Planning reserves miss slots as `.loading`, so a plan discarded without
     /// execution must be abandoned or those slots stay un-loadable and
     /// un-evictable for the life of the streamer.
@@ -1477,7 +1050,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     /// The slot's global cell, what the table names and the kernels address.
     private func cellIndexUnlocked(_ slot: Int) -> Int {
-        arena == nil ? slot : Int(slotBufferOffsets[slot]) / poolSlotStride
+        Int(slotBufferOffsets[slot]) / poolSlotStride
     }
 
     /// CPU publication occurs under the cache lock. A loading entry is visible

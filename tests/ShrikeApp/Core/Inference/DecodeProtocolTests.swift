@@ -6,7 +6,6 @@ import ShrikeDecodeProtocol
     @Test func loadRequestRoundTripPreservesEveryPublicRuntimeOption() throws {
         let options = DecodeRuntimeOptions(
             expertCacheSlots: 32,
-            expertCachePolicy: "lru",
             prefillEnabled: false,
             prefillChunkTokens: 64,
             modelVerification: "trusted-install",

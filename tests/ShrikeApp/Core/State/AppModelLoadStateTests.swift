@@ -56,7 +56,7 @@ import Testing
         #expect(!model.canLoadModel)
         #expect(model.canUnloadModel)
 
-        model.runtimeOptions.expertCachePolicy = .lru
+        model.runtimeOptions.expertCacheSlots = 32
         #expect(model.canReloadModel)
         #expect(model.canUnloadModel)
         #expect(!model.canRun)
@@ -94,7 +94,7 @@ import Testing
         model.outputText = "keep me"
         model.promptText = "keep this draft"
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
-        model.runtimeOptions.expertCachePolicy = .lru
+        model.runtimeOptions.expertCacheSlots = 32
 
         model.reloadModel()
         for _ in 0..<200 where !model.loadState.isReady {

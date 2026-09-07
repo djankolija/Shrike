@@ -719,11 +719,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             device: context.device,
             expecting: expectedArch,
             streamingMode: .pread(slotCount: loadSlots),
-            expertCachePolicy: loadRuntime.modelExpertCachePolicy,
             integrityPolicy: .resolved(directoryURL: modelDirectory))
         let runtime = try RuntimeConfiguration(
             expertCacheSlots: loadSlots,
-            expertCachePolicy: loadRuntime.expertCachePolicy,
             prefillChunkTokens: requestedPrefillChunkTokens
                 ?? (model.config.family == .qwen36
                     ? RuntimeConfiguration.qwenLongPrefillChunkTokens
@@ -743,7 +741,6 @@ public actor ServerModelSession: ServerInferenceBackend {
                 device: context.device,
                 expecting: .qwen36MTP,
                 streamingMode: .pread(slotCount: StreamingMTPMemoryPlan.expertSlots),
-                expertCachePolicy: runtime.modelExpertCachePolicy,
                 integrityPolicy: .resolved(directoryURL: mtpModelDirectory))
             let decoder = try StreamingMTPDecoder(
                 targetModel: model,
@@ -768,7 +765,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             .joined()
         let runtimeIdentity = [
             String(runtime.expertCacheSlots),
-            runtime.expertCachePolicy.rawValue,
             runtime.prefillPolicy.rawValue,
             String(runtime.prefillChunkTokens),
             runtime.headPath.rawValue,

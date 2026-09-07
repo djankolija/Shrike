@@ -8,8 +8,7 @@ public enum ExpertLoadOperationState: Sendable, Equatable {
 }
 
 /// One routed-expert storage batch whose submission is independent from its
-/// completion. The operation is deliberately backend-neutral: pread and Metal
-/// I/O publish the same state and error contract to the decode scheduler.
+/// completion.
 ///
 /// unchecked-invariant: all mutable state and continuations are guarded by
 /// `condition`; terminal transition happens exactly once.
@@ -22,37 +21,18 @@ public final class ExpertLoadOperation: @unchecked Sendable {
 
     public let submittedNanos: UInt64
     public let completionToken: ExpertIOCompletionToken?
-    /// Present only for the Metal-I/O staging route. The dependent compute
-    /// command owns the copy into the expert cache and must release it after
-    /// that command completes.
-    let metalStagingTransfer: MetalExpertStagingTransfer?
-    /// A staged Metal load is not resident until the event-gated GPU blit has
-    /// completed. Pread writes cache slots directly and therefore remains
-    /// false.
-    let requiresGPUFinalization: Bool
     private var startedAtNanos: UInt64 = 0
     private var completedAtNanos: UInt64 = 0
 
     private let eventCoordinator: ExpertIOEventCoordinator?
-    private let backendSignalsEvent: Bool
 
     init(completionToken: ExpertIOCompletionToken? = nil,
          eventCoordinator: ExpertIOEventCoordinator? = nil,
-         backendSignalsEvent: Bool = false,
-         metalStagingTransfer: MetalExpertStagingTransfer? = nil,
-         requiresGPUFinalization: Bool = false,
          submittedNanos: UInt64 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) {
-        precondition(!requiresGPUFinalization || metalStagingTransfer != nil,
-                     "a staged Metal load requires a staging transfer")
         self.completionToken = completionToken
         self.eventCoordinator = eventCoordinator
-        self.backendSignalsEvent = backendSignalsEvent
-        self.metalStagingTransfer = metalStagingTransfer
-        self.requiresGPUFinalization = requiresGPUFinalization
         self.submittedNanos = submittedNanos
     }
-
-    func releaseStagingTransfer() { metalStagingTransfer?.release() }
 
     public var state: ExpertLoadOperationState {
         condition.withLock { currentState }
@@ -160,18 +140,14 @@ public final class ExpertLoadOperation: @unchecked Sendable {
         condition.unlock()
 
         if let completionToken, let eventCoordinator {
-            if backendSignalsEvent {
-                eventCoordinator.recordBackendSignal(completionToken)
-            } else {
-                switch result {
-                case .success:
-                    eventCoordinator.publish(completionToken, succeeded: true)
-                case .failure:
-                    // Failure still advances the timeline so a pre-submitted GPU
-                    // command cannot deadlock. Event-aware kernels see status=2
-                    // and avoid dereferencing the incomplete expert slots.
-                    eventCoordinator.publish(completionToken, succeeded: false)
-                }
+            switch result {
+            case .success:
+                eventCoordinator.publish(completionToken, succeeded: true)
+            case .failure:
+                // Failure still advances the timeline so a pre-submitted GPU
+                // command cannot deadlock. Event-aware kernels see status=2
+                // and avoid dereferencing the incomplete expert slots.
+                eventCoordinator.publish(completionToken, succeeded: false)
             }
         }
 

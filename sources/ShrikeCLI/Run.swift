@@ -139,7 +139,6 @@ public func run(args: Args,
             device: context.device,
             expecting: expectedArch,
             streamingMode: .pread(slotCount: loadRuntime.expertCacheSlots),
-            expertCachePolicy: loadRuntime.modelExpertCachePolicy,
             integrityPolicy: .resolved(directoryURL: modelURL))
         let prefillChunkTokens: Int
         switch args.prefillChunk {
@@ -156,7 +155,6 @@ public func run(args: Args,
         }
         let runtime = try RuntimeConfiguration(
             expertCacheSlots: loadRuntime.expertCacheSlots,
-            expertCachePolicy: loadRuntime.expertCachePolicy,
             prefillChunkTokens: prefillChunkTokens,
             prefillAttentionPath: loadRuntime.prefillAttentionPath,
             forceLogitsHead: !config.isPureGreedy,

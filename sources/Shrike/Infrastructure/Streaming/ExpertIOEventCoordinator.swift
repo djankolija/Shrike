@@ -88,17 +88,4 @@ public final class ExpertIOEventCoordinator: @unchecked Sendable {
         event.signaledValue = publishedValue
         lock.unlock()
     }
-
-    /// Records a value already signalled by an MTLIO command buffer. Decode
-    /// submits at most one such batch at a time, so values reach this shared
-    /// timeline in order; keeping the same terminal set also protects future
-    /// callers from accidentally advancing over an unrecorded value.
-    func recordBackendSignal(_ token: ExpertIOCompletionToken) {
-        lock.lock()
-        terminalValues.insert(token.value)
-        while terminalValues.remove(publishedValue &+ 1) != nil {
-            publishedValue &+= 1
-        }
-        lock.unlock()
-    }
 }

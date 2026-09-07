@@ -86,7 +86,7 @@ internal enum PrefillSweepMode: String, Sendable, Equatable, CaseIterable {
     }
 }
 
-/// `SHRIKE_EXPERT_CACHE_PROTECT=chunk`'s still-needed set: a per-layer
+/// The chunk's still-needed set of routed experts: a per-layer
 /// `[Bool]` of `expertsPerLayer` entries, `true` until that expert's tile is
 /// planned, so the streamer tests it with one array read and no hashing,
 /// and no allocation happens per tile.
@@ -267,39 +267,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     /// The P12 gap levers in force: the shared expert committed before the
-    /// router wait, and the expert pools held in a queue residency set. The
-    /// set only gains an allocation under `SHRIKE_EXPERT_CACHE_LAYOUT=pool`,
-    /// so `allocations=` and the cache layout are reported alongside it
-    /// rather than inferred from the holder's mere existence. `expert_io=`
-    /// is the bounded reader's parsed thread count and batch depth (v13 T2);
-    /// `sweep=recency` also prints `tail=` (v13 T4 step 2 fix-up 1);
-    /// `protect=` is `SHRIKE_EXPERT_CACHE_PROTECT` (v13 T4 step 2 fix-up 2).
+    /// router wait, and the expert pools held in a queue residency set, with
+    /// `allocations=` reported rather than inferred from the holder's mere
+    /// existence; `sweep=recency` also prints `tail=` (v13 T4 step 2 fix-up 1).
     public var prefillGapLeversDescription: String {
-        // Parsed configuration, not the layer streamers' live readers -- reaching
-        // one would force a layer open ahead of the lazy load.
-        let boundedReader: BoundedReaderConfiguration?
-        let boundedReaderFailure: String?
-        do {
-            boundedReader = try BoundedReaderConfiguration.environmentValue()
-            boundedReaderFailure = nil
-        } catch ModelError.internalInconsistency(let detail) {
-            boundedReader = nil
-            boundedReaderFailure = detail
-        } catch {
-            boundedReader = nil
-            boundedReaderFailure = String(describing: error)
-        }
-        return Self.prefillGapLeversDescription(
+        Self.prefillGapLeversDescription(
             overlap: prefillRouteOverlap,
             residencyAllocationCount: poolResidency?.allocationCount,
             poolResidencyUnavailableReason: poolResidencyUnavailableReason,
             sweepMode: prefillSweepMode,
             sweepTail: prefillSweepTail,
-            cacheLayout: (try? ExpertCacheLayout.environmentValue()) ?? .pool,
-            expertIOThreads: boundedReader?.threads ?? BoundedReaderConfiguration.defaultThreads,
-            expertIOBatchDepth: boundedReader?.batchDepth ?? BoundedReaderConfiguration.defaultBatchDepth,
-            expertIOParseFailure: boundedReaderFailure,
-            cacheProtectMode: expertCacheProtectMode,
             prefetch: prefetchConfigurationInEffect,
             prefetchTopM: predictivePrefetchTopM)
     }
@@ -321,11 +298,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         poolResidencyUnavailableReason: String?,
         sweepMode: PrefillSweepMode,
         sweepTail: Int = prefillSweepTailDefault,
-        cacheLayout: ExpertCacheLayout,
-        expertIOThreads: Int,
-        expertIOBatchDepth: Int,
-        expertIOParseFailure: String? = nil,
-        cacheProtectMode: ExpertCacheProtectMode = .chunk,
         prefetch: RuntimePrefetch = .off,
         prefetchTopM: Int = 4
     ) -> String {
@@ -340,14 +312,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let sweep = sweepMode == .recency
             ? "sweep=\(sweepMode.rawValue) tail=\(sweepTail)"
             : "sweep=\(sweepMode.rawValue)"
-        // A reader configuration the streamer will refuse must not print as
-        // the defaults it is not running.
-        let expertIO = expertIOParseFailure.map { "expert_io=invalid(\($0))" }
-            ?? "expert_io=threads=\(expertIOThreads) batch_depth=\(expertIOBatchDepth)"
         return "overlap=\(overlap ? "on" : "off") residency=\(residency)"
-            + " \(sweep) cache_layout=\(cacheLayout.rawValue)"
-            + " \(expertIO)"
-            + " protect=\(cacheProtectMode.rawValue)"
+            + " \(sweep)"
             + " prefetch=\(prefetchDescription(prefetch, topM: prefetchTopM))"
     }
 
@@ -697,8 +663,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var routerReadbackTag: UInt32 = 0
     /// Bookkeeping that needs a command's GPU stamps, which the word wake reads before they exist.
     private var deferredGPURecords: [DeferredGPURecord] = []
-    private let expertIOBackend: ExpertIOBackend
-    private let expertCacheProtectMode: ExpertCacheProtectMode
     private let predictivePrefetch: ExpertPrefetchRing?
     private let prefetchConfiguration: RuntimePrefetch
     private let anePrefill: ANEPrefillAttention?
@@ -735,8 +699,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let residency = Self.makePoolResidency(context: context)
         self.poolResidency = residency.holder
         self.poolResidencyUnavailableReason = residency.unavailableReason
-        self.expertIOBackend = try ExpertIOBackend.environmentValue()
-        self.expertCacheProtectMode = try ExpertCacheProtectMode.environmentValue()
         self.prefetchConfiguration = runtimeConfiguration.prefetch
         let prefetch = try Self.makePredictivePrefetch(
             model: model, configuration: runtimeConfiguration.prefetch)
@@ -850,13 +812,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         try model.configurePrefetchCells(configuration.enabled ? topM + configuration.inFlight : 0)
         guard configuration.enabled else { return (topM, nil) }
         let cells = try model.prefetchCells()
-        // The per-slot layout has no cell the classifier can name: no ring.
-        guard !cells.isEmpty else {
-            // Stderr: the CLI's stdout is the generation the golden compares.
-            FileHandle.standardError.write(Data(
-                "Shrike prefetch: off under SHRIKE_EXPERT_CACHE_LAYOUT=per-slot (no cell the classifier can name)\n".utf8))
-            return (topM, nil)
-        }
         let ring = try ExpertPrefetchRing(cells: cells, inFlightBudget: configuration.inFlight) {
             layer, expert, cell in
             model.dropRoutedExpertLanding(layer: layer, expert: expert, cell: cell)
@@ -3902,7 +3857,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     /// Builds, gates, and commits the miss-fixup routed CB: the I/O
-    /// event wait, the staging blit, phase 1
+    /// event wait, phase 1
     /// (full or hit-split subset), the phase-2 reduce, the residual tail,
     /// and the S3b layer-done signal wiring.
     private func buildAndCommitMissFixupCommand(
@@ -3935,12 +3890,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // wait.
         if let token = ioToken {
             routedCB.encodeWaitForEvent(token.event, value: token.value)
-        }
-        if let stagingTransfer = eventLoad?.storage.metalStagingTransfer {
-            // The compute command references cache slots only after it has
-            // waited for the MTLIO staging event. This is deliberately a GPU
-            // blit, not a CPU memcpy or a completion-handler submission.
-            try stagingTransfer.encodeCopy(commandBuffer: routedCB)
         }
         let splitArgBuf = phase1HitCB != nil && !phase1MissSlots.isEmpty
             ? phase1HitSplitArgBuf
@@ -5660,8 +5609,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             throw ModelError.internalInconsistency(
                 detail: "routed-MoE prefill on layer \(L) without a router view")
         }
-        if let poolResidency, let pool = try model.routedExpertResidency(layer: L).expertPool {
-            poolResidency.include(pool)
+        if let poolResidency {
+            poolResidency.include(try model.routedExpertResidency(layer: L).expertPool)
         }
         try prefillRouter.encodeBlock(
                     commandBuffer: cb,
@@ -5792,12 +5741,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     /// A fresh `PrefillChunkExpertProtection` seeded from the whole chunk's
-    /// routed experts under `SHRIKE_EXPERT_CACHE_PROTECT=chunk`, `nil` (off)
-    /// otherwise, so a `nil` plan-time `protectedExperts` argument is itself
-    /// the off case.
-    private func chunkExpertProtection(routes: PrefillMoEGroupedRoutes) -> PrefillChunkExpertProtection? {
-        guard expertCacheProtectMode == .chunk else { return nil }
-        return PrefillChunkExpertProtection(routedGroups: routes.groups, expertsPerLayer: cfg.numExperts)
+    /// routed experts.
+    private func chunkExpertProtection(routes: PrefillMoEGroupedRoutes) -> PrefillChunkExpertProtection {
+        PrefillChunkExpertProtection(routedGroups: routes.groups, expertsPerLayer: cfg.numExperts)
     }
 
     /// One prefill layer's routed tiles as `PrefillRoutedTileSequencer`
@@ -5816,7 +5762,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         private let routedOffsets: MoEExpertOffsets
         private let hiddenSize: Int
         private let startPosition: Int
-        private var protection: PrefillChunkExpertProtection?
+        private var protection: PrefillChunkExpertProtection
         private var pendingBatches: [PendingPrefillBatch] = []
         private var openBatch: OpenPrefillBatch?
         private var tileLifetime = PrefillStreamedTileSlotLifetime()
@@ -5831,7 +5777,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
              routedOffsets: MoEExpertOffsets,
              hiddenSize: Int,
              startPosition: Int,
-             protection: PrefillChunkExpertProtection?) {
+             protection: PrefillChunkExpertProtection) {
             self.runner = runner
             self.layer = layer
             self.routes = routes
@@ -5851,7 +5797,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         func plan(tile: Int, avoidingInFlight inFlight: Int?) throws -> Bool {
             let expertIDs = try PrefillStreamedTileBinding.expertIDs(forTile: tile, routes: routes)
-            protection?.planning(expertIDs)
+            protection.planning(expertIDs)
             var avoiding = heldSlots
             if let inFlight {
                 guard let fetch = begunFetches[inFlight] else {
@@ -5864,7 +5810,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 layer: layer,
                 experts: expertIDs,
                 avoidingSlots: avoiding,
-                protectedExperts: protection?.remaining)
+                protectedExperts: protection.remaining)
             keptPlans[tile] = plan
             return plan != nil
         }
@@ -5885,7 +5831,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             } else {
                 fetch = try PrefillStreamedTileBinding.beginFetchForTile(
                     model: runner.model, layer: layer, tileIndex: tile, routes: routes,
-                    avoidingSlots: heldSlots, protectedExperts: protection?.remaining)
+                    avoidingSlots: heldSlots, protectedExperts: protection.remaining)
             }
             // Kept before the lifetime check so a throw below is still waited out.
             begunFetches[tile] = fetch
@@ -6294,20 +6240,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                     waitIfNeeded: Bool,
                                     deferTimings: Bool = false) throws {
         defer { pending.expertLease?.release() }
-        // A staged Metal-I/O batch owns its source buffers until a later command
-        // on the queue has executed (in order; the word wake releases before the
-        // completion mark). If any command/error path exits early, leave the
-        // cache entries empty rather than retaining a LOADING slot.
-        var finalizedStagingTransfer = false
-        defer {
-            if let operation = pending.storageOperation {
-                if operation.storage.requiresGPUFinalization,
-                   !finalizedStagingTransfer {
-                    model.failRoutedExpertStagingTransfer(plan: operation.plan)
-                }
-                operation.storage.releaseStagingTransfer()
-            }
-        }
         if waitIfNeeded {
             if let phase1HitCB = pending.phase1HitCB {
                 try waitForCompletion(phase1HitCB)
@@ -6324,10 +6256,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // wait. A failed read is surfaced after safe no-op kernels have
             // prevented incomplete slot bytes from being dereferenced.
             try operation.storage.wait()
-            if operation.storage.requiresGPUFinalization {
-                try model.finalizeRoutedExpertStagingTransfer(plan: operation.plan)
-                finalizedStagingTransfer = true
-            }
             totalIOQueueNanos &+= operation.storage.submissionToStartNanos
             totalIoNanos &+= operation.storage.loadNanos
             totalMissIoNanos &+= operation.storage.loadNanos
@@ -6513,10 +6441,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         arguments: MoE.SpeculativeDispatchArguments,
         completionClock: CommandCompletionClock?
     ) throws -> MTLCommandBuffer {
-        guard let pool = residency.expertPool else {
-            throw ModelError.internalInconsistency(
-                detail: "speculative decode requires SHRIKE_EXPERT_CACHE_LAYOUT=pool")
-        }
+        let pool = residency.expertPool
         guard let cb = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }

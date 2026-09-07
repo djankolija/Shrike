@@ -23,7 +23,7 @@ public struct ExpertResidencyEntry: Sendable, Equatable {
 /// unchecked-invariant: immutable resource handles are synchronized by cache plans.
 public struct ExpertResidencyResources: @unchecked Sendable {
     public let table: MTLBuffer
-    public let expertPool: MTLBuffer?
+    public let expertPool: MTLBuffer
     public let poolSlotStride: UInt64
     public let expertStride: UInt64
     public let expertCount: Int

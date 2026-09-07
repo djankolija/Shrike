@@ -60,12 +60,9 @@ final class ResidentBuffer {
         // faults (net +1.4%); with the pin the decode gains ~10% interleaved.
         // An 8 GB allocation (128 slots) still hurts even pinned (memory
         // pressure), so the pin alone is not enough there. Best-effort: a
-        // low RLIMIT_MEMLOCK must not fail the load. Set SHRIKE_NO_PIN=1 to
-        // opt out.
-        if ProcessInfo.processInfo.environment["SHRIKE_NO_PIN"] == nil {
-            if mlock(base, mappedLen) != 0 {
-                // ignore — the pin is best-effort
-            }
+        // low RLIMIT_MEMLOCK must not fail the load.
+        if mlock(base, mappedLen) != 0 {
+            // ignore — the pin is best-effort
         }
 
         let sliceStart = base.advanced(by: sliceShift)

@@ -17,12 +17,6 @@ public enum RuntimePrefillAttentionPath: String, Codable, Sendable {
     case causalMatrix = "causal-matrix"
 }
 
-public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
-    case lfu
-    case lru
-    case agingLFU = "aging-lfu"
-}
-
 /// Where the predictive prefetch ring issues a layer's reads: `after` the
 /// layer's demand batch has completed (the drive is otherwise idle and the
 /// demand read is never slowed), or `beside` it, right after the demand
@@ -282,7 +276,6 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public static let qwenLongPrefillChunkTokens = 4_096
 
     public let expertCacheSlots: Int
-    public let expertCachePolicy: RuntimeExpertCachePolicy
     public let prefillPolicy: RuntimePrefillPolicy
     public let prefillChunkTokens: Int
     public let prefillAttentionPath: RuntimePrefillAttentionPath
@@ -293,7 +286,6 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let yarnContextTokens: Int
 
     public init(expertCacheSlots: Int = 64,
-                expertCachePolicy: RuntimeExpertCachePolicy = .agingLFU,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .causalMatrix,
@@ -312,7 +304,6 @@ public struct RuntimeConfiguration: Sendable, Equatable {
             throw RuntimeConfigurationError.invalidYaRNContextTokens(yarnContextTokens)
         }
         self.expertCacheSlots = expertCacheSlots
-        self.expertCachePolicy = expertCachePolicy
         self.prefillPolicy = prefillEnabled ? .chunked : .off
         self.prefillChunkTokens = prefillChunkTokens
         self.prefillAttentionPath = prefillAttentionPath
@@ -360,13 +351,6 @@ public struct RuntimeConfiguration: Sendable, Equatable {
             return .off
         case .chunked:
             return .production(chunkTokens: prefillChunkTokens)
-        }
-    }
-    public var modelExpertCachePolicy: ExpertCachePolicy {
-        switch expertCachePolicy {
-        case .lru: .lru
-        case .lfu: .lfu
-        case .agingLFU: .agingLFU
         }
     }
 }

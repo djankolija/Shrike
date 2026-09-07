@@ -13,14 +13,12 @@ import Testing
     @Test func productionDefaultsAreStable() throws {
         let runtime = try RuntimeConfiguration(
             expertCacheSlots: 16,
-            expertCachePolicy: .lfu,
             prefillEnabled: true,
             prefillChunkTokens: 128,
             prefillAttentionPath: .fullTensorOps2DPreferred,
             forceLogitsHead: false)
         #expect(runtime.fp16RingEnabled)
         #expect(runtime.expertCacheSlots == 16)
-        #expect(runtime.expertCachePolicy == .lfu)
         #expect(runtime.prefillPolicy == .chunked)
         #expect(runtime.prefillChunkTokens == 128)
         #expect(runtime.prefillAttentionPath == .fullTensorOps2DPreferred)
@@ -46,13 +44,11 @@ import Testing
     @Test func retainedControlsReachTypedRuntime() throws {
         let runtime = try RuntimeConfiguration(
             expertCacheSlots: 32,
-            expertCachePolicy: .lru,
             prefillEnabled: false,
             prefillChunkTokens: 64,
             prefillAttentionPath: .causalTiled,
             forceLogitsHead: true)
         #expect(runtime.expertCacheSlots == 32)
-        #expect(runtime.modelExpertCachePolicy == .lru)
         #expect(runtime.prefillConfig == .off)
         #expect(runtime.prefillAttentionPath == .causalTiled)
         #expect(runtime.headPath == .logits)

@@ -6,86 +6,6 @@ import Testing
 @testable import Shrike
 
 extension PreadExpertStreamerTests {
-  @Test func expertIOBackendEnvironmentDefaultsAndFailsClosed() throws {
-    #expect(try ExpertIOBackend.environmentValue([:]) == .pread)
-    #expect(try ExpertIOBackend.environmentValue([
-      "SHRIKE_EXPERT_IO_BACKEND": "metal",
-    ]) == .metal)
-    #expect(throws: (any Error).self) {
-      try ExpertIOBackend.environmentValue([
-        "SHRIKE_EXPERT_IO_BACKEND": "unknown",
-      ])
-    }
-  }
-
-  @Test func expertCacheProtectModeEnvironmentDefaultsAndFailsClosed() throws {
-    #expect(try ExpertCacheProtectMode.environmentValue([:]) == .chunk)
-    #expect(try ExpertCacheProtectMode.environmentValue([
-      "SHRIKE_EXPERT_CACHE_PROTECT": "chunk",
-    ]) == .chunk)
-    #expect(throws: (any Error).self) {
-      try ExpertCacheProtectMode.environmentValue([
-        "SHRIKE_EXPERT_CACHE_PROTECT": "unknown",
-      ])
-    }
-  }
-
-  @Test func prefillGapLeversDescriptionReportsTheCacheProtectMode() {
-    #expect(RealForwardRunner.prefillGapLeversDescription(
-      overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
-      sweepMode: .carry, cacheLayout: .pool, expertIOThreads: 8, expertIOBatchDepth: 2,
-      cacheProtectMode: .chunk)
-      == "overlap=on residency=none sweep=carry cache_layout=pool"
-        + " expert_io=threads=8 batch_depth=2 protect=chunk prefetch=off")
-  }
-
-  @Test func boundedReaderConfigurationParsesThreadsAndBatchDepth() throws {
-    defer {
-      unsetenv("SHRIKE_EXPERT_IO_THREADS")
-      unsetenv("SHRIKE_EXPERT_IO_BATCH_DEPTH")
-    }
-    unsetenv("SHRIKE_EXPERT_IO_THREADS")
-    unsetenv("SHRIKE_EXPERT_IO_BATCH_DEPTH")
-    #expect(try BoundedReaderConfiguration.environmentValue()
-      == BoundedReaderConfiguration(threads: 4, batchDepth: 2))
-
-    setenv("SHRIKE_EXPERT_IO_THREADS", "8", 1)
-    setenv("SHRIKE_EXPERT_IO_BATCH_DEPTH", "2", 1)
-    #expect(try BoundedReaderConfiguration.environmentValue()
-      == BoundedReaderConfiguration(threads: 8, batchDepth: 2))
-
-    setenv("SHRIKE_EXPERT_IO_BATCH_DEPTH", "1", 1)
-    #expect(try BoundedReaderConfiguration.environmentValue()
-      == BoundedReaderConfiguration(threads: 8, batchDepth: 1))
-    unsetenv("SHRIKE_EXPERT_IO_THREADS")
-    unsetenv("SHRIKE_EXPERT_IO_BATCH_DEPTH")
-
-    for invalid in ["0", "99", "x"] {
-      setenv("SHRIKE_EXPERT_IO_THREADS", invalid, 1)
-      #expect(throws: ModelError.internalInconsistency(
-        detail: "unsupported SHRIKE_EXPERT_IO_THREADS '\(invalid)'; allowed: 1-16")) {
-        try BoundedReaderConfiguration.environmentValue()
-      }
-    }
-    unsetenv("SHRIKE_EXPERT_IO_THREADS")
-
-    for invalid in ["0", "99", "x"] {
-      setenv("SHRIKE_EXPERT_IO_BATCH_DEPTH", invalid, 1)
-      #expect(throws: ModelError.internalInconsistency(
-        detail: "unsupported SHRIKE_EXPERT_IO_BATCH_DEPTH '\(invalid)'; allowed: 1-2")) {
-        try BoundedReaderConfiguration.environmentValue()
-      }
-    }
-  }
-
-  @Test func prefillGapLeversDescriptionReportsTheBoundedReaderShape() {
-    #expect(RealForwardRunner.prefillGapLeversDescription(
-      overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
-      sweepMode: .carry, cacheLayout: .pool, expertIOThreads: 8, expertIOBatchDepth: 2)
-      == "overlap=on residency=none sweep=carry cache_layout=pool"
-        + " expert_io=threads=8 batch_depth=2 protect=chunk prefetch=off")
-  }
-
   @Test func cachedBatchWithoutExecutorLoadsTaggedBytes() throws {
     let url = try Self.writeSyntheticLayer()
     defer { try? FileManager.default.removeItem(at: url) }
@@ -166,8 +86,6 @@ extension PreadExpertStreamerTests {
   @Test func contiguousPoolUsesAlignedNonOverlappingSlotOffsets() throws {
     let url = try Self.writeSyntheticLayer()
     defer { try? FileManager.default.removeItem(at: url) }
-    setenv("SHRIKE_EXPERT_CACHE_LAYOUT", "pool", 1)
-    defer { unsetenv("SHRIKE_EXPERT_CACHE_LAYOUT") }
     let device = try MetalContext().device
     let streamer = try PreadExpertStreamer(
       layout: Self.makeLayout(path: url.path), device: device, slotCount: 4)
@@ -176,7 +94,6 @@ extension PreadExpertStreamerTests {
     try operation.wait()
     let buffers = streamer.expertCachePlanBuffers(plan)
 
-    #expect(streamer.cacheLayout == .pool)
     #expect(buffers.allSatisfy { $0.buffer === buffers[0].buffer })
     #expect(Set(buffers.map(\.offset)).count == 4)
     #expect(buffers.allSatisfy { Int($0.offset).isMultiple(of: Int(getpagesize())) })
@@ -258,8 +175,7 @@ extension PreadExpertStreamerTests {
 
     func warmedStreamer() throws -> PreadExpertStreamer {
       let streamer = try PreadExpertStreamer(
-        layout: Self.makeLayout(path: url.path), device: device, slotCount: 2,
-        cachePolicy: .lfu)
+        layout: Self.makeLayout(path: url.path), device: device, slotCount: 2)
       _ = try streamer.loadExpertsCached(experts: [0])
       _ = try streamer.loadExpertsCached(experts: [1])
       _ = try streamer.loadExpertsCached(experts: [0])
@@ -281,8 +197,7 @@ extension PreadExpertStreamerTests {
     defer { try? FileManager.default.removeItem(at: url) }
     let device = try MetalContext().device
     let streamer = try PreadExpertStreamer(
-      layout: Self.makeLayout(path: url.path), device: device, slotCount: 2,
-      cachePolicy: .lfu)
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 2)
 
     _ = try streamer.loadExpertsCached(experts: [0, 1])
     let plan = streamer.planExpertsCachedIfPossible(
@@ -296,8 +211,7 @@ extension PreadExpertStreamerTests {
     defer { try? FileManager.default.removeItem(at: url) }
     let device = try MetalContext().device
     let streamer = try PreadExpertStreamer(
-      layout: Self.makeLayout(path: url.path), device: device, slotCount: 2,
-      cachePolicy: .lfu)
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 2)
 
     _ = try streamer.loadExpertsCached(experts: [0, 1])
     let plan = try streamer.planExpertsCached(

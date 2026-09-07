@@ -593,7 +593,6 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         -> DecodeRuntimeOptions {
         DecodeRuntimeOptions(
             expertCacheSlots: options.expertCacheSlots,
-            expertCachePolicy: options.expertCachePolicy.rawValue,
             prefillEnabled: options.prefillEnabled,
             prefillChunkTokens: options.prefillChunkTokens,
             modelVerification: options.modelVerification.rawValue,

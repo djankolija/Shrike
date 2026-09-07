@@ -12,20 +12,6 @@ import ShrikeKernelsC
 ///
 /// Four readers is the knee.
 ///
-/// What this is *not*: a fix for v3.x's fetch rate. That path already parallelises
-/// through `DispatchQueue.concurrentPerform` and runs at ~2.6-2.8 GB/s, 66-72% of
-/// the ceiling. And at decode's actual batch size this pool is no faster than a
-/// plain `pread` -- at 128 slots the hit rate is ~92%, so a layer fetches about one
-/// expert, and one read is one read:
-///
-///     batch 1   pool 3.41 GB/s   serial 3.44
-///     batch 4   pool 5.36        serial 3.80
-///     batch 8   pool 5.95        serial 3.69
-///
-/// The pool earns its keep only at 4-8 misses per batch, which is what a *smaller*
-/// slot cache produces. It exists to make a low-RAM configuration viable, not to
-/// speed up the current one.
-///
 /// `batchDepth` lets a second caller publish its batch while the first is
 /// still outstanding, instead of parking until the first clears -- see
 /// `include/shrike_expert_io.h` for the two-slot ring and the FIFO claim that
@@ -33,12 +19,9 @@ import ShrikeKernelsC
 /// initializer's own default is 1 (a single-batch reader); production's
 /// default is 2, set by `BoundedReaderConfiguration` in `PreadExpertStreamer.swift`.
 ///
-/// `bypassCache` (the default) keeps expert reads out of the unified buffer cache.
-/// That is a footprint decision rather than a speed one: streaming 16.88 GiB with
-/// it on left the machine at 78% free memory, so the slot cache stays the only
-/// cache and a declared RAM budget means what it says. Allowing the page cache
-/// makes repeat reads faster but grows a second, unbounded cache in exactly the
-/// memory this project exists to leave alone.
+/// Expert reads bypass the unified buffer cache: streaming 16.88 GiB that way
+/// left the machine at 78% free memory, so the slot cache stays the only cache
+/// and a declared RAM budget means what it says.
 /// unchecked-invariant: the C reader serializes batch publication under its
 /// mutex and this wrapper stores no mutable Swift state.
 public final class ParallelExpertReader: @unchecked Sendable {
@@ -74,20 +57,17 @@ public final class ParallelExpertReader: @unchecked Sendable {
     ///   - batchDepth: published batches held at once; clamped to
     ///     1...SHRIKE_IO_MAX_BATCHES by the C layer. Default 1; production's
     ///     default is 2, set by `BoundedReaderConfiguration`.
-    ///   - bypassCache: keep reads out of the page cache. Default on, because a
-    ///     bounded footprint is the point of streaming.
     public init(path: String,
                 expertStride: Int,
                 threads: Int = 4,
-                batchDepth: Int = 1,
-                bypassCache: Bool = true) throws {
+                batchDepth: Int = 1) throws {
         precondition(expertStride > 0, "expertStride must be positive")
         var failure: Int32 = 0
         guard let handle = shrike_expert_reader_create(path,
                                                      expertStride,
                                                      Int32(threads),
                                                      Int32(batchDepth),
-                                                     bypassCache ? 1 : 0,
+                                                     1,
                                                      &failure) else {
             throw Failure.openFailed(path: path, errno: failure)
         }

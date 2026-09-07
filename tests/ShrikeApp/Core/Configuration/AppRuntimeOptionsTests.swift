@@ -7,7 +7,6 @@ import Shrike
     @Test func defaultsMatchProduction() throws {
         let options = AppRuntimeOptions()
         #expect(options.expertCacheSlots == 64)
-        #expect(options.expertCachePolicy == .agingLFU)
         #expect(options.prefillEnabled)
         #expect(options.prefillChunkTokens == 4096)
         #expect(options.modelVerification == .fullSha256)
@@ -17,11 +16,10 @@ import Shrike
 
         let runtime = try options.resolvedRuntimeConfiguration(forceLogitsHead: false)
         #expect(runtime.expertCacheSlots == RuntimeConfiguration.production.expertCacheSlots)
-        #expect(runtime.expertCachePolicy == RuntimeConfiguration.production.expertCachePolicy)
         #expect(runtime.prefillConfig.chunkTokens == 4096)
         #expect(runtime.headPath == RuntimeConfiguration.production.headPath)
         #expect(options.resultSummary ==
-            "Cache 64 AGING-LFU, prefill 4096, 8-bit KV, native RoPE, thinking off, full SHA-256")
+            "Cache 64, prefill 4096, 8-bit KV, native RoPE, thinking off, full SHA-256")
     }
 
     @Test func everyPublicChoiceMapsToRuntime() throws {
@@ -45,12 +43,10 @@ import Shrike
     @Test func runtimeAndTrustChoicesAreExplicit() throws {
         let options = AppRuntimeOptions(
             expertCacheSlots: 32,
-            expertCachePolicy: .lru,
             prefillEnabled: false,
             prefillChunkTokens: 64,
             modelVerification: .trustedInstall)
         let runtime = try options.resolvedRuntimeConfiguration(forceLogitsHead: true)
-        #expect(runtime.modelExpertCachePolicy == .lru)
         #expect(runtime.prefillConfig == .off)
         #expect(runtime.headPath == .logits)
         #expect(options.modelVerification.runtimeValue == .sizeCheckTrustedReceipt)
@@ -74,7 +70,6 @@ import Shrike
         var variants: [AppRuntimeOptions] = []
         var value = base
         value.expertCacheSlots = 24; variants.append(value)
-        value = base; value.expertCachePolicy = .lru; variants.append(value)
         value = base; value.modelVerification = .trustedInstall; variants.append(value)
         value = base; value.kvCachePrecision = .int4; variants.append(value)
         value = base; value.ropeScalingMode = .yarn; variants.append(value)

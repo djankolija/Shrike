@@ -2,7 +2,6 @@ import Foundation
 
 public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     public var expertCacheSlots: Int
-    public var expertCachePolicy: String
     public var prefillEnabled: Bool
     public var prefillChunkTokens: Int
     public var modelVerification: String
@@ -12,7 +11,6 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     public var ropeScalingMode: String
 
     public init(expertCacheSlots: Int = 32,
-                expertCachePolicy: String = "aging-lfu",
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
                 modelVerification: String = "full-sha256",
@@ -21,7 +19,6 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
                 kvCacheBits: Int = 8,
                 ropeScalingMode: String = "none") {
         self.expertCacheSlots = expertCacheSlots
-        self.expertCachePolicy = expertCachePolicy
         self.prefillEnabled = prefillEnabled
         self.prefillChunkTokens = prefillChunkTokens
         self.modelVerification = modelVerification
