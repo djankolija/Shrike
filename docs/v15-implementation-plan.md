@@ -374,7 +374,7 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         +3.6 / +1.8, +3.8 / +4.0, +2.1 / +1.8 % against a drift of −0.2 / 0.0 / +0.2)
         and free (the follow-ups unmoved, golden identical everywhere): the defaults
         are `adopt=blit join_us=400`; `SHRIKE_PREFETCH_ADOPT=copy` and
-        `SHRIKE_PREFETCH_JOIN_US=0` are the A/Bs. Landed as 5841078; the flipped
+        `SHRIKE_PREFETCH_JOIN_US=0` are the A/Bs. Landed as f74d6e7; the flipped
         build golden identical at the default, copy, off and speculative-validate on
         both boxes; the confirmation arms on the deployed default (prod, copy, prod
         per shape, `~/.claude/handoffs/archive/shrike-v15-t2/t2-confirm-summary.md`):
@@ -573,9 +573,39 @@ the probe's sleeping host). The design doc carries the tables and the placement 
 - `recordPrefetchAdoptionsUnlocked` counts adoptions as reloads
   (`PreadExpertStreamer.swift:1454-1466`); a distinct counter once Task 2 retires
   the copy.
+- `prefetch_begin_ms` accumulates inside the ring's `begin` on whichever thread
+  runs it; under `after` most begins run on a storage worker, so the counter no
+  longer measures decode-thread time inside the submit gap as Task 1's "plus the
+  begin path" reading used it (the close's review). A decode-thread-only split if
+  that reading is needed again.
+- The draft runner of `StreamingMTP.swift` builds its `RuntimeConfiguration`
+  without `prefetch:` (as without the other knobs), so it takes `.production` and
+  allocates a nine-buffer ring it never uses (the one-layer draft has no probe
+  target). Inert; the constructor's knob list when next touched.
 
 ## Close
 
-- [ ] The full suite under ThreadSanitizer, a whole-branch review by a fresh
+- [x] The full suite under ThreadSanitizer, a whole-branch review by a fresh
   reviewer, the fixes folded into their owning commits, the design doc's After
   block, Davor's go, the fast-forward merge to `main` and the push.
+  **DONE 2026-09-07.** The full suite under ThreadSanitizer on the pre-fold tree:
+  1309 tests, zero reports, 41 minutes. The whole-branch review found no HIGH and
+  one MEDIUM of the same class as Task 2's folded leak, one step earlier: a ring
+  slot leased to a plan by `readyBuffers` was stranded when the plan threw; fixed
+  by `ExpertPrefetchRing.unlease` around the plan, with its test. Six LOWs folded:
+  a failed adoption counted as adopted on the release paths (`consume(adopted:)`,
+  the transfer's `release(adopted:)`, the guard and the pending command's fail path
+  releasing as no adoption); the drain check moved ahead of the fixup's commit so
+  an abandon can no longer run with the blit committed; an unopenable
+  `SHRIKE_PREFETCH_TRACE` path fails closed; `decode-rows.py` prints the seven
+  counters it parsed; the replay's two-distance queue keys each capture by its own
+  `probe_distance` with a self-test, and the profile split has one; a comment
+  trimmed. Two recorded as follow-ons above: `prefetch_begin_ms`'s thread and the
+  draft runner's prefetch. Folded into Task 2 (f74d6e7), the queue tool (ae27c54)
+  and the profile tool (70dffed) by fixup and autosquash, the later commits
+  rewritten (Task 3 791aa4d). On the rebased tree: the four gates (1312 tests),
+  golden identical at the default, separate and off on both boxes and both
+  profiles, the fold's suites under the sanitizer clean (106 tests), the mini
+  serving the build at the bare launch. The go: "Proceed and good luck!" and
+  "feel free to continue after the 3 points from the handoff" (2026-09-07);
+  merged fast-forward to `main` and pushed.

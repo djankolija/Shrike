@@ -278,7 +278,7 @@ chapter moves to the reserved-slot landing (Task 2), whose prize is now a measur
 1.2 to 1.5 ms per token in the submit gap plus the 0.5 to 1.0 late predictions per
 token the late join would rescue, then the fused probe (Task 3).
 
-## Task 2: the adoption by GPU blit and the bounded late join (commit 5841078)
+## Task 2: the adoption by GPU blit and the bounded late join (commit f74d6e7)
 
 Every number MEASURED on the mini unless marked modelled; the plan's Task 2 carries
 the step list and the raw data lives at `~/.claude/handoffs/archive/shrike-v15-t2/`.
@@ -359,7 +359,7 @@ per-read cost) and the probe's GPU time (Task 3); the scheduled step zero on the
 two-distance queue (the candidate task) asks whether the idle half of every window
 can serve a layer further ahead.
 
-## Task 3: the fused probe (commit 2ff0e85)
+## Task 3: the fused probe (commit 791aa4d)
 
 Every number MEASURED on the mini unless marked modelled; the plan's Task 3 carries
 the step list and the raw data lives at `~/.claude/handoffs/archive/shrike-v15-t3/`.
@@ -419,6 +419,28 @@ the chapter's opening rows (14.1 / 14.8 / 15.0), production is at 15.4 to 15.6 /
 window's remaining terms are the reading layers themselves (12.6 to 13.7 per token
 at production's per-read cost, 7.7 to 9.0 ms of GPU idle per token) and the
 prefill-to-decode boundary (Task 4).
+
+**The chapter closes here** (2026-09-07). Three levers, each real and free on the
+mini with byte-identical output and an A/B knob: the placement gate
+(`SHRIKE_PREDICTIVE_PREFETCH=0` the off), the adoption by GPU blit with the bounded
+late join (`SHRIKE_PREFETCH_ADOPT=copy`, `SHRIKE_PREFETCH_JOIN_US=0`), the fused probe
+(`SHRIKE_PREFETCH_PROBE=separate`). The misses per token went from about 30 to about
+20 on the three answers (Task 1's table), and production from 14.1 / 14.8 / 15.0 to
+15.4 to 15.6 / 16.3 / 16.2 tok/s at the bare launch. Two candidates were priced at
+their step zero and measured null, nothing built: the two-distance queue (the idle
+half of a window serving the layer after next adds 0.3 to 1.2 useful adoptions per
+token on the replay) and the prefill-to-decode boundary (the first window's excess
+under 1 % of an answer, compulsory on the 300). What remains of the miss window is
+the reading layers themselves, 12.6 to 13.7 per token at production's per-read cost,
+which no placement or adoption change reaches. The one design refinement with a
+prize still on the table is the index swap inside one slab: the ring's buffer
+becoming the pool slot by an index exchange, the blit's copy gone (its cost per
+adopted expert not measured on its own; the step zero prices it when next
+considered). The follow-ons, not scheduled: the token-boundary window (the head and
+sampling, about 5 ms of idle drive per token, modelled); the join racing a deferred `begin` at
+distance 2 or more; the host-state term (the probe's 0.13 ms) in production;
+`prefetch_late` for a claimed-but-unattached slot; the pair pipelines compiled in
+every `MoE` init.
 
 ## Levers, ranked (modelled from the measured rows)
 
