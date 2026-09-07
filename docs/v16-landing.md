@@ -416,3 +416,47 @@ measured loss).
   today's miss count, the arms confirm or refute it.
 - The ring's lease and Task 2's guard collapse when nothing is copied; the review looks
   for what they guarded.
+
+## The chapter's close (2026-09-07)
+
+The full suite under ThreadSanitizer on the final tree: 1327 tests in 173 suites, zero
+reports, 41 minutes. The whole-branch review by a fresh reviewer verified every fold of
+the two per-commit reviews and found no code defect blocking the merge; its findings were
+folded into the merge commit by amend and into the docs.
+
+The landing's question, opened from v15's closing pointer, is closed both ways, and the
+tree it leaves is smaller than the one it found.
+
+- **The race can be won on the hardware.** The instrument (Task 1) measured it lost on
+  most layers by the tail command's window; the kernel-boundary probe showed a later
+  dispatch of a running command sees a host write at every margin once the command has
+  streamed 1 MB, so the whole "during" bucket was winnable; the merge (Task 2) measured
+  the classifier seeing 70 / 59 / 69 % of landed predictions resident, above the
+  instrument's "at most" row.
+- **Winning it buys nothing on this box.** With 56 to 69 % of the adopted-only fixup
+  commands gone, three to four host-built commands per token, tok/s stayed flat within
+  the repeats' drift on all three shapes: the round trips had been paid under the drive.
+  The token's pace is the reading layers' SSD chain, 56.6 / 38.7 / 36.0 ms of reads in a
+  65 / 61 / 62 ms token. Every model that priced the landing (2.7 to 3.5 ms per token at
+  the ceiling, then +2.5 to +3 %) assumed those commands sat on the critical path.
+- **The merge stays as a subtraction.** One address space for every expert cell, the
+  ring's included; a landing published from the storage thread; an index swap at the
+  plan with no copy; the copy and blit adoption modes, the transfer, the guard, a knob
+  and nine standalone buffers gone; misses per token unchanged to the tenth; golden
+  byte-identical on both boxes in every mode. The consolidation series continues from it.
+- **The replay is a trustworthy instrument for misses, and only for misses.** It priced
+  the pool landing and the retaining ring within 0.2 per token of production three times
+  running, the non-retaining ring as a loss, and the no-prefetch control to the tenth; it
+  cannot see a millisecond, and the wall's null is the third time the box overruled a
+  timing model it had no way to check.
+
+**Production on the mini at the close:** 15.34 / 15.35, 16.46 / 16.48, 16.12 / 16.14 tok/s
+on the card / the 300 / the 1k at the bare launch (v15's close: 15.4 to 15.6 / 16.3 / 16.2),
+the same answers, the same misses.
+
+**What remains.** The reading layers themselves: 12.6 to 13.6 per token at production's
+per-read cost, the one term every chapter since v13 has circled and none has moved. The
+consolidation series (the plan's Candidates: the architecture document, the knobs pruned
+by measured status, one residency publish path, the runner decomposed) is the next
+chapter, on Davor's direction of 2026-09-07; the reading layers come after it on a
+smaller tree.

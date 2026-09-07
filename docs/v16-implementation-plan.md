@@ -272,6 +272,14 @@ record. Every number is measured on the mini unless marked modelled.
 
 ## Close
 
-- [ ] The full suite under ThreadSanitizer, a whole-branch review by a fresh reviewer, the
+- [x] The full suite under ThreadSanitizer, a whole-branch review by a fresh reviewer, the
   fixes folded into their owning commits, the design doc's closing block, Davor's go, the
   fast-forward merge to `main` and the push.
+
+  **DONE 2026-09-07**: the full suite under ThreadSanitizer on the final tree 1327 tests, zero
+  reports, 41 minutes; the whole-branch review (archived at `~/.claude/handoffs/archive/shrike-v16-t2/branch-review.md`)
+  verified every fold and found no code defect blocking the merge, its three documentation
+  errors and five naming cleanups folded; the fixes amended into 7652fb6; the four gates and
+  five golden cells on the final tree, the mini at the final build (245d62e5a09420bf) with
+  golden identical at the default and with the prefetch off; the closing block written;
+  Davor's go and the merge pending.
