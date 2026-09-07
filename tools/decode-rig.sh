@@ -23,12 +23,10 @@
 # and one row per request from tools/decode-rows.py.
 #
 # Env: SERVER_ENV (prepended to the server launch, e.g.
-# SERVER_ENV="SHRIKE_PREDICTIVE_PREFETCH=1 SHRIKE_PREFETCH_TOP_M=8" for an
-# A/B arm; every launch also carries SHRIKE_RUNNER_STATS=1
-# SHRIKE_KERNEL_STATS=1 and SHRIKE_ROUTE_TRACE); PREFETCH_TRACE=1 adds
-# SHRIKE_PREFETCH_TRACE (the next-layer router probe runs and its top-8 is
-# logged per decode layer; use with SERVER_ENV="SHRIKE_PREFETCH_PROBE_DISTANCE=2"
-# for the distance-2 capture); NO_TURNS=1 skips the follow-up requests;
+# SERVER_ENV="SHRIKE_PREFILL_ANE=on" for an A/B arm; every launch also carries
+# SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 and SHRIKE_ROUTE_TRACE);
+# PREFETCH_TRACE=1 adds SHRIKE_PREFETCH_TRACE (the next-layer router probe's
+# top-8 is logged per decode layer); NO_TURNS=1 skips the follow-up requests;
 # MAX_TOKENS (default 512) the cold request's answer length; MODEL / MODEL_ID
 # (default ./models/ornith15.gturbo / ornith15, matching tools/mini-deploy.sh);
 # REUSE=<dir> (card only) the directory holding payload-*-turn2.json and

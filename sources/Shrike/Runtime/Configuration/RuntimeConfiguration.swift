@@ -17,132 +17,6 @@ public enum RuntimePrefillAttentionPath: String, Codable, Sendable {
     case causalMatrix = "causal-matrix"
 }
 
-/// Where the predictive prefetch ring issues a layer's reads: `after` the
-/// layer's demand batch has completed (the drive is otherwise idle and the
-/// demand read is never slowed), or `beside` it, right after the demand
-/// batch's submission (v14 T1's shape).
-public enum RuntimePrefetchPlacement: String, Codable, Sendable {
-    case after
-    case beside
-}
-
-/// How the next-layer router probe is dispatched: as its own GEMV and
-/// selection after the authoritative router's (`separate`), or in the same
-/// two dispatches as a second grid row (`fused`).
-public enum RuntimePrefetchProbe: String, Codable, Sendable {
-    case separate
-    case fused
-}
-
-/// The predictive routed-expert prefetch. Every value is validated whether
-/// or not the ring is on, so a mistyped knob never runs as a default it is
-/// not.
-public struct RuntimePrefetch: Codable, Sendable, Equatable {
-    public let enabled: Bool
-    /// Predicted experts considered per layer; nil takes the architecture's
-    /// top-k at runner initialisation, an explicit value is checked against it
-    /// there.
-    public let topM: Int?
-    public let inFlight: Int
-    public let placement: RuntimePrefetchPlacement
-    public let distance: Int
-    public let tracePath: String?
-    /// The bound within which a wait for a prediction still in flight counts
-    /// as joined rather than late; the wait itself runs to completion, since
-    /// the prediction's cell is claimed, so 0 is refused rather than read as
-    /// the "never wait" it once was.
-    public let joinMicros: Int
-    public let probe: RuntimePrefetchProbe
-
-    public static let allowedInFlight = 1...8
-    public static let allowedDistance = 1...8
-    public static let allowedJoinMicros = 1...2000
-
-    public static let off = RuntimePrefetch(enabled: false, topM: nil, inFlight: 1,
-                                            placement: .after, distance: 1, tracePath: nil)
-    public static let production = RuntimePrefetch(enabled: true, topM: nil, inFlight: 1,
-                                                   placement: .after, distance: 1, tracePath: nil)
-
-    public init(enabled: Bool, topM: Int?, inFlight: Int, placement: RuntimePrefetchPlacement,
-                distance: Int, tracePath: String?,
-                joinMicros: Int = 400, probe: RuntimePrefetchProbe = .fused) {
-        self.enabled = enabled
-        self.topM = topM
-        self.inFlight = inFlight
-        self.placement = placement
-        self.distance = distance
-        self.tracePath = tracePath
-        self.joinMicros = joinMicros
-        self.probe = probe
-    }
-
-    public static func environmentValue(
-        _ environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> RuntimePrefetch {
-        let enabled: Bool
-        switch environment["SHRIKE_PREDICTIVE_PREFETCH"] {
-        case nil, "1": enabled = true
-        case "0": enabled = false
-        case let raw?:
-            throw RuntimeConfigurationError.invalidPrefetch(
-                "SHRIKE_PREDICTIVE_PREFETCH '\(raw)'; allowed: 0, 1")
-        }
-        let topM = try positiveInt(environment, "SHRIKE_PREFETCH_TOP_M", allowed: 1...Int.max)
-        let inFlight = try positiveInt(environment, "SHRIKE_PREFETCH_INFLIGHT",
-                                       allowed: allowedInFlight) ?? production.inFlight
-        let placement: RuntimePrefetchPlacement
-        if let raw = environment["SHRIKE_PREFETCH_PLACEMENT"] {
-            guard let value = RuntimePrefetchPlacement(rawValue: raw) else {
-                throw RuntimeConfigurationError.invalidPrefetch(
-                    "SHRIKE_PREFETCH_PLACEMENT '\(raw)'; allowed: after, beside")
-            }
-            placement = value
-        } else {
-            placement = production.placement
-        }
-        let distance = try positiveInt(environment, "SHRIKE_PREFETCH_PROBE_DISTANCE",
-                                       allowed: allowedDistance) ?? production.distance
-        let trace = environment["SHRIKE_PREFETCH_TRACE"].flatMap { $0.isEmpty ? nil : $0 }
-        if let raw = environment["SHRIKE_PREFETCH_ADOPT"] {
-            throw RuntimeConfigurationError.invalidPrefetch(
-                "SHRIKE_PREFETCH_ADOPT '\(raw)' was removed by v16's merge: a prediction lands in "
-                    + "the pool's own address space and needs no copy")
-        }
-        if environment["SHRIKE_PREFETCH_JOIN_US"] == "0" {
-            throw RuntimeConfigurationError.invalidPrefetch(
-                "SHRIKE_PREFETCH_JOIN_US '0' no longer means never wait: a landed prediction's cell "
-                    + "is claimed, so the wait runs to completion and the bound only classifies "
-                    + "joined against late; allowed: 1...2000")
-        }
-        let joinMicros = try positiveInt(environment, "SHRIKE_PREFETCH_JOIN_US",
-                                         allowed: allowedJoinMicros) ?? production.joinMicros
-        let probe: RuntimePrefetchProbe
-        if let raw = environment["SHRIKE_PREFETCH_PROBE"] {
-            guard let value = RuntimePrefetchProbe(rawValue: raw) else {
-                throw RuntimeConfigurationError.invalidPrefetch(
-                    "SHRIKE_PREFETCH_PROBE '\(raw)'; allowed: separate, fused")
-            }
-            probe = value
-        } else {
-            probe = production.probe
-        }
-        return RuntimePrefetch(enabled: enabled, topM: topM, inFlight: inFlight,
-                               placement: placement, distance: distance, tracePath: trace,
-                               joinMicros: joinMicros, probe: probe)
-    }
-
-    private static func positiveInt(_ environment: [String: String], _ name: String,
-                                    allowed: ClosedRange<Int>) throws -> Int? {
-        guard let raw = environment[name] else { return nil }
-        guard let value = Int(raw), allowed.contains(value) else {
-            let bound = allowed.upperBound == Int.max
-                ? "a positive integer" : "\(allowed.lowerBound)...\(allowed.upperBound)"
-            throw RuntimeConfigurationError.invalidPrefetch("\(name) '\(raw)'; allowed: \(bound)")
-        }
-        return value
-    }
-}
-
 /// Storage precision for the autoregressive attention key/value cache.
 /// Quantized modes use affine groups of 64 values and keep their scale and
 /// bias alongside each token row; model weights are unaffected.
@@ -184,7 +58,7 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
         case .yaRNUnsupportedArchitecture:
             return "YaRN requires the Qwen3.5-MoE NeoX sub-dimension RoPE architecture"
         case .invalidPrefetch(let detail):
-            return "unsupported prefetch configuration: \(detail)"
+            return "the prefetch trace could not be opened: \(detail)"
         }
     }
 }
@@ -280,7 +154,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let prefillChunkTokens: Int
     public let prefillAttentionPath: RuntimePrefillAttentionPath
     public let headPath: RuntimeHeadPath
-    public let prefetch: RuntimePrefetch
+    public let prefetchTracePath: String?
     public let kvCachePrecision: KVCachePrecision
     public let ropeScalingMode: RuntimeRoPEScalingMode
     public let yarnContextTokens: Int
@@ -290,7 +164,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 prefillChunkTokens: Int = 128,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .causalMatrix,
                 forceLogitsHead: Bool = false,
-                prefetch: RuntimePrefetch = .production,
+                prefetchTracePath: String? = nil,
                 kvCachePrecision: KVCachePrecision = .int8,
                 ropeScalingMode: RuntimeRoPEScalingMode = .none,
                 yarnContextTokens: Int = RuntimeConfiguration.defaultYaRNContextTokens) throws {
@@ -308,10 +182,16 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.prefillChunkTokens = prefillChunkTokens
         self.prefillAttentionPath = prefillAttentionPath
         self.headPath = forceLogitsHead ? .logits : .fusedRows
-        self.prefetch = prefetch
+        self.prefetchTracePath = prefetchTracePath
         self.kvCachePrecision = kvCachePrecision
         self.ropeScalingMode = ropeScalingMode
         self.yarnContextTokens = yarnContextTokens
+    }
+
+    public static func environmentPrefetchTracePath(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String? {
+        environment["SHRIKE_PREFETCH_TRACE"].flatMap { $0.isEmpty ? nil : $0 }
     }
 
     public func validate(maxContext: Int) throws {

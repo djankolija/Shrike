@@ -54,56 +54,12 @@ import Testing
         #expect(runtime.headPath == .logits)
     }
 
-    @Test func prefetchEnvironmentIsFailClosed() throws {
-        #expect(try RuntimePrefetch.environmentValue([:]) == .production)
-        #expect(RuntimePrefetch.production
-            == RuntimePrefetch(enabled: true, topM: nil, inFlight: 1, placement: .after,
-                               distance: 1, tracePath: nil, joinMicros: 400, probe: .fused))
-        #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREDICTIVE_PREFETCH": "0"]) == .off)
-        #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREDICTIVE_PREFETCH": "1"]) == .production)
-        #expect(try RuntimePrefetch.environmentValue([
-            "SHRIKE_PREDICTIVE_PREFETCH": "1",
-            "SHRIKE_PREFETCH_TOP_M": "8",
-            "SHRIKE_PREFETCH_INFLIGHT": "2",
-            "SHRIKE_PREFETCH_PLACEMENT": "beside",
-            "SHRIKE_PREFETCH_PROBE_DISTANCE": "2",
-            "SHRIKE_PREFETCH_TRACE": "/tmp/prefetch.jsonl",
-        ]) == RuntimePrefetch(enabled: true, topM: 8, inFlight: 2, placement: .beside,
-                              distance: 2, tracePath: "/tmp/prefetch.jsonl"))
-        #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREFETCH_TRACE": ""]).tracePath == nil)
-        #expect(RuntimePrefetch.production.joinMicros == 400)
-        #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREFETCH_JOIN_US": "250"]).joinMicros == 250)
-        #expect(RuntimePrefetch.production.probe == .fused)
-        #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREFETCH_PROBE": "separate"]).probe == .separate)
-        let bad: [[String: String]] = [
-            ["SHRIKE_PREDICTIVE_PREFETCH": "yes"],
-            ["SHRIKE_PREFETCH_TOP_M": "0"],
-            ["SHRIKE_PREFETCH_TOP_M": "many"],
-            ["SHRIKE_PREFETCH_INFLIGHT": "0"],
-            ["SHRIKE_PREFETCH_INFLIGHT": "9"],
-            ["SHRIKE_PREFETCH_PLACEMENT": "typo"],
-            ["SHRIKE_PREFETCH_PROBE_DISTANCE": "0"],
-            ["SHRIKE_PREFETCH_PROBE_DISTANCE": "far"],
-            ["SHRIKE_PREFETCH_ADOPT": "blit"],
-            ["SHRIKE_PREFETCH_ADOPT": "copy"],
-            ["SHRIKE_PREFETCH_JOIN_US": "-1"],
-            ["SHRIKE_PREFETCH_JOIN_US": "0"],
-            ["SHRIKE_PREFETCH_JOIN_US": "2001"],
-            ["SHRIKE_PREFETCH_JOIN_US": "soon"],
-            ["SHRIKE_PREFETCH_PROBE": "both"],
-        ]
-        for environment in bad {
-            #expect(throws: RuntimeConfigurationError.self) {
-                try RuntimePrefetch.environmentValue(environment)
-            }
-        }
-    }
-
-    @Test func configurationDefaultsMatchTheEnvironmentDefaults() throws {
-        #expect(RuntimeConfiguration.production.prefetch == .production)
-        #expect(RuntimeConfiguration.production.prefetch.enabled)
-        #expect(RuntimeConfiguration.production.prefetch
-            == (try RuntimePrefetch.environmentValue([:])))
+    @Test func prefetchTracePathReadsTheEnvironment() {
+        #expect(RuntimeConfiguration.environmentPrefetchTracePath([:]) == nil)
+        #expect(RuntimeConfiguration.environmentPrefetchTracePath(["SHRIKE_PREFETCH_TRACE": ""]) == nil)
+        #expect(RuntimeConfiguration.environmentPrefetchTracePath(
+            ["SHRIKE_PREFETCH_TRACE": "/tmp/prefetch.jsonl"]) == "/tmp/prefetch.jsonl")
+        #expect(RuntimeConfiguration.production.prefetchTracePath == nil)
     }
 
     @Test(arguments: [32, 64, 128, 256, 512, 1_024, 2_048, 4_096])

@@ -29,9 +29,9 @@ public struct ExpertPrefetchStatistics: Sendable, Equatable {
 /// arena the ring owns, where the target layer's classifier can hit them. A
 /// landing the layer's plan wants is swapped into that layer's pool and the
 /// ring takes the freed cell; one the plan does not want is dropped from the
-/// layer's table when the ring reclaims the cell. At most `inFlightBudget`
-/// reads are in flight across all layers (v15 step zero: a read still in
-/// flight shares the drive with the next demand read).
+/// layer's table when the ring reclaims the cell. At most one read is in
+/// flight across all layers (v15 step zero: a read still in flight shares
+/// the drive with the next demand read).
 /// unchecked-invariant: slot ownership, operation association and the
 /// statistics are guarded by `lock`; `begin` may run on a storage thread and
 /// on the decode thread at once; `drop` runs under `lock` and takes the
@@ -43,6 +43,7 @@ final class ExpertPrefetchRing: @unchecked Sendable {
     /// How long `readyCells` waits for a claimed slot's operation to attach
     /// (the window between the ring's claim and the issue's return).
     static let attachSpinNanos: UInt64 = 5_000_000
+    static let inFlightBudget = 1
 
     private struct Slot {
         var cell: Int
@@ -66,7 +67,6 @@ final class ExpertPrefetchRing: @unchecked Sendable {
 
     private let lock = NSLock()
     private var slots: [Slot]
-    private let inFlightBudget: Int
     private let drop: Drop
     private var stats = ExpertPrefetchStatistics()
 
@@ -82,23 +82,20 @@ final class ExpertPrefetchRing: @unchecked Sendable {
         slots.reduce(0) { $0 + ($1.isInFlight ? 1 : 0) }
     }
 
-    init(cells: [Int], inFlightBudget: Int, drop: @escaping Drop) throws {
-        guard !cells.isEmpty, inFlightBudget > 0, Set(cells).count == cells.count else {
+    init(cells: [Int], drop: @escaping Drop) throws {
+        guard !cells.isEmpty, Set(cells).count == cells.count else {
             throw ModelError.internalInconsistency(detail: "invalid prefetch ring geometry")
         }
         slots = cells.map { Slot(cell: $0) }
-        self.inFlightBudget = inFlightBudget
         self.drop = drop
     }
 
     /// Begins missing reads for `layer` in free cells, best-scored first,
-    /// within the in-flight budget, issued while the decode stands at `from`
-    /// (the layer whose plan or demand completion issues them). Finished
-    /// entries of the layers between, whose plans are still to come, are kept;
-    /// the rest are reclaimed. Already queued predictions are deduplicated; a
-    /// batch the streamer refuses (the pool already holds an expert) is
-    /// counted refused, not thrown.
-    func begin(layer: Int, from issuing: Int? = nil, experts: [Int], resident: Set<Int>,
+    /// within the in-flight budget. Finished entries of `layer`, whose plan
+    /// is still to come, are kept; the rest are reclaimed. Already queued
+    /// predictions are deduplicated; a batch the streamer refuses (the pool
+    /// already holds an expert) is counted refused, not thrown.
+    func begin(layer: Int, experts: [Int], resident: Set<Int>,
                deferred: Bool = false, issue: Issue) throws {
         let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         defer {
@@ -106,7 +103,7 @@ final class ExpertPrefetchRing: @unchecked Sendable {
             lock.withLock { stats.beginNanos &+= elapsed }
         }
         lock.lock()
-        reclaimTerminalSlotsUnlocked(after: issuing ?? layer - 1, upTo: layer)
+        reclaimTerminalSlotsUnlocked(keeping: layer)
         let active = Set(slots.compactMap { slot in
             slot.layer == layer && slot.expert >= 0 ? slot.expert : nil
         })
@@ -115,7 +112,7 @@ final class ExpertPrefetchRing: @unchecked Sendable {
             !resident.contains($0) && !active.contains($0) && seen.insert($0).inserted
         }
         let free = slots.indices.filter { slots[$0].expert < 0 }
-        let budgetLeft = max(0, inFlightBudget - inFlightCountUnlocked)
+        let budgetLeft = max(0, Self.inFlightBudget - inFlightCountUnlocked)
         let count = min(wanted.count, free.count, budgetLeft)
         stats.refused &+= UInt64(wanted.count - count)
         guard count > 0 else {
@@ -278,11 +275,10 @@ final class ExpertPrefetchRing: @unchecked Sendable {
 
     /// A completed landing no plan took is dropped from its layer's table
     /// before its cell can be read into again; a failed one was dropped by
-    /// the read's own failure path. Entries for the layers whose plans are
-    /// still to come, `issuing` exclusive to `target` inclusive, are kept.
-    private func reclaimTerminalSlotsUnlocked(after issuing: Int, upTo target: Int) {
-        for index in slots.indices where !slots[index].leased
-            && !(slots[index].layer > issuing && slots[index].layer <= target) {
+    /// the read's own failure path. Entries for `layer`, whose plan is still
+    /// to come, are kept.
+    private func reclaimTerminalSlotsUnlocked(keeping layer: Int) {
+        for index in slots.indices where !slots[index].leased && slots[index].layer != layer {
             switch slots[index].operation?.state {
             case .completed:
                 drop(slots[index].layer, slots[index].expert, slots[index].cell)

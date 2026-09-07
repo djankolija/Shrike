@@ -330,44 +330,26 @@ import Testing
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
             sweepMode: .fixed)
-            == "overlap=on residency=set allocations=24 sweep=fixed prefetch=off")
+            == "overlap=on residency=set allocations=24 sweep=fixed")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: false, residencyAllocationCount: 0, poolResidencyUnavailableReason: nil,
             sweepMode: .alternate)
-            == "overlap=off residency=set allocations=0 sweep=alternate prefetch=off")
+            == "overlap=off residency=set allocations=0 sweep=alternate")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: "boom",
             sweepMode: .alternate)
-            == "overlap=on residency=unavailable reason=boom sweep=alternate prefetch=off")
+            == "overlap=on residency=unavailable reason=boom sweep=alternate")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
             sweepMode: .fixed)
-            == "overlap=on residency=none sweep=fixed prefetch=off")
+            == "overlap=on residency=none sweep=fixed")
     }
 
-    @Test func prefillGapLeversDescriptionReportsThePrefetchInEffect() {
-        let on = RuntimePrefetch(enabled: true, topM: 8, inFlight: 2, placement: .beside,
-                                 distance: 2, tracePath: nil, joinMicros: 400, probe: .fused)
+    @Test func prefillGapLeversDescriptionReportsThePrefetchTrace() {
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed,
-            prefetch: on, prefetchTopM: 8)
-            == "overlap=on residency=set allocations=24 sweep=fixed"
-                + " prefetch=on top_m=8 inflight=2 placement=beside distance=2 join_us=400 probe=fused")
-        let architectureTopM = RuntimePrefetch(enabled: true, topM: nil, inFlight: 1,
-                                               placement: .after, distance: 1, tracePath: nil)
-        #expect(RealForwardRunner.prefillGapLeversDescription(
-            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed,
-            prefetch: architectureTopM, prefetchTopM: 4)
-            .hasSuffix(" prefetch=on top_m=4 inflight=1 placement=after distance=1 join_us=400 probe=fused"))
-        let traceOnly = RuntimePrefetch(enabled: false, topM: nil, inFlight: 1, placement: .after,
-                                        distance: 1, tracePath: "/tmp/prefetch-trace.jsonl")
-        #expect(RealForwardRunner.prefillGapLeversDescription(
-            overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
-            sweepMode: .fixed,
-            prefetch: traceOnly, prefetchTopM: 4)
-            .hasSuffix(" prefetch=off trace=on probe=fused"))
+            sweepMode: .fixed, prefetchTrace: true)
+            == "overlap=on residency=set allocations=24 sweep=fixed prefetch_trace=on")
     }
 
     @Test func prefetchTraceOpensFailClosed() throws {
@@ -400,23 +382,23 @@ import Testing
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
             sweepMode: .carry)
-            == "overlap=on residency=set allocations=24 sweep=carry prefetch=off")
+            == "overlap=on residency=set allocations=24 sweep=carry")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
             sweepMode: .recency, sweepTail: 96)
-            == "overlap=on residency=set allocations=24 sweep=recency tail=96 prefetch=off")
+            == "overlap=on residency=set allocations=24 sweep=recency tail=96")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
             sweepMode: .recency, sweepTail: 48)
-            == "overlap=on residency=set allocations=24 sweep=recency tail=48 prefetch=off")
+            == "overlap=on residency=set allocations=24 sweep=recency tail=48")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
             sweepMode: .fixed, sweepTail: 48)
-            == "overlap=on residency=set allocations=24 sweep=fixed prefetch=off")
+            == "overlap=on residency=set allocations=24 sweep=fixed")
         #expect(RealForwardRunner.prefillGapLeversDescription(
             overlap: true, residencyAllocationCount: 24, poolResidencyUnavailableReason: nil,
             sweepMode: .resident, sweepTail: 96)
-            == "overlap=on residency=set allocations=24 sweep=resident prefetch=off")
+            == "overlap=on residency=set allocations=24 sweep=resident")
     }
 
     @Test func sweepTailDefaultsAndFailsClosed() throws {

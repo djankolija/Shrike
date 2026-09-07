@@ -680,7 +680,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         let context = try reusingContext ?? MetalContext()
         let loadRuntime = try RuntimeConfiguration(
             forceLogitsHead: true,
-            prefetch: try RuntimePrefetch.environmentValue())
+            prefetchTracePath: RuntimeConfiguration.environmentPrefetchTracePath())
         let slotOverride = ProcessInfo.processInfo.environment["SHRIKE_EXPERT_CACHE_SLOTS"]
             .flatMap(Int.init)
         // Precedence: --expert-cache-slots flag, then the env override, then a
@@ -728,7 +728,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                     : loadRuntime.prefillChunkTokens),
             prefillAttentionPath: loadRuntime.prefillAttentionPath,
             forceLogitsHead: true,
-            prefetch: loadRuntime.prefetch,
+            prefetchTracePath: loadRuntime.prefetchTracePath,
             kvCachePrecision: kvCachePrecision,
             ropeScalingMode: ropeScalingMode,
             yarnContextTokens: ropeScalingMode == .yarn
