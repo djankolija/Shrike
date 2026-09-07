@@ -379,12 +379,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     private var prefetchConfigurationInEffect: RuntimePrefetch {
-        RuntimePrefetch(enabled: prefetchConfiguration.enabled, topM: prefetchConfiguration.topM,
+        RuntimePrefetch(enabled: prefetchConfiguration.enabled && predictivePrefetch != nil,
+                        topM: prefetchConfiguration.topM,
                         inFlight: prefetchConfiguration.inFlight,
                         placement: prefetchConfiguration.placement,
                         distance: prefetchConfiguration.distance,
                         tracePath: prefetchTraceFD >= 0 ? prefetchConfiguration.tracePath : nil,
-                        adoption: prefetchBlitActive ? .blit : .copy,
                         joinMicros: prefetchConfiguration.joinMicros,
                         probe: prefetchConfiguration.probe)
     }
@@ -435,7 +435,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         return "on top_m=\(topM) inflight=\(prefetch.inFlight)"
             + " placement=\(prefetch.placement.rawValue) distance=\(prefetch.distance)"
-            + " adopt=\(prefetch.adoption.rawValue) join_us=\(prefetch.joinMicros)"
+            + " join_us=\(prefetch.joinMicros)"
             + " probe=\(prefetch.probe.rawValue)"
     }
 
@@ -796,9 +796,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let expertCacheProtectMode: ExpertCacheProtectMode
     private let predictivePrefetch: ExpertPrefetchRing?
     private let prefetchConfiguration: RuntimePrefetch
-    /// The blit lands in the fixup command, so it applies only where the
-    /// fixup computes the adopted experts.
-    private let prefetchBlitActive: Bool
     private let anePrefill: ANEPrefillAttention?
     private let predictivePrefetchTopM: Int
     public let rdadviseEnabled: Bool
@@ -847,12 +844,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.expertIOBackend = try ExpertIOBackend.environmentValue()
         self.expertCacheProtectMode = try ExpertCacheProtectMode.environmentValue()
         self.prefetchConfiguration = runtimeConfiguration.prefetch
-        self.prefetchBlitActive = runtimeConfiguration.prefetch.adoption == .blit
-            && [.speculative, .speculativeValidate, .gpuResidency]
-                .contains(runtimeConfiguration.decodeExpertExecution)
         let prefetch = try Self.makePredictivePrefetch(
-            model: model, device: context.device,
-            configuration: runtimeConfiguration.prefetch)
+            model: model, configuration: runtimeConfiguration.prefetch)
         self.predictivePrefetchTopM = prefetch.topM
         self.predictivePrefetch = prefetch.ring
         self.prefetchTraceFD = try Self.openPrefetchTrace(runtimeConfiguration.prefetch.tracePath)
@@ -959,7 +952,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     private static func makePredictivePrefetch(
-        model: Model, device: MTLDevice, configuration: RuntimePrefetch
+        model: Model, configuration: RuntimePrefetch
     ) throws -> (topM: Int, ring: ExpertPrefetchRing?) {
         let cfg = model.config
         let topM = configuration.topM ?? cfg.topKExperts
@@ -967,15 +960,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             throw ModelError.internalInconsistency(
                 detail: "SHRIKE_PREFETCH_TOP_M must be 1...\(cfg.topKExperts)")
         }
-        // In-flight reads hold slots beside the completed ones a later plan
-        // may still adopt, so the ring is sized for both.
-        let ring = configuration.enabled
-            ? try ExpertPrefetchRing(
-                device: device,
-                expertStride: model.routedExpertByteStride(layer: 0),
-                slotCount: topM + configuration.inFlight,
-                inFlightBudget: configuration.inFlight)
-            : nil
+        // In-flight reads hold cells beside the completed ones a later plan
+        // may still take, so the ring is sized for both.
+        try model.configurePrefetchCells(configuration.enabled ? topM + configuration.inFlight : 0)
+        guard configuration.enabled else { return (topM, nil) }
+        let cells = try model.prefetchCells()
+        // The per-slot layout has no cell the classifier can name: no ring.
+        guard !cells.isEmpty else {
+            // Stderr: the CLI's stdout is the generation the golden compares.
+            FileHandle.standardError.write(Data(
+                "Shrike prefetch: off under SHRIKE_EXPERT_CACHE_LAYOUT=per-slot (no cell the classifier can name)\n".utf8))
+            return (topM, nil)
+        }
+        let ring = try ExpertPrefetchRing(cells: cells, inFlightBudget: configuration.inFlight) {
+            layer, expert, cell in
+            model.dropRoutedExpertLanding(layer: layer, expert: expert, cell: cell)
+        }
         return (topM, ring)
     }
 
@@ -1009,11 +1009,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     /// The classifier is the tail command's last kernel, so a read completed before
     /// the command's GPU start surely beat it and one completed after its end surely lost.
-    static func prefetchRaceSplit(completions: [Int: UInt64], adopted: [Int],
+    static func prefetchRaceSplit(completions: [Int: UInt64], landed: [Int],
                                   gpuStartNanos: UInt64, gpuEndNanos: UInt64) -> PrefetchRaceSplit {
         var split = PrefetchRaceSplit()
         let known = gpuStartNanos > 0 && gpuEndNanos > 0
-        for expert in adopted {
+        for expert in landed {
             guard let completed = completions[expert], known else {
                 split.unknown &+= 1
                 continue
@@ -1039,23 +1039,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     /// The word wake reaches the plan before the tail command reports its GPU
     /// times, so a race it cannot settle waits with the deferred records.
-    private func recordPrefetchRace(plan: RoutedExpertFetchPlan?, experts: [Int], layer L: Int,
-                                    tailCB: MTLCommandBuffer) {
-        guard let plan, !plan.adopted.isEmpty, let predictivePrefetch else { return }
-        let adopted = plan.adopted.map { experts[$0] }
-        let completions = predictivePrefetch.completionNanos(layer: L, experts: Set(adopted))
+    private func recordPrefetchRace(landed: [Int], layer L: Int, tailCB: MTLCommandBuffer) {
+        guard !landed.isEmpty, let predictivePrefetch else { return }
+        let completions = predictivePrefetch.completionNanos(layer: L, experts: Set(landed))
         if tailCB.status == .completed {
-            countPrefetchRace(completions: completions, adopted: adopted, tailCB: tailCB)
+            countPrefetchRace(completions: completions, landed: landed, tailCB: tailCB)
         } else {
             deferredGPURecords.append(
-                .prefetchRace(completions: completions, adopted: adopted, tailCB: tailCB))
+                .prefetchRace(completions: completions, landed: landed, tailCB: tailCB))
         }
     }
 
-    private func countPrefetchRace(completions: [Int: UInt64], adopted: [Int],
+    private func countPrefetchRace(completions: [Int: UInt64], landed: [Int],
                                    tailCB: MTLCommandBuffer) {
         let split = Self.prefetchRaceSplit(
-            completions: completions, adopted: adopted,
+            completions: completions, landed: landed,
             gpuStartNanos: UInt64(max(0, tailCB.gpuStartTime) * 1_000_000_000),
             gpuEndNanos: UInt64(max(0, tailCB.gpuEndTime) * 1_000_000_000))
         totalPrefetchBeforeClassify &+= split.before
@@ -1065,39 +1063,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         totalPrefetchDuringEarlier &+= split.duringEarlier
         totalPrefetchAfterClassify &+= split.after
         totalPrefetchRaceUnknown &+= split.unknown
-    }
-
-    private func makePrefetchAdoptionGuard(plan: RoutedExpertFetchPlan?,
-                                           adopted: Set<Int>) -> PrefetchAdoptionGuard? {
-        guard let plan, !adopted.isEmpty else { return nil }
-        let model = self.model
-        let ring = predictivePrefetch
-        return PrefetchAdoptionGuard(
-            fail: { model.failAdoptedPrefetches(plan: plan) },
-            release: { ring?.consume(layer: plan.layer, experts: adopted, adopted: false) })
-    }
-
-    private func makePrefetchAdoptionTransfer(plan: RoutedExpertFetchPlan, experts: [Int],
-                                              views: [TensorView],
-                                              staged: [Int: MTLBuffer]) throws -> PrefetchAdoptionTransfer {
-        var sources: [MTLBuffer] = []
-        for index in plan.adopted {
-            guard let source = staged[experts[index]] else {
-                throw ModelError.internalInconsistency(
-                    detail: "an adopted prefetch has no staged buffer")
-            }
-            sources.append(source)
-        }
-        let adoptedExperts = Set(plan.adopted.map { experts[$0] })
-        let layer = plan.layer
-        return PrefetchAdoptionTransfer(
-            plan: plan,
-            sources: sources,
-            destinations: plan.adopted.map { views[$0].buffer },
-            destinationOffsets: plan.adopted.map { Int(views[$0].offset) },
-            byteCount: Int(views[plan.adopted[0]].length)) { [predictivePrefetch] adopted in
-                predictivePrefetch?.consume(layer: layer, experts: adoptedExperts, adopted: adopted)
-            }
     }
 
     /// A refused speculative read is counted, never thrown into the decode.
@@ -1111,10 +1076,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                    demand: demand) { deferred in
             do {
                 let resident = Set(try model.routedExpertResidentIDs(layer: target))
-                try predictivePrefetch.begin(layer: target, experts: experts,
-                                             resident: resident, deferred: deferred) { experts, buffers in
-                    try model.beginRoutedExpertPrefetch(layer: target, experts: experts,
-                                                        into: buffers)
+                try predictivePrefetch.begin(layer: target, from: L, experts: experts,
+                                             resident: resident, deferred: deferred) { experts, cells in
+                    try model.beginRoutedExpertPrefetch(layer: target, experts: experts, cells: cells)
                 }
             } catch {
                 if predictivePrefetch.noteHookFailure() {
@@ -2117,7 +2081,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalLoopProduceNanos: UInt64 = 0
     public private(set) var totalCachePlanNanos: UInt64 = 0
     public var totalPrefetchBeginNanos: UInt64 { predictivePrefetch?.statistics.beginNanos ?? 0 }
-    public private(set) var totalPrefetchBlitExperts: UInt64 = 0
+    /// Landed predictions the classifier counted resident: the landing's prize.
+    public private(set) var totalPrefetchLandedHits: UInt64 = 0
     public private(set) var totalPrefetchBeforeClassify: UInt64 = 0
     public private(set) var totalPrefetchDuringTail: UInt64 = 0
     public private(set) var totalPrefetchDuringLastFifty: UInt64 = 0
@@ -4169,8 +4134,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         routedOffsets: MoEExpertOffsets,
         topK: UInt32,
         d D: UInt32,
-        f FmoE: UInt32,
-        adoptionTransfer: PrefetchAdoptionTransfer? = nil
+        f FmoE: UInt32
     ) throws -> (cb: MTLCommandBuffer, commitNanos: UInt64) {
         // The phase-2 reduce already folded the shared branch (h1Buf
         // as its residual); the tail is a plain residual add.
@@ -4189,10 +4153,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // wait-free) measured null on the M1 — the parked-CB wake is as fast
         // as a fresh-commit schedule (v10 T3, 2026-08-31); keep the encoded
         // wait.
-        if let adoptionTransfer {
-            try adoptionTransfer.encodeCopy(commandBuffer: routedCB)
-            totalPrefetchBlitExperts &+= UInt64(adoptionTransfer.expertCount)
-        }
         if let token = ioToken {
             routedCB.encodeWaitForEvent(token.event, value: token.value)
         }
@@ -4348,7 +4308,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         case kernel(role: String, cb: MTLCommandBuffer)
         case routerWake(cb: MTLCommandBuffer, wokeAt: UInt64)
         case routed(PendingRoutedCommand, ioCompletedNanos: UInt64)
-        case prefetchRace(completions: [Int: UInt64], adopted: [Int], tailCB: MTLCommandBuffer)
+        case prefetchRace(completions: [Int: UInt64], landed: [Int], tailCB: MTLCommandBuffer)
 
         var commandBuffers: [(label: String, cb: MTLCommandBuffer)] {
             switch self {
@@ -4401,8 +4361,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 recordRouterWake(cb, wokeAt: woke, deferred: false)
             case .routed(let pending, let ioCompletedNanos):
                 try recordRoutedCommandTimings(pending, ioCompletedNanos: ioCompletedNanos)
-            case .prefetchRace(let completions, let adopted, let tailCB):
-                countPrefetchRace(completions: completions, adopted: adopted, tailCB: tailCB)
+            case .prefetchRace(let completions, let landed, let tailCB):
+                countPrefetchRace(completions: completions, landed: landed, tailCB: tailCB)
             }
         }
         deferredGPURecords = kept
@@ -6520,7 +6480,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let specScratch: (acts: MTLBuffer, y: MTLBuffer)?
         let expertLease: RoutedExpertLease?
         let storageOperation: RoutedExpertLoadOperation?
-        let adoptionTransfer: PrefetchAdoptionTransfer?
         let overlapCompletionClock: CommandCompletionClock?
         let expectedOverlapCompletions: Int
         let hitCommitNanos: UInt64
@@ -6567,7 +6526,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // completion mark). If any command/error path exits early, leave the
         // cache entries empty rather than retaining a LOADING slot.
         var finalizedStagingTransfer = false
-        var finalizedAdoption = false
         defer {
             if let operation = pending.storageOperation {
                 if operation.storage.requiresGPUFinalization,
@@ -6575,10 +6533,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     model.failRoutedExpertStagingTransfer(plan: operation.plan)
                 }
                 operation.storage.releaseStagingTransfer()
-            }
-            if let transfer = pending.adoptionTransfer, !finalizedAdoption {
-                if let plan = transfer.plan { model.failAdoptedPrefetches(plan: plan) }
-                transfer.release(adopted: false)
             }
         }
         if waitIfNeeded {
@@ -6608,11 +6562,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             totalIoNanos &+= operation.storage.loadNanos
             totalMissIoNanos &+= operation.storage.loadNanos
             ioCompletedNanos = operation.storage.completedNanos
-        }
-        if let transfer = pending.adoptionTransfer {
-            if let plan = transfer.plan { try model.finalizeAdoptedPrefetches(plan: plan) }
-            finalizedAdoption = true
-            transfer.release()
         }
         if let sharedCB = pending.sharedCB, let err = sharedCB.error {
             throw ModelError.commandBufferFailed(
@@ -6985,32 +6934,39 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let canUsePlannedFetch = cfg.topKExperts <= MoE.maxStreamedExperts
         let residentBeforePlan = prefetchTraceFD >= 0
             ? try model.routedExpertResidentIDs(layer: L) : []
-        let readyPrefetches = predictivePrefetch?.readyBuffers(
+        let landedPrefetches = predictivePrefetch?.readyCells(
             layer: L, experts: experts,
             joinNanos: UInt64(prefetchConfiguration.joinMicros) * 1_000) ?? [:]
+        // The classifier's view, taken before this plan: a landing it missed
+        // is swapped in all the same and reported adopted for the fixup.
+        let gpuMissedExperts: Set<Int>? = hostReadback.map { readback in
+            Set(readback.missPositions.map { Int(readback.expertIDs[Int($0)]) })
+        }
         let cachePlanStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let plannedFetch: RoutedExpertFetchPlan?
         do {
             plannedFetch = canUsePlannedFetch
-                ? try model.planRoutedExperts(
-                    layer: L, experts: experts, prefetched: readyPrefetches,
-                    adoption: prefetchBlitActive ? .blit : .copy)
+                ? try model.planRoutedExperts(layer: L, experts: experts,
+                                              gpuMissedExperts: gpuMissedExperts,
+                                              leasedLandings: Set(landedPrefetches.keys))
                 : nil
         } catch {
-            predictivePrefetch?.unlease(layer: L, experts: Set(readyPrefetches.keys))
+            predictivePrefetch?.unlease(layer: L, experts: Set(landedPrefetches.keys))
             throw error
         }
         totalCachePlanNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cachePlanStarted
-        recordPrefetchRace(plan: plannedFetch, experts: experts, layer: L, tailCB: tailCB)
-        // The blit's adopted slots stay leased until their command completes.
-        let blitAdopted = prefetchBlitActive
-            ? Set((plannedFetch?.adopted ?? []).map { experts[$0] }) : Set<Int>()
-        let consumedAtPlan = Set(readyPrefetches.keys).subtracting(blitAdopted)
-        if !consumedAtPlan.isEmpty {
-            predictivePrefetch?.consume(layer: L, experts: consumedAtPlan)
+        let landed = Array(landedPrefetches.keys)
+        recordPrefetchRace(landed: landed, layer: L, tailCB: tailCB)
+        if !landed.isEmpty {
+            let swapped = plannedFetch?.freedCells.count ?? 0
+            let adoptedCount = plannedFetch?.adopted.count ?? 0
+            // A landed hit is one the classifier counted; without one none is.
+            if gpuMissedExperts != nil {
+                totalPrefetchLandedHits &+= UInt64(max(0, swapped - adoptedCount))
+            }
+            predictivePrefetch?.consume(layer: L, experts: Set(landed),
+                                        freedCells: plannedFetch?.freedCells ?? [:])
         }
-        let adoptionGuard = makePrefetchAdoptionGuard(plan: plannedFetch, adopted: blitAdopted)
-        defer { adoptionGuard?.abandon() }
         let missesForTrace = plannedFetch.map { plan in
             plan.misses.map { experts[$0] }
         } ?? experts
@@ -7264,11 +7220,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
             }
         }
-        if let adoptionGuard, let plannedFetch {
-            adoptionGuard.attach(try makePrefetchAdoptionTransfer(
-                plan: plannedFetch, experts: experts, views: blobs, staged: readyPrefetches))
-        }
-        let adoptionTransfer = adoptionGuard?.transfer
         schedulePredictivePrefetch(layer: L, predicted: predictedNextLayer,
                                    demand: plannedLoad?.storage)
         decodeRoutedBufsScratch.removeAll(keepingCapacity: true)
@@ -7299,7 +7250,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 specScratch: nil,
                 expertLease: expertLease,
                 storageOperation: eventLoad,
-                adoptionTransfer: nil,
                 overlapCompletionClock: eventLoad == nil ? nil : overlapCompletionClock,
                 expectedOverlapCompletions: expectedOverlapCompletions,
                 hitCommitNanos: 0,
@@ -7327,8 +7277,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             phase1MissSlots: phase1MissSlots,
             routedBufs: routedBufs,
             routedOffsets: routedOffsets,
-            topK: topK, d: D, f: FmoE,
-            adoptionTransfer: adoptionTransfer)
+            topK: topK, d: D, f: FmoE)
         totalFixupBuildNanos &+= routedCommitNanos - fixupBuildStarted
         if missCount > 0, let completed = completedStorageNanos, completed > 0 {
             let submitted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
@@ -7346,7 +7295,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 ? specScratch[L % specScratch.count] : nil,
             expertLease: expertLease,
             storageOperation: eventLoad,
-            adoptionTransfer: adoptionTransfer,
             overlapCompletionClock: eventLoad == nil ? nil : overlapCompletionClock,
             expectedOverlapCompletions: expectedOverlapCompletions,
             hitCommitNanos: hitCommitNanos,
@@ -7358,7 +7306,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     : "moe_phase1_miss_fixup_phase2",
             encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
         transferredExpertLease = true
-        adoptionGuard?.commit()
         totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
         if layerTraceEnabled,
            position < 3 || position % 16 == 0 {

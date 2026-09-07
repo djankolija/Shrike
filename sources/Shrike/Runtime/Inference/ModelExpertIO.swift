@@ -10,6 +10,7 @@ public struct RoutedExpertFetchPlan: Sendable {
     public var hits: Int { cachePlan.hits }
     public var assignedSlots: [Int] { cachePlan.assignedSlots }
     public var adopted: [Int] { cachePlan.adopted }
+    public var freedCells: [Int: Int] { cachePlan.freedCells }
 
     public init(layer: Int, cachePlan: ExpertCachePlan) {
         self.layer = layer
@@ -115,31 +116,46 @@ extension Model {
                                   experts: [Int],
                                   avoidingSlots: Set<Int> = [],
                                   protectedExperts: [Bool]? = nil,
-                                  prefetched: [Int: MTLBuffer] = [:],
-                                  adoption: RuntimePrefetchAdoption = .copy) throws
+                                  gpuMissedExperts: Set<Int>? = nil,
+                                  leasedLandings: Set<Int> = []) throws
         -> RoutedExpertFetchPlan? {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
         let validSlots = Set(avoidingSlots.filter { $0 >= 0 && $0 < streamer.slotCount })
-        let planAdoption: PrefetchAdoption = adoption == .blit
-            ? .gpuBlit(Set(prefetched.keys))
-            : .hostCopy(prefetched.mapValues { $0.contents() })
         return RoutedExpertFetchPlan(
             layer: layer, cachePlan: try streamer.planExpertsCached(
                 experts: experts, avoidingSlots: validSlots, protectedExperts: protectedExperts,
-                adoption: planAdoption))
+                gpuMissedExperts: gpuMissedExperts, leasedLandings: leasedLandings))
     }
 
-    func finalizeAdoptedPrefetches(plan: RoutedExpertFetchPlan) throws {
-        try ensureLayerOpened(plan.layer)
-        let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
-        try streamer.finalizeAdoptedSlots(plan.cachePlan)
+    /// The ring's cell count has to be known before the arena exists, which
+    /// is the first layer's opening; a mismatch after that is a programming
+    /// error, not a runtime condition.
+    public func configurePrefetchCells(_ count: Int) throws {
+        try streamersQueue.sync {
+            if streamersBox.arena != nil, streamersBox.prefetchCellCount != count {
+                throw ModelError.internalInconsistency(
+                    detail: "the expert cell arena was allocated before the prefetch ring was sized")
+            }
+            streamersBox.prefetchCellCount = count
+        }
     }
 
-    func failAdoptedPrefetches(plan: RoutedExpertFetchPlan) {
-        guard (try? ensureLayerOpened(plan.layer)) != nil else { return }
-        let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
-        streamer.failAdoptedSlots(plan.cachePlan)
+    /// The ring's cells in the arena; empty under the per-slot layout, where
+    /// no cell is addressable by the classifier and the prefetch is refused.
+    public func prefetchCells() throws -> [Int] {
+        try ensureLayerOpened(firstRoutedLayer())
+        return streamersQueue.sync { streamersBox.prefetchCells }
+    }
+
+    private func firstRoutedLayer() -> Int {
+        packedExpertsLayout.layers.firstIndex { !$0.experts.isEmpty } ?? 0
+    }
+
+    func dropRoutedExpertLanding(layer: Int, expert: Int, cell: Int) {
+        guard (try? ensureLayerOpened(layer)) != nil else { return }
+        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
+        streamer.dropLanding(expert: expert, cell: cell)
     }
 
     public func planRoutedExpertsIfPossible(layer: Int,
@@ -206,12 +222,11 @@ extension Model {
 
     public func beginRoutedExpertPrefetch(layer: Int,
                                            experts: [Int],
-                                           into buffers: [MTLBuffer]) throws
+                                           cells: [Int]) throws
         -> ExpertLoadOperation {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
-        return try streamer.beginPrefetch(experts: experts,
-                                          destinations: buffers.map { $0.contents() })
+        return try streamer.beginPrefetch(experts: experts, cells: cells)
     }
 
     func pinRoutedExperts(for plan: RoutedExpertFetchPlan) throws -> RoutedExpertLease {

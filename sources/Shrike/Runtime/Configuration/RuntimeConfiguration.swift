@@ -111,14 +111,6 @@ public enum RuntimePrefetchPlacement: String, Codable, Sendable {
     case beside
 }
 
-/// How an adopted prediction reaches its cache slot: a host `memcpy` at plan
-/// time (`copy`), or a GPU blit at the head of the fixup command that computes
-/// it (`blit`, only where the fixup computes adopted experts).
-public enum RuntimePrefetchAdoption: String, Codable, Sendable {
-    case copy
-    case blit
-}
-
 /// How the next-layer router probe is dispatched: as its own GEMV and
 /// selection after the authoritative router's (`separate`), or in the same
 /// two dispatches as a second grid row (`fused`).
@@ -140,15 +132,16 @@ public struct RuntimePrefetch: Codable, Sendable, Equatable {
     public let placement: RuntimePrefetchPlacement
     public let distance: Int
     public let tracePath: String?
-    public let adoption: RuntimePrefetchAdoption
-    /// How long a plan waits for a prediction still in flight before reading
-    /// the expert itself; 0 never waits.
+    /// The bound within which a wait for a prediction still in flight counts
+    /// as joined rather than late; the wait itself runs to completion, since
+    /// the prediction's cell is claimed, so 0 is refused rather than read as
+    /// the "never wait" it once was.
     public let joinMicros: Int
     public let probe: RuntimePrefetchProbe
 
     public static let allowedInFlight = 1...8
     public static let allowedDistance = 1...8
-    public static let allowedJoinMicros = 0...2000
+    public static let allowedJoinMicros = 1...2000
 
     public static let off = RuntimePrefetch(enabled: false, topM: nil, inFlight: 1,
                                             placement: .after, distance: 1, tracePath: nil)
@@ -156,7 +149,7 @@ public struct RuntimePrefetch: Codable, Sendable, Equatable {
                                                    placement: .after, distance: 1, tracePath: nil)
 
     public init(enabled: Bool, topM: Int?, inFlight: Int, placement: RuntimePrefetchPlacement,
-                distance: Int, tracePath: String?, adoption: RuntimePrefetchAdoption = .blit,
+                distance: Int, tracePath: String?,
                 joinMicros: Int = 400, probe: RuntimePrefetchProbe = .fused) {
         self.enabled = enabled
         self.topM = topM
@@ -164,7 +157,6 @@ public struct RuntimePrefetch: Codable, Sendable, Equatable {
         self.placement = placement
         self.distance = distance
         self.tracePath = tracePath
-        self.adoption = adoption
         self.joinMicros = joinMicros
         self.probe = probe
     }
@@ -196,15 +188,16 @@ public struct RuntimePrefetch: Codable, Sendable, Equatable {
         let distance = try positiveInt(environment, "SHRIKE_PREFETCH_PROBE_DISTANCE",
                                        allowed: allowedDistance) ?? production.distance
         let trace = environment["SHRIKE_PREFETCH_TRACE"].flatMap { $0.isEmpty ? nil : $0 }
-        let adoption: RuntimePrefetchAdoption
         if let raw = environment["SHRIKE_PREFETCH_ADOPT"] {
-            guard let value = RuntimePrefetchAdoption(rawValue: raw) else {
-                throw RuntimeConfigurationError.invalidPrefetch(
-                    "SHRIKE_PREFETCH_ADOPT '\(raw)'; allowed: copy, blit")
-            }
-            adoption = value
-        } else {
-            adoption = production.adoption
+            throw RuntimeConfigurationError.invalidPrefetch(
+                "SHRIKE_PREFETCH_ADOPT '\(raw)' was removed by v16's merge: a prediction lands in "
+                    + "the pool's own address space and needs no copy")
+        }
+        if environment["SHRIKE_PREFETCH_JOIN_US"] == "0" {
+            throw RuntimeConfigurationError.invalidPrefetch(
+                "SHRIKE_PREFETCH_JOIN_US '0' no longer means never wait: a landed prediction's cell "
+                    + "is claimed, so the wait runs to completion and the bound only classifies "
+                    + "joined against late; allowed: 1...2000")
         }
         let joinMicros = try positiveInt(environment, "SHRIKE_PREFETCH_JOIN_US",
                                          allowed: allowedJoinMicros) ?? production.joinMicros
@@ -220,7 +213,7 @@ public struct RuntimePrefetch: Codable, Sendable, Equatable {
         }
         return RuntimePrefetch(enabled: enabled, topM: topM, inFlight: inFlight,
                                placement: placement, distance: distance, tracePath: trace,
-                               adoption: adoption, joinMicros: joinMicros, probe: probe)
+                               joinMicros: joinMicros, probe: probe)
     }
 
     private static func positiveInt(_ environment: [String: String], _ name: String,

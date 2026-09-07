@@ -25,8 +25,8 @@ GAPS = {
 RUNNER = ["expert_hit_rate_decode", "expert_misses_decode", "hit_fixup_layers", "io_ms",
           "io_fixup_wake_ms", "io_fetch_ms", "io_hidden_pct", "cache_plan_ms",
           "prefetch_begin_ms", "prefetch_issued", "prefetch_adopted", "prefetch_reclaimed",
-          "prefetch_deferred", "prefetch_overlapped", "prefetch_late", "prefetch_refused",
-          "prefetch_joined", "prefetch_blit_experts", "prefetch_before_classify",
+          "prefetch_deferred", "prefetch_overlapped", "prefetch_late", "prefetch_refused", "prefetch_failed",
+          "prefetch_joined", "prefetch_landed_hits", "prefetch_before_classify",
           "prefetch_during_tail", "prefetch_during_lt50us", "prefetch_during_50_150us",
           "prefetch_during_gt150us", "prefetch_after_classify", "prefetch_race_unknown",
           "prefetch_hook_failed",
@@ -112,9 +112,10 @@ for block in blocks:
               f"issued={fmt(runner['prefetch_issued'], 0)} adopted={fmt(runner['prefetch_adopted'], 0)} "
               f"reclaimed={fmt(runner['prefetch_reclaimed'], 0)} "
               f"late={fmt(runner['prefetch_late'], 0)} joined={fmt(runner['prefetch_joined'], 0)} "
-              f"refused={fmt(runner['prefetch_refused'], 0)} deferred={fmt(runner['prefetch_deferred'], 0)} "
+              f"refused={fmt(runner['prefetch_refused'], 0)} failed={fmt(runner['prefetch_failed'], 0)} "
+              f"deferred={fmt(runner['prefetch_deferred'], 0)} "
               f"overlapped={fmt(runner['prefetch_overlapped'], 0)} "
-              f"blit_experts={fmt(runner['prefetch_blit_experts'], 0)} "
+              f"landed_hits={fmt(runner['prefetch_landed_hits'], 0)} "
               f"before_classify={fmt(runner['prefetch_before_classify'], 0)} "
               f"during_tail={fmt(runner['prefetch_during_tail'], 0)} "
               f"(lt50us={fmt(runner['prefetch_during_lt50us'], 0)} "

@@ -95,6 +95,11 @@ public struct Model {
         /// Layer files need separate handles, but not separate MTLIO queues.
         /// One queue prevents prefill from exhausting Metal-I/O worker threads.
         var metalIOService: MetalExpertIOService?
+        /// One arena for every layer's pool cells and the ring's, allocated
+        /// at the first layer's opening under the pool layout.
+        var arena: ExpertCellArena?
+        var prefetchCellCount = 0
+        var prefetchCells: [Int] = []
         init(numLayers: Int) {
             self.streamers = Array(repeating: nil, count: numLayers)
             self.layerVerified = Array(repeating: false, count: numLayers)
@@ -549,6 +554,27 @@ public struct Model {
             metalStagingPool = nil
             metalIOService = nil
         }
+        var arena: ExpertCellArena?
+        var cellRange: Range<Int>?
+        if try ExpertCacheLayout.environmentValue() == .pool {
+            // Dense layers own no cells: the arena is sized by the routed layers.
+            let routedLayers = packedExpertsLayout.layers.indices.filter {
+                !packedExpertsLayout.layers[$0].experts.isEmpty
+            }
+            if streamersBox.arena == nil {
+                let pageSize = Int(getpagesize())
+                let stride = ((Int(packedExpertsLayout.expertStride) + pageSize - 1) / pageSize) * pageSize
+                let poolCells = routedLayers.count * slotCount
+                streamersBox.arena = try ExpertCellArena(
+                    device: device,
+                    cellCount: poolCells + streamersBox.prefetchCellCount,
+                    stride: stride)
+                streamersBox.prefetchCells = Array(poolCells..<(poolCells + streamersBox.prefetchCellCount))
+            }
+            arena = streamersBox.arena
+            let ordinal = routedLayers.firstIndex(of: L) ?? 0
+            cellRange = (ordinal * slotCount)..<((ordinal + 1) * slotCount)
+        }
         streamersBox.streamers[L] = try PreadExpertStreamer(
             layout: layout,
             device: device,
@@ -556,7 +582,9 @@ public struct Model {
             cachePolicy: expertCachePolicy,
             eventCoordinator: expertIOEventCoordinator,
             metalStagingPool: metalStagingPool,
-            metalIOService: metalIOService)
+            metalIOService: metalIOService,
+            arena: arena,
+            cellRange: cellRange)
     }
 
     /// Test hook: how many layer files have been opened so far.

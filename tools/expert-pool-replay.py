@@ -509,14 +509,34 @@ class LayerPool:
         self.fills = 0
         self.useful_fills = 0
         self.wasted_fills = 0
+        # `pool`: a fill lands in a victim slot and stays (v16's landing in
+        # the pool's own slot). `ring`: a fill lives beside the pool until its
+        # layer's plan, counts a hit there and is then gone (the ring's cells
+        # addressable by the classifier, no victim, nothing retained).
+        # `ring-retain`: the same, but a hit expert is then placed in a victim
+        # slot, which was production before v16's merge (the ring with
+        # adoption) and is the merge's own profile (the swap at the plan).
+        self.fill_mode = "pool"
+        self.ring = set()
 
     def fill(self, candidates, budget):
         """Places up to `budget` predicted experts that are not resident into
         victim slots chosen by the policy, resident at once with no plan's use
         accounting (the exact route's later hit supplies it). The previous
         plan's slots are ineligible, as the streamer's pinned slots are; a
-        filled expert evicted before any plan hits it counts as wasted."""
+        filled expert evicted before any plan hits it counts as wasted. In the
+        ring modes the fill is held beside the pool instead, no victim."""
         placed = 0
+        if self.fill_mode != "pool":
+            for expert in candidates:
+                if placed >= budget:
+                    break
+                if expert in self.slot_expert or expert in self.ring:
+                    continue
+                self.ring.add(expert)
+                self.fills += 1
+                placed += 1
+            return placed
         for expert in candidates:
             if placed >= budget:
                 break
@@ -593,16 +613,32 @@ class LayerPool:
                         self.filled_unused.discard(slot)
                     break
 
+        # A ring fill the exact route wants is a hit served from the ring's
+        # cell; `ring-retain` then gives it a victim slot like a miss, without
+        # counting it one. Whatever the plan did not want is wasted, and the
+        # ring is empty again after the plan either way.
+        ring_hit_indices = [i for i in range(len(experts))
+                            if assigned[i] == -1 and experts[i] in self.ring]
+        hits += len(ring_hit_indices)
+        self.useful_fills += len(ring_hit_indices)
+        self.wasted_fills += len(self.ring) - len(ring_hit_indices)
+        self.ring = set()
+        retain_indices = ring_hit_indices if self.fill_mode == "ring-retain" else []
+        for i in ring_hit_indices:
+            assigned[i] = -2
+
         miss_indices = [i for i in range(len(experts)) if assigned[i] == -1]
+        needed = len(miss_indices) + len(retain_indices)
         eligible = [s for s in range(self.slots)
                     if s not in reserved and s not in avoiding and s not in protect]
-        if len(miss_indices) > len(eligible):
+        if needed > len(eligible):
             eligible = [s for s in range(self.slots) if s not in reserved and s not in avoiding]
-        if len(miss_indices) > len(eligible):
+        if needed > len(eligible):
             eligible = [s for s in range(self.slots) if s not in reserved]
 
         eligible.sort(key=lambda slot: self._victim_key(slot, active))
         victims = eligible[:len(miss_indices)]
+        retain_victims = eligible[len(miss_indices):needed]
 
         clock = self.use_clock + 1
         self.use_clock = clock
@@ -624,6 +660,13 @@ class LayerPool:
             self.slot_expert[slot] = experts[miss_i]
             self.slot_last_use[slot] = clock
             assigned[miss_i] = slot
+        for retain_i, slot in zip(retain_indices, retain_victims):
+            if slot in self.filled_unused:
+                self.wasted_fills += 1
+                self.filled_unused.discard(slot)
+            self.slot_expert[slot] = experts[retain_i]
+            self.slot_last_use[slot] = clock
+            assigned[retain_i] = slot
 
         self.plans_done += 1
         self.last_assigned = set(slot for slot in assigned if slot >= 0)
@@ -1026,12 +1069,13 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
            prefill_weight="one", sweep_order="index", sweep_carry=False,
            phase_policy=None, profile_window=None, protect="chunk",
            sweep_tail=DEFAULT_SWEEP_TAIL, sweep_head_factor=DEFAULT_SWEEP_HEAD_FACTOR,
-           fills=None, fill_budget=1, fill_stats=None):
+           fills=None, fill_budget=1, fill_stats=None, fill_mode="pool"):
     """Returns (stats, total_compulsory, settle_stats, settle_meta, profile).
     `fills` ((layer, position) -> predicted experts, see load_prefetch_fills)
-    places up to `fill_budget` of them into the layer's pool before the
-    decode plan at that position; `fill_stats`, when a dict, receives the
-    totals (fills, useful, wasted, unused_at_end).
+    places up to `fill_budget` of them into the layer's pool (`fill_mode`
+    pool) or beside it (ring, ring-retain; see LayerPool) before the decode
+    plan at that position; `fill_stats`, when a dict, receives the totals
+    (fills, useful, wasted, unused_at_end).
 
     stats[request_id] = {"prefill": [hits, misses, compulsory, capacity],
                           "decode": [hits, misses, compulsory, capacity]}
@@ -1088,6 +1132,8 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
         if fills is not None and not hasattr(pool, "fill"):
             raise ValueError(f"speculative fills are modelled for the lru / lfu / aging-lfu / belady "
                              f"pool only, not {policy.label()}")
+        if fills is not None:
+            pool.fill_mode = fill_mode
         lookback = deque(maxlen=avoid_lookback) if avoid_lookback > 0 else deque()
         next_reverse = sweep_order in ("rows-desc", "last-desc")
 
@@ -1276,6 +1322,28 @@ def self_test():
                              fills={(1, 1): [4]}, fill_stats=fill_stats)
     check("fill wrong misses", stats[1]["decode"][1], 3)
     check("fill wrong counters", (fill_stats["fills"], fill_stats["useful"], fill_stats["wasted"]), (1, 0, 1))
+    # The fill modes on A, B, C, B: a right fill of B before position 1 is a
+    # hit in every mode; in `ring` nothing is retained, so B's return at
+    # position 3 misses (A, the older resident, is evicted for it), while
+    # `pool` and `ring-retain` keep B and hit; a wrong ring fill is wasted at
+    # its plan and costs the pool nothing.
+    return_trace = "\n".join(f"{i} 1 {letter_ids[expert]}" for i, expert in enumerate(["A", "B", "C", "B"]))
+    for mode, expected_hits, expected_misses in (("pool", 2, 2), ("ring", 1, 3), ("ring-retain", 2, 2)):
+        fill_stats = {}
+        stats, _, _, _, _ = _run(return_trace, slots=2, policy_raw="lru",
+                                 fills={(1, 1): [letter_ids["B"]]}, fill_stats=fill_stats,
+                                 fill_mode=mode)
+        check(f"fill mode {mode} hits", stats[1]["decode"][0], expected_hits)
+        check(f"fill mode {mode} misses", stats[1]["decode"][1], expected_misses)
+        check(f"fill mode {mode} counters",
+              (fill_stats["fills"], fill_stats["useful"], fill_stats["wasted"]), (1, 1, 0))
+    fill_stats = {}
+    stats, _, _, _, _ = _run(return_trace, slots=2, policy_raw="lru",
+                             fills={(1, 1): [4]}, fill_stats=fill_stats, fill_mode="ring")
+    check("ring wrong fill hits", stats[1]["decode"][0], 1)
+    check("ring wrong fill misses", stats[1]["decode"][1], 3)
+    check("ring wrong fill counters",
+          (fill_stats["fills"], fill_stats["useful"], fill_stats["wasted"]), (1, 0, 1))
     # The two-distance queue keys each capture's target by its own probe_distance:
     # the second capture here is at distance 3, so its fill lands three layers on.
     import os
@@ -1929,6 +1997,13 @@ def main():
     parser.add_argument("--fill-budget", type=int, default=1,
                         help="fills placed per layer per position (default 1, the ring's "
                              "one read in flight)")
+    parser.add_argument("--fill-mode", choices=["pool", "ring", "ring-retain"], default="pool",
+                        help="where a fill lives: pool (default) lands in a victim slot and "
+                             "stays (the landing in the pool's own slot); ring is held beside "
+                             "the pool until its layer's plan, a hit there, then gone (the ring "
+                             "addressable by the classifier, nothing retained); ring-retain "
+                             "then places a hit expert in a victim slot (the ring with "
+                             "adoption before v16's merge, and the merge's swap)")
     parser.add_argument("--self-test", action="store_true",
                          help="run the built-in synthetic-trace checks and exit")
     args = parser.parse_args()
@@ -1968,14 +2043,16 @@ def main():
             args.prefill_weight, args.sweep_order, args.sweep_carry == "on",
             phase_policy, args.profile_window, protect=args.protect,
             sweep_tail=args.sweep_tail, sweep_head_factor=args.sweep_head_factor,
-            fills=fills, fill_budget=args.fill_budget, fill_stats=fill_stats)
+            fills=fills, fill_budget=args.fill_budget, fill_stats=fill_stats,
+            fill_mode=args.fill_mode)
     except ValueError as e:
         parser.error(str(e))
 
     print_report(stats, total_compulsory, policy, args.slots, args.layer,
                  args.avoid_lookback, settle_stats, settle_meta, protect=args.protect)
     if fill_stats is not None:
-        print(f"  speculative fills (top-m={args.fill_top_m} budget={args.fill_budget}): "
+        print(f"  speculative fills (top-m={args.fill_top_m} budget={args.fill_budget} "
+              f"mode={args.fill_mode}): "
               f"placed={fill_stats.get('fills', 0)} useful={fill_stats.get('useful', 0)} "
               f"wasted={fill_stats.get('wasted', 0)} "
               f"unused_at_end={fill_stats.get('unused_at_end', 0)}")

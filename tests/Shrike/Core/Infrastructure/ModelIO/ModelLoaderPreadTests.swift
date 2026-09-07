@@ -23,8 +23,11 @@ import Metal
         let view = try model.routedExpert(layer: 1, expert: 4)
         #expect(model.openLayerFileCount() == 1)
 
-        // pread returns the scratch slot: offset is 0, not exp.offset.
-        #expect(view.offset == 0)
+        // The view is a cache cell of the shared arena, not the expert's file offset:
+        // layer 1's first slot is its first cell, one layer's worth of cells in.
+        let residency = try model.routedExpertResidency(layer: 1)
+        #expect(view.buffer === residency.expertPool)
+        #expect(view.offset == UInt64(2) * residency.poolSlotStride)
 
         // Same tagged-byte contract as ModelLoaderTests.routedExpertBytesRoundTrip.
         let b = Self.readBytes(view)

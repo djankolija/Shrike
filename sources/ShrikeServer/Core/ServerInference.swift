@@ -453,8 +453,9 @@ private struct RunnerCounterSnapshot {
     let prefetchOverlapped: UInt64
     let prefetchLate: UInt64
     let prefetchRefused: UInt64
+    let prefetchFailed: UInt64
     let prefetchJoined: UInt64
-    let prefetchBlitExperts: UInt64
+    let prefetchLandedHits: UInt64
     let prefetchBeforeClassify: UInt64
     let prefetchDuringTail: UInt64
     let prefetchDuringLastFifty: UInt64
@@ -1150,13 +1151,14 @@ public actor ServerModelSession: ServerInferenceBackend {
             prefetchBegin: runner.totalPrefetchBeginNanos,
             prefetchIssued: runner.prefetchStatistics.issued,
             prefetchAdopted: runner.prefetchStatistics.adopted,
-            prefetchReclaimed: runner.prefetchStatistics.reclaimedUnadopted,
+            prefetchReclaimed: runner.prefetchStatistics.reclaimed,
             prefetchDeferred: runner.prefetchStatistics.deferred,
             prefetchOverlapped: runner.prefetchStatistics.overlapped,
             prefetchLate: runner.prefetchStatistics.late,
             prefetchRefused: runner.prefetchStatistics.refused,
+            prefetchFailed: runner.prefetchStatistics.failed,
             prefetchJoined: runner.prefetchStatistics.joined,
-            prefetchBlitExperts: runner.totalPrefetchBlitExperts,
+            prefetchLandedHits: runner.totalPrefetchLandedHits,
             prefetchBeforeClassify: runner.totalPrefetchBeforeClassify,
             prefetchDuringTail: runner.totalPrefetchDuringTail,
             prefetchDuringLastFifty: runner.totalPrefetchDuringLastFifty,
@@ -2022,8 +2024,8 @@ public actor ServerModelSession: ServerInferenceBackend {
         return String(
             format: "prefetch_begin_ms=%.4f prefetch_issued=%llu prefetch_adopted=%llu "
                 + "prefetch_reclaimed=%llu prefetch_deferred=%llu prefetch_overlapped=%llu "
-                + "prefetch_late=%llu prefetch_refused=%llu prefetch_joined=%llu "
-                + "prefetch_blit_experts=%llu prefetch_before_classify=%llu "
+                + "prefetch_late=%llu prefetch_refused=%llu prefetch_failed=%llu prefetch_joined=%llu "
+                + "prefetch_landed_hits=%llu prefetch_before_classify=%llu "
                 + "prefetch_during_tail=%llu prefetch_during_lt50us=%llu "
                 + "prefetch_during_50_150us=%llu prefetch_during_gt150us=%llu "
                 + "prefetch_after_classify=%llu prefetch_race_unknown=%llu "
@@ -2031,13 +2033,14 @@ public actor ServerModelSession: ServerInferenceBackend {
             beginMs,
             stats.issued - snapshot.prefetchIssued,
             stats.adopted - snapshot.prefetchAdopted,
-            stats.reclaimedUnadopted - snapshot.prefetchReclaimed,
+            stats.reclaimed - snapshot.prefetchReclaimed,
             stats.deferred - snapshot.prefetchDeferred,
             stats.overlapped - snapshot.prefetchOverlapped,
             stats.late - snapshot.prefetchLate,
             stats.refused - snapshot.prefetchRefused,
+            stats.failed - snapshot.prefetchFailed,
             stats.joined - snapshot.prefetchJoined,
-            runner.totalPrefetchBlitExperts - snapshot.prefetchBlitExperts,
+            runner.totalPrefetchLandedHits - snapshot.prefetchLandedHits,
             runner.totalPrefetchBeforeClassify - snapshot.prefetchBeforeClassify,
             runner.totalPrefetchDuringTail - snapshot.prefetchDuringTail,
             runner.totalPrefetchDuringLastFifty - snapshot.prefetchDuringLastFifty,
