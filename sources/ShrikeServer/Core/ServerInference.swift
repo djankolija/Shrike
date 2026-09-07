@@ -539,7 +539,6 @@ public actor ServerModelSession: ServerInferenceBackend {
     private let defaultReasoningEffort: ReasoningEffort
     let reasoningRetention: ReasoningRetention
     private let runner: RealForwardRunner
-    private let mtpDecoder: StreamingMTPDecoder?
     private let scratch: RawCompletionScratch
     private let prefillConfig: PrefillRuntimeConfig
     // Long prompts are prefilled chunk by chunk — small enough to keep expert
@@ -579,18 +578,6 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// concise mode is off. Selected per quantization (see ConcisePrompt).
     private nonisolated let concisePrompt: String?
 
-    /// A pure function of its two arguments, so a caller can reproduce the
-    /// effective cache mode for the startup banner without loading a model.
-    public static func effectivePromptCacheMode(
-        requested: ServerPromptCacheMode,
-        mtpEnabled: Bool
-    ) -> ServerPromptCacheMode {
-        // A target-only snapshot cannot restore the draft stream. Keeping a
-        // cache allocated while MTP is active would spend memory on entries
-        // that must never be consumed or published.
-        mtpEnabled ? .off : requested
-    }
-
     static func defaultReasoningEffort(
         explicit: ReasoningEffort?,
         dialect: ChatDialect,
@@ -628,7 +615,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     }
 
     /// lint:allow-long a sequential construction pipeline: tokenizer, Metal
-    /// context, runtime config, model, optional MTP sidecar, runner, scratch.
+    /// context, runtime config, model, runner, scratch.
     /// Each step consumes the last, so extracting any of them would return a
     /// tuple straight back into the next -- the same shape as Model.load.
     public static func load(modelDirectory: URL,
@@ -646,8 +633,6 @@ public actor ServerModelSession: ServerInferenceBackend {
                             reasoningRetention: ReasoningRetention? = nil,
                             expertCacheSlots requestedExpertCacheSlots: Int? = nil,
                             expertCacheBudgetBytes: Int? = nil,
-                            mtpModelDirectory: URL? = nil,
-                            mtpMemoryMiB: Int = StreamingMTPMemoryPlan.defaultBudgetMiB,
                             reusingContext: MetalContext? = nil) async throws -> ServerModelSession {
         let tokenizerFolder = GFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
@@ -733,31 +718,10 @@ public actor ServerModelSession: ServerInferenceBackend {
             ropeScalingMode: ropeScalingMode,
             yarnContextTokens: ropeScalingMode == .yarn
                 ? maxContext : RuntimeConfiguration.defaultYaRNContextTokens)
-        let mtpDecoder: StreamingMTPDecoder?
-        let runner: RealForwardRunner
-        if let mtpModelDirectory {
-            let sidecar = try Model.load(
-                directoryURL: mtpModelDirectory,
-                device: context.device,
-                expecting: .qwen36MTP,
-                streamingMode: .pread(slotCount: StreamingMTPMemoryPlan.expertSlots),
-                integrityPolicy: .resolved(directoryURL: mtpModelDirectory))
-            let decoder = try StreamingMTPDecoder(
-                targetModel: model,
-                mtpSidecar: sidecar,
-                context: context,
-                maxContext: maxContext,
-                memoryBudgetMiB: mtpMemoryMiB,
-                runtimeConfiguration: runtime)
-            mtpDecoder = decoder
-            runner = decoder.target
-        } else {
-            mtpDecoder = nil
-            runner = try RealForwardRunner(model: model,
+        let runner = try RealForwardRunner(model: model,
                                            context: context,
                                            maxContext: maxContext,
                                            runtimeConfiguration: runtime)
-        }
         let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
         let templateDigest = SHA256.hash(data: try Data(contentsOf: templateURL))
@@ -783,12 +747,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             kvStorage: runtime.kvCachePrecision.label,
             fp16RingEnabled: runtime.fp16RingEnabled,
             templateSHA256: templateDigest)
-        let effectivePromptCacheMode = Self.effectivePromptCacheMode(
-            requested: promptCacheMode,
-            mtpEnabled: mtpDecoder != nil)
         let promptStateStore: ServerPromptStateStore?
         let promptCache: ServerPromptCache
-        if effectivePromptCacheMode == .multiPrefix {
+        if promptCacheMode == .multiPrefix {
             let store = try ServerPromptStateStore(
                 configuration: ServerPromptCacheStorageConfiguration(
                     memoryLimitBytes: promptCacheMemoryLimitBytes,
@@ -817,12 +778,11 @@ public actor ServerModelSession: ServerInferenceBackend {
                                          defaultReasoningEffort: resolvedReasoningEffort.effort,
                                          reasoningRetention: resolvedRetention,
                                          runner: runner,
-                                         mtpDecoder: mtpDecoder,
                                          scratch: scratch,
                                          prefillConfig: runtime.prefillConfig,
                                          expertCacheSlots: loadSlots,
                                          maxContext: maxContext,
-                                         promptCacheMode: effectivePromptCacheMode,
+                                         promptCacheMode: promptCacheMode,
                                          promptCacheDomain: promptCacheDomain,
                                          promptCache: promptCache,
                                          promptStateStore: promptStateStore,
@@ -842,7 +802,6 @@ public actor ServerModelSession: ServerInferenceBackend {
                  defaultReasoningEffort: ReasoningEffort,
                  reasoningRetention: ReasoningRetention,
                  runner: RealForwardRunner,
-                 mtpDecoder: StreamingMTPDecoder?,
                  scratch: RawCompletionScratch,
                  prefillConfig: PrefillRuntimeConfig,
                  expertCacheSlots: Int,
@@ -859,7 +818,6 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.reasoningRetention = reasoningRetention
         self.modelFamily = model.config.family
         self.runner = runner
-        self.mtpDecoder = mtpDecoder
         self.scratch = scratch
         self.prefillConfig = prefillConfig
         self.prefillChunkTokens = prefillConfig.chunkTokens
@@ -1160,7 +1118,6 @@ public actor ServerModelSession: ServerInferenceBackend {
                 }
                 activePromptCacheEntryID = nil
                 runner.reset()
-                mtpDecoder?.reset()
             }
         }
         let promptIDs = prepared.promptIDs
@@ -1196,18 +1153,6 @@ public actor ServerModelSession: ServerInferenceBackend {
         var decodingError: Error?
         var shouldStop = false
 
-        let activeProducer: any LogitProducer = if config.isPureGreedy,
-                                                   let mtpDecoder,
-                                                   promptIDs.count + config.maxNewTokens
-                                                    <= mtpDecoder.draftMaxContext {
-            mtpDecoder
-        } else {
-            runner
-        }
-        let activeStart: RawCompletionStart = activeProducer is StreamingMTPDecoder
-            ? .reset : completionStart
-        let activePromptIDs = activeProducer is StreamingMTPDecoder
-            ? promptIDs : effectivePromptIDs
         func publish(_ events: [StructuredAssistantEvent]) {
             for event in events {
                 switch event {
@@ -1230,14 +1175,14 @@ public actor ServerModelSession: ServerInferenceBackend {
         let statsRunner = runner
         var expertAtDecodeStart: ExpertStreamingStatistics?
         let result = try await runRawCompletion(
-            producer: activeProducer,
+            producer: runner,
             tokenizer: tokenizer,
-            promptIds: activePromptIDs,
+            promptIds: effectivePromptIDs,
             config: config,
             context: context,
             scratch: scratch,
             prefillConfig: prefillConfig,
-            start: activeStart,
+            start: completionStart,
             shouldStop: { shouldStop }) { progress in
                 switch progress {
                 case .prefill(let done, let total):
@@ -1272,8 +1217,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                     shouldStop = true
                 }
         }
-        emitGenerationDiagnostics(activeProducer: activeProducer,
-                                  result: result,
+        emitGenerationDiagnostics(result: result,
                                   snapshot: runnerSnapshot,
                                   expertAtDecodeStart: expertAtDecodeStart)
         // Harmony ends at a stop token the generation loop never forwards
@@ -1425,7 +1369,6 @@ public actor ServerModelSession: ServerInferenceBackend {
         reasoningEffort: ReasoningEffort
     ) -> KVNormalizationPlan {
         guard promptCacheMode != .off,
-              mtpDecoder == nil,
               prefillConfig.mode == .chunked,
               result.kvPosition == result.kvBackedTokenIDs.count,
               result.uncommittedBoundaryTokenIDs.count == 1,
@@ -1809,12 +1752,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         stopStringFiltered: Bool,
         normalization: KVNormalization
     ) -> UUID? {
-        if mtpDecoder != nil {
-            // Native MTP keeps a second KV stream. Until both states are
-            // persisted atomically, do not publish target-only cache entries.
-            promptCache.invalidate()
-            activePromptCacheEntryID = nil
-        } else if promptCacheMode == .singlePrefix {
+        if promptCacheMode == .singlePrefix {
             guard let publication = promptCache.publish(
                 domain: promptCacheDomain,
                 request: cacheRequest,
@@ -1915,64 +1853,22 @@ public actor ServerModelSession: ServerInferenceBackend {
         return tokenizer.encode(rendered, addBOS: false)
     }
 
-    /// Optional per-request diagnostics: MTP acceptance, the SHRIKE_RUNNER_STATS
-    /// stage split, and the SHRIKE_KERNEL_STATS GPU breakdown. All three are
-    /// env-gated and read-only, so they stay out of the generation path proper.
+    /// Optional per-request diagnostics: the generation summary, the
+    /// SHRIKE_RUNNER_STATS stage split, and the SHRIKE_KERNEL_STATS GPU
+    /// breakdown. All three are env-gated and read-only, so they stay out of
+    /// the generation path proper.
     private func emitGenerationDiagnostics(
-        activeProducer: any LogitProducer,
         result: RawDecodeResult,
         snapshot runnerSnapshot: RunnerCounterSnapshot,
         expertAtDecodeStart: ExpertStreamingStatistics?
     ) {
-        if let activeMTP = activeProducer as? StreamingMTPDecoder {
-            let stats = activeMTP.statistics
-            let decodeRate = result.decodeSeconds > 0
-                ? Double(result.newTokens) / result.decodeSeconds : 0
-            cacheDiag(String(format:
-                "Shrike mtp drafted=%d accepted=%d acceptance=%.1f%% "
-                    + "target_passes=%d emitted_per_pass=%.3f "
-                    + "prefill_s=%.3f decode_s=%.3f decode_tok_s=%.3f "
-                    + "memory_required_mib=%.1f memory_budget_mib=%.1f",
-                stats.draftedTokens,
-                stats.acceptedTokens,
-                stats.acceptanceRate * 100,
-                stats.targetBackbonePasses,
-                stats.emittedTokensPerTargetPass,
-                result.prefillSeconds,
-                result.decodeSeconds,
-                decodeRate,
-                Double(activeMTP.memoryPlan.requiredBytes) / 1_048_576,
-                Double(activeMTP.memoryPlan.budgetBytes) / 1_048_576))
-            if ProcessInfo.processInfo.environment["SHRIKE_RUNNER_STATS"] != nil,
-               stats.targetBackbonePasses > 0 {
-                // Per-pass phase attribution for the Track B1 investigation:
-                // where a verify pass's wall time actually goes. Milliseconds
-                // averaged over the request's target passes.
-                let passes = Double(stats.targetBackbonePasses)
-                let ms: (UInt64) -> Double = { Double($0) / passes / 1_000_000 }
-                cacheDiag(String(format:
-                    "Shrike mtp-phases per_pass_ms proposal=%.3f checkpoint=%.3f "
-                        + "verify=%.3f verify_backbone=%.3f verify_head=%.3f "
-                        + "verify_argmax=%.3f commit=%.3f rollback=%.3f passes=%d",
-                    ms(stats.proposalNanos),
-                    ms(stats.checkpointNanos),
-                    ms(stats.verifyNanos),
-                    ms(stats.verifyBackboneNanos),
-                    ms(stats.verifyHeadNanos),
-                    ms(stats.verifyArgmaxNanos),
-                    ms(stats.commitNanos),
-                    ms(stats.rollbackNanos),
-                    stats.targetBackbonePasses))
-            }
-        } else {
-            let decodeRate = result.decodeSeconds > 0
-                ? Double(result.newTokens) / result.decodeSeconds : 0
-            cacheDiag(String(format:
-                "Shrike generation prefill_s=%.3f decode_s=%.3f decode_tok_s=%.3f",
-                result.prefillSeconds,
-                result.decodeSeconds,
-                decodeRate))
-        }
+        let decodeRate = result.decodeSeconds > 0
+            ? Double(result.newTokens) / result.decodeSeconds : 0
+        cacheDiag(String(format:
+            "Shrike generation prefill_s=%.3f decode_s=%.3f decode_tok_s=%.3f",
+            result.prefillSeconds,
+            result.decodeSeconds,
+            decodeRate))
         if ProcessInfo.processInfo.environment["SHRIKE_RUNNER_STATS"] != nil {
             emitRunnerDiagnostics(result: result, snapshot: runnerSnapshot,
                                   expertAtDecodeStart: expertAtDecodeStart)

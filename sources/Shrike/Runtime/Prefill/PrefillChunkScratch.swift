@@ -34,8 +34,7 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     /// Non-zero when the shared expert output is scalar-gated (Qwen).
     let sharedScalarGateElements: Int
     /// v12 P4: the chunked delta-rule scan's factors scratch, sized only for
-    /// the compiled shape and chunks of 64+ rows — the 32-token MTP draft
-    /// chunk stays on the serial kernel and allocates nothing here.
+    /// the compiled shape and chunks of 64+ rows.
     let gdnChunkFactorBytes: Int
 
     init(config: ArchConfig,
@@ -118,10 +117,10 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     var sharedExpertActScratchElements: Int { sharedIntermediate }
     var routedGateUpActElements: Int { 3 * routedPairMicrobatchRows * routedIntermediate }
     var routedDownOutputElements: Int { routedPairMicrobatchRows * hiddenSize }
-    /// The strict `>` keeps the 32-token MTP draft chunk off the matrix path
-    /// so its hard memory budget stays unchanged; a dense architecture has no
-    /// routed experts at all. This same predicate gates the allocation below
-    /// and the branch in `RealForwardRunner.encodeRoutedTileExperts`.
+    /// The strict `>` keeps a 32-row chunk off the matrix path; a dense
+    /// architecture has no routed experts at all. This same predicate gates
+    /// the allocation below and the branch in
+    /// `RealForwardRunner.encodeRoutedTileExperts`.
     var usesRoutedExpertMatrixPath: Bool {
         routedIntermediate > 0
             && topK > 0

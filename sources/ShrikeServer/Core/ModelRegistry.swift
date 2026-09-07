@@ -392,11 +392,7 @@ public actor ModelRegistry {
                 reasoningEffort: arguments.reasoningEffort,
                 reasoningRetention: arguments.reasoningRetention,
                 expertCacheSlots: arguments.expertCacheSlots,
-                expertCacheBudgetBytes: arguments.expertCacheBudgetBytes,
-                mtpModelDirectory: arguments.mtpModel.map {
-                    URL(fileURLWithPath: $0).standardizedFileURL
-                },
-                mtpMemoryMiB: arguments.mtpMemoryMiB)
+                expertCacheBudgetBytes: arguments.expertCacheBudgetBytes)
             let facts = try plan.previewFacts(modelID: entry.id)
             return Model(id: entry.id, plan: plan, facts: facts)
         }

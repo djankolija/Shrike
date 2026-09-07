@@ -14,7 +14,6 @@ let package = Package(
         .executable(name: "ShrikeMac", targets: ["ShrikeMac"]),
         .executable(name: "ShrikeDecodeService", targets: ["ShrikeDecodeService"]),
         .executable(name: "ShrikeServer", targets: ["ShrikeServer"]),
-        .executable(name: "ShrikeBench", targets: ["ShrikeBench"]),
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
@@ -107,11 +106,6 @@ let package = Package(
             name: "ShrikeServer",
             dependencies: ["ShrikeServerCore"],
             path: "sources/ShrikeServer/Command"
-        ),
-        .executableTarget(
-            name: "ShrikeBench",
-            dependencies: ["Shrike"],
-            path: "sources/ShrikeBench"
         ),
         .executableTarget(
             name: "ShrikeMac",

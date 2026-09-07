@@ -116,20 +116,3 @@ void bias_add_fp16(
     x[tid] = half(float(x[tid]) + float(bias[tid % row_elems]));
 }
 
-// Row-wise concatenation used by Qwen3.5-MoE MTP's 4096 -> 2048 adapter.
-[[kernel, max_total_threads_per_threadgroup(256)]]
-void concat_rows_fp16(
-    device const half* lhs  [[buffer(0)]],
-    device const half* rhs  [[buffer(1)]],
-    device half*       out  [[buffer(2)]],
-    constant uint&     rows [[buffer(3)]],
-    constant uint&     dim  [[buffer(4)]],
-    uint               tid  [[thread_position_in_grid]]
-) {
-    const uint total = rows * dim;
-    if (tid >= total) return;
-    const uint row = tid / dim;
-    const uint col = tid % dim;
-    out[row * 2u * dim + col] = lhs[tid];
-    out[row * 2u * dim + dim + col] = rhs[tid];
-}

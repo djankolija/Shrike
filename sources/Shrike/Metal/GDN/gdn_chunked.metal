@@ -34,7 +34,6 @@ struct GDNChunkParams {
     uint rows;
     uint rowStride;
     uint chunkCount;
-    uint checkpointEnabled;
 };
 
 using gdn_device_half_tensor =
@@ -166,8 +165,7 @@ kernel void gdn_chunk_scan(
     device const uchar*  factors  [[buffer(1)]],
     device float*        state    [[buffer(2)]],   // [Hv, Dv, Dk]
     device half*         y        [[buffer(3)]],   // [T, Hv * Dv]
-    device float*        checkpointState [[buffer(4)]],
-    constant GDNChunkParams& p    [[buffer(5)]],
+    constant GDNChunkParams& p    [[buffer(4)]],
     uint2 tg [[threadgroup_position_in_grid]],
     uint lid [[thread_index_in_threadgroup]]
 ) {
@@ -267,17 +265,6 @@ kernel void gdn_chunk_scan(
             u_tile[uint(pos[1]) * uint(kGDNChunkValueBlock) + uint(pos[0])] = u[e];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        if (c == 0u && p.checkpointEnabled != 0u) {
-            device const half* k0 = rows + Hk * Dk + hk * Dk;
-            device float* checkpointBlock = checkpointState + (h * Dv + dv0) * Dk;
-            for (uint i = lid; i < stateElements; i += kGDNChunkThreads) {
-                const uint dv = i / uint(kGDNChunkHeadDim);
-                const uint dk = i % uint(kGDNChunkHeadDim);
-                checkpointBlock[i] = fma(gamma[0], s_tile[i],
-                                         u_tile[dv] * float(k0[dk]));
-            }
-        }
 
         auto o1 = ks_op.get_destination_cooperative_tensor<
             decltype(q_tensor), decltype(s_tensor), float>();

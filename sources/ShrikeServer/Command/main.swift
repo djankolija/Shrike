@@ -58,7 +58,7 @@ do {
     }
     for name in roster.droppedBundles {
         FileHandle.standardError.write(
-            Data("notice: \(name).gturbo is not servable (mtp family); excluded from the roster\n".utf8))
+            Data("notice: \(name).gturbo is an MTP sidecar the runtime no longer consumes; excluded from the roster\n".utf8))
     }
 
     if effective.preload {
@@ -78,9 +78,8 @@ do {
         ? "off" : effective.promptCacheDiskDirectory ?? "off"
     let cacheMemoryMiB = effective.promptCacheMode == .off
         ? 0 : effective.promptCacheMemoryMiB
-    let mtp = effective.mtpModel == nil ? "off" : "on:\(effective.mtpMemoryMiB)MiB"
     let idle = effective.idleUnloadSeconds > 0 ? "\(effective.idleUnloadSeconds)s" : "off"
-    print("ShrikeServer ready at http://127.0.0.1:\(effective.port) models=\(registry.ids.joined(separator: ",")) default=\(roster.defaultID ?? "none") context=\(effective.maxContext) prompt_cache=\(effective.promptCacheMode.rawValue) prompt_cache_memory_mib=\(cacheMemoryMiB) prompt_cache_disk=\(diskCache) thinking=\(effective.thinkingMode.rawValue) reasoning_effort=\(effective.reasoningEffort?.rawValue ?? "auto") reasoning_retention=\(effective.reasoningRetention?.rawValue ?? "as-generated") mtp=\(mtp) idle_unload=\(idle) preload=\(effective.preload ? "on" : "off")")
+    print("ShrikeServer ready at http://127.0.0.1:\(effective.port) models=\(registry.ids.joined(separator: ",")) default=\(roster.defaultID ?? "none") context=\(effective.maxContext) prompt_cache=\(effective.promptCacheMode.rawValue) prompt_cache_memory_mib=\(cacheMemoryMiB) prompt_cache_disk=\(diskCache) thinking=\(effective.thinkingMode.rawValue) reasoning_effort=\(effective.reasoningEffort?.rawValue ?? "auto") reasoning_retention=\(effective.reasoningRetention?.rawValue ?? "as-generated") idle_unload=\(idle) preload=\(effective.preload ? "on" : "off")")
     if effective.unloadDiscardsWarmCache {
         FileHandle.standardError.write(Data(
             ("warning: --idle-unload-seconds drops the in-memory prompt cache with "

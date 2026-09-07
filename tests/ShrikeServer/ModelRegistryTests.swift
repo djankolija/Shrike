@@ -113,9 +113,7 @@ struct ModelRegistryTests {
             promptCacheDiskDirectory: nil,
             promptCacheDiskLimitBytes: 1_048_576,
             prefillChunkTokens: nil,
-            expertCacheSlots: nil,
-            mtpModelDirectory: nil,
-            mtpMemoryMiB: 0)
+            expertCacheSlots: nil)
     }
 
     private func makeRegistry(

@@ -354,10 +354,8 @@ public final class KVCacheManager {
     /// Rewind the logical cursor without copying KV. Speculative rows are
     /// append-only and become unreachable immediately; a later pass
     /// overwrites them.
-    /// Ring-backed draft KV is safe because MTP verification never rewinds by
-    /// more than its two-token proposal depth. `RealForwardRunner.rewind` is
-    /// the other caller and relies on its own `supportsPartialRewind` check,
-    /// not on any guarantee this method makes.
+    /// `RealForwardRunner.rewind` is the caller and relies on its own
+    /// `supportsPartialRewind` check, not on any guarantee this method makes.
     func rewind(to newPosition: Int) throws {
         guard newPosition >= 0, newPosition <= position else {
             throw InferenceStateSnapshotError.invalidPosition(newPosition)

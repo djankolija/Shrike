@@ -94,8 +94,9 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     public static func descriptor(for family: ModelFamily) -> AppModelInstallDescriptor? {
         switch family {
         case .qwen36: return .qwen36
-        // No pinned installer sources: MTP ships beside its target, and the
-        // gpt-oss / Kimi-Linear families install via local repack only.
+        // No pinned installer sources: MTP ships beside its target and the
+        // runtime does not consume it, and the gpt-oss / Kimi-Linear families
+        // install via local repack only.
         case .qwen36MTP, .gptOss20b, .kimiLinear48b: return nil
         }
     }

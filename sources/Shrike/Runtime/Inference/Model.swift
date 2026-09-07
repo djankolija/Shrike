@@ -27,14 +27,6 @@ public enum ExpertStreamingMode: Sendable {
 /// `MTLBuffer`; routed expert weights live behind per-layer streaming
 /// backends opened lazily on first touch.
 public struct Model {
-    /// unchecked-invariant: all `let`, holding two read-only TensorViews and
-    /// their bit widths. @unchecked only because TensorView is.
-    struct SharedTargetWeights: @unchecked Sendable {
-        let embedding: TensorView
-        let lmHead: TensorView
-        let embeddingBits: Int
-        let lmHeadBits: Int
-    }
     public let device: MTLDevice
     public let config: ArchConfig
     public let streamingMode: ExpertStreamingMode
@@ -42,7 +34,7 @@ public struct Model {
     public var modelID: String { manifest.modelID }
     public var sourceSnapshotHash: String? { manifest.sourceSnapshotHash }
     public var embeddingWeightBits: Int {
-        sharedTargetWeights?.embeddingBits ?? manifest.quant?.embedding.weightBits ?? 4
+        manifest.quant?.embedding.weightBits ?? 4
     }
     public var lmHeadWeightBits: Int {
         // Fallback to the embedding slot: qwen36 keeps a separate lm_head, but
@@ -51,7 +43,7 @@ public struct Model {
         // lm_head tensor against the embedding slot for qwen36, so the
         // fallback is only reachable when the validator already accepted the
         // coupling.
-        sharedTargetWeights?.lmHeadBits ?? manifest.quant?.embedding.weightBits ?? 4
+        manifest.quant?.embedding.weightBits ?? 4
     }
     public var attentionWeightBits: Int { manifest.quant?.attention.weightBits ?? 4 }
     public var routerWeightBits: Int { manifest.quant?.router.weightBits ?? 8 }
@@ -64,8 +56,6 @@ public struct Model {
     public var weightsDigestFromManifest: String? {
         manifest.files["model_weights.bin"]?.sha256
     }
-    var mtpResidentTensorBytes: Int { residentBuffer.buffer.length }
-    var mtpExpertStrideBytes: Int { Int(packedExpertsLayout.expertStride) }
 
     let residentBuffer: ResidentBuffer
     let residentIndex: ResidentIndex
@@ -73,7 +63,6 @@ public struct Model {
     let manifest: Manifest
     let directoryURL: URL
     let modelDirectory: GTurboModelDirectory
-    let sharedTargetWeights: SharedTargetWeights?
 
     /// Lazy state. Held inside a reference box so `Model` can stay a struct
     /// while still letting accessors mutate layer state via a serial queue.
@@ -107,8 +96,7 @@ public struct Model {
          packedExpertsLayout: PackedExpertsLayout,
          manifest: Manifest,
          directoryURL: URL,
-         modelDirectory: GTurboModelDirectory,
-         sharedTargetWeights: SharedTargetWeights? = nil) {
+         modelDirectory: GTurboModelDirectory) {
         self.device = device
         self.config = config
         self.streamingMode = streamingMode
@@ -119,7 +107,6 @@ public struct Model {
         self.manifest = manifest
         self.directoryURL = directoryURL
         self.modelDirectory = modelDirectory
-        self.sharedTargetWeights = sharedTargetWeights
         self.streamersBox = StreamersBox(numLayers: packedExpertsLayout.numLayers)
         self.streamersQueue = DispatchQueue(label: "Shrike.expert-streamers")
         self.expertIOEventCoordinator = ExpertIOEventCoordinator(device: device)
@@ -128,14 +115,12 @@ public struct Model {
     // MARK: - Resident accessors
 
     public func embedding() throws -> TensorView {
-        if let sharedTargetWeights { return sharedTargetWeights.embedding }
         return try resident(name: "language_model.model.embed_tokens.weight")
     }
 
     /// Qwen 3.6 carries a separate `lm_head` tensor. The transpose for the
     /// lm_head GEMV path is the kernel's job, not the loader's.
     public func lmHead() throws -> TensorView {
-        if let sharedTargetWeights { return sharedTargetWeights.lmHead }
         if config.tieWordEmbeddings { return try embedding() }
         return try resident(name: "language_model.lm_head.weight")
     }
@@ -224,69 +209,6 @@ public struct Model {
     }
     public func finalNorm() throws -> TensorView {
         return try resident(name: "language_model.model.norm.weight")
-    }
-
-    /// MTP projection over the normalized next-token embedding followed by the
-    /// normalized target hidden state: `[embedding, hidden]`, `[2D] -> [D]`.
-    public func mtpProjection() throws -> TensorView {
-        return try resident(name: "fc.weight")
-    }
-    public func mtpEmbeddingNorm() throws -> TensorView {
-        return try resident(name: "pre_fc_norm_embedding.weight")
-    }
-    public func mtpHiddenNorm() throws -> TensorView {
-        return try resident(name: "pre_fc_norm_hidden.weight")
-    }
-
-    /// Attach a native MTP sidecar to a target without copying either large
-    /// tensor. The returned model retains the target's Metal buffers and uses
-    /// its actual 4/6/8-bit head kernels.
-    public func sharingTargetWeights(from target: Model) throws -> Model {
-        guard config.family == .qwen36MTP,
-              target.config.family == .qwen36,
-              config.hiddenSize == target.config.hiddenSize,
-              config.vocabSize == target.config.vocabSize,
-              Self.mtpLineagesAreCompatible(sidecarID: modelID,
-                                             targetID: target.modelID) else {
-            throw ModelError.indexCorrupt(
-                detail: "MTP sidecar is incompatible with the target model")
-        }
-        return Model(device: device,
-                     config: config,
-                     streamingMode: streamingMode,
-                     integrityPolicy: integrityPolicy,
-                     residentBuffer: residentBuffer,
-                     residentIndex: residentIndex,
-                     packedExpertsLayout: packedExpertsLayout,
-                     manifest: manifest,
-                     directoryURL: directoryURL,
-                     modelDirectory: modelDirectory,
-                     sharedTargetWeights: SharedTargetWeights(
-                        embedding: try target.embedding(),
-                        lmHead: try target.lmHead(),
-                        embeddingBits: target.embeddingWeightBits,
-                        lmHeadBits: target.lmHeadWeightBits))
-    }
-
-    /// The Qwen3.5-MoE tensor contract is shared by Qwen 3.6 and Ornith 1.5,
-    /// but their trained embeddings and heads are not interchangeable. Keep
-    /// synthetic and privately named compatible checkpoints usable while
-    /// rejecting a known cross-model pairing before any generation begins.
-    static func mtpLineagesAreCompatible(sidecarID: String,
-                                         targetID: String) -> Bool {
-        func lineage(_ modelID: String) -> String? {
-            let normalized = modelID.lowercased()
-            if normalized.contains("ornith-1.5") { return "ornith-1.5" }
-            if normalized.contains("qwen3.6") || normalized.hasPrefix("qwen-") {
-                return "qwen3.6"
-            }
-            return nil
-        }
-        guard let sidecar = lineage(sidecarID),
-              let target = lineage(targetID) else {
-            return true
-        }
-        return sidecar == target
     }
 
     // MARK: - Per-head attention norms (Q/K only)
@@ -633,8 +555,8 @@ extension Model {
             receipt = nil
         }
 
-        let manifest = try ManifestReader.decode(
-            data: manifestData, expecting: expecting)
+        let manifest = try ManifestReader.decode(data: manifestData, expecting: expecting)
+        if expecting.family == .qwen36MTP { throw Self.mtpSidecarRefused }
         if let receipt {
             let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try VerifiedInstallReceiptReader.validate(receipt,
@@ -807,20 +729,16 @@ extension Model {
                                      columns: config.hiddenSize,
                                      slot: quant.embedding)
         case .qwen36MTP:
-            // The MTP sidecar shares the target's embedding and lm_head; it
-            // carries only the 2D->D projection and its two input norms.
-            try checks.requireAffine("fc.weight",
-                                     rows: config.hiddenSize,
-                                     columns: 2 * config.hiddenSize,
-                                     slot: quant.attention)
-            try checks.requireBF16("pre_fc_norm_embedding.weight", count: config.hiddenSize)
-            try checks.requireBF16("pre_fc_norm_hidden.weight", count: config.hiddenSize)
+            throw Self.mtpSidecarRefused
         }
         try checks.requireBF16("language_model.model.norm.weight", count: config.hiddenSize)
 
         try validateLayerSchema(checks: checks, layout: layout,
                                 config: config, quant: quant)
     }
+
+    static let mtpSidecarRefused = ModelError.unsupportedArchitecture(
+        detail: "the MTP sidecar family is a draft model the runtime no longer consumes (removed in v17)")
 
     /// Per-layer tensor schema: shapes, dtypes and quant layouts for every
     /// transformer layer, plus the packed-expert layout cross-check.
@@ -867,8 +785,7 @@ extension Model {
                                      rows: config.numExperts, columns: config.hiddenSize,
                                      slot: quant.router)
             // The shared-expert scalar gate is quantized at the ROUTER's bit
-            // width (8-bit on the target checkpoint, 4-bit on the MTP
-            // sidecar), independent of the sharedExpert slot.
+            // width, independent of the sharedExpert slot.
             try checks.requireAffine("\(prefix).mlp.shared_expert_gate.weight",
                                      rows: 1, columns: config.hiddenSize,
                                      slot: quant.router)

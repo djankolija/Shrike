@@ -294,9 +294,8 @@ import ShrikeValidationSupport
     }
 
     /// Prefill scratch layout: the qwen shape must size the packed q_proj /
-    /// split-gate / GDN buffers; the MTP sidecar shape differs (no linear
-    /// layers, no GDN buffers, but still gated attention output).
-    @Test func prefillScratchLayout_qwenAndMtpSizes() {
+    /// split-gate / GDN buffers.
+    @Test func prefillScratchLayout_qwenSizes() {
         let qwen = PrefillChunkScratchLayout(config: .qwenToy(), chunkTokens: 32)
         // max(packed q_proj 2*4*32, gdn qkvDim 256) = 256.
         #expect(qwen.qProjElementsPerToken == 256)
@@ -307,14 +306,5 @@ import ShrikeValidationSupport
         #expect(qwen.sharedScalarGateElements == 1)
         #expect(qwen.qElements == 32 * 256)
         #expect(qwen.attentionOutputElements == 32 * 4 * 32)
-
-        let mtp = PrefillChunkScratchLayout(config: .qwen36MTP, chunkTokens: 128)
-        // Gate-packed q_proj with no linear layers: 2x the per-head rows.
-        #expect(mtp.qProjElementsPerToken == 2 * mtp.maxQElementsPerToken)
-        #expect(mtp.attnGateElementsPerToken == mtp.maxQElementsPerToken)
-        #expect(mtp.gdnQKVDim == 0)
-        #expect(mtp.gdnValueDim == 0)
-        #expect(mtp.sharedScalarGateElements == 1)
-        #expect(mtp.qElements == 128 * 2 * mtp.maxQElementsPerToken)
     }
 }

@@ -11,7 +11,6 @@ final class Elementwise {
     private let scalarGateRowsPSO: MTLComputePipelineState
     private let residualAddPSO: MTLComputePipelineState
     private let splitQGatePSO: MTLComputePipelineState
-    private let concatRowsPSO: MTLComputePipelineState
     private let biasAddPSO: MTLComputePipelineState
 
     /// Eight simdgroups: the count `shared_scalar_gate_rows`' threadgroup
@@ -25,7 +24,6 @@ final class Elementwise {
         self.scalarGateRowsPSO = try context.pipeline("shared_scalar_gate_rows")
         self.residualAddPSO = try context.pipeline("residual_add_fp16")
         self.splitQGatePSO = try context.pipeline("split_q_gate_fp16")
-        self.concatRowsPSO = try context.pipeline("concat_rows_fp16")
         self.biasAddPSO = try context.pipeline("bias_add_fp16")
     }
 
@@ -240,27 +238,6 @@ final class Elementwise {
     var residualAddThreadgroupWidth: Int {
         min(residualAddPSO.maxTotalThreadsPerThreadgroup,
             Self.residualAddThreadgroupWidth)
-    }
-
-    func encodeConcatRows(commandBuffer: MTLCommandBuffer,
-                          lhs: MTLBuffer,
-                          rhs: MTLBuffer,
-                          out: MTLBuffer,
-                          rows: Int,
-                          dim: Int) throws {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
-        encoder.setComputePipelineState(concatRowsPSO)
-        encoder.setBuffer(lhs, offset: 0, index: 0)
-        encoder.setBuffer(rhs, offset: 0, index: 1)
-        encoder.setBuffer(out, offset: 0, index: 2)
-        var rowCount = UInt32(rows)
-        var dimension = UInt32(dim)
-        encoder.setBytes(&rowCount, length: MemoryLayout<UInt32>.size, index: 3)
-        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.size, index: 4)
-        dispatch(encoder, pipeline: concatRowsPSO, threads: rows * dim)
-        encoder.endEncoding()
     }
 
     private func dispatch(_ encoder: MTLComputeCommandEncoder,

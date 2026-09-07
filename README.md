@@ -21,7 +21,7 @@ swift build -c release
 ```
 
 Products land in `.build/release/`: `ShrikeServer`, `ShrikeCLI`, `ShrikeRepack`,
-`ShrikeMac`, `ShrikeBench`, and `ShrikeDecodeService` (an out-of-process decode
+`ShrikeMac`, and `ShrikeDecodeService` (an out-of-process decode
 helper the Mac app spawns; not run directly).
 
 ## Install a model
@@ -92,9 +92,9 @@ add, since the parser, repacker, and inference path are shared.
   low|medium|high` (per-request via the OpenAI `reasoning_effort` field;
   ShrikeCLI has no such flag), and `--thinking off` on a Harmony model warns
   and maps to effort `low`.
-- **MTP is off by default.** Speculative decoding is experimental; measured runs
-  showed no benefit, and it requires greedy decoding, native RoPE, and prompt-cache
-  reuse disabled.
+- **No speculative decoding.** MTP was removed in v17 after measured runs showed no
+  benefit. The `.gturbo` format still recognizes an MTP sidecar, but the loader
+  refuses it and the model roster leaves it out.
 - **ANE prefill is off by default.** Opt-in via `SHRIKE_PREFILL_ANE=on`, worth a
   measured 2.31x on prefill for one qualified prompt. See
   [docs/ane-prefill.md](docs/ane-prefill.md).

@@ -129,12 +129,10 @@ import ShrikeValidationSupport
     private struct KernelRun {
         let y: [Float]
         let state: [Float]
-        let checkpoint: [Float]
     }
 
-    /// Runs either delta-step kernel on the fixture's normed rows with a
-    /// checkpoint buffer attached; `convOut` is allocated at the 64-row
-    /// multiple the chunked path requires.
+    /// Runs either delta-step kernel on the fixture's normed rows; `convOut`
+    /// is allocated at the 64-row multiple the chunked path requires.
     private static func runKernel(chunked: Bool, fixture: Fixture,
                                   ctx: MetalContext, gdn: GDN) throws -> KernelRun {
         let cfg = gdn.config
@@ -150,7 +148,6 @@ import ShrikeValidationSupport
               let aLog = bf16Buffer(device, fixture.aLog),
               let dtBias = bf16Buffer(device, fixture.dtBias),
               let state = floatBuffer(device, fixture.state),
-              let checkpoint = floatBuffer(device, [Float](repeating: 0, count: fixture.state.count)),
               let y = Fp16Buffer.make(device, count: rows * cfg.valueDim),
               let factors = device.makeBuffer(
                 length: GDN.chunkFactorsBytes(config: cfg, prefillChunkTokens: rows),
@@ -162,20 +159,19 @@ import ShrikeValidationSupport
             try gdn.encodeDeltaStepPrefillChunked(
                 commandBuffer: cb, convOut: convOut, aProj: aProj, bProj: bProj,
                 aLog: aLog, aLogOffset: 0, dtBias: dtBias, dtBiasOffset: 0,
-                state: state, checkpointState: checkpoint, y: y,
+                state: state, y: y,
                 rows: rows, factors: factors)
         } else {
             try gdn.encodeDeltaStepPrefill(
                 commandBuffer: cb, convOut: convOut, aProj: aProj, bProj: bProj,
                 aLog: aLog, aLogOffset: 0, dtBias: dtBias, dtBiasOffset: 0,
-                state: state, checkpointState: checkpoint, y: y, rows: rows)
+                state: state, y: y, rows: rows)
         }
         cb.commit()
         cb.waitUntilCompleted()
         #expect(cb.status == .completed, "command buffer status \(cb.status.rawValue)")
         return KernelRun(y: readHalves(y, count: rows * cfg.valueDim),
-                         state: readFloats(state, count: fixture.state.count),
-                         checkpoint: readFloats(checkpoint, count: fixture.state.count))
+                         state: readFloats(state, count: fixture.state.count))
     }
 
     @Test func chunkedKernelMatchesSerialKernel() throws {
@@ -190,15 +186,12 @@ import ShrikeValidationSupport
             let got = try Self.runKernel(chunked: true, fixture: fixture, ctx: ctx, gdn: gdn)
             #expect(got.y.allSatisfy { $0.isFinite }, "rows \(rows): non-finite y")
             #expect(got.state.allSatisfy { $0.isFinite }, "rows \(rows): non-finite state")
-            #expect(got.checkpoint.allSatisfy { $0.isFinite }, "rows \(rows): non-finite checkpoint")
             let yAbs = RelError.maxAbsDiff(got.y, want.y)
             let yRel = RelError.compute(actual: got.y, reference: want.y)
             #expect(yAbs <= 2e-2 && yRel <= 2e-2,
                     "rows \(rows): y maxAbs \(yAbs) rel \(yRel)")
             let stateRel = RelError.compute(actual: got.state, reference: want.state)
             #expect(stateRel <= 2e-2, "rows \(rows): state rel \(stateRel)")
-            let checkpointAbs = RelError.maxAbsDiff(got.checkpoint, want.checkpoint)
-            #expect(checkpointAbs <= 2e-2, "rows \(rows): checkpoint maxAbs \(checkpointAbs)")
         }
     }
 

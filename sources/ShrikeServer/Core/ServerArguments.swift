@@ -5,8 +5,6 @@ public struct ServerArguments: Equatable, Sendable {
     /// Serve exactly this model, ignoring any config or roster. nil selects
     /// config mode: scan a models directory and serve everything found.
     public let model: String?
-    public let mtpModel: String?
-    public let mtpMemoryMiB: Int
     public let port: Int
     /// Explicit --model-id value; nil derives the API ID from the installed
     /// manifest (for example qwen3.6-35b-a3b or ornith-1.5-35b-a3b).
@@ -70,9 +68,6 @@ public struct ServerArguments: Equatable, Sendable {
                              --model.
       --preload              Load the default model at startup instead of on
                              the first request.
-      --mtp-model <dir>      Optional native Qwen/Ornith MTP sidecar directory.
-      --mtp-memory-mib <MiB> Strict incremental MTP budget, 256...512
-                             (default 384).
       --port <1...65535>     Loopback port (default 8080).
       --model-id <id>        API model identifier (default derived from the
                              installed model manifest).
@@ -142,8 +137,6 @@ public struct ServerArguments: Equatable, Sendable {
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> ServerArguments {
         var model: String?
-        var mtpModel: String?
-        var mtpMemoryMiB = StreamingMTPMemoryPlan.defaultBudgetMiB
         var port = 8080
         var modelIDOverride: String?
         var maxContext = 262_144
@@ -203,18 +196,6 @@ public struct ServerArguments: Equatable, Sendable {
             switch flag {
             case "--model":
                 model = value
-            case "--mtp-model":
-                guard !value.isEmpty else {
-                    throw ServerArgumentError.invalid("--mtp-model must not be empty")
-                }
-                mtpModel = value
-            case "--mtp-memory-mib":
-                guard let parsed = Int(value),
-                      StreamingMTPMemoryPlan.allowedBudgetMiB.contains(parsed) else {
-                    throw ServerArgumentError.invalid(
-                        "--mtp-memory-mib must be between 256 and 512")
-                }
-                mtpMemoryMiB = parsed
             case "--port":
                 guard let parsed = Int(value), (1...65_535).contains(parsed) else {
                     throw ServerArgumentError.invalid("--port must be between 1 and 65535")
@@ -344,9 +325,6 @@ public struct ServerArguments: Equatable, Sendable {
             throw ServerArgumentError.invalid(
                 "--model-id requires --model; config mode names models in the config file")
         }
-        if model == nil, mtpModel != nil {
-            throw ServerArgumentError.invalid("--mtp-model requires --model")
-        }
         if preload, lazyLoad {
             throw ServerArgumentError.invalid("--preload and --lazy-load contradict each other")
         }
@@ -354,13 +332,7 @@ public struct ServerArguments: Equatable, Sendable {
             maxContext = RuntimeConfiguration.defaultYaRNContextTokens
         }
         try validateMaxContext(maxContext, ropeScalingMode: ropeScalingMode)
-        if ropeScalingMode == .yarn, mtpModel != nil {
-            throw ServerArgumentError.invalid(
-                "--mtp-model cannot be combined with --rope-scaling yarn")
-        }
         return ServerArguments(model: model,
-                               mtpModel: mtpModel,
-                               mtpMemoryMiB: mtpMemoryMiB,
                                port: port,
                                modelIDOverride: modelIDOverride,
                                maxContext: maxContext,
@@ -418,8 +390,6 @@ public struct ServerArguments: Equatable, Sendable {
             expertCacheBudgetBytes = RuntimeConfiguration.parseBudgetBytes(text)
         }
         return ServerArguments(model: model,
-                               mtpModel: mtpModel,
-                               mtpMemoryMiB: mtpMemoryMiB,
                                port: port,
                                modelIDOverride: modelIDOverride,
                                maxContext: maxContext,

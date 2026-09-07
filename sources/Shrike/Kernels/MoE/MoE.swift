@@ -564,25 +564,6 @@ final class MoE {
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
     }
 
-    /// An argument buffer with no views encoded yet, for callers that
-    /// re-encode per use via `writeRoutedArgumentBuffer`.
-    func makeEmptyRoutedArgumentBuffer(device: MTLDevice) -> MTLBuffer? {
-        device.makeBuffer(length: routedArgEncoder.encodedLength,
-                          options: .storageModeShared)
-    }
-
-    /// Re-encode the views of an argument buffer created by
-    /// `makeRoutedArgumentBuffer`. The caller owns the hazard: the buffer must
-    /// not be rewritten while a committed command still reads it.
-    func writeRoutedArgumentBuffer(_ buffer: MTLBuffer,
-                                   routedBlobs: [MTLBuffer],
-                                   topK: UInt32,
-                                   routedBufferOffsets: [Int]? = nil) {
-        validate(routedBlobs: routedBlobs, topK: topK)
-        encodeRoutedArgumentBuffer(buffer, routedBlobs: routedBlobs,
-                                   routedBufferOffsets: routedBufferOffsets)
-    }
-
     func makeReusedRoutedArgumentBuffer(routedBlobs: [MTLBuffer],
                                                topK: UInt32,
                                                routedBufferOffsets: [Int]? = nil) -> MTLBuffer {

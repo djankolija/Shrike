@@ -54,9 +54,9 @@ final class MPPPrefillInt4QMM {
     let variant: TileVariant
     let weightLoads: WeightLoads
     var tileN: Int { variant.tileN }
-    /// Bounds a grouped dispatch's grid height and its block count at 32-row
-    /// granularity over the bench's 2,048-row staging; the wave's real bound is
-    /// the caller's staging block.
+    /// Bounds a grouped dispatch's grid height and its block count: 64 tiles
+    /// is 2,048 rows at the 32-row tile, above the 1,024-row block the caller's
+    /// staging loops over.
     static let groupedMaxRowTiles = 64
 
     private struct Rung {

@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Metal
 @testable import Shrike
 
 @Suite struct ManifestReaderTests {
@@ -259,6 +260,25 @@ import Foundation
             config: arch)
         defer { try? FileManager.default.removeItem(at: dir) }
         #expect(try ManifestReader.peekFamily(directoryURL: dir) == .qwen36MTP)
+    }
+
+    @Test func loadRefusesTheMTPSidecarFamily() throws {
+        let arch = ArchConfig.qwen36MTP
+        let (dir, _) = try Self.writeToyManifest(
+            filesOverride: [
+                "model_weights.bin": ["size": 1, "sha256": String(repeating: "0", count: 64)],
+                "packed_experts/layout.json": ["size": 2, "sha256": String(repeating: "0", count: 64)],
+                "packed_experts/layer_0.bin": ["size": 1, "sha256": String(repeating: "0", count: 64)],
+            ],
+            config: arch)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        #expect {
+            _ = try Model.load(directoryURL: dir, device: device, expecting: arch)
+        } throws: { error in
+            guard case ModelError.unsupportedArchitecture(let detail) = error else { return false }
+            return detail.contains("MTP sidecar")
+        }
     }
 
     @Test func missingManifestThrowsPartialInstall() throws {

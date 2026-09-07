@@ -201,9 +201,7 @@ private func makeRegistry(backend: any ServerInferenceBackend,
         promptCacheDiskDirectory: nil,
         promptCacheDiskLimitBytes: 1_048_576,
         prefillChunkTokens: nil,
-        expertCacheSlots: nil,
-        mtpModelDirectory: nil,
-        mtpMemoryMiB: 0)
+        expertCacheSlots: nil)
     let model = ModelRegistry.Model(
         id: id, plan: plan,
         facts: ModelSessionFacts(modelID: id,
@@ -567,9 +565,7 @@ struct HTTPServerTests {
             promptCacheDiskDirectory: nil,
             promptCacheDiskLimitBytes: 1_048_576,
             prefillChunkTokens: nil,
-            expertCacheSlots: nil,
-            mtpModelDirectory: nil,
-            mtpMemoryMiB: 0)
+            expertCacheSlots: nil)
         let model = ModelRegistry.Model(
             id: "m", plan: plan,
             facts: ModelSessionFacts(modelID: "m",

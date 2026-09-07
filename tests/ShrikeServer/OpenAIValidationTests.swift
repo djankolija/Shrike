@@ -296,8 +296,6 @@ struct ServerArgumentTests {
     @Test func defaults() throws {
         let arguments = try ServerArguments.parse(
             ["--model", "model.gturbo"], environment: [:])
-        #expect(arguments.mtpModel == nil)
-        #expect(arguments.mtpMemoryMiB == 384)
         #expect(arguments.port == 8080)
         #expect(arguments.maxContext == 262_144)
         #expect(arguments.queueLimit == 4)
@@ -338,12 +336,9 @@ struct ServerArgumentTests {
         }
     }
 
-    @Test func modelIDAndMTPRequireModel() throws {
+    @Test func modelIDRequiresModel() throws {
         #expect(throws: ServerArgumentError.self) {
             try ServerArguments.parse(["--model-id", "nice-name"])
-        }
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse(["--mtp-model", "mtp.gturbo"])
         }
     }
 
@@ -435,12 +430,6 @@ struct ServerArgumentTests {
                 "--model", "model.gturbo", "--max-context", "524288",
             ])
         }
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse([
-                "--model", "model.gturbo", "--mtp-model", "mtp.gturbo",
-                "--rope-scaling", "yarn",
-            ])
-        }
     }
 
     @Test func acceptsPublicPrefillChunksAndRejectsUnsupportedValues() throws {
@@ -455,31 +444,6 @@ struct ServerArgumentTests {
                 "--prefill-chunk", "8192",
             ])
         }
-    }
-
-    @Test func parsesBoundedMTPOptions() throws {
-        let arguments = try ServerArguments.parse([
-            "--model", "qwen.gturbo",
-            "--mtp-model", "qwen-mtp.gturbo",
-            "--mtp-memory-mib", "512",
-        ])
-        #expect(arguments.mtpModel == "qwen-mtp.gturbo")
-        #expect(arguments.mtpMemoryMiB == 512)
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse([
-                "--model", "qwen.gturbo",
-                "--mtp-memory-mib", "1024",
-            ])
-        }
-    }
-
-    @Test func mtpForcesPromptCacheOff() {
-        #expect(ServerModelSession.effectivePromptCacheMode(
-            requested: .multiPrefix,
-            mtpEnabled: true) == .off)
-        #expect(ServerModelSession.effectivePromptCacheMode(
-            requested: .multiPrefix,
-            mtpEnabled: false) == .multiPrefix)
     }
 
     @Test func parsesSinglePrefixModeAndRejectsUnknownMode() throws {

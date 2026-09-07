@@ -48,8 +48,6 @@ public struct ModelSessionPlan: Sendable {
     public let expertCacheSlots: Int?
     /// Bytes the routed-expert cache may use; slots are derived from it.
     public let expertCacheBudgetBytes: Int?
-    public let mtpModelDirectory: URL?
-    public let mtpMemoryMiB: Int
 
     public init(modelDirectory: URL,
                 maxContext: Int,
@@ -65,9 +63,7 @@ public struct ModelSessionPlan: Sendable {
                 reasoningEffort: ReasoningEffort? = nil,
                 reasoningRetention: ReasoningRetention? = nil,
                 expertCacheSlots: Int?,
-                expertCacheBudgetBytes: Int? = nil,
-                mtpModelDirectory: URL?,
-                mtpMemoryMiB: Int) {
+                expertCacheBudgetBytes: Int? = nil) {
         self.modelDirectory = modelDirectory
         self.maxContext = maxContext
         self.promptCacheMode = promptCacheMode
@@ -83,8 +79,6 @@ public struct ModelSessionPlan: Sendable {
         self.reasoningRetention = reasoningRetention
         self.expertCacheSlots = expertCacheSlots
         self.expertCacheBudgetBytes = expertCacheBudgetBytes
-        self.mtpModelDirectory = mtpModelDirectory
-        self.mtpMemoryMiB = mtpMemoryMiB
     }
 
     public func makeSession(
@@ -106,8 +100,6 @@ public struct ModelSessionPlan: Sendable {
             reasoningRetention: reasoningRetention,
             expertCacheSlots: expertCacheSlots,
             expertCacheBudgetBytes: expertCacheBudgetBytes,
-            mtpModelDirectory: mtpModelDirectory,
-            mtpMemoryMiB: mtpMemoryMiB,
             reusingContext: reusingContext)
     }
 
@@ -130,8 +122,6 @@ public struct ModelSessionPlan: Sendable {
         return ModelSessionFacts(
             modelID: modelID,
             prefillChunkTokens: resolvedChunk,
-            promptCacheMode: ServerModelSession.effectivePromptCacheMode(
-                requested: promptCacheMode,
-                mtpEnabled: mtpModelDirectory != nil))
+            promptCacheMode: promptCacheMode)
     }
 }
