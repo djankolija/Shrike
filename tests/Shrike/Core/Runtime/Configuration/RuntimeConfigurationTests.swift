@@ -64,4 +64,58 @@ import Testing
         #expect(runtime.prefillConfig.mode == .chunked)
         #expect(runtime.prefillConfig.chunkTokens == chunkTokens)
     }
+
+    @Test func refusesEveryDeletedKnobByName() {
+        let deleted = [
+            "SHRIKE_DECODE_EXPERT_EXECUTION", "SHRIKE_SPEC_PHASE1", "SHRIKE_ROUTER_WAKE",
+            "SHRIKE_HOST_WAIT", "SHRIKE_EXPERT_IO_SYNC", "SHRIKE_EXPERT_IO_SUBMISSION",
+            "SHRIKE_RDADVISE_POLICY",
+            "SHRIKE_EXPERT_CACHE_LAYOUT", "SHRIKE_EXPERT_IO_BACKEND", "SHRIKE_BOUNDED_IO",
+            "SHRIKE_PARALLEL_IO", "SHRIKE_EXPERT_IO_THREADS", "SHRIKE_EXPERT_IO_BATCH_DEPTH",
+            "SHRIKE_EXPERT_CACHE_POLICY", "SHRIKE_EXPERT_CACHE_PROTECT", "SHRIKE_NO_PIN",
+            "SHRIKE_PREDICTIVE_PREFETCH", "SHRIKE_PREFETCH_TOP_M", "SHRIKE_PREFETCH_INFLIGHT",
+            "SHRIKE_PREFETCH_PROBE_DISTANCE", "SHRIKE_PREFETCH_JOIN_US",
+            "SHRIKE_PREFETCH_PLACEMENT", "SHRIKE_PREFETCH_PROBE", "SHRIKE_PREFETCH_ADOPT",
+            "SHRIKE_ATTN_MATRIX_TILE", "SHRIKE_MPP_TILE_N", "SHRIKE_MPP_TILE_K",
+            "SHRIKE_MPP_DEQUANT_BUFFERS", "SHRIKE_MPP_WEIGHT_LOADS", "SHRIKE_PREFILL_ATTENTION",
+            "SHRIKE_PREFILL_ROUTER", "SHRIKE_PREFILL_ROUTER_TOKENS", "SHRIKE_PREFILL_ROUTED_GEMM",
+            "SHRIKE_PREFILL_ROUTE_OVERLAP", "SHRIKE_PREFILL_POOL_RESIDENCY",
+            "SHRIKE_PREFILL_TAIL_TILE", "SHRIKE_PREFILL_TILE_BATCH", "SHRIKE_PREFILL_TILE_DEPTH",
+            "SHRIKE_PREFILL_FETCH_DEPTH", "SHRIKE_PREFILL_MATRIX_MIN_ROWS", "SHRIKE_PREFILL_SWEEP",
+            "SHRIKE_PREFILL_SWEEP_TAIL", "SHRIKE_GDN_PREFILL_SCAN", "SHRIKE_ATTN_FULL_CHUNKS",
+            "SHRIKE_SAMPLER_PATH",
+            "SHRIKE_MTP_VERIFY", "SHRIKE_MTP_EXPERT_SLOTS",
+            "SHRIKE_EXPERT_CACHE_SLOTS",
+            "SHRIKE_LAYER_TRACE", "SHRIKE_GPU_CAPTURE_DIR", "SHRIKE_CACHE_DIAG",
+            "SHRIKE_GEN_DIAG", "SHRIKE_PHASES",
+        ]
+        #expect(deleted.count == 53)
+        var environment = Dictionary(uniqueKeysWithValues: deleted.map { ($0, "1") })
+        environment["PATH"] = "/usr/bin"
+        #expect(throws: RuntimeConfigurationError.unknownEnvironment(deleted.sorted())) {
+            try RuntimeConfiguration.refuseUnknownEnvironment(environment)
+        }
+    }
+
+    @Test func theSurvivingThirteenPass() throws {
+        let names = RuntimeConfiguration.knownEnvironmentNames
+        #expect(names.count == 13)
+        try RuntimeConfiguration.refuseUnknownEnvironment(
+            Dictionary(uniqueKeysWithValues: names.map { ($0, "1") }))
+    }
+
+    @Test func ignoresVariablesOutsideThePrefix() throws {
+        try RuntimeConfiguration.refuseUnknownEnvironment([:])
+        try RuntimeConfiguration.refuseUnknownEnvironment(
+            ["PATH": "/usr/bin", "SHRIKEX": "1", "MY_SHRIKE_MODEL": "x", "shrike_phases": "1"])
+    }
+
+    @Test func theRefusalListsTheNamesSortedAndNamesTheChapter() {
+        #expect(throws: RuntimeConfigurationError.unknownEnvironment(["SHRIKE_AA", "SHRIKE_ZZ"])) {
+            try RuntimeConfiguration.refuseUnknownEnvironment(["SHRIKE_ZZ": "1", "SHRIKE_AA": ""])
+        }
+        #expect(RuntimeConfigurationError.unknownEnvironment(["SHRIKE_AA", "SHRIKE_ZZ"]).description
+            == "SHRIKE_AA, SHRIKE_ZZ: not read by this build "
+                + "(removed in v17; docs/v17-consolidation.md is the record)")
+    }
 }

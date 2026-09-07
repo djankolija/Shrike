@@ -2,11 +2,11 @@
 """Per-request prefill ledger from a ShrikeServer log with SHRIKE_KERNEL_STATS.
 
 Splits the log into per-request blocks at the 'Shrike kernel busy_ms' line
-(the block terminator), pairs each block with the preceding gen_diag line for
-the prompt token count when present, and reports every prefill_* role
-normalized per PROMPT token (the server's per_token_ms divides by generated
-tokens). Pass the prompt token count explicitly when the log has no gen_diag
-line (the production launch); prefill-measure.sh prints it from the response.
+(the block terminator), takes the generated count from the request's
+'completed ... completion=' line that follows it, and reports every prefill_*
+role normalized per PROMPT token (the server's per_token_ms divides by
+generated tokens). The prompt token count is the argument;
+prefill-measure.sh prints it from the response.
 
 Usage: prefill-ledger.py <server.log> [lastN] [prompt_tokens]
 """
@@ -18,13 +18,12 @@ last_n = int(sys.argv[2]) if len(sys.argv) > 2 else 10
 prompt_override = int(sys.argv[3]) if len(sys.argv) > 3 else None
 
 blocks = []
-cur = {"roles": {}, "gaps": [], "prefill_tokens": None, "generated": None,
-       "runner": {}, "busy": None}
+cur = {"roles": {}, "gaps": [], "generated": None, "runner": {}, "busy": None}
 for line in open(path, errors="ignore"):
-    m = re.search(r"Shrike gen_diag prefill=(\d+) generated=(\d+)", line)
+    m = re.search(r"request \S+ completed .*completion=(\d+)", line)
     if m:
-        cur["prefill_tokens"] = int(m.group(1))
-        cur["generated"] = int(m.group(2))
+        if blocks and blocks[-1]["generated"] is None:
+            blocks[-1]["generated"] = int(m.group(1))
         continue
     if "Shrike runner " in line:
         cur["runner"] = dict(re.findall(r"(\w+)=([\d.]+)", line))
@@ -43,8 +42,7 @@ for line in open(path, errors="ignore"):
     if m:
         cur["busy"] = tuple(float(m.group(i)) for i in range(1, 4))
         blocks.append(cur)
-        cur = {"roles": {}, "gaps": [], "prefill_tokens": None, "generated": None,
-               "runner": {}, "busy": None}
+        cur = {"roles": {}, "gaps": [], "generated": None, "runner": {}, "busy": None}
 
 if not blocks:
     print(f"no kernel-stats blocks found in {path} (is SHRIKE_KERNEL_STATS=1 set?)",
@@ -52,7 +50,7 @@ if not blocks:
     sys.exit(1)
 
 for b in blocks[-last_n:]:
-    n = b["prefill_tokens"] or prompt_override or 0
+    n = prompt_override or 0
     print(f"=== prompt_tokens={n} generated={b['generated']} "
           f"busy_ms={b['busy'][0]:.0f} span_ms={b['busy'][1]:.0f} occupancy={b['busy'][2]:.1f}%")
     prefill_total = 0.0

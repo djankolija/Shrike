@@ -73,6 +73,7 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
                              options: AppRuntimeOptions,
                              forceLogitsHead: Bool,
                              onState: @escaping @Sendable (AppModelLoadState) -> Void) async throws {
+        try RuntimeConfiguration.refuseUnknownEnvironment()
         try await session.ensureLoaded(
             key: SessionLoadKey(directory: modelDirectory.standardizedFileURL,
                                 maxContext: maxContextTokens,

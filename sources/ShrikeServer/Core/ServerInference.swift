@@ -64,24 +64,6 @@ enum StructuredOutputFailureCause: String, Equatable, Sendable {
     }
 }
 
-/// Opt-in generated-token dump: set SHRIKE_GEN_DIAG=1 to log every
-/// completion's generated token IDs to stderr, so channel-marker questions
-/// (which 2000xx token preceded a text region) are answerable post-hoc.
-enum ShrikeGenDiag {
-    static let enabled =
-        ProcessInfo.processInfo.environment["SHRIKE_GEN_DIAG"] != nil
-
-    static func line(prefillTokens: Int,
-                     kvBackedTokenIDs: [Int32],
-                     boundaryTokenIDs: [Int32]) -> String {
-        let prefill = min(max(prefillTokens, 0), kvBackedTokenIDs.count)
-        let generated = Array(kvBackedTokenIDs.dropFirst(prefill))
-            + boundaryTokenIDs
-        return "Shrike gen_diag prefill=\(prefill) "
-            + "generated=\(generated.count) ids=\(generated)"
-    }
-}
-
 /// Rich diagnostic snapshot collected at structured-output failure time.
 /// Includes SHA-256 hashes of token sequences for forensic comparison.
 struct StructuredOutputFailureDiagnostics: Equatable, Sendable {
@@ -627,6 +609,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                             expertCacheSlots requestedExpertCacheSlots: Int? = nil,
                             expertCacheBudgetBytes: Int? = nil,
                             reusingContext: MetalContext? = nil) async throws -> ServerModelSession {
+        try RuntimeConfiguration.refuseUnknownEnvironment()
         let tokenizerFolder = GFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
             throw GFTokenizerError.missingToolTemplate
@@ -659,16 +642,9 @@ public actor ServerModelSession: ServerInferenceBackend {
         let loadRuntime = try RuntimeConfiguration(
             forceLogitsHead: true,
             prefetchTracePath: RuntimeConfiguration.environmentPrefetchTracePath())
-        let slotOverride = ProcessInfo.processInfo.environment["SHRIKE_EXPERT_CACHE_SLOTS"]
-            .flatMap(Int.init)
-        // Precedence: --expert-cache-slots flag, then the env override, then a
-        // count derived from the model's own expert stride against a 1 GiB budget.
-        //
-        // Derived rather than fixed because the right count depends on the
-        // quantisation: 1 GiB is 16 slots at 4-bit and 8 at 8-bit, which are the
-        // measured optima for each. The previous fixed default of 64 was slower
-        // *and* larger than either -- benchmarked at the shipped 262144 context,
-        // 4-bit managed 9.85 tok/s at 64 slots against 13.61 at 16.
+        // Precedence: --expert-cache-slots, then the ladder value nearest the
+        // budget (--ram-budget, default RuntimeConfiguration.defaultExpertCacheBudgetBytes)
+        // over the model's expert stride times its layers.
         let expectedArch: ArchConfig
         do {
             let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
@@ -691,7 +667,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             // message than anything this could throw, so pick the safe small end.
             derivedSlots = RuntimeConfiguration.allowedExpertCacheSlots.first ?? 8
         }
-        let loadSlots = requestedExpertCacheSlots ?? slotOverride ?? derivedSlots
+        let loadSlots = requestedExpertCacheSlots ?? derivedSlots
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,
@@ -1213,12 +1189,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             } catch {
                 decodingError = error
             }
-        }
-        if ShrikeGenDiag.enabled {
-            cacheDiag(ShrikeGenDiag.line(
-                prefillTokens: result.prefillTokens,
-                kvBackedTokenIDs: result.kvBackedTokenIDs,
-                boundaryTokenIDs: result.uncommittedBoundaryTokenIDs))
         }
         func structuredFailure(
             kind: StructuredOutputFailureKind,

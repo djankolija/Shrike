@@ -51,6 +51,7 @@ public func run(args: Args,
                 stdout: FileHandle = .standardOutput,
                 stderr: FileHandle = .standardError) async -> RunResult {
     do {
+        try RuntimeConfiguration.refuseUnknownEnvironment()
         let modelURL = URL(fileURLWithPath: args.model)
         let tokenizer = try await GFTokenizer.load(
             forModelDirectory: modelURL,
@@ -188,20 +189,6 @@ public func run(args: Args,
                 }
             }
 
-        if ProcessInfo.processInfo.environment["SHRIKE_PHASES"] == "1" {
-            let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
-            let total = stats.decodeSeconds * 1000
-            let accounted = Double(runner.totalCb1Nanos + runner.totalIoNanos
-                                   + runner.totalCb2Nanos) / 1e6
-            var lines = "\n[phases over \(stats.newTokens) tokens, decode "
-            lines += String(format: "%.0f", total) + " ms]\n"
-            lines += "  cb1 encode+commit: " + ms(runner.totalCb1Nanos) + " ms\n"
-            lines += "  expert io await:   " + ms(runner.totalIoNanos) + " ms\n"
-            lines += "  cb2 encode+commit: " + ms(runner.totalCb2Nanos) + " ms\n"
-            lines += "  unaccounted (GPU waits): "
-            lines += String(format: "%.1f", total - accounted) + " ms\n"
-            stderr.write(Data(lines.utf8))
-        }
         if !args.quiet {
             let tokensPerSecond = stats.decodeSeconds > 0
                 ? Double(stats.newTokens) / stats.decodeSeconds

@@ -1237,42 +1237,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         ProcessInfo.processInfo.environment["SHRIKE_KERNEL_STATS"] != nil
     private let runnerStatsEnabled =
         ProcessInfo.processInfo.environment["SHRIKE_RUNNER_STATS"] != nil
-    private let layerTraceEnabled =
-        ProcessInfo.processInfo.environment["SHRIKE_LAYER_TRACE"] != nil
-    /// SHRIKE_GPU_CAPTURE_DIR: write one programmatic .gputrace of decode
-    /// tokens 8–10 of the process's first generation (requires launching with
-    /// METAL_CAPTURE_ENABLED=1; the bundle opens in Xcode's Metal debugger).
-    private let gpuCaptureDir =
-        ProcessInfo.processInfo.environment["SHRIKE_GPU_CAPTURE_DIR"]
-    private var gpuCaptureProduceCalls = 0
-    private var gpuCaptureActive = false
-    private var gpuCaptureDone = false
-
-    private func updateGPUCaptureWindow() {
-        guard let gpuCaptureDir, !gpuCaptureDone else { return }
-        gpuCaptureProduceCalls += 1
-        let manager = MTLCaptureManager.shared()
-        if !gpuCaptureActive, gpuCaptureProduceCalls == 8 {
-            let descriptor = MTLCaptureDescriptor()
-            descriptor.captureObject = ctx.device
-            descriptor.destination = .gpuTraceDocument
-            descriptor.outputURL = URL(fileURLWithPath: gpuCaptureDir)
-                .appendingPathComponent("shrike-decode-\(Int(Date().timeIntervalSince1970)).gputrace")
-            do {
-                try manager.startCapture(with: descriptor)
-                gpuCaptureActive = true
-                print("Shrike gpu-capture started: \(descriptor.outputURL?.path ?? "?")")
-            } catch {
-                gpuCaptureDone = true
-                print("Shrike gpu-capture failed to start: \(error)")
-            }
-        } else if gpuCaptureActive, gpuCaptureProduceCalls >= 10 {
-            manager.stopCapture()
-            gpuCaptureActive = false
-            gpuCaptureDone = true
-            print("Shrike gpu-capture stopped")
-        }
-    }
 
     /// Open file descriptor for SHRIKE_ROUTE_TRACE, or -1. Opened once and
     /// never closed: the runner lives as long as the process, and a decode
@@ -1693,15 +1657,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             return ane
         }()
 
-        let prefillProfile = ProcessInfo.processInfo.environment["SHRIKE_PHASES"] != nil
-        var prefillRouteNanos: UInt64 = 0
-        var prefillTileNanos: UInt64 = 0
-        var prefillTailNanos: UInt64 = 0
-        var prefillActiveExperts: UInt64 = 0
-
         for L in 0..<cfg.numLayers {
             try Task.checkCancellation()
-            let prefillLayerStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             model.beginOpeningRoutedExpertStreamer(layer: L)
             let views = layerViews[L]
             let isLinear = cfg.layerIsLinear(L)
@@ -1782,24 +1739,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 try await encodeRoutedMoEPrefill(
                     cb: &cb, layer: L, views: views, scratch: scratch,
                     tokenCount: t, hiddenSize: D,
-                    startPosition: startPosition,
-                    layerStart: prefillLayerStart,
-                    routeNanos: &prefillRouteNanos,
-                    tileNanos: &prefillTileNanos,
-                    tailNanos: &prefillTailNanos,
-                    activeExperts: &prefillActiveExperts)
+                    startPosition: startPosition)
             }
-        }
-
-        if prefillProfile {
-            let prefillTotal = prefillRouteNanos + prefillTileNanos + prefillTailNanos
-            print("[prefill phases over \(t) tokens, \(prefillTotal / 1_000_000) ms total]")
-            print("  route readback + GPU: \(String(format: "%.1f", Double(prefillRouteNanos) / 1e6)) ms")
-            print("  expert fetch + tiles: \(String(format: "%.1f", Double(prefillTileNanos) / 1e6)) ms")
-            print("  tail + residual:      \(String(format: "%.1f", Double(prefillTailNanos) / 1e6)) ms")
-            let perLayer = Double(prefillActiveExperts) / Double(max(1, cfg.numLayers))
-            print("  active experts/layer: \(String(format: "%.2f", perLayer))"
-                + " (topK=\(cfg.topKExperts), max possible \(t * cfg.topKExperts))")
         }
 
         if writeFinalHead {
@@ -2012,7 +1953,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // prompts that end exactly on a chunk boundary reach here with the
         // last model still resident. No-op when ANE prefill is off or empty.
         anePrefill?.releaseModels()
-        updateGPUCaptureWindow()
         try kv?.reserve(tokens: position + 1)
         guard position < maxContext else {
             throw PrefillError.prefillCursorMismatch(
@@ -2164,11 +2104,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             let waitNanos = woke - tWait
             totalWaitNanos &+= waitNanos
-            var prevRoutedUs: Double = 0
             if let pending = pendingRoutedCommand {
-                if pending.cb.gpuEndTime > 0 {
-                    prevRoutedUs = (pending.cb.gpuEndTime - pending.cb.gpuStartTime) * 1_000_000
-                }
                 try finishPendingRoutedCommand(pending, waitIfNeeded: false,
                                                deferTimings: wordWake)
                 pendingRoutedCommand = nil
@@ -2198,13 +2134,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // per generation, so it never aliases concurrent decode work.
             try await encodeDecodeRoutedMoE(
                 layer: L, position: position,
-                attnCB: cmds.attnCB, tailCB: cmds.routerCB,
+                tailCB: cmds.routerCB,
                 specCB: cmds.specCB,
                 overlapCompletionClock: cmds.overlapCompletionClock,
                 pending: &pendingRoutedCommand,
-                bodyStart: tBodyStart, cb1Start: tCb1Start,
-                waitMark: tWait, waitNanos: waitNanos,
-                previousRoutedMicros: prevRoutedUs,
+                bodyStart: tBodyStart,
                 hostReadback: hostReadback,
                 predictedNextLayer: predictedNextLayer)
         }
@@ -4338,15 +4272,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         scratch: PrefillChunkScratchBuffers,
         tokenCount t: Int,
         hiddenSize D: Int,
-        startPosition: Int,
-        layerStart prefillLayerStart: UInt64,
-        routeNanos prefillRouteNanos: inout UInt64,
-        tileNanos prefillTileNanos: inout UInt64,
-        tailNanos prefillTailNanos: inout UInt64,
-        activeExperts prefillActiveExperts: inout UInt64
+        startPosition: Int
     ) async throws {
-        var prefillRouteEnd = prefillLayerStart
-        var prefillTileEnd = prefillLayerStart
         let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
             (onesPerExpertScale!, 0)
         guard let router = views.router else {
@@ -4406,14 +4333,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 let routing = try buildPrefillRoutes(layer: L, tokenCount: t, scratch: scratch)
                 let routes = routing.routes
                 let schedulerConfig = routing.schedulerConfig
-                prefillRouteEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-                prefillRouteNanos &+= prefillRouteEnd - prefillLayerStart
-                // One group per *distinct* expert this chunk touches. For a
-                // 1-token chunk this is topK; for a speculative 2-token verify
-                // it is the union of the two tokens' routes, which is what
-                // decides whether the extra row rides along on weights the
-                // first row already pulled in or pays for its own.
-                prefillActiveExperts &+= UInt64(routes.groups.count)
 
                 try waitForCompletion(sharedCB)
                 recordKernelGPU(role: "prefill_shared_expert", sharedCB)
@@ -4436,8 +4355,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 try await PrefillRoutedTileSequencer(
                     scheduler: PrefillRoutedTileScheduler(config: schedulerConfig))
                     .run(tileCount: routes.tiles.count, driver: tileDriver)
-                prefillTileEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-                prefillTileNanos &+= prefillTileEnd - prefillRouteEnd
                 guard let tailCB = ctx.queue.makeCommandBuffer() else {
                     throw ModelError.residentBufferWrapFailed
                 }
@@ -4478,7 +4395,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     }
                     cb = nextCB
                 }
-                prefillTailNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - prefillTileEnd
     }
 
     /// A fresh `PrefillChunkExpertProtection` seeded from the whole chunk's
@@ -5212,22 +5128,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// phase-1/phase-2 encode, and the deferred completion hand-off.
     ///
     /// lint:allow-long one pipeline whose phases share the fetch plan, the
-    /// argument buffer and the slot scratch; the layer trace at the end reports
-    /// timings from every phase, so splitting it would mean threading those
-    /// back out purely to shorten a function.
+    /// argument buffer and the slot scratch.
     private func encodeDecodeRoutedMoE(
         layer L: Int,
         position: Int,
-        attnCB: MTLCommandBuffer,
         tailCB: MTLCommandBuffer,
         specCB: MTLCommandBuffer,
         overlapCompletionClock: CommandCompletionClock?,
         pending pendingRoutedCommand: inout PendingRoutedCommand?,
         bodyStart tBodyStart: UInt64,
-        cb1Start tCb1Start: UInt64,
-        waitMark tWait: UInt64,
-        waitNanos: UInt64,
-        previousRoutedMicros prevRoutedUs: Double,
         hostReadback: RouterHostReadback?,
         predictedNextLayer: [Int]
     ) async throws {
@@ -5554,20 +5463,5 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
         transferredExpertLease = true
         totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
-        if layerTraceEnabled,
-           position < 3 || position % 16 == 0 {
-            let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            // Under the word wake the stamps may not exist yet.
-            func gpuMicros(_ cb: MTLCommandBuffer) -> String {
-                cb.gpuEndTime > 0 ? String(Int((cb.gpuEndTime - cb.gpuStartTime) * 1_000_000)) : "pending"
-            }
-            print("Shrike layer pos=\(position) L=\(L) "
-                + "body_us=\((now - tBodyStart) / 1000) "
-                + "wait_us=\(waitNanos / 1000) io_us=\(layerIo / 1000) "
-                + "cb1_us=\((tWait - tCb1Start) / 1000) "
-                + "cb2_us=\((now - tCb2Start) / 1000) "
-                + "gpu_attn_us=\(gpuMicros(attnCB)) gpu_tail_us=\(gpuMicros(tailCB)) "
-                + "gpu_routed_us=\(prevRoutedUs > 0 ? String(Int(prevRoutedUs)) : "pending")")
-        }
     }
 }

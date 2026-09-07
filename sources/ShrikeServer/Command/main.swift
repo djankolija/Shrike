@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Shrike
 import ShrikeServerCore
 
 let arguments: ServerArguments
@@ -14,6 +15,7 @@ do {
 }
 
 do {
+    try RuntimeConfiguration.refuseUnknownEnvironment()
     let signals = ServerTerminationSignals()
 
     let config: ServerConfig

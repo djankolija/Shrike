@@ -107,8 +107,8 @@ public struct ServerArguments: Equatable, Sendable {
                              canonical re-render. Harmony always strips.
       --expert-cache-slots <count>
                              Routed-expert cache slots per layer: 8, 16, 24,
-                             32, 64, 96, or 128 (default 64). Environment
-                             override: SHRIKE_EXPERT_CACHE_SLOTS.
+                             32, 64, 96, or 128 (default: derived from
+                             --ram-budget).
       --ram-budget <size>    Bytes the routed-expert cache may use, e.g. 8G,
                              2G, 512M. Slots are derived from this and the
                              model's expert stride, so this is the knob and

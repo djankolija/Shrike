@@ -35,6 +35,7 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
     case yaRNContextMismatch(maxContext: Int, configured: Int)
     case yaRNUnsupportedArchitecture
     case invalidPrefetch(String)
+    case unknownEnvironment([String])
 
     public var description: String {
         switch self {
@@ -52,6 +53,9 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
             return "YaRN requires the Qwen3.5-MoE NeoX sub-dimension RoPE architecture"
         case .invalidPrefetch(let detail):
             return "the prefetch trace could not be opened: \(detail)"
+        case .unknownEnvironment(let names):
+            return names.joined(separator: ", ")
+                + ": not read by this build (removed in v17; docs/v17-consolidation.md is the record)"
         }
     }
 }
@@ -182,6 +186,26 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         _ environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> String? {
         environment["SHRIKE_PREFETCH_TRACE"].flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    public static let knownEnvironmentNames: Set<String> = [
+        "SHRIKE_THINKING_MODE", "SHRIKE_REASONING_EFFORT", "SHRIKE_REASONING_RETENTION",
+        "SHRIKE_STRIP_CLI_PROMPT", "SHRIKE_STRIP_TAGS", "SHRIKE_CONCISE_MODE",
+        "SHRIKE_TOKENIZER_DIR", "SHRIKE_MODEL", "SHRIKE_PREFILL_ANE",
+        "SHRIKE_RUNNER_STATS", "SHRIKE_KERNEL_STATS", "SHRIKE_ROUTE_TRACE",
+        "SHRIKE_PREFETCH_TRACE",
+    ]
+
+    /// Fails the launch by name on any `SHRIKE_*` variable this build does not read.
+    public static func refuseUnknownEnvironment(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws {
+        let unknown = environment.keys.filter {
+            $0.hasPrefix("SHRIKE_") && !knownEnvironmentNames.contains($0)
+        }.sorted()
+        guard unknown.isEmpty else {
+            throw RuntimeConfigurationError.unknownEnvironment(unknown)
+        }
     }
 
     public func validate(maxContext: Int) throws {

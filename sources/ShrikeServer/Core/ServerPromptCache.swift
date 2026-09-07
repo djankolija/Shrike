@@ -449,27 +449,11 @@ struct ServerPromptCache: Sendable {
         let commonPrefix = (0..<comparableLength).first {
             renderedPromptIDs[$0] != entry.kvBackedTokenIDs[$0]
         } ?? comparableLength
-        ShrikeCacheDiag.log(
-            "lcp k=\(commonPrefix) kv=\(entry.kvPosition) "
-                + "fraction=\(Double(commonPrefix) / Double(entry.kvPosition)) "
-                + "entry=\(entry.id.uuidString.lowercased())")
 
         // S12: direct prefix hit, which an identical-prompt replay takes too —
         // its render extends the entry by nothing.
         if commonPrefix == entry.kvPosition {
             return .resume(effective: renderedPromptIDs, cachedTokens: entry.kvPosition)
-        }
-        if renderedPromptIDs.count < entry.kvPosition {
-            ShrikeCacheDiag.log(
-                "s12_short rendered=\(renderedPromptIDs.count) kv=\(entry.kvPosition)")
-        } else {
-            let lo = max(0, commonPrefix - 6)
-            let hi = min(entry.kvPosition, commonPrefix + 6)
-            ShrikeCacheDiag.log(
-                "s12_diverge at=\(commonPrefix) of kv=\(entry.kvPosition) "
-                    + "window=\(lo)..<\(hi) "
-                    + "rendered=\(Array(renderedPromptIDs[lo..<hi])) "
-                    + "cached=\(Array(entry.kvBackedTokenIDs[lo..<hi]))")
         }
 
         // Salvage only where it can win: a render the entry already contains
@@ -479,17 +463,5 @@ struct ServerPromptCache: Sendable {
               commonPrefix > 0,
               commonPrefix < renderedPromptIDs.count else { return nil }
         return .salvage(commonPrefix: commonPrefix)
-    }
-}
-
-/// Opt-in cache diagnostics: set SHRIKE_CACHE_DIAG=1 to have every match
-/// failure say which check rejected the entry. Off by default so the hot
-/// path stays quiet.
-enum ShrikeCacheDiag {
-    static let enabled = ProcessInfo.processInfo.environment["SHRIKE_CACHE_DIAG"] != nil
-
-    static func log(_ message: String) {
-        guard enabled else { return }
-        FileHandle.standardError.write(Data("Shrike prompt_cache_diag \(message)\n".utf8))
     }
 }
