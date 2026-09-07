@@ -57,6 +57,11 @@ final class MoE {
     private let routerGemvSpecializedPSO: MTLComputePipelineState
     private let routerSelectK8PSO: MTLComputePipelineState
     private let routerSelectK8SpecializedPSO: MTLComputePipelineState
+    private let routerGemvPairPSO: MTLComputePipelineState
+    private let routerGemvPairSpecializedPSO: MTLComputePipelineState
+    private let routerSelectK8PairPSO: MTLComputePipelineState
+    private let routerSelectK8PairSpecializedPSO: MTLComputePipelineState
+    private let routerLogitsPair: MTLBuffer
     private let residencyClassifyPSO: MTLComputePipelineState
     private let residencyClassifySpecPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
@@ -129,22 +134,17 @@ final class MoE {
             MetalFunctionConstant(index: 43, value: .bool(true)),
             MetalFunctionConstant(index: 44, value: .uint32(UInt32(routerWeightBits))),
         ]
-        let routerName = "router_gemv_r4"
-        self.routerGemvPSO = try context.pipeline(
-            routerName,
-            constants: [MetalFunctionConstant(index: 44,
-                                              value: .uint32(UInt32(routerWeightBits)))],
-            maxTotalThreadsPerThreadgroup: 512)
-        self.routerGemvSpecializedPSO = try context.pipeline(
-            routerName,
-            constants: routerConstants,
-            maxTotalThreadsPerThreadgroup: 512)
-        let selectName = sigmoidRouterScores
-            ? "router_topk_select_sigmoid_k8" : "router_topk_select_k8"
-        self.routerSelectK8PSO = try context.pipeline(selectName)
-        self.routerSelectK8SpecializedPSO = try context.pipeline(
-            selectName,
-            constants: routerConstants)
+        let routerPipelines = try Self.makeRouterPipelines(
+            context: context, constants: routerConstants,
+            routerWeightBits: routerWeightBits, sigmoidRouterScores: sigmoidRouterScores)
+        self.routerGemvPSO = routerPipelines.gemv
+        self.routerGemvSpecializedPSO = routerPipelines.gemvSpecialized
+        self.routerSelectK8PSO = routerPipelines.select
+        self.routerSelectK8SpecializedPSO = routerPipelines.selectSpecialized
+        self.routerGemvPairPSO = routerPipelines.gemvPair
+        self.routerGemvPairSpecializedPSO = routerPipelines.gemvPairSpecialized
+        self.routerSelectK8PairPSO = routerPipelines.selectPair
+        self.routerSelectK8PairSpecializedPSO = routerPipelines.selectPairSpecialized
         self.residencyClassifyPSO = try context.pipeline("moe_classify_expert_residency")
         self.residencyClassifySpecPSO = try context.pipeline(
             "moe_classify_expert_residency_spec")
@@ -192,6 +192,12 @@ final class MoE {
             throw MetalError.noDevice
         }
         self.routerLogits = logits
+        guard let pairLogits = context.device.makeBuffer(
+            length: 256 * MemoryLayout<Float>.stride,
+            options: .storageModeShared) else {
+            throw MetalError.noDevice
+        }
+        self.routerLogitsPair = pairLogits
         readyStatus.contents().storeBytes(of: UInt32(1), as: UInt32.self)
         self.alwaysReadyIOStatus = readyStatus
         self.routedArgEncoder = phase1Function.makeArgumentEncoder(bufferIndex: 0)
@@ -300,6 +306,130 @@ final class MoE {
         }
         selector.dispatchThreadgroups(
             MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+    }
+
+    private struct RouterPipelines {
+        let gemv: MTLComputePipelineState
+        let gemvSpecialized: MTLComputePipelineState
+        let select: MTLComputePipelineState
+        let selectSpecialized: MTLComputePipelineState
+        let gemvPair: MTLComputePipelineState
+        let gemvPairSpecialized: MTLComputePipelineState
+        let selectPair: MTLComputePipelineState
+        let selectPairSpecialized: MTLComputePipelineState
+    }
+
+    private static func makeRouterPipelines(context: MetalContext,
+                                            constants: [MetalFunctionConstant],
+                                            routerWeightBits: Int,
+                                            sigmoidRouterScores: Bool) throws -> RouterPipelines {
+        let bits = [MetalFunctionConstant(index: 44, value: .uint32(UInt32(routerWeightBits)))]
+        let selectName = sigmoidRouterScores
+            ? "router_topk_select_sigmoid_k8" : "router_topk_select_k8"
+        return RouterPipelines(
+            gemv: try context.pipeline("router_gemv_r4", constants: bits,
+                                       maxTotalThreadsPerThreadgroup: 512),
+            gemvSpecialized: try context.pipeline("router_gemv_r4", constants: constants,
+                                                  maxTotalThreadsPerThreadgroup: 512),
+            select: try context.pipeline(selectName),
+            selectSpecialized: try context.pipeline(selectName, constants: constants),
+            gemvPair: try context.pipeline("router_gemv_r4_pair", constants: bits,
+                                           maxTotalThreadsPerThreadgroup: 512),
+            gemvPairSpecialized: try context.pipeline("router_gemv_r4_pair", constants: constants,
+                                                      maxTotalThreadsPerThreadgroup: 512),
+            selectPair: try context.pipeline(selectName + "_pair"),
+            selectPairSpecialized: try context.pipeline(selectName + "_pair", constants: constants))
+    }
+
+    struct RouterOperands {
+        let weights: MTLBuffer
+        var weightsOffset = 0
+        let scales: MTLBuffer
+        var scalesOffset = 0
+        let biases: MTLBuffer
+        var biasesOffset = 0
+        let effectiveScale: MTLBuffer
+        var effectiveScaleOffset = 0
+        let logitBias: MTLBuffer
+        var logitBiasOffset = 0
+        let outIndices: MTLBuffer
+        let outWeights: MTLBuffer
+    }
+
+    func encodeRouterPair(commandBuffer: MTLCommandBuffer,
+                          first: RouterOperands, second: RouterOperands,
+                          hidden: MTLBuffer,
+                          perExpertScale: MTLBuffer, perExpertScaleOffset: Int = 0,
+                          numExperts: UInt32, d: UInt32, topK: UInt32) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encodeRouterPair(encoder: encoder, first: first, second: second, hidden: hidden,
+                         perExpertScale: perExpertScale, perExpertScaleOffset: perExpertScaleOffset,
+                         numExperts: numExperts, d: d, topK: topK)
+        encoder.endEncoding()
+    }
+
+    /// The grid's second row is the second router; the first router's results are bit for bit `encodeRouter`'s.
+    func encodeRouterPair(encoder: MTLComputeCommandEncoder,
+                          first: RouterOperands, second: RouterOperands,
+                          hidden: MTLBuffer,
+                          perExpertScale: MTLBuffer, perExpertScaleOffset: Int = 0,
+                          numExperts: UInt32, d: UInt32, topK: UInt32) {
+        precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
+        precondition(numExperts <= 256)
+        precondition((1...UInt32(Self.maxStreamedExperts)).contains(topK))
+        precondition(topK <= numExperts)
+        for operands in [first, second] {
+            precondition(operands.effectiveScale.length >= Int(d) * MemoryLayout<UInt16>.stride)
+            precondition(operands.logitBias.length >= Int(numExperts) * MemoryLayout<UInt16>.stride)
+        }
+        precondition(perExpertScale.length >= Int(numExperts) * MemoryLayout<UInt16>.stride)
+        var expertCount = numExperts
+        var dimension = d
+        var topKValue = topK
+        let useSpecialized = numExperts == realDecodeNumExperts
+            && d == realDecodeD
+            && topK == realDecodeTopK
+        encoder.setComputePipelineState(
+            useSpecialized ? routerGemvPairSpecializedPSO : routerGemvPairPSO)
+        encoder.setBuffer(first.weights, offset: first.weightsOffset, index: 0)
+        encoder.setBuffer(first.scales, offset: first.scalesOffset, index: 1)
+        encoder.setBuffer(first.biases, offset: first.biasesOffset, index: 2)
+        encoder.setBuffer(hidden, offset: 0, index: 3)
+        encoder.setBuffer(first.effectiveScale, offset: first.effectiveScaleOffset, index: 4)
+        encoder.setBuffer(routerLogits, offset: 0, index: 5)
+        encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 7)
+        encoder.setBuffer(second.weights, offset: second.weightsOffset, index: 8)
+        encoder.setBuffer(second.scales, offset: second.scalesOffset, index: 9)
+        encoder.setBuffer(second.biases, offset: second.biasesOffset, index: 10)
+        encoder.setBuffer(second.effectiveScale, offset: second.effectiveScaleOffset, index: 11)
+        encoder.setBuffer(routerLogitsPair, offset: 0, index: 12)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (Int(numExperts) + 3) / 4, height: 2, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+
+        encoder.setComputePipelineState(
+            useSpecialized ? routerSelectK8PairSpecializedPSO : routerSelectK8PairPSO)
+        encoder.setBuffer(routerLogits, offset: 0, index: 0)
+        encoder.setBuffer(perExpertScale, offset: perExpertScaleOffset, index: 1)
+        encoder.setBuffer(first.outIndices, offset: 0, index: 2)
+        encoder.setBuffer(first.outWeights, offset: 0, index: 3)
+        encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
+        encoder.setBytes(&topKValue, length: MemoryLayout<UInt32>.stride, index: 5)
+        encoder.setBuffer(first.logitBias, offset: first.logitBiasOffset, index: 6)
+        if sigmoidRouterScores {
+            var scaling = routedScalingFactor
+            encoder.setBytes(&scaling, length: MemoryLayout<Float>.stride, index: 7)
+        }
+        encoder.setBuffer(routerLogitsPair, offset: 0, index: 8)
+        encoder.setBuffer(second.outIndices, offset: 0, index: 9)
+        encoder.setBuffer(second.outWeights, offset: 0, index: 10)
+        encoder.setBuffer(second.logitBias, offset: second.logitBiasOffset, index: 11)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: 1, height: 2, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
     }
 

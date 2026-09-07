@@ -109,7 +109,8 @@ import Testing
         #expect(try RuntimePrefetch.environmentValue([:]) == .production)
         #expect(RuntimePrefetch.production
             == RuntimePrefetch(enabled: true, topM: nil, inFlight: 1, placement: .after,
-                               distance: 1, tracePath: nil, adoption: .blit, joinMicros: 400))
+                               distance: 1, tracePath: nil, adoption: .blit, joinMicros: 400,
+                               probe: .fused))
         #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREDICTIVE_PREFETCH": "0"]) == .off)
         #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREDICTIVE_PREFETCH": "1"]) == .production)
         #expect(try RuntimePrefetch.environmentValue([
@@ -130,6 +131,8 @@ import Testing
         #expect(copyUnjoined.adoption == .copy)
         #expect(copyUnjoined.joinMicros == 0)
         #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREFETCH_JOIN_US": "250"]).joinMicros == 250)
+        #expect(RuntimePrefetch.production.probe == .fused)
+        #expect(try RuntimePrefetch.environmentValue(["SHRIKE_PREFETCH_PROBE": "separate"]).probe == .separate)
         let bad: [[String: String]] = [
             ["SHRIKE_PREDICTIVE_PREFETCH": "yes"],
             ["SHRIKE_PREFETCH_TOP_M": "0"],
@@ -143,6 +146,7 @@ import Testing
             ["SHRIKE_PREFETCH_JOIN_US": "-1"],
             ["SHRIKE_PREFETCH_JOIN_US": "2001"],
             ["SHRIKE_PREFETCH_JOIN_US": "soon"],
+            ["SHRIKE_PREFETCH_PROBE": "both"],
         ]
         for environment in bad {
             #expect(throws: RuntimeConfigurationError.self) {

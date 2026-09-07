@@ -383,9 +383,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         inFlight: prefetchConfiguration.inFlight,
                         placement: prefetchConfiguration.placement,
                         distance: prefetchConfiguration.distance,
-                        tracePath: prefetchConfiguration.tracePath,
+                        tracePath: prefetchTraceFD >= 0 ? prefetchConfiguration.tracePath : nil,
                         adoption: prefetchBlitActive ? .blit : .copy,
-                        joinMicros: prefetchConfiguration.joinMicros)
+                        joinMicros: prefetchConfiguration.joinMicros,
+                        probe: prefetchConfiguration.probe)
     }
 
     static func prefillGapLeversDescription(
@@ -429,10 +430,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     private static func prefetchDescription(_ prefetch: RuntimePrefetch, topM: Int) -> String {
-        guard prefetch.enabled else { return "off" }
+        guard prefetch.enabled else {
+            return prefetch.tracePath == nil ? "off" : "off trace=on probe=\(prefetch.probe.rawValue)"
+        }
         return "on top_m=\(topM) inflight=\(prefetch.inFlight)"
             + " placement=\(prefetch.placement.rawValue) distance=\(prefetch.distance)"
             + " adopt=\(prefetch.adoption.rawValue) join_us=\(prefetch.joinMicros)"
+            + " probe=\(prefetch.probe.rawValue)"
     }
 
     /// The prefill router kernel in force (`block` or `tiled tokens=N`) and its
@@ -3614,23 +3618,43 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                    weightOffset: Int(postAttn.offset),
                                    out: routedX,
                                    d: D, eps: eps)
-        moe.encodeRouter(encoder: tailEncoder,
-            weights: routerW.buffer, weightsOffset: Int(routerW.offset),
-            scales:  routerW.buffer, scalesOffset:  Int(routerW.scaleOffset),
-            biases:  routerW.buffer, biasesOffset:  Int(routerW.biasOffset),
-            hidden: routedX,
-            effectiveScale: effectiveScaleBuffers[L],
-            perExpertScale: perExpertScale.buffer,
-            perExpertScaleOffset: perExpertScale.offset,
-            logitBias: routerLogitBias[L].buffer,
-            logitBiasOffset: routerLogitBias[L].offset,
-            outIndices: outIndices, outWeights: outWeights,
-            numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
-        if let nextRouterW {
-            // Probe only: score the next router against the current
-            // post-attention normalized residual. The exact router above
-            // remains authoritative; this result is emitted solely to
-            // SHRIKE_PREFETCH_TRACE for predictor qualification.
+        if let nextRouterW, prefetchConfiguration.probe == .fused {
+            let probeLayer = L + prefetchProbeDistance
+            moe.encodeRouterPair(
+                encoder: tailEncoder,
+                first: MoE.RouterOperands(
+                    weights: routerW.buffer, weightsOffset: Int(routerW.offset),
+                    scales: routerW.buffer, scalesOffset: Int(routerW.scaleOffset),
+                    biases: routerW.buffer, biasesOffset: Int(routerW.biasOffset),
+                    effectiveScale: effectiveScaleBuffers[L],
+                    logitBias: routerLogitBias[L].buffer, logitBiasOffset: routerLogitBias[L].offset,
+                    outIndices: outIndices, outWeights: outWeights),
+                second: MoE.RouterOperands(
+                    weights: nextRouterW.buffer, weightsOffset: Int(nextRouterW.offset),
+                    scales: nextRouterW.buffer, scalesOffset: Int(nextRouterW.scaleOffset),
+                    biases: nextRouterW.buffer, biasesOffset: Int(nextRouterW.biasOffset),
+                    effectiveScale: effectiveScaleBuffers[probeLayer],
+                    logitBias: routerLogitBias[probeLayer].buffer,
+                    logitBiasOffset: routerLogitBias[probeLayer].offset,
+                    outIndices: prefetchPredictionIndices, outWeights: prefetchPredictionWeights),
+                hidden: routedX,
+                perExpertScale: perExpertScale.buffer, perExpertScaleOffset: perExpertScale.offset,
+                numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
+        } else {
+            moe.encodeRouter(encoder: tailEncoder,
+                weights: routerW.buffer, weightsOffset: Int(routerW.offset),
+                scales:  routerW.buffer, scalesOffset:  Int(routerW.scaleOffset),
+                biases:  routerW.buffer, biasesOffset:  Int(routerW.biasOffset),
+                hidden: routedX,
+                effectiveScale: effectiveScaleBuffers[L],
+                perExpertScale: perExpertScale.buffer,
+                perExpertScaleOffset: perExpertScale.offset,
+                logitBias: routerLogitBias[L].buffer,
+                logitBiasOffset: routerLogitBias[L].offset,
+                outIndices: outIndices, outWeights: outWeights,
+                numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
+        }
+        if let nextRouterW, prefetchConfiguration.probe == .separate {
             moe.encodeRouter(encoder: tailEncoder,
                 weights: nextRouterW.buffer, weightsOffset: Int(nextRouterW.offset),
                 scales: nextRouterW.buffer, scalesOffset: Int(nextRouterW.scaleOffset),

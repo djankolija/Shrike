@@ -395,6 +395,33 @@ kernel void router_gemv_r4(
                             out_logits, num_experts, D, 4, tg_idx, sg_idx, lane);
 }
 
+kernel void router_gemv_r4_pair(
+    device const uint8_t* W_a [[buffer(0)]],
+    device const bfloat* scales_a [[buffer(1)]],
+    device const bfloat* biases_a [[buffer(2)]],
+    device const half* hidden [[buffer(3)]],
+    device const bfloat* effective_scale_a [[buffer(4)]],
+    device float* out_logits_a [[buffer(5)]],
+    constant uint& num_experts [[buffer(6)]],
+    constant uint& D [[buffer(7)]],
+    device const uint8_t* W_b [[buffer(8)]],
+    device const bfloat* scales_b [[buffer(9)]],
+    device const bfloat* biases_b [[buffer(10)]],
+    device const bfloat* effective_scale_b [[buffer(11)]],
+    device float* out_logits_b [[buffer(12)]],
+    uint2 tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    if (tg_idx.y == 0) {
+        router_gemv_body(W_a, scales_a, biases_a, hidden, effective_scale_a,
+                         out_logits_a, num_experts, D, 4, tg_idx.x, sg_idx, lane);
+    } else {
+        router_gemv_body(W_b, scales_b, biases_b, hidden, effective_scale_b,
+                         out_logits_b, num_experts, D, 4, tg_idx.x, sg_idx, lane);
+    }
+}
+
 static inline float router_sigmoid(float x) {
     return 1.0f / (1.0f + exp(-x));
 }
@@ -496,6 +523,33 @@ kernel void router_topk_select_k8(
                             NE, K, logit_bias, false, 1.0f);
 }
 
+kernel void router_topk_select_k8_pair(
+    device const float* logits_a [[buffer(0)]],
+    device const bfloat* per_expert_scale [[buffer(1)]],
+    device uint* out_indices_a [[buffer(2)]],
+    device half* out_weights_a [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    constant uint& top_k [[buffer(5)]],
+    device const bfloat* logit_bias_a [[buffer(6)]],
+    device const float* logits_b [[buffer(8)]],
+    device uint* out_indices_b [[buffer(9)]],
+    device half* out_weights_b [[buffer(10)]],
+    device const bfloat* logit_bias_b [[buffer(11)]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tg_idx [[threadgroup_position_in_grid]]
+) {
+    if (tid.x != 0) return;
+    const uint NE = router_fc_num_experts(num_experts);
+    const uint K = min(router_fc_top_k(top_k), kMaxStreamedExperts);
+    if (tg_idx.y == 0) {
+        router_topk_select_body(logits_a, per_expert_scale, out_indices_a, out_weights_a,
+                                NE, K, logit_bias_a, false, 1.0f);
+    } else {
+        router_topk_select_body(logits_b, per_expert_scale, out_indices_b, out_weights_b,
+                                NE, K, logit_bias_b, false, 1.0f);
+    }
+}
+
 kernel void router_topk_select_sigmoid_k8(
     device const float* logits [[buffer(0)]],
     device const bfloat* per_expert_scale [[buffer(1)]],
@@ -512,6 +566,34 @@ kernel void router_topk_select_sigmoid_k8(
     const uint K = min(router_fc_top_k(top_k), kMaxStreamedExperts);
     router_topk_select_body(logits, per_expert_scale, out_indices, out_weights,
                             NE, K, score_bias, true, scaling);
+}
+
+kernel void router_topk_select_sigmoid_k8_pair(
+    device const float* logits_a [[buffer(0)]],
+    device const bfloat* per_expert_scale [[buffer(1)]],
+    device uint* out_indices_a [[buffer(2)]],
+    device half* out_weights_a [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    constant uint& top_k [[buffer(5)]],
+    device const bfloat* score_bias_a [[buffer(6)]],
+    constant float& scaling [[buffer(7)]],
+    device const float* logits_b [[buffer(8)]],
+    device uint* out_indices_b [[buffer(9)]],
+    device half* out_weights_b [[buffer(10)]],
+    device const bfloat* score_bias_b [[buffer(11)]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tg_idx [[threadgroup_position_in_grid]]
+) {
+    if (tid.x != 0) return;
+    const uint NE = router_fc_num_experts(num_experts);
+    const uint K = min(router_fc_top_k(top_k), kMaxStreamedExperts);
+    if (tg_idx.y == 0) {
+        router_topk_select_body(logits_a, per_expert_scale, out_indices_a, out_weights_a,
+                                NE, K, score_bias_a, true, scaling);
+    } else {
+        router_topk_select_body(logits_b, per_expert_scale, out_indices_b, out_weights_b,
+                                NE, K, score_bias_b, true, scaling);
+    }
 }
 
 // Each SIMD computes one affine INT4 row. Four adjacent groups are loaded as

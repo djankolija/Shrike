@@ -124,11 +124,219 @@ import ShrikeValidationSupport
         #expect(actual.indices == expected.indices)
     }
 
+    @Test func fusedRouterPairMatchesTwoSeparateDispatchesBitForBit() throws {
+        try Self.expectPairMatchesTheSingleDispatches(topK: Self.topK, specialized: false)
+    }
+
+    @Test func fusedRouterPairMatchesOnTheSpecializedPipeline() throws {
+        try Self.expectPairMatchesTheSingleDispatches(topK: Self.topK, specialized: true)
+    }
+
+    @Test func fusedRouterPairMatchesAtTopFour() throws {
+        try Self.expectPairMatchesTheSingleDispatches(topK: 4, specialized: false)
+    }
+
+    private static func expectPairMatchesTheSingleDispatches(topK: Int, specialized: Bool) throws {
+        var rng = SplitMix64(seed: 0xF05E_D1A7)
+        func weightSet(_ offset: Float) -> [[Float]] {
+            (0..<Self.experts).map { expert in
+                (0..<Self.dimension).map { _ in rng.uniform(-0.05, 0.05) + Float(expert) * offset }
+            }
+        }
+        let first = weightSet(0.01)
+        let second = weightSet(-0.007)
+        let hidden = (0..<Self.dimension).map { _ in rng.uniform(-1.0, 1.0) }
+        let firstScale = (0..<Self.dimension).map { _ in rng.uniform(0.5, 1.5) }
+        let secondScale = (0..<Self.dimension).map { _ in rng.uniform(0.5, 1.5) }
+        let expertScale = (0..<Self.experts).map { _ in rng.uniform(0.6, 1.4) }
+        var secondBias = [Float](repeating: 0, count: Self.experts)
+        secondBias[3] = 0.4
+
+        let separateFirst = try Self.run(weights: first, hidden: hidden, effectiveScale: firstScale,
+                                         expertScale: expertScale, topK: topK, specialized: specialized)
+        let separateSecond = try Self.run(weights: second, hidden: hidden, effectiveScale: secondScale,
+                                          expertScale: expertScale, topK: topK, logitBias: secondBias,
+                                          specialized: specialized)
+        let pair = try Self.runPair(
+            first: (first, firstScale, nil), second: (second, secondScale, secondBias),
+            hidden: hidden, expertScale: expertScale, topK: topK, specialized: specialized)
+
+        #expect(pair.first.indices == separateFirst.indices)
+        #expect(pair.first.weights == separateFirst.weights)
+        #expect(pair.second.indices == separateSecond.indices)
+        #expect(pair.second.weights == separateSecond.weights)
+        #expect(pair.first.indices != pair.second.indices || pair.first.weights != pair.second.weights)
+    }
+
+    @Test(arguments: [false, true])
+    func fusedSigmoidRouterPairMatchesTheSingleDispatchesBitForBit(specialized: Bool) throws {
+        let context = try MetalContext()
+        let kernel = try Self.makeSigmoidKernel(context: context, specialized: specialized)
+        let first = Self.makeSigmoidFixture(seed: 0x516_0001)
+        let second = Self.makeSigmoidFixture(seed: 0x516_0002)
+        let firstBuffers = try Self.makeSigmoidBuffers(
+            context, weights: first.weights, hidden: first.hidden, bias: first.bias)
+        let secondBuffers = try Self.makeSigmoidBuffers(
+            context, weights: second.weights, hidden: first.hidden, bias: second.bias)
+        let singleFirst = try Self.runSigmoidSingle(kernel, context: context, buffers: firstBuffers)
+        let singleSecond = try Self.runSigmoidSingle(kernel, context: context, buffers: secondBuffers)
+
+        let firstOperands = try Self.sigmoidOperands(firstBuffers, context: context)
+        let secondOperands = try Self.sigmoidOperands(secondBuffers, context: context)
+        guard let commandBuffer = context.queue.makeCommandBuffer() else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        try kernel.encodeRouterPair(
+            commandBuffer: commandBuffer, first: firstOperands, second: secondOperands,
+            hidden: firstBuffers.hidden, perExpertScale: firstBuffers.ones,
+            numExperts: UInt32(Self.kimiExperts), d: UInt32(Self.dimension),
+            topK: UInt32(Self.kimiTopK))
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        #expect(commandBuffer.error == nil)
+
+        let pairFirst = Self.readResult(firstOperands, topK: Self.kimiTopK)
+        let pairSecond = Self.readResult(secondOperands, topK: Self.kimiTopK)
+        #expect(pairFirst.indices == singleFirst.indices)
+        #expect(pairFirst.weights == singleFirst.weights)
+        #expect(pairSecond.indices == singleSecond.indices)
+        #expect(pairSecond.weights == singleSecond.weights)
+        #expect(pairFirst.indices != pairSecond.indices || pairFirst.weights != pairSecond.weights)
+    }
+
+    private typealias RouterSet = (weights: [[Float]], effectiveScale: [Float], logitBias: [Float]?)
+
+    private static func makeSoftmaxKernel(context: MetalContext, topK: Int, specialized: Bool) throws
+        -> MoE {
+        guard specialized else { return try MoE(context: context) }
+        return try MoE(context: context, specializedD: UInt32(Self.dimension),
+                       specializedNumExperts: UInt32(Self.experts), specializedTopK: UInt32(topK))
+    }
+
+    private static func readResult(_ operands: MoE.RouterOperands, topK: Int) -> Result {
+        let pointer = operands.outIndices.contents().bindMemory(to: UInt32.self, capacity: topK)
+        return Result(indices: (0..<topK).map { pointer[$0] },
+                      weights: Fp16Buffer.read(operands.outWeights, count: topK))
+    }
+
+    private static func makeRouterBuffers(_ set: RouterSet, context: MetalContext, topK: Int) throws
+        -> MoE.RouterOperands {
+        let packedRows = set.weights.map { Quantization.quantizeInt8Affine($0) }
+        let packed = packedRows.flatMap(\.packed)
+        let scales = packedRows.flatMap(\.scales)
+        let biases = packedRows.flatMap(\.biases)
+        let logitBias = set.logitBias ?? [Float](repeating: 0, count: Self.experts)
+        guard let weightBuffer = context.device.makeBuffer(
+                  bytes: packed, length: packed.count, options: .storageModeShared),
+              let scaleBuffer = context.device.makeBuffer(
+                  bytes: scales, length: scales.count * MemoryLayout<UInt16>.stride,
+                  options: .storageModeShared),
+              let biasBuffer = context.device.makeBuffer(
+                  bytes: biases, length: biases.count * MemoryLayout<UInt16>.stride,
+                  options: .storageModeShared),
+              let effectiveBuffer = context.device.makeBuffer(
+                  bytes: set.effectiveScale.map(Quantization.bf16Bits),
+                  length: set.effectiveScale.count * MemoryLayout<UInt16>.stride,
+                  options: .storageModeShared),
+              let logitBiasBuffer = context.device.makeBuffer(
+                  bytes: logitBias.map(Quantization.bf16Bits),
+                  length: Self.experts * MemoryLayout<UInt16>.stride,
+                  options: .storageModeShared),
+              let indexBuffer = context.device.makeBuffer(
+                  length: topK * MemoryLayout<UInt32>.stride, options: .storageModeShared),
+              let outputWeightBuffer = Fp16Buffer.make(context.device, count: topK) else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        return MoE.RouterOperands(
+            weights: weightBuffer, scales: scaleBuffer, biases: biasBuffer,
+            effectiveScale: effectiveBuffer, logitBias: logitBiasBuffer,
+            outIndices: indexBuffer, outWeights: outputWeightBuffer)
+    }
+
+    private static func runPair(first: RouterSet, second: RouterSet, hidden: [Float],
+                                expertScale: [Float], topK: Int = RouterTopKTests.topK,
+                                specialized: Bool = false) throws
+        -> (first: Result, second: Result) {
+        let context = try MetalContext()
+        let kernel = try makeSoftmaxKernel(context: context, topK: topK, specialized: specialized)
+        let firstOperands = try makeRouterBuffers(first, context: context, topK: topK)
+        let secondOperands = try makeRouterBuffers(second, context: context, topK: topK)
+        guard let hiddenBuffer = Fp16Buffer.make(context.device, values: hidden),
+              let expertScaleBuffer = context.device.makeBuffer(
+                  bytes: expertScale.map(Quantization.bf16Bits),
+                  length: expertScale.count * MemoryLayout<UInt16>.stride,
+                  options: .storageModeShared),
+              let commandBuffer = context.queue.makeCommandBuffer() else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        try kernel.encodeRouterPair(
+            commandBuffer: commandBuffer, first: firstOperands, second: secondOperands,
+            hidden: hiddenBuffer, perExpertScale: expertScaleBuffer,
+            numExperts: UInt32(Self.experts), d: UInt32(Self.dimension), topK: UInt32(topK))
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        #expect(commandBuffer.error == nil)
+        return (readResult(firstOperands, topK: topK), readResult(secondOperands, topK: topK))
+    }
+
     // MARK: - Sigmoid scoring (Kimi)
 
     private static let kimiExperts = 256
     private static let kimiTopK = 8
     private static let kimiScaling: Float = 2.446
+
+    private typealias SigmoidBuffers = (weights: MTLBuffer, scales: MTLBuffer, biases: MTLBuffer,
+                                        hidden: MTLBuffer, ones: MTLBuffer, ext: MTLBuffer,
+                                        correction: MTLBuffer)
+
+    private static func makeSigmoidKernel(context: MetalContext, specialized: Bool) throws -> MoE {
+        guard specialized else {
+            return try MoE(context: context,
+                           specializedNumExperts: UInt32(Self.kimiExperts),
+                           specializedTopK: UInt32(Self.kimiTopK),
+                           sigmoidRouterScores: true,
+                           routedScalingFactor: Self.kimiScaling)
+        }
+        return try MoE(context: context,
+                       specializedD: UInt32(Self.dimension),
+                       specializedNumExperts: UInt32(Self.kimiExperts),
+                       specializedTopK: UInt32(Self.kimiTopK),
+                       sigmoidRouterScores: true,
+                       routedScalingFactor: Self.kimiScaling)
+    }
+
+    private static func sigmoidOperands(_ buffers: SigmoidBuffers, context: MetalContext) throws
+        -> MoE.RouterOperands {
+        guard let indexBuffer = context.device.makeBuffer(
+                  length: Self.kimiTopK * MemoryLayout<UInt32>.stride, options: .storageModeShared),
+              let weightBuffer = Fp16Buffer.make(context.device, count: Self.kimiTopK) else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        return MoE.RouterOperands(
+            weights: buffers.weights, scales: buffers.scales, biases: buffers.biases,
+            effectiveScale: buffers.ext, logitBias: buffers.correction,
+            outIndices: indexBuffer, outWeights: weightBuffer)
+    }
+
+    private static func runSigmoidSingle(_ kernel: MoE, context: MetalContext,
+                                         buffers: SigmoidBuffers) throws -> Result {
+        let operands = try sigmoidOperands(buffers, context: context)
+        guard let commandBuffer = context.queue.makeCommandBuffer() else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        try kernel.encodeRouter(
+            commandBuffer: commandBuffer,
+            weights: buffers.weights, scales: buffers.scales, biases: buffers.biases,
+            hidden: buffers.hidden, effectiveScale: buffers.ext, perExpertScale: buffers.ones,
+            logitBias: buffers.correction,
+            outIndices: operands.outIndices, outWeights: operands.outWeights,
+            numExperts: UInt32(Self.kimiExperts), d: UInt32(Self.dimension),
+            topK: UInt32(Self.kimiTopK))
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        #expect(commandBuffer.error == nil)
+        return readResult(operands, topK: Self.kimiTopK)
+    }
 
     /// Selection sorts by `sigmoid(logit) + correction bias`; weights are the
     /// ORIGINAL sigmoid scores of the selected, ÷ (sum + 1e-20), × scaling.
@@ -418,7 +626,8 @@ import ShrikeValidationSupport
                             effectiveScale: [Float],
                             expertScale: [Float],
                             topK: Int = RouterTopKTests.topK,
-                            logitBias: [Float]? = nil) throws -> Result {
+                            logitBias: [Float]? = nil,
+                            specialized: Bool = false) throws -> Result {
         let packedRows = weights.map { Quantization.quantizeInt8Affine($0) }
         let groupsPerRow = Self.dimension / Quantization.groupSize
         let packed = packedRows.flatMap(\.packed)
@@ -427,7 +636,7 @@ import ShrikeValidationSupport
         precondition(scales.count == Self.experts * groupsPerRow)
 
         let context = try MetalContext()
-        let kernel = try MoE(context: context)
+        let kernel = try makeSoftmaxKernel(context: context, topK: topK, specialized: specialized)
         guard let weightBuffer = context.device.makeBuffer(
                   bytes: packed, length: packed.count, options: .storageModeShared),
               let scaleBuffer = context.device.makeBuffer(

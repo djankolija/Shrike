@@ -435,16 +435,30 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         `MoE.encodeRouterPair` with its own logits scratch and pipelines,
         `RuntimePrefetch.probe` in both binaries and the banner, the runner's tail
         encode using the pair when fused; the default `separate` until the arms.
-  - [ ] Step 3 (numerics): golden IDENTICAL on both boxes and profiles with the ring
-        on and off.
-  - [ ] Step 4 (the arms, mini): fused against separate at the Task 1 (and Task 2)
+  - [x] Step 3 (numerics): golden IDENTICAL on both boxes and profiles with the ring
+        on and off. **DONE 2026-09-07:** fused identical on both boxes and profiles,
+        and under `speculative-validate` on the M4 Pro.
+  - [x] Step 4 (the arms, mini): fused against separate at the Task 1 (and Task 2)
         winning cell, mirrored; readings: the tail's GPU time per layer, tok/s.
-  - [ ] Step 5 (the rule): real and free flips the default.
+        **DONE 2026-09-07, 12 lifetimes, every answer identical**
+        (`~/.claude/handoffs/archive/shrike-v15-t3/t3-arms-summary.md`):
+
+        | cell | card tok/s | the 300 | the 1k | wall ms per token |
+        | --- | ---: | ---: | ---: | --- |
+        | separate (Task 2's default) | 15.16 / 15.11 | 15.70 / 15.87 | 15.57 / 15.66 | 66.2 to 66.4 / 63.2 to 63.9 / 64.0 to 64.4 |
+        | fused | 15.57 / 15.37 (**+2.2 %**) | 16.49 / 16.41 (**+4.3 %**) | 16.17 / 16.18 (**+3.6 %**) | 64.5 to 65.3 / 60.8 to 61.1 / 61.9 to 62.0 |
+
+        The sign held in both orders on every shape (+2.7 / +1.7, +5.1 / +3.4, +3.9 /
+        +3.3) against repeats of −0.3 / +1.1 / +0.6; the fusion removes two launches
+        per layer, the GEMV's and the select's, 1.3 to 2.7 ms per token; adopted and
+        late unchanged, joined up (the shorter tail brings the plan sooner).
+  - [x] Step 5 (the rule): real and free flips the default. **DONE 2026-09-07:** the
+        default is `probe=fused`; `SHRIKE_PREFETCH_PROBE=separate` is the A/B.
   - [ ] Step 6 (design doc, review).
 
 ### Task 4: the prefill-to-decode boundary (the companion)
 
-- [ ] **T4: every answer's first window is its worst, 42 misses per token at 11.9
+- [x] **T4: every answer's first window is its worst, 42 misses per token at 11.9
   tok/s ([v14-decode.md](v14-decode.md) step zero row 3), because the pool holds
   prefill's experts when the answer starts.** v13 Task 5's resident-first sweep was
   the first cut (0.5 to 0.9 s off the first turn's decode) and named itself
@@ -456,13 +470,34 @@ the probe's sleeping host). The design doc carries the tables and the placement 
   a knob. It shortens the slowest stretch of every card without raising the plateau.
 
   **Steps.**
-  - [ ] Step 0 (zero code): the replay pricing above, a named stop (a boundary
+  - [x] Step 0 (zero code): the replay pricing above, a named stop (a boundary
         policy must remove a measured fraction of the first window's misses above
-        what the resident-first sweep already takes).
+        what the resident-first sweep already takes). **DONE 2026-09-07, the named
+        stop reached before any policy was designed; the task lands as a measured
+        null.** The replay's `--profile 16` now splits each window's misses into
+        capacity (an expert this layer used before in the request, evicted since)
+        and compulsory (the request's first touch), MODELLED from the three archived
+        answers at production's pool (the baseline reproduces production's miss
+        counts exactly):
+
+        | answer | first window (capacity / compulsory) | average window | the addressable excess |
+        | --- | --- | --- | ---: |
+        | the card | 674 (545 / 129) | 478 (439 / 39) | about 106 capacity misses |
+        | the 300 | 611 (324 / 287) | 473 (404 / 69) | none (the capacity share is below average) |
+        | the 1k | 668 (497 / 171) | 438 (410 / 29) | about 87 |
+
+        The first window's excess is compulsory on the 300 (the answer opens on
+        experts the prompt never used, which no retention or boundary fill can
+        hold) and about 100 capacity misses per answer on the card and the 1k, at
+        most 85 ms per answer at step zero's slope, under 1 % of the answer's decode
+        and below the method's drift band; the second window of the 300 (763) and the
+        mid-answer windows of the 1k (676 / 674 / 797) are as bad as any first
+        window, so the boundary is not where the swings live. The resident-first
+        sweep already holds what a boundary policy could; nothing is built.
   - [ ] Step 1 (tests RED first), Step 2 (the code), Step 3 (numerics), Step 4 (the
         arms: the first 64 tokens of each cold answer as the verdict window beside
         the whole answer, the turns as controls), Step 5 (the rule), Step 6 (design
-        doc, review).
+        doc, review): not run, the stop reached at Step 0.
 
 ## Candidate tasks (not scheduled)
 
