@@ -62,7 +62,6 @@ final class MoE {
     private let routerSelectK8PairPSO: MTLComputePipelineState
     private let routerSelectK8PairSpecializedPSO: MTLComputePipelineState
     private let routerLogitsPair: MTLBuffer
-    private let residencyClassifyPSO: MTLComputePipelineState
     private let residencyClassifySpecPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
     private let phase1U16PSO: MTLComputePipelineState
@@ -145,7 +144,6 @@ final class MoE {
         self.routerGemvPairSpecializedPSO = routerPipelines.gemvPairSpecialized
         self.routerSelectK8PairPSO = routerPipelines.selectPair
         self.routerSelectK8PairSpecializedPSO = routerPipelines.selectPairSpecialized
-        self.residencyClassifyPSO = try context.pipeline("moe_classify_expert_residency")
         self.residencyClassifySpecPSO = try context.pipeline(
             "moe_classify_expert_residency_spec")
         let phase1Name = routedWeightBits == 4
@@ -483,8 +481,7 @@ final class MoE {
         resolvedGenerations: MTLBuffer,
         topK: UInt32,
         numExperts: UInt32,
-        speculative: SpeculativeDispatchArguments? = nil,
-        phase1Hits: Bool = false,
+        speculative: SpeculativeDispatchArguments,
         hostReadback: RouterHostReadbackArguments? = nil
     ) throws {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
@@ -498,7 +495,7 @@ final class MoE {
             missExperts: missExperts, resolvedSlots: resolvedSlots,
             resolvedGenerations: resolvedGenerations,
             topK: topK, numExperts: numExperts,
-            speculative: speculative, phase1Hits: phase1Hits,
+            speculative: speculative,
             hostReadback: hostReadback)
         encoder.endEncoding()
     }
@@ -516,14 +513,11 @@ final class MoE {
         resolvedGenerations: MTLBuffer,
         topK: UInt32,
         numExperts: UInt32,
-        speculative: SpeculativeDispatchArguments? = nil,
-        phase1Hits: Bool = false,
+        speculative: SpeculativeDispatchArguments,
         hostReadback: RouterHostReadbackArguments? = nil
     ) {
         precondition(topK <= UInt32(Self.maxStreamedExperts))
-        if let speculative {
-            precondition(speculative.arguments.length >= Self.specDispatchArgsLength)
-        }
+        precondition(speculative.arguments.length >= Self.specDispatchArgsLength)
         if let hostReadback {
             precondition(hostReadback.tag != 0)
             precondition(hostReadback.buffer.length
@@ -533,8 +527,7 @@ final class MoE {
         }
         var topKValue = topK
         var expertCount = numExperts
-        encoder.setComputePipelineState(
-            speculative != nil ? residencyClassifySpecPSO : residencyClassifyPSO)
+        encoder.setComputePipelineState(residencyClassifySpecPSO)
         encoder.setBuffer(topKIndices, offset: 0, index: 0)
         encoder.setBuffer(residencyTable, offset: 0, index: 1)
         encoder.setBuffer(hitCount, offset: 0, index: 2)
@@ -546,23 +539,19 @@ final class MoE {
         encoder.setBuffer(resolvedGenerations, offset: 0, index: 8)
         encoder.setBytes(&topKValue, length: MemoryLayout<UInt32>.stride, index: 9)
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 10)
-        if let speculative {
-            var grids: [UInt32] = [
-                UInt32(speculative.phase1Threadgroups.width),
-                UInt32(speculative.phase1Threadgroups.height),
-                UInt32(speculative.phase1Threadgroups.depth),
-                UInt32(speculative.phase2Threadgroups.width),
-                UInt32(speculative.phase2Threadgroups.height),
-                UInt32(speculative.phase2Threadgroups.depth),
-                UInt32(speculative.tailThreadgroups.width),
-                UInt32(speculative.tailThreadgroups.height),
-                UInt32(speculative.tailThreadgroups.depth),
-            ]
-            encoder.setBytes(&grids, length: Self.specDispatchArgsLength, index: 11)
-            encoder.setBuffer(speculative.arguments, offset: 0, index: 12)
-            var hitsFlag: UInt32 = phase1Hits ? 1 : 0
-            encoder.setBytes(&hitsFlag, length: MemoryLayout<UInt32>.stride, index: 13)
-        }
+        var grids: [UInt32] = [
+            UInt32(speculative.phase1Threadgroups.width),
+            UInt32(speculative.phase1Threadgroups.height),
+            UInt32(speculative.phase1Threadgroups.depth),
+            UInt32(speculative.phase2Threadgroups.width),
+            UInt32(speculative.phase2Threadgroups.height),
+            UInt32(speculative.phase2Threadgroups.depth),
+            UInt32(speculative.tailThreadgroups.width),
+            UInt32(speculative.tailThreadgroups.height),
+            UInt32(speculative.tailThreadgroups.depth),
+        ]
+        encoder.setBytes(&grids, length: Self.specDispatchArgsLength, index: 11)
+        encoder.setBuffer(speculative.arguments, offset: 0, index: 12)
         // A zero tag tells the kernel there is no copy to write; the bindings
         // stay valid either way.
         var readbackTag = hostReadback?.tag ?? 0

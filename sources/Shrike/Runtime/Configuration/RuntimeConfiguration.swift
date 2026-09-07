@@ -23,85 +23,6 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
     case agingLFU = "aging-lfu"
 }
 
-/// Decode scheduling for SSD-backed routed experts.
-///
-/// `hitFixup` commits phase 1 for resident experts while cache misses are read,
-/// then computes only the missed experts before the common reduction. `barrier`
-/// preserves the former all-experts-after-I/O path as a correctness/performance
-/// control for A/B measurements.
-public enum RuntimeDecodeExpertExecution: String, Codable, Sendable {
-    case hitFixup = "hit-fixup"
-    case barrier
-    case gpuResidency = "gpu-residency"
-    case speculative
-    case speculativeValidate = "speculative-validate"
-
-    public static func environmentValue(
-        _ environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> RuntimeDecodeExpertExecution {
-        guard let raw = environment["SHRIKE_DECODE_EXPERT_EXECUTION"] else {
-            return .speculative
-        }
-        guard let value = RuntimeDecodeExpertExecution(rawValue: raw) else {
-            throw RuntimeConfigurationError.invalidDecodeExpertExecution(raw)
-        }
-        return value
-    }
-}
-
-public enum RuntimeExpertIOSynchronization: String, Codable, Sendable {
-    case host
-    case event
-
-    public static func environmentValue(
-        _ environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> RuntimeExpertIOSynchronization {
-        guard let raw = environment["SHRIKE_EXPERT_IO_SYNC"] else { return .event }
-        guard let value = RuntimeExpertIOSynchronization(rawValue: raw) else {
-            throw RuntimeConfigurationError.invalidExpertIOSynchronization(raw)
-        }
-        return value
-    }
-}
-
-/// Which routed experts the speculative command computes in phase 1: only on
-/// an all-hit layer (the classifier zeroes its grids otherwise), or the
-/// GPU-classified hits on every layer while the fixup keeps the misses.
-public enum RuntimeSpecPhase1Coverage: String, Codable, Sendable {
-    case allHit = "all-hit"
-    case hits
-
-    public static func environmentValue(
-        _ environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> RuntimeSpecPhase1Coverage {
-        guard let raw = environment["SHRIKE_SPEC_PHASE1"] else { return .allHit }
-        guard let value = RuntimeSpecPhase1Coverage(rawValue: raw) else {
-            throw RuntimeConfigurationError.invalidSpecPhase1Coverage(raw)
-        }
-        return value
-    }
-}
-
-/// How the host learns that a routed layer's router has run: the residency
-/// classifier's tagged host readback polled directly (the default), or the
-/// command's completion mark, which the driver publishes later. The poll needs
-/// the spin host wait; under `SHRIKE_HOST_WAIT=wait` the status path's parked
-/// wait is taken instead.
-public enum RuntimeRouterWake: String, Codable, Sendable {
-    case status
-    case word
-
-    public static func environmentValue(
-        _ environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> RuntimeRouterWake {
-        guard let raw = environment["SHRIKE_ROUTER_WAKE"] else { return .word }
-        guard let value = RuntimeRouterWake(rawValue: raw) else {
-            throw RuntimeConfigurationError.invalidRouterWake(raw)
-        }
-        return value
-    }
-}
-
 /// Where the predictive prefetch ring issues a layer's reads: `after` the
 /// layer's demand batch has completed (the drive is otherwise idle and the
 /// demand read is never slowed), or `beside` it, right after the demand
@@ -228,21 +149,6 @@ public struct RuntimePrefetch: Codable, Sendable, Equatable {
     }
 }
 
-public enum RuntimeExpertIOSubmission: String, Codable, Sendable {
-    case deferred
-    case immediate
-
-    public static func environmentValue(
-        _ environment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> RuntimeExpertIOSubmission {
-        guard let raw = environment["SHRIKE_EXPERT_IO_SUBMISSION"] else { return .immediate }
-        guard let value = RuntimeExpertIOSubmission(rawValue: raw) else {
-            throw RuntimeConfigurationError.invalidExpertIOSubmission(raw)
-        }
-        return value
-    }
-}
-
 /// Storage precision for the autoregressive attention key/value cache.
 /// Quantized modes use affine groups of 64 values and keep their scale and
 /// bias alongside each token row; model weights are unaffected.
@@ -267,11 +173,6 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
     case contextRequiresYaRN(Int)
     case yaRNContextMismatch(maxContext: Int, configured: Int)
     case yaRNUnsupportedArchitecture
-    case invalidDecodeExpertExecution(String)
-    case invalidExpertIOSynchronization(String)
-    case invalidExpertIOSubmission(String)
-    case invalidSpecPhase1Coverage(String)
-    case invalidRouterWake(String)
     case invalidPrefetch(String)
 
     public var description: String {
@@ -288,16 +189,6 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
             return "YaRN is configured for \(configured) tokens, but max context is \(maxContext)"
         case .yaRNUnsupportedArchitecture:
             return "YaRN requires the Qwen3.5-MoE NeoX sub-dimension RoPE architecture"
-        case .invalidDecodeExpertExecution(let value):
-            return "unsupported decode expert execution '\(value)'; allowed: hit-fixup, barrier, gpu-residency"
-        case .invalidExpertIOSynchronization(let value):
-            return "unsupported expert I/O synchronization '\(value)'; allowed: host, event"
-        case .invalidExpertIOSubmission(let value):
-            return "unsupported expert I/O submission '\(value)'; allowed: deferred, immediate"
-        case .invalidSpecPhase1Coverage(let value):
-            return "unsupported spec phase-1 coverage '\(value)'; allowed: all-hit, hits"
-        case .invalidRouterWake(let value):
-            return "unsupported router wake '\(value)'; allowed: status, word"
         case .invalidPrefetch(let detail):
             return "unsupported prefetch configuration: \(detail)"
         }
@@ -397,11 +288,6 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let prefillChunkTokens: Int
     public let prefillAttentionPath: RuntimePrefillAttentionPath
     public let headPath: RuntimeHeadPath
-    public let decodeExpertExecution: RuntimeDecodeExpertExecution
-    public let expertIOSynchronization: RuntimeExpertIOSynchronization
-    public let expertIOSubmission: RuntimeExpertIOSubmission
-    public let specPhase1Coverage: RuntimeSpecPhase1Coverage
-    public let routerWake: RuntimeRouterWake
     public let prefetch: RuntimePrefetch
     public let kvCachePrecision: KVCachePrecision
     public let ropeScalingMode: RuntimeRoPEScalingMode
@@ -414,11 +300,6 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 prefillChunkTokens: Int = 128,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .causalMatrix,
                 forceLogitsHead: Bool = false,
-                decodeExpertExecution: RuntimeDecodeExpertExecution = .speculative,
-                expertIOSynchronization: RuntimeExpertIOSynchronization = .event,
-                expertIOSubmission: RuntimeExpertIOSubmission = .immediate,
-                specPhase1Coverage: RuntimeSpecPhase1Coverage = .allHit,
-                routerWake: RuntimeRouterWake = .word,
                 prefetch: RuntimePrefetch = .production,
                 kvCachePrecision: KVCachePrecision = .int8,
                 ropeScalingMode: RuntimeRoPEScalingMode = .none,
@@ -439,11 +320,6 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.prefillChunkTokens = prefillChunkTokens
         self.prefillAttentionPath = prefillAttentionPath
         self.headPath = forceLogitsHead ? .logits : .fusedRows
-        self.decodeExpertExecution = decodeExpertExecution
-        self.expertIOSynchronization = expertIOSynchronization
-        self.expertIOSubmission = expertIOSubmission
-        self.specPhase1Coverage = specPhase1Coverage
-        self.routerWake = routerWake
         self.prefetch = prefetch
         self.kvCachePrecision = kvCachePrecision
         self.ropeScalingMode = ropeScalingMode

@@ -4,7 +4,7 @@ import Testing
 @testable import Shrike
 
 /// Pins the cross-queue shared-event ordering assumptions the expert-IO
-/// event synchronization relies on (SHRIKE_EXPERT_IO_SYNC, default `event`:
+/// event synchronization relies on (v10 T5's default, the only path since v17:
 /// the miss-fixup CB waits on the reader queue's completion signal).
 @Suite struct CrossQueueSharedEventTests {
     private static let timeout: DispatchTimeInterval = .seconds(20)

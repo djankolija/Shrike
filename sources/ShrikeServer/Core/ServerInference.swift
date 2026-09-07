@@ -475,12 +475,7 @@ private struct RunnerCounterSnapshot {
     let pathRouterWake: UInt64
     let pathRouterWakeFallbacks: UInt64
     let ioQueue: UInt64
-    let ioCompletionToFixup: UInt64
-    let ioHostWaits: UInt64
     let ioHostWaitsAvoided: UInt64
-    let gpuClassifiedHits: UInt64
-    let gpuClassifiedMisses: UInt64
-    let gpuAllHitLayers: UInt64
     let expertStreaming: ExpertStreamingStatistics
 }
 
@@ -688,11 +683,6 @@ public actor ServerModelSession: ServerInferenceBackend {
         let context = try reusingContext ?? MetalContext()
         let loadRuntime = try RuntimeConfiguration(
             forceLogitsHead: true,
-            decodeExpertExecution: try RuntimeDecodeExpertExecution.environmentValue(),
-            expertIOSynchronization: try RuntimeExpertIOSynchronization.environmentValue(),
-            expertIOSubmission: try RuntimeExpertIOSubmission.environmentValue(),
-            specPhase1Coverage: try RuntimeSpecPhase1Coverage.environmentValue(),
-            routerWake: try RuntimeRouterWake.environmentValue(),
             prefetch: try RuntimePrefetch.environmentValue())
         let slotOverride = ProcessInfo.processInfo.environment["SHRIKE_EXPERT_CACHE_SLOTS"]
             .flatMap(Int.init)
@@ -746,11 +736,6 @@ public actor ServerModelSession: ServerInferenceBackend {
                     : loadRuntime.prefillChunkTokens),
             prefillAttentionPath: loadRuntime.prefillAttentionPath,
             forceLogitsHead: true,
-            decodeExpertExecution: loadRuntime.decodeExpertExecution,
-            expertIOSynchronization: loadRuntime.expertIOSynchronization,
-            expertIOSubmission: loadRuntime.expertIOSubmission,
-            specPhase1Coverage: loadRuntime.specPhase1Coverage,
-            routerWake: loadRuntime.routerWake,
             prefetch: loadRuntime.prefetch,
             kvCachePrecision: kvCachePrecision,
             ropeScalingMode: ropeScalingMode,
@@ -1178,12 +1163,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             pathRouterWake: runner.totalRouterWakeNanos,
             pathRouterWakeFallbacks: runner.totalRouterWakeFallbacks,
             ioQueue: runner.totalIOQueueNanos,
-            ioCompletionToFixup: runner.totalIOCompletionToFixupSubmitNanos,
-            ioHostWaits: runner.totalExpertIOHostWaits,
             ioHostWaitsAvoided: runner.totalExpertIOHostWaitsAvoided,
-            gpuClassifiedHits: runner.totalGPUClassifiedHits,
-            gpuClassifiedMisses: runner.totalGPUClassifiedMisses,
-            gpuAllHitLayers: runner.totalGPUResidencyAllHitLayers,
             expertStreaming: runner.expertStreamingStatistics())
         runner.resetKernelGPUTimings()
         var completed = false
@@ -2068,9 +2048,6 @@ public actor ServerModelSession: ServerInferenceBackend {
         let expert = expertNow.subtracting(snapshot.expertStreaming)
         let expertPrefill = expertAtDecodeStart?.subtracting(snapshot.expertStreaming) ?? .zero
         let expertDecode = expertNow.subtracting(expertAtDecodeStart ?? snapshot.expertStreaming)
-        let gpuHits = runner.totalGPUClassifiedHits - snapshot.gpuClassifiedHits
-        let gpuMisses = runner.totalGPUClassifiedMisses - snapshot.gpuClassifiedMisses
-        let gpuAllHit = runner.totalGPUResidencyAllHitLayers - snapshot.gpuAllHitLayers
         let rankLayers = runner.totalRankWeightLayers - snapshot.rankWeightLayers
         let rankMass: String
         if rankLayers > 0 {
@@ -2098,9 +2075,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "path_router_wake_fallbacks=%llu "
                 + "io_queue_ms=%.4f "
                 + "io_load_ms=%.4f io_fetch_ms=%.4f io_fixup_wake_ms=%.4f "
-                + "io_completion_to_fixup_ms=%.4f io_host_waits=%llu "
-                + "io_host_waits_avoided=%llu gpu_classified_hits=%llu "
-                + "gpu_classified_misses=%llu gpu_all_hit_layers=%llu "
+                + "io_host_waits_avoided=%llu "
                 + "expert_slots_loading=%d expert_slots_pinned=%d "
                 + "expert_hit_rate_prefill=%.4f expert_hits_prefill=%llu "
                 + "expert_misses_prefill=%llu expert_hit_rate_decode=%.4f "
@@ -2141,10 +2116,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             Double(expert.totalLoadNanos) / Double(tokens) / 1_000_000,
             Double(expert.fetchNanos) / Double(tokens) / 1_000_000,
             ms(runner.totalFixupWakeNanos, snapshot.fixupWake),
-            ms(runner.totalIOCompletionToFixupSubmitNanos, snapshot.ioCompletionToFixup),
-            runner.totalExpertIOHostWaits - snapshot.ioHostWaits,
             runner.totalExpertIOHostWaitsAvoided - snapshot.ioHostWaitsAvoided,
-            gpuHits, gpuMisses, gpuAllHit,
             expertNow.loadingSlots, expertNow.pinnedSlots,
             expertPrefill.hitRate, expertPrefill.hits, expertPrefill.misses,
             expertDecode.hitRate, expertDecode.hits, expertDecode.misses,

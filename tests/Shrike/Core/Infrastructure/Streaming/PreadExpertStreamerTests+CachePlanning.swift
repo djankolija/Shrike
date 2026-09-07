@@ -36,25 +36,7 @@ extension PreadExpertStreamerTests {
       sweepMode: .carry, cacheLayout: .pool, expertIOThreads: 8, expertIOBatchDepth: 2,
       cacheProtectMode: .chunk)
       == "overlap=on residency=none sweep=carry cache_layout=pool"
-        + " expert_io=threads=8 batch_depth=2 protect=chunk spec_phase1=all-hit router_wake=word prefetch=off")
-  }
-
-  @Test func prefillGapLeversDescriptionReportsTheSpecPhase1Mode() {
-    #expect(RealForwardRunner.prefillGapLeversDescription(
-      overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
-      sweepMode: .carry, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 2,
-      cacheProtectMode: .chunk, specPhase1: .hits)
-      == "overlap=on residency=none sweep=carry cache_layout=pool"
-        + " expert_io=threads=4 batch_depth=2 protect=chunk spec_phase1=hits router_wake=word prefetch=off")
-  }
-
-  @Test func prefillGapLeversDescriptionReportsTheRouterWakeMode() {
-    #expect(RealForwardRunner.prefillGapLeversDescription(
-      overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
-      sweepMode: .carry, cacheLayout: .pool, expertIOThreads: 4, expertIOBatchDepth: 2,
-      cacheProtectMode: .chunk, routerWake: .status)
-      == "overlap=on residency=none sweep=carry cache_layout=pool"
-        + " expert_io=threads=4 batch_depth=2 protect=chunk spec_phase1=all-hit router_wake=status prefetch=off")
+        + " expert_io=threads=8 batch_depth=2 protect=chunk prefetch=off")
   }
 
   @Test func boundedReaderConfigurationParsesThreadsAndBatchDepth() throws {
@@ -101,7 +83,7 @@ extension PreadExpertStreamerTests {
       overlap: true, residencyAllocationCount: nil, poolResidencyUnavailableReason: nil,
       sweepMode: .carry, cacheLayout: .pool, expertIOThreads: 8, expertIOBatchDepth: 2)
       == "overlap=on residency=none sweep=carry cache_layout=pool"
-        + " expert_io=threads=8 batch_depth=2 protect=chunk spec_phase1=all-hit router_wake=word prefetch=off")
+        + " expert_io=threads=8 batch_depth=2 protect=chunk prefetch=off")
   }
 
   @Test func cachedBatchWithoutExecutorLoadsTaggedBytes() throws {

@@ -77,7 +77,7 @@ import Testing
                           specializedNumExperts: 4)
 
         var result = try classify([0, 1, 2, 3], streamer: streamer,
-                                  moe: moe, context: context, speculative: true)
+                                  moe: moe, context: context)
         #expect(result.misses == [0, 1, 2, 3])
         #expect(result.specArgs == Self.zeroGrids)
 
@@ -85,24 +85,18 @@ import Testing
             try streamer.planExpertsCached(experts: [1]))
         _ = try streamer.loadExpertsCached(experts: [3])
         result = try classify([0, 1, 2, 3], streamer: streamer,
-                              moe: moe, context: context, speculative: true)
+                              moe: moe, context: context)
         #expect(result.hits == [1, 3])
         #expect(result.specArgs == Self.zeroGrids)
 
         result = try classify([1, 3], streamer: streamer,
-                              moe: moe, context: context, speculative: true)
+                              moe: moe, context: context)
         #expect(result.misses.isEmpty)
         #expect(result.specArgs == Self.fullGrids)
 
-        let base = try classify([1, 3], streamer: streamer,
-                                moe: moe, context: context)
-        #expect(base.hits == result.hits)
-        #expect(base.slots == result.slots)
-        #expect(base.generations == result.generations)
     }
 
-    @Test(arguments: [false, true])
-    func classifierPublishesTheTaggedHostReadback(speculative: Bool) throws {
+    @Test func classifierPublishesTheTaggedHostReadback() throws {
         let url = try PreadExpertStreamerTests.writeSyntheticLayer()
         defer { try? FileManager.default.removeItem(at: url) }
         let context = try MetalContext()
@@ -117,8 +111,7 @@ import Testing
                           specializedNumExperts: 4)
         _ = try streamer.loadExpertsCached(experts: [0, 2])
         let result = try classify([0, 1, 2, 3], streamer: streamer,
-                                  moe: moe, context: context,
-                                  speculative: speculative, readbackTag: 0x4d2)
+                                  moe: moe, context: context, readbackTag: 0x4d2)
         #expect(result.hits == [0, 2])
         #expect(result.hostReadback == RouterHostReadback(
             hitCount: 2, missCount: 2,
@@ -129,42 +122,10 @@ import Testing
             predictedIDs: [3, 2, 1, 0]))
     }
 
-    @Test func speculativePhase1GridFollowsThePartialHitKnob() throws {
-        let url = try PreadExpertStreamerTests.writeSyntheticLayer()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let context = try MetalContext()
-        let streamer = try PreadExpertStreamer(
-            layout: PreadExpertStreamerTests.makeLayout(path: url.path),
-            device: context.device,
-            slotCount: 2)
-        let moe = try MoE(context: context,
-                          siluActivation: true,
-                          specializedD: 2048,
-                          specializedF: 512,
-                          specializedNumExperts: 4)
-        _ = try streamer.loadExpertsCached(experts: [0, 2])
-        let partialWithKnob = try classify([0, 1, 2, 3], streamer: streamer, moe: moe,
-                                           context: context, speculative: true,
-                                           phase1Hits: true)
-        #expect(partialWithKnob.hits == [0, 2])
-        #expect(Array(partialWithKnob.specArgs[0..<3]) == Array(Self.fullGrids[0..<3]))
-        #expect(Array(partialWithKnob.specArgs[3..<9]) == Array(Self.zeroGrids[3..<9]))
-        let partialWithoutKnob = try classify([0, 1, 2, 3], streamer: streamer, moe: moe,
-                                              context: context, speculative: true)
-        #expect(partialWithoutKnob.specArgs == Self.zeroGrids)
-        let allMissWithKnob = try classify([1, 3, 1, 3], streamer: streamer, moe: moe,
-                                           context: context, speculative: true,
-                                           phase1Hits: true)
-        #expect(allMissWithKnob.hits.isEmpty)
-        #expect(allMissWithKnob.specArgs == Self.zeroGrids)
-    }
-
     private func classify(_ experts: [UInt32],
                           streamer: PreadExpertStreamer,
                           moe: MoE,
                           context: MetalContext,
-                          speculative: Bool = false,
-                          phase1Hits: Bool = false,
                           readbackTag: UInt32? = nil) throws -> Classification {
         func buffer<T>(_ values: [T]) -> MTLBuffer {
             values.withUnsafeBytes { bytes in
@@ -183,10 +144,8 @@ import Testing
         let slots = buffer([UInt32](repeating: 0, count: experts.count))
         let generations = buffer([UInt64](repeating: 0, count: experts.count))
         let resources = streamer.expertResidencyResources()
-        let specArgsBuffer = speculative
-            ? context.device.makeBuffer(length: MoE.specDispatchArgsLength,
-                                        options: .storageModeShared)!
-            : nil
+        let specArgsBuffer = context.device.makeBuffer(length: MoE.specDispatchArgsLength,
+                                                       options: .storageModeShared)!
         let weights = buffer(Array([Float16(0.5), 0.25, 0.125, 0.0625].prefix(experts.count)))
         let predicted = buffer(Array(experts.reversed()))
         let readbackWords = readbackTag == nil ? nil : context.device.makeBuffer(
@@ -207,14 +166,11 @@ import Testing
             resolvedGenerations: generations,
             topK: UInt32(experts.count),
             numExperts: UInt32(resources.expertCount),
-            speculative: specArgsBuffer.map {
-                MoE.SpeculativeDispatchArguments(
-                    arguments: $0,
-                    phase1Threadgroups: Self.phase1FullGrid,
-                    phase2Threadgroups: Self.phase2FullGrid,
-                    tailThreadgroups: Self.tailFullGrid)
-            },
-            phase1Hits: phase1Hits,
+            speculative: MoE.SpeculativeDispatchArguments(
+                arguments: specArgsBuffer,
+                phase1Threadgroups: Self.phase1FullGrid,
+                phase2Threadgroups: Self.phase2FullGrid,
+                tailThreadgroups: Self.tailFullGrid),
             hostReadback: readbackTag.map {
                 MoE.RouterHostReadbackArguments(
                     buffer: readbackWords!, tag: $0,
@@ -237,9 +193,7 @@ import Testing
             missExperts: values(missExperts, count: missN, as: UInt32.self),
             slots: values(slots, count: experts.count, as: UInt32.self),
             generations: values(generations, count: experts.count, as: UInt64.self),
-            specArgs: specArgsBuffer.map {
-                values($0, count: 9, as: UInt32.self)
-            } ?? [],
+            specArgs: values(specArgsBuffer, count: 9, as: UInt32.self),
             hostReadback: readbackWords.flatMap { words in
                 RouterHostReadback.decode(
                     words: words.contents().bindMemory(

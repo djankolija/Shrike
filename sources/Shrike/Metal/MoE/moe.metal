@@ -184,33 +184,6 @@ static inline void moe_publish_router_readback(
     }
 }
 
-kernel void moe_classify_expert_residency(
-    device const uint* topk_indices [[buffer(0)]],
-    device const ExpertResidencyGPU* residency [[buffer(1)]],
-    device uint* hit_count [[buffer(2)]],
-    device uint* hit_positions [[buffer(3)]],
-    device uint* miss_count [[buffer(4)]],
-    device uint* miss_positions [[buffer(5)]],
-    device uint* miss_experts [[buffer(6)]],
-    device uint* resolved_slots [[buffer(7)]],
-    device ulong* resolved_generations [[buffer(8)]],
-    constant uint& top_k [[buffer(9)]],
-    constant uint& num_experts [[buffer(10)]],
-    device uint* host_readback [[buffer(14)]],
-    constant uint& host_readback_tag [[buffer(15)]],
-    device const half* topk_weights [[buffer(16)]],
-    device const uint* predicted_indices [[buffer(17)]],
-    uint lane [[thread_index_in_threadgroup]]) {
-    if (lane != 0) return;
-    const uint misses = moe_classify_residency_body(
-        topk_indices, residency, hit_count, hit_positions,
-        miss_count, miss_positions, miss_experts,
-        resolved_slots, resolved_generations, top_k, num_experts);
-    moe_publish_router_readback(
-        host_readback, host_readback_tag, topk_indices, topk_weights,
-        predicted_indices, hit_positions, miss_positions, misses, top_k, num_experts);
-}
-
 /// v9 speculative dispatch: additionally publishes indirect dispatch
 /// arguments — the caller-supplied full grids when every routed expert is
 /// resident, zero-width grids otherwise — so pre-committed speculative
@@ -229,7 +202,6 @@ kernel void moe_classify_expert_residency_spec(
     constant uint& num_experts [[buffer(10)]],
     constant MoESpecDispatchArgs& spec_full_grids [[buffer(11)]],
     device MoESpecDispatchArgs* spec_args [[buffer(12)]],
-    constant uint& spec_phase1_hits [[buffer(13)]],
     device uint* host_readback [[buffer(14)]],
     constant uint& host_readback_tag [[buffer(15)]],
     device const half* topk_weights [[buffer(16)]],
@@ -241,12 +213,9 @@ kernel void moe_classify_expert_residency_spec(
         miss_count, miss_positions, miss_experts,
         resolved_slots, resolved_generations, top_k, num_experts);
     const bool all_hit = (misses == 0u);
-    // With spec_phase1_hits the phase-1 grid runs on any layer that has a hit;
-    // the kernel skips the absent positions and the fixup fills them.
-    const bool phase1 = all_hit || (spec_phase1_hits != 0u && misses < top_k);
     for (uint i = 0; i < 3; ++i) {
         const uint zero_grid = (i == 0u) ? 0u : 1u;
-        spec_args->phase1_threadgroups[i] = phase1
+        spec_args->phase1_threadgroups[i] = all_hit
             ? spec_full_grids.phase1_threadgroups[i] : zero_grid;
         spec_args->phase2_threadgroups[i] = all_hit
             ? spec_full_grids.phase2_threadgroups[i] : zero_grid;

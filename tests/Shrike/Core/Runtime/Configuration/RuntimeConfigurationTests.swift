@@ -28,7 +28,6 @@ import Testing
         #expect(runtime.prefillChunkTokens == 128)
         #expect(runtime.prefillAttentionPath == .fullTensorOps2DPreferred)
         #expect(runtime.headPath == .fusedRows)
-        #expect(runtime.decodeExpertExecution == .speculative)
         #expect(runtime.kvCachePrecision == .int8)
         #expect(runtime.ropeScalingMode == .none)
     }
@@ -55,54 +54,13 @@ import Testing
             prefillEnabled: false,
             prefillChunkTokens: 64,
             prefillAttentionPath: .causalTiled,
-            forceLogitsHead: true,
-            decodeExpertExecution: .barrier)
+            forceLogitsHead: true)
         #expect(runtime.expertCacheSlots == 32)
         #expect(runtime.modelExpertCachePolicy == .lru)
         #expect(runtime.rdadviseEnabled)
         #expect(runtime.prefillConfig == .off)
         #expect(runtime.prefillAttentionPath == .causalTiled)
         #expect(runtime.headPath == .logits)
-        #expect(runtime.decodeExpertExecution == .barrier)
-    }
-
-    @Test func decodeExpertExecutionEnvironmentIsFailClosed() throws {
-        #expect(try RuntimeDecodeExpertExecution.environmentValue([:]) == .speculative)
-        #expect(try RuntimeDecodeExpertExecution.environmentValue([
-            "SHRIKE_DECODE_EXPERT_EXECUTION": "barrier",
-        ]) == .barrier)
-        #expect(try RuntimeDecodeExpertExecution.environmentValue([
-            "SHRIKE_DECODE_EXPERT_EXECUTION": "gpu-residency",
-        ]) == .gpuResidency)
-        #expect(throws: RuntimeConfigurationError.self) {
-            try RuntimeDecodeExpertExecution.environmentValue([
-                "SHRIKE_DECODE_EXPERT_EXECUTION": "typo",
-            ])
-        }
-    }
-
-    @Test func specPhase1CoverageEnvironmentIsFailClosed() throws {
-        #expect(try RuntimeSpecPhase1Coverage.environmentValue([:]) == .allHit)
-        #expect(try RuntimeSpecPhase1Coverage.environmentValue([
-            "SHRIKE_SPEC_PHASE1": "hits",
-        ]) == .hits)
-        #expect(throws: RuntimeConfigurationError.self) {
-            try RuntimeSpecPhase1Coverage.environmentValue([
-                "SHRIKE_SPEC_PHASE1": "typo",
-            ])
-        }
-    }
-
-    @Test func routerWakeEnvironmentIsFailClosed() throws {
-        #expect(try RuntimeRouterWake.environmentValue([:]) == .word)
-        #expect(try RuntimeRouterWake.environmentValue([
-            "SHRIKE_ROUTER_WAKE": "status",
-        ]) == .status)
-        #expect(throws: RuntimeConfigurationError.self) {
-            try RuntimeRouterWake.environmentValue([
-                "SHRIKE_ROUTER_WAKE": "typo",
-            ])
-        }
     }
 
     @Test func prefetchEnvironmentIsFailClosed() throws {
@@ -155,36 +113,6 @@ import Testing
         #expect(RuntimeConfiguration.production.prefetch.enabled)
         #expect(RuntimeConfiguration.production.prefetch
             == (try RuntimePrefetch.environmentValue([:])))
-        #expect(RuntimeConfiguration.production.routerWake == .word)
-        #expect(RuntimeConfiguration.production.specPhase1Coverage == .allHit)
-        #expect(RuntimeConfiguration.production.routerWake
-            == (try RuntimeRouterWake.environmentValue([:])))
-        #expect(RuntimeConfiguration.production.specPhase1Coverage
-            == (try RuntimeSpecPhase1Coverage.environmentValue([:])))
-    }
-
-    @Test func expertIOSynchronizationEnvironmentIsFailClosed() throws {
-        #expect(try RuntimeExpertIOSynchronization.environmentValue([:]) == .event)
-        #expect(try RuntimeExpertIOSynchronization.environmentValue([
-            "SHRIKE_EXPERT_IO_SYNC": "event",
-        ]) == .event)
-        #expect(throws: RuntimeConfigurationError.self) {
-            try RuntimeExpertIOSynchronization.environmentValue([
-                "SHRIKE_EXPERT_IO_SYNC": "typo",
-            ])
-        }
-    }
-
-    @Test func expertIOSubmissionEnvironmentIsFailClosed() throws {
-        #expect(try RuntimeExpertIOSubmission.environmentValue([:]) == .immediate)
-        #expect(try RuntimeExpertIOSubmission.environmentValue([
-            "SHRIKE_EXPERT_IO_SUBMISSION": "immediate",
-        ]) == .immediate)
-        #expect(throws: RuntimeConfigurationError.self) {
-            try RuntimeExpertIOSubmission.environmentValue([
-                "SHRIKE_EXPERT_IO_SUBMISSION": "typo",
-            ])
-        }
     }
 
     @Test(arguments: [32, 64, 128, 256, 512, 1_024, 2_048, 4_096])

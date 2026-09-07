@@ -121,12 +121,13 @@ reads those vars, the built-in defaults are taken, and tuned configuration
 quietly vanishes. If a launch config ever graduates to a launchd plist, audit
 every env var name against the current `SHRIKE_*` set first.
 
-**The measured perf winners are code defaults as of T5 (2026-09-01)** — a bare
-launch runs event IO sync, immediate submission, pool cache layout, speculative
-execution, and the spin host wait. The env vars remain as explicit A/B
-overrides only (`SHRIKE_HOST_WAIT=wait` opts back into parked waits; the
-others take their previous values by name). Output is byte-identical across
-all of them; only speed changes. Add
+**The measured perf winners are the only paths since v17 (2026-09-07)**: a bare
+launch runs event IO sync, immediate submission, the pool cache layout, speculative
+execution, the spin host wait and the word wake, and the A/B knobs that once
+selected their losers (`SHRIKE_DECODE_EXPERT_EXECUTION`, `SHRIKE_EXPERT_IO_SYNC`,
+`SHRIKE_EXPERT_IO_SUBMISSION`, `SHRIKE_SPEC_PHASE1`, `SHRIKE_ROUTER_WAKE`,
+`SHRIKE_HOST_WAIT`) are gone with the losing code; git history is their record
+(`docs/v17-consolidation.md`). Add
 `SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1` when measuring with
 `tools/decode-measure.sh` and the `tools/parse-*-stats.py` parsers.
 **`--ram-budget 8G` is the measured optimum on the 16 GB mini** (snaps to 128
