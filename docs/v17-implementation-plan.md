@@ -101,14 +101,30 @@ marked modelled.
 
 ### Task 2: the knobs
 
-- [ ] **T2: 66 knobs to the surviving set, the losing paths deleted, one tripwire.** One
+- [x] **T2: 66 knobs to the surviving set, the losing paths deleted, one tripwire.** One
   commit per family; the order below so each commit shrinks the next one's surface.
+  **DONE 2026-09-08**: seven commits, 66 knobs to 13, +1109 −12720 across 114 files, 19
+  files gone, Metal kernels 82 to 67, the baseline 18 to 14, the suite 1327 to 1229 tests
+  and 604 to 205 s; golden identical on both boxes at every commit; the arms on the mini
+  flat within the drift with every answer identical; reviewed and folded.
 
   **Steps.**
-  - [ ] Step 1, the record: the bare launch's banner captured on both boxes at `e959d55`
+  - [x] Step 1, the record: the bare launch's banner captured on both boxes at `e959d55`
         (the modes in effect) and kept in the ledger; every later commit's banner must
-        print the same values for what remains.
-  - [ ] Step 2, the decode modes (one commit). `RuntimeDecodeExpertExecution` reduced to
+        print the same values for what remains. **DONE 2026-09-07**: the mini's banner
+        from the archived v16 arms log at the final build (its own log had rotated; no
+        restart taken); the CLI prints no banner, the server's line is the record.
+  - [x] Step 2, the decode modes. **DONE 2026-09-08 as two commits**, 28fd4a6 (the five
+        mode enums and their knobs with the losing code: one classifier kernel, the
+        speculative command on every routed layer, the word wake and the spin the only
+        waits, the I/O acquisition's host-wait arms gone with a fail-closed guard, the five
+        counters only the deleted modes fed gone; 13 files, +213 −710; 1319 tests) and
+        eef39e1 (the rdadvise engine, dead at the only remaining path: the policy, its
+        state, the stage, the CLI flag, the app's option and picker, the protocol fields,
+        the runner line's three fields; 29 files, +70 −672; 1308 tests); golden identical
+        on both profiles at each; the baseline 18 entries throughout, the routed stage
+        389 to 304 lines.
+        As planned: `RuntimeDecodeExpertExecution` reduced to
         `speculative` and then removed as an enum (a mode with one value is not a mode):
         the `hitFixup`, `barrier`, `gpuResidency` and `speculativeValidate` arms in
         `encodeLayerCommands`, `encodeDecodeRoutedMoE`'s classification (the three-way
@@ -124,7 +140,15 @@ marked modelled.
         deferred submission. Tests: `RuntimeConfigurationTests`' cases for the deleted
         knobs go; the speculative path's tests stay; the golden's speculative-validate and
         gpu-residency cells are no longer cells. Gates, golden, the banner diffed.
-  - [ ] Step 3, the streamer (one commit). `SHRIKE_EXPERT_CACHE_LAYOUT` and the per-slot
+  - [x] Step 3, the streamer. **DONE 2026-09-08 as 9a70a1e**: one layout (the arena, the
+        pool buffer required), one reader (the bounded C pread reader at four threads and
+        two batches), one policy (aging-LFU, the lru arm gone), chunk protection always
+        built, the pin always attempted; the Metal IO backend and the legacy cached-pread
+        path deleted with their staging and finalize paths (three files gone); 28 files,
+        +132 −1295; the baseline 18 to 17 (the streamer's init under 120 lines), none
+        added; 1299 tests; golden identical on both profiles; CLAUDE.md's per-slot
+        fallback sentence replaced.
+        As planned: `SHRIKE_EXPERT_CACHE_LAYOUT` and the per-slot
         allocation branch in `PreadExpertStreamer.init` (`posix_memalign` per slot, the
         per-slot `cellIndexUnlocked` arm, the per-slot notice, the `prefetchCells` empty
         case) go; the arena is the layout. `SHRIKE_EXPERT_IO_BACKEND` and
@@ -138,7 +162,13 @@ marked modelled.
         `SHRIKE_EXPERT_CACHE_PROTECT` (chunk protection always), `SHRIKE_NO_PIN` go. The
         tests of the deleted arms go; `PreadExpertStreamerTests+CachePlanning`'s knob
         cases become plain cases. Gates, golden.
-  - [ ] Step 4, the prefetch (one commit). `RuntimePrefetch` loses `enabled`, `topM`,
+  - [x] Step 4, the prefetch. **DONE 2026-09-08 as 3597ad1**: the seven knobs and
+        `RuntimePrefetch` gone, the ring always built with the top-k plus one cells, one
+        read in flight, distance one, the 400 us join, the after placement, the fused
+        probe; the trace path the survivor; the ring's tests adapted to the constant
+        budget, two deleted; 13 files, +223 −430; the baseline 17 throughout; 1296
+        tests; golden identical on both profiles.
+        As planned: `RuntimePrefetch` loses `enabled`, `topM`,
         `inflight`, `probeDistance`, `joinMicros`, `placement`, `probe`: the ring is
         always built (nine cells, top-k predictions, one in flight, distance one, the
         400 us join, placement after the demand submission, the fused probe); the
@@ -149,8 +179,19 @@ marked modelled.
         `tools/decode-rig.sh`'s `SERVER_ENV` examples updated. Tests: the ring's and the
         configuration's cases for the deleted knobs go. Gates, golden; the golden's
         prefetch-off cell is no longer a cell.
-  - [ ] Step 5, prefill and the kernels, MTP and ShrikeBench (one commit, or two if the
-        review wants the kernels apart). The twenty-one prefill knobs inlined at their
+  - [ ] Step 5, prefill and the kernels, MTP and ShrikeBench, as two commits. **The first
+        DONE 2026-09-08 as 25ccdf7**: MTP (the runtime's, 5943 lines with its kernels,
+        scratch, checkpoint, server plumbing and tools; the format's family kept, the
+        roster's exclusion kept) and ShrikeBench (the target, four library helpers only it
+        used, the bench-only Metal variants); the baseline 17 to 14, none added; 1281
+        tests; golden identical on both profiles. **The second DONE 2026-09-08 as
+        ceeed38**: the twenty-one prefill and kernel knobs to constants, the losing tile,
+        tensor-ops, block-router, per-expert GEMM, sweep and MPP variants deleted with
+        their kernels and reference tests, the tiled attention and serial GDN kernels
+        kept as the default's own fallbacks, the banner one line; 30 files, +322 −3439;
+        the baseline 14 throughout; 1221 tests in 194 s (the suite's wall 604 s before);
+        golden identical on both profiles.
+        As planned (one commit, or two if the review wants the kernels apart). The twenty-one prefill knobs inlined at their
         defaults; where a knob selected a kernel variant, the losing variants
         (`SHRIKE_ATTN_MATRIX_TILE`'s six, the MPP tile family's, the block router, the
         per-expert routed GEMM, the tiled prefill attention path, the serial GDN scan, the
@@ -163,7 +204,15 @@ marked modelled.
         ShrikeBench: the target, `sources/ShrikeBench/`, its `Package.swift` product,
         `README.md`'s mention go. Gates, golden, and the prefill ledger's shapes (300 / 1k
         / 2k pairs through `tools/turn-rig.sh pair`) within v13's numbers.
-  - [ ] Step 6, product, diagnostics and the tripwire (one commit).
+  - [x] Step 6, product, diagnostics and the tripwire. **DONE 2026-09-08 as f373569**: the
+        slot-count override and the five diagnostics without a reader gone; the tripwire
+        at every launch (the server's main, the session's load, the CLI, the app client),
+        the 53 deleted names refused by test and verified end to end on both binaries; the
+        read set under `sources/` exactly the thirteen; 10 files, +187 −214; the baseline
+        14 throughout; 1223 tests; golden identical on both profiles. The task's seven
+        commits: 114 files, +1109 −12720, 19 files deleted, Metal kernels 82 to 67, the
+        suite 1327 to 1229 tests and 604 to 205 s.
+        As planned (one commit).
         `SHRIKE_EXPERT_CACHE_SLOTS` goes (`--expert-cache-slots` carries it);
         `SHRIKE_LAYER_TRACE`, `SHRIKE_GPU_CAPTURE_DIR` (and the capture window),
         `SHRIKE_CACHE_DIAG`, `SHRIKE_GEN_DIAG` (`ShrikeGenDiag`), `SHRIKE_PHASES` (the
@@ -174,14 +223,30 @@ marked modelled.
         passes every deleted name and expects the refusal, and passes the surviving set
         and expects none. The banner prints only what remains. The four stale names in
         `docs/` left as history. Gates, golden.
-  - [ ] Step 7: the arms on the mini (deploy leave asked first): the golden at the default
+  - [x] Step 7: the arms on the mini (deploy leave asked first): the golden at the default
         on the mini's build, two production lifetimes per shape through the rig, the rows
         beside v16's close; the turn rig's `pair 300`. Real: the before-and-after table.
-        Free: within the drift.
-  - [ ] Step 8: a fresh reviewer over the task's commits (the deletions' callers, the
+        Free: within the drift. **DONE 2026-09-08** (Davor's leave; `f373569`'s build
+        before the review's fold deployed at the bare launch 00:55, golden identical on
+        both profiles on the mini;
+        the card 15.62 / 15.58 against 15.34 / 15.35, the 300 16.23 / 16.11 against
+        16.46 / 16.48, the 1k 16.11 / 16.20 against 16.12 / 16.14 tok/s, every answer
+        identical, misses 20.0 / 20.0 / 18.8 to the tenth, the ring's counts and the
+        reading layers per token within the noise; the pair's warm 300-token turn 3.19 s
+        against v13's 3.54, the cold 7.69 against v13's step zero at 8.9; production
+        restored 01:02).
+  - [x] Step 8: a fresh reviewer over the task's commits (the deletions' callers, the
         inlined constants against the banner of Step 1, the tripwire's set against the
         tools), the fixes folded, the docs commit (the design doc's Task 2 section, this
-        task's boxes).
+        task's boxes). **DONE 2026-09-08**: no surviving-path change found (32 banner
+        values matched, the default paths identical at every site read, 0 vacuous tests);
+        two HIGH coverage losses restored (the read-advice primitive's tests, the tiled
+        router's 4-bit, offset and stride cases), the sidecar family refused at load with a
+        test, the GDN checkpoint parameter deleted, the MPP wide tile's 8-bit and irregular
+        coverage added, the prefill ledger's parse and the replay's prose fixed, stale
+        comments trimmed, an error case renamed, two messages reworded; folded by
+        autosquash (four conflicts by hand), the final tree's gates and golden clean on
+        both boxes, 1229 tests.
 
 ### Task 3: one residency publish path
 

@@ -221,6 +221,79 @@ expects the refusal; the refusal's message names the chapter that removed it.
 Real: the count of knobs, enum cases, layouts, readers, backends and kernels. Free: by
 construction for a path production never took, confirmed by the golden and the arms.
 
+**Built (2026-09-08), seven commits on `refactor/v17-consolidation`, each with the four
+gates and the local golden identical on both profiles:**
+
+| commit | family | what went | files | lines | tests after |
+| --- | --- | --- | ---: | ---: | ---: |
+| 28fd4a6 | the decode modes | the five mode enums and their knobs; the hit-fixup, barrier, gpu-residency and speculative-validate arms; the plain classifier kernel and the hits-only phase 1; the parked wait and the status wake; host sync and deferred submission with the I/O acquisition's two host-wait arms (a fail-closed guard in their place); the standalone shared-expert command; five counters only those modes fed | 13 | +213 −710 | 1319 |
+| eef39e1 | rdadvise | the policy engine dead at the only path: the policy, its adaptive state, the stage, the CLI flag, the app's option, picker, protocol fields and diagnostics rows, the runner line's three fields; the load-time warm kept | 29 | +70 −672 | 1308 |
+| 9a70a1e | the streamer | one layout (the arena required), one reader (the bounded C pread at four threads and two batches), one policy (aging-LFU), chunk protection always, the pin always; the Metal IO backend with its staging and finalize paths, the legacy cached-pread path | 28 | +132 −1295 | 1299 |
+| 3597ad1 | the prefetch | the seven knobs and `RuntimePrefetch`; the ring always built with the top-k plus one cells, one in flight, distance one, the 400 us join, the after placement, the fused probe; the trace path kept | 13 | +223 −430 | 1296 |
+| 25ccdf7 | MTP and ShrikeBench | the runtime's speculative decode (the draft runner, the verify pair, the sidecar load, the two-row kernels, the GDN speculative checkpoint, the server's flags and session plumbing, the prompt-cache forcing, the tool); the bench target, four library helpers and the bench-only Metal variants; the format's MTP family kept and the roster's exclusion kept | 49 | +185 −5943 | 1281 |
+| ceeed38 | prefill and the kernels | the twenty-one knobs to constants; the r32s4, r64s8, g4k128d and flash attention tiles, the tensor-ops 2D path, the block router, the per-expert routed GEMM with its gather and scatter, the four losing sweep orders and the carry plumbing, the MPP n32b2, n64b1 and n64b2 instantiations; the tiled attention and serial GDN kernels kept as the default's own fallbacks; the banner one line | 30 | +322 −3439 | 1221 |
+| f373569 | diagnostics and the tripwire | the slot-count override and the five diagnostics without a reader; `refuseUnknownEnvironment` at every launch, 53 names refused by test, verified end to end on the CLI and the server | 10 | +187 −214 | 1223 |
+
+The count, at `f373569` against `e959d55`:
+
+| what | before | after |
+| --- | ---: | ---: |
+| `SHRIKE_*` knobs read under `sources/` | 66 | 13 |
+| decode execution enum cases | 5 | 0 (one path) |
+| expert cache layouts | 2 | 1 |
+| expert readers | 3 | 1 |
+| Metal kernels | 82 | 67 (65 after the close's fold) |
+| source files | 250 | 235 |
+| lines under `sources/`, `tests/`, `tools/` | | +1109 −12720 |
+| `RealForwardRunner.swift` | 7326 lines | 5467 |
+| `PreadExpertStreamer.swift` | 1716 lines | 1174 |
+| swiftlint baseline entries | 18 | 14 |
+| the serial suite | 1327 tests, 604 s | 1229 tests, 205 s |
+
+Two things the deletions surfaced that the plan did not name: the prompt cache's runtime
+identity lost two knob names (rdadvise, the policy), so persisted prompt-cache entries
+re-key once after the deploy, a one-time miss with no numerics involved; and the GDN
+delta-step kernels keep a checkpoint parameter whose only writer was MTP (a production
+kernel signature, left for a decision of its own; the review's fold takes it out).
+
+**The arms (2026-09-08, the mini at `f373569`'s build before the review's fold, deployed
+at the bare launch; golden identical on both profiles there; two production lifetimes per
+shape through the rig, beside v16's close read the same way):**
+
+| shape | v16 close tok/s | v17 T2 tok/s | misses per token | landed hits per token | reading layers per token | answer |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| the card | 15.34 / 15.35 | 15.62 / 15.58 | 20.0 / 20.0 | 7.38, 7.23 / 7.14, 7.37 | 12.73, 12.70 / 12.74, 12.73 | identical |
+| the 300 | 16.46 / 16.48 | 16.23 / 16.11 | 20.0 / 20.0 | 6.05, 5.91 / 6.06, 6.12 | 13.55, 13.55 / 13.53, 13.55 | identical |
+| the 1k | 16.12 / 16.14 | 16.11 / 16.20 | 18.8 / 18.8 | 6.39, 6.44 / 6.33, 6.37 | 12.61, 12.59 / 12.57, 12.57 | identical |
+
+Free: +1.6 / −1.9 / 0 % on the three shapes, inside the repeats' drift of 0 to 3.3 %, with
+every answer identical to v16's, the misses to the tenth, and the ring's issued, adopted,
+landed, joined and late counts, the race split and the fixup layers per token within the
+noise of the two lifetimes. The turn rig's 300-token pair on the same build: the warm
+second turn's wall 3.19 s (prefill 2.82 s) against v13's close at 3.54 s; the cold first
+turn on the fresh server 7.69 s against v13's step zero at 8.9 s. Prefill is at or under
+the record on the surviving kernels.
+
+**The review (2026-09-08, a fresh reviewer over the seven commits against `e959d55`)**
+found no surviving-path behaviour change: the 32 values of the pre-task banner all matched
+their constant or sole remaining path, the routed stage, the streamer, the ring, the
+attention gate and the grouped dispatch read identical under the defaults, and none of
+the 346 surviving tests was left vacuous. Its findings and their disposition, folded into
+the owning commits by autosquash: HIGH, two coverage losses (the kept read-advice
+primitive's two tests restored as `RDAdviceCallTests`; the tiled router's only 4-bit,
+weight-offset and padded-stride cases restored as one parameterised test against the
+scalar reference); MEDIUM, the loader still validated the MTP sidecar's private tensors
+(it now refuses the family before any tensor check, with a test), the GDN prefill
+kernels' checkpoint parameter with no writer left (deleted, the golden the witness), the
+MPP wide tile's 8-bit and irregular-scale coverage (two tests on the default instance),
+`tools/prefill-ledger.py` parsing the deleted gen_diag line (the request line's completion
+count instead), the replay's prose naming deleted knobs as settable (reworded), stale
+comments in the streamer, the reader and the prefill (trimmed), two commit messages
+(reworded); LOW, an error case named for the deleted tensor-ops path (`matrixPathUnavailable`),
+the prefetch error's description, a benchmark-era doc line. The fold's tree: the release
+build clean, swiftlint's 14 entries unchanged, 1229 tests, golden identical on both boxes,
+the mini at the final build with the pair at 3.17 s warm.
+
 ### Task 3: one residency publish path
 
 After Task 2 the writers shrink by the test-only round-robin load (writers 2 to 5 go with
