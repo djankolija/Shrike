@@ -1107,6 +1107,7 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
                     base = first_decode_position.get(label[1], position)
                     window_index = (position - base) // profile_window
                     profile[label[1]][window_index] += misses
+                    profile[label[1]][("capacity", window_index)] += pool.capacity - before[1]
                 lookback.clear()
                 continue
 
@@ -1211,12 +1212,17 @@ def print_expect_deltas(stats, expect_path):
 
 
 def print_profile(profile, window):
+    """Misses per window, then the capacity misses per window (the rest are
+    compulsory, the request's first touch of that layer's expert)."""
     print(f"  --profile {window}: decode misses per window, summed over replayed layers")
     for request_id in sorted(profile):
         windows = profile[request_id]
-        last = max(windows) if windows else -1
+        indices = [key for key in windows if isinstance(key, int)]
+        last = max(indices) if indices else -1
         values = [windows.get(i, 0) for i in range(last + 1)]
+        capacity = [windows.get(("capacity", i), 0) for i in range(last + 1)]
         print(f"    request {request_id}: " + "/".join(str(v) for v in values))
+        print(f"    request {request_id} capacity: " + "/".join(str(v) for v in capacity))
 
 
 # --- self-test -------------------------------------------------------------
@@ -1249,6 +1255,10 @@ def self_test():
     check("lru misses", stats[1]["decode"][1], 4)
     check("lru compulsory", stats[1]["decode"][2], 3)
     check("lru capacity", stats[1]["decode"][3], 1)
+    _, _, _, _, profile = _run(decode_trace, slots=2, policy_raw="lru", profile_window=1)
+    check("profile misses per window", [profile[1].get(i, 0) for i in range(7)], [1, 0, 0, 1, 0, 1, 1])
+    check("profile capacity per window", [profile[1].get(("capacity", i), 0) for i in range(7)],
+          [0, 0, 0, 0, 0, 0, 1])
 
     # Speculative fills (v15 Task 2's pricing): layer 1 requests A, B, C at
     # positions 0, 1, 2 with two slots; a right fill of B before position 1 is a
@@ -1774,8 +1784,8 @@ def self_test():
         "6 0 2", "7 0 3", "8 0 4", "9 0 5",
     ])
     _, _, _, _, profile = _run(profile_trace, slots=1, policy_raw="lru", profile_window=2)
-    check("profile req1 windows", dict(profile[1]), {0: 2, 1: 2})
-    check("profile req2 windows", dict(profile[2]), {0: 2, 1: 2})
+    check("profile req1 windows", {key: value for key, value in profile[1].items() if isinstance(key, int)}, {0: 2, 1: 2})
+    check("profile req2 windows", {key: value for key, value in profile[2].items() if isinstance(key, int)}, {0: 2, 1: 2})
 
     # Dataset 14: --protect. Request 1's decode (slots=2, lfu) leaves slot A
     # holding expert 1 at count 2 (a hit bumped it) and slot B holding
