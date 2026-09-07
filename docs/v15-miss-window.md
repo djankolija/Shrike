@@ -278,6 +278,87 @@ chapter moves to the reserved-slot landing (Task 2), whose prize is now a measur
 1.2 to 1.5 ms per token in the submit gap plus the 0.5 to 1.0 late predictions per
 token the late join would rescue, then the fused probe (Task 3).
 
+## Task 2: the adoption by GPU blit and the bounded late join (commit 5841078)
+
+Every number MEASURED on the mini unless marked modelled; the plan's Task 2 carries
+the step list and the raw data lives at `~/.claude/handoffs/archive/shrike-v15-t2/`.
+
+**The pricing that changed the design.** The plan's original Task 2 landed the
+predicted read straight in a pool slot. Step 0 priced it offline with the replay
+tool's new speculative-fill hook on T1's captures (the baseline replay reproduces
+production's decode misses exactly): one fill per layer cuts decode misses by a third
+(6689 to 4309 / 9468 to 6261 / 11398 to 7666), but the wrong fills' evictions cost
+about one extra miss per token (useful fills 11.8 / 11.3 / 10.1 per token against
+misses saved 10.9 / 10.2 / 9.2), 0.85 ms against the 1.2 to 1.5 ms the copy costs.
+Davor ruled for the alternative: the ring stays, and the copy moves to the GPU. A
+per-slot buffer swap, the graphics-canonical answer, is out because v9 measured the
+per-slot layout a loss (the flip to one slab halved the all-hit gap, 32.6 to 16.7 ms
+per token, Metal residency over about 3,400 slot buffers); an index swap inside one
+slab is that answer done properly and a later refinement.
+
+**What was built.** The planner reserves an adopted prediction's slot as `loading`
+without copying (`PrefetchAdoption.gpuBlit`), and the fixup command that computes
+the adopted experts carries a blit from the ring's buffer into the slot at its head,
+ahead of its event wait, so the copy runs under the demand read the command was
+already waiting for (the Metal-I/O storage path's shape). The slot becomes resident
+and the ring's buffer is released when that command has completed, or emptied and
+released on any early exit. The blit applies only where the fixup computes the
+adopted experts (the speculative modes and `gpu-residency`); elsewhere the host copy
+stays and the banner says so. And the late join: a prediction still in flight when
+the exact route asks for it is awaited up to a bound (`SHRIKE_PREFETCH_JOIN_US`)
+instead of being read again beside its own duplicate. `SHRIKE_PREFETCH_ADOPT`
+(`copy` | `blit`) and the join bound join `RuntimePrefetch`, fail-closed, printed by
+the banner as `adopt=` and `join_us=`; `prefetch_joined` and `prefetch_blit_experts`
+join the runner line.
+
+**The arms (18 lifetimes, every answer identical, the follow-ups unmoved, golden
+identical at every cell on both boxes and at the blit under `speculative-validate`).**
+
+| cell | card tok/s | the 300 | the 1k | submit gap ms per token | late / joined per token |
+| --- | ---: | ---: | ---: | --- | --- |
+| copy (Task 1's default) | 14.65 / 14.61 | 15.44 / 15.44 | 15.41 / 15.44 | 4.19 / 3.64 / 3.38 | 0.5 / 0 |
+| blit | 15.08 / 15.10 (**+3.2 %**) | 15.89 / 15.76 (**+2.5 %**) | 15.38 / 15.63 (+0.5 %) | 2.48 / 2.5 to 2.7 / 2.4 to 2.5 | 0.6 to 0.8 / 0 |
+| blit, join 400 µs | 15.17 / 14.87 (**+2.7 %**) | 16.03 / 16.06 (**+3.9 %**) | 15.73 / 15.72 (**+1.9 %**) | 2.5 to 2.7 | 0.00 / 0.6 to 0.9 |
+
+**Readings.**
+
+- **The copy leaves the submit gap on every shape**: 1.7 / 1.2 / 1.0 ms per token,
+  above the 1.2 to 1.5 modelled on the card; the adopted count is unchanged (10.0 /
+  9.4 / 8.6 per token), so the blit changes nothing about what is adopted, only
+  where the bytes move.
+- **The join catches every late prediction.** Late falls to 0.00 on all eighteen
+  lifetimes with the join on; joined 0.6 to 0.9 per token; adoption up 0.4 to 0.8
+  per token and misses down 20.4 / 20.7 / 19.3 to 19.9 / 19.9 / 18.7. The wait sits
+  inside the plan and is not visible in the submit gap (2.5 to 2.7 against the
+  blit's 2.5).
+- **The gap block's miss window is no longer the GPU's idle time under the blit.**
+  The fixup command now starts with the blit ahead of its event wait, so the block
+  measures the gap to the blit (0.6 to 0.7 ms per reading layer, from 1.0), and the
+  wait moves inside the command. The wall and tok/s are the verdict: 68.6 to 66.2 /
+  64.9 to 62.5 / 65.0 to 63.7 ms per token from copy to blit with the join.
+- **The 1k is the thin shape for the blit alone** (+0.5 %, one order at −0.2) and
+  the join carries it (+1.9 %, both orders); the 300 gains most (+3.9 %).
+
+**The rule.** Real (both orders on all three shapes, +3.6 / +1.8, +3.8 / +4.0, +2.1
+/ +1.8 % against a drift of −0.2 / 0.0 / +0.2) and free (the controls unmoved,
+golden identical): **the defaults are the blit and a 400 µs join**;
+`SHRIKE_PREFETCH_ADOPT=copy` and `SHRIKE_PREFETCH_JOIN_US=0` are the A/Bs.
+
+**After T2** (2026-09-07; the shipping defaults changed). Production on the mini
+runs the blit and the join at the bare launch (the banner: `adopt=blit
+join_us=400`), and the confirmation arms on the deployed default (prod, copy, prod
+per shape, `~/.claude/handoffs/archive/shrike-v15-t2/t2-confirm-summary.md`) put it
+at **15.13 / 15.15 then 15.16 / 14.97 on the card, 16.01 / 16.05 then 16.04 / 16.02 on
+the 300, 15.71 / 15.83 then 15.83 / 15.88 on the 1k** (before and after the review's
+fold) against 14.59 / 14.76, 15.63 / 15.44, 15.45 / 15.56 with the copy (−2.0 to −3.6
+/ −2.5 to −3.7 / −1.8 to −2.0 %), late predictions at zero, every answer identical,
+the follow-ups unmoved. From the chapter's opening rows (14.1 / 14.8 / 15.0), production is at
+15.1 / 16.0 / 15.7 to 15.8 tok/s, **+7 / +8 / +5 % with two levers landed.** What remains of the miss
+window is the reading layers themselves (12.6 to 13.5 per token at production's
+per-read cost) and the probe's GPU time (Task 3); the scheduled step zero on the
+two-distance queue (the candidate task) asks whether the idle half of every window
+can serve a layer further ahead.
+
 ## Levers, ranked (modelled from the measured rows)
 
 Every prize is stated per token against the card's 71.3 ms (14.1 tok/s) unless
@@ -308,7 +389,9 @@ below 0.12 ms ([v14-decode.md](v14-decode.md) "Task 1").
   it) instead of duplicated. Removes the copy (1.2 to 1.4 ms per token at top-8) and
   the duplicate reads; costs the pool a wasted fill per wrong prediction, priced
   offline by `tools/expert-pool-replay.py` before it is built. **+1.2 to +1.6 ms,
-  about +2 %.**
+  about +2 %.** **Measured (Task 2), after the design changed to the GPU blit and the
+  join: +2.7 / +3.9 / +1.9 %, the copy's 1.7 / 1.2 / 1.0 ms per token out of the
+  submit gap, late predictions to zero; the defaults flipped.**
 - **(c) The fused probe (Task 3).** The second router GEMV runs on the same input as
   the authoritative one and is dispatch-bound (53 µs per layer, 2.0 to 2.3 ms per
   token of GPU in the attention tail): one dispatch scoring both routers.

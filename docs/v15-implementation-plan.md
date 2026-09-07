@@ -374,8 +374,26 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         +3.6 / +1.8, +3.8 / +4.0, +2.1 / +1.8 % against a drift of −0.2 / 0.0 / +0.2)
         and free (the follow-ups unmoved, golden identical everywhere): the defaults
         are `adopt=blit join_us=400`; `SHRIKE_PREFETCH_ADOPT=copy` and
-        `SHRIKE_PREFETCH_JOIN_US=0` are the A/Bs.
-  - [ ] Step 6 (design doc, review).
+        `SHRIKE_PREFETCH_JOIN_US=0` are the A/Bs. Landed as 5841078; the flipped
+        build golden identical at the default, copy, off and speculative-validate on
+        both boxes; the confirmation arms on the deployed default (prod, copy, prod
+        per shape, `~/.claude/handoffs/archive/shrike-v15-t2/t2-confirm-summary.md`):
+        **15.13 / 15.15 then 15.16 / 14.97, 16.01 / 16.05 then 16.04 / 16.02, 15.71 /
+        15.83 then 15.83 / 15.88 tok/s** (before and after the review's fold)
+        against 14.59 / 14.76, 15.63 / 15.44, 15.45 / 15.56 with the copy (−2.0 to
+        −3.6 / −2.5 to −3.7 / −1.8 to −2.0 %), late 0.00, every answer identical, the
+        follow-ups unmoved; the folded build's full suite 1306 tests, its filtered
+        sanitizer pass 69 tests, golden identical at the default, copy, off and
+        speculative-validate on both boxes.
+  - [x] Step 6 (design doc, review). **The review (2026-09-07) found one real defect
+        of this task and it was folded:** an adopted slot and its ring buffer leaked on
+        any throw between the plan and the transfer's creation (the pool slot
+        `loading` for the streamer's life, the ring a slot poorer); fixed by a guard
+        created right after the plan that fails the slots and releases the ring
+        exactly once on any early exit and hands both to the pending command on
+        commit, with its tests; `prefetch_joined` now counts per prediction; two
+        comments trimmed. Left as noted: the join racing a deferred `begin` exists
+        only at distance 2 or more; `prefetch_blit_experts` counts at encode.
 
 ### Task 3: the fused probe
 
@@ -389,15 +407,34 @@ the probe's sleeping host). The design doc carries the tables and the placement 
   passes.**
 
   **Steps.**
-  - [ ] Step 0 (zero code): the probe's GPU cost re-measured on the Task 1 binary
+  - [x] Step 0 (zero code): the probe's GPU cost re-measured on the Task 1 binary
         from the kernel stats (the role's per-layer time with the ring on against
-        off), so the prize is the box's number.
-  - [ ] Step 1 (tests RED first): a kernel test that the fused router's authoritative
+        off), so the prize is the box's number. **DONE 2026-09-07 from the archived
+        arms' kernel stats (the cold card answer):** the probe runs inside the
+        attention tail command, and with the ring on `attn_layer_linear` is 17.14 ms
+        per token against 15.44 off and `attn_layer_kv` 9.76 against 9.67: **1.7 to
+        1.8 ms per token, 0.057 per linear layer.** (The same stats show the blit
+        moving the event wait inside the fixup command: its roles sum to 8.33 ms per
+        token against 2.69 off while the miss window fell 13.3 to 7.6, the idle
+        unchanged.)
+  - [x] Step 1 (tests RED first): a kernel test that the fused router's authoritative
         outputs equal the single router's bit for bit on the toy models, and that
-        the probe half equals the separate probe's.
-  - [ ] Step 2 (the code): the fused kernel in `moe.metal` and its encode in
+        the probe half equals the separate probe's. **DONE 2026-09-07:**
+        `fusedRouterPairMatchesTwoSeparateDispatchesBitForBit` (two weight sets, two
+        scale sets, a bias on one, the pair's first router equal to the single
+        dispatch's indices and weights and its second to the separate probe's);
+        `SHRIKE_PREFETCH_PROBE` (`separate` | `fused`) fail-closed and the banner's
+        `probe=` field.
+  - [x] Step 2 (the code): the fused kernel in `moe.metal` and its encode in
         `MoE`, selected by the ring's presence, the separate probe retained behind
-        the knob for the A/B. Four gates.
+        the knob for the A/B. Four gates. **DONE 2026-09-07:** `router_gemv_r4_pair`,
+        `router_topk_select_k8_pair` and the sigmoid pair (a two-row grid, the
+        second row the probe with the same body, so the first row's arithmetic is
+        the single kernel's exactly; Metal requires every position attribute in a
+        kernel to share its width, so the pair selects take two-component ids),
+        `MoE.encodeRouterPair` with its own logits scratch and pipelines,
+        `RuntimePrefetch.probe` in both binaries and the banner, the runner's tail
+        encode using the pair when fused; the default `separate` until the arms.
   - [ ] Step 3 (numerics): golden IDENTICAL on both boxes and profiles with the ring
         on and off.
   - [ ] Step 4 (the arms, mini): fused against separate at the Task 1 (and Task 2)
@@ -456,6 +493,22 @@ the probe's sleeping host). The design doc carries the tables and the placement 
   dispatch". A smaller separate item from the same proposal, the token-boundary window
   (the head and sampling, about 5 ms of idle drive, spent on layers 0 to 4 if their
   routes follow from the sampled token), is priced later.
+  **DONE 2026-09-07 ≈ 02:30, the named stop reached; the queue is not built.**
+  MODELLED from T1's measured captures (the d1 and d2 lifetimes route-identical line
+  for line, `~/.claude/handoffs/archive/shrike-v15-queue-step0/`): (i) the union of
+  the two predictions lifts full-layer coverage from 0.462 / 0.442 / 0.428 to 0.529 /
+  0.503 / 0.496 and per-miss recall from 0.58 to 0.64, at precision 0.47 against
+  0.60 over the nonresident predictions and 2.2 predicted reads per plan against
+  1.6; (ii) the replay at production's pool: a window spent on the layer after next
+  only when the next needs nothing gives 4302 / 6323 / 7686 decode misses against
+  the one-fill model's 4309 / 6261 / 7666; every window spent on both in sequence
+  (the ring's best case, one read in flight) gives 4231 / 6379 / 7822 with 3,300 to
+  6,600 more wasted fills, and the extra useful adoptions, the only term the ring
+  would keep since a wasted read evicts nothing there, are 1.2 / 0.4 / 0.3 per
+  token, about 1.0 / 0.35 / 0.27 ms, against a second router GEMV per layer's 2.0 to
+  2.3 ms of GPU. The distance-2 prediction mostly names what distance 1 already
+  names or misses; the idle half of the window has nothing worth reading. Task 3
+  fuses the single-distance probe as written.
 - **(e) Deeper lookahead.** The "drive never idles" ceiling (18.3 tok/s on the cold
   card, 22 with the other gaps) needs reads two or more layers ahead; T1's
   distance-2 coverage was measured on the mis-scaled probe and Task 1 Step 6
