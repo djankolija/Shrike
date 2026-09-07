@@ -29,41 +29,75 @@ marked modelled.
 
 ### Task 1: the document
 
-- [ ] **T1: `docs/architecture.md` rewritten in place from the tree at `e959d55`.**
+- [x] **T1: `docs/architecture.md` rewritten in place from the tree at `e959d55`.**
+  **DONE 2026-09-07**: 504 lines from the tree, every piece with its keeping measurement,
+  the four v4 invariants re-verified and all holding, the 66-row knob table with the
+  13-name surviving set, the writer list, the stage maps; reviewed against the tree and
+  the fixes folded.
 
   **Steps.**
   - [x] Step 0 (zero code): the three maps taken from the tree (the knob inventory with
         read sites, binaries, users and class; the fourteen residency writers with thread
         and trigger; the stage maps of the eighteen long functions), recorded in the design
         doc's step zero. **DONE 2026-09-07.**
-  - [ ] Step 1: the decode path written from `produceToken` and `encodeDecodeRoutedMoE`
+  - [x] Step 1: the decode path written from `produceToken` and `encodeDecodeRoutedMoE`
         as they stand (the embed, the held command per layer, the speculative lookahead,
         the word wake, the routed stage's plan, swap, fixup and deferred records, the
         head), each piece with the measurement that keeps it and its chapter: the
         speculative command (v9), the event sync and immediate submission (v10 T5), the
         word wake (v14 lever B, +2.8 to +3.6 %), the fused probe and the placement gate
         (v15), the merge (v16, the classifier seeing 70 / 59 / 69 % of landed predictions).
-  - [ ] Step 2: the residency table and its writers (the design doc's list), the arena
+        **DONE 2026-09-07** (the sections "The decode path, token by token" through "The
+        dense layers"; the word wake's timing corrected against v14's text: the word lands
+        0.063 ms after the router command's GPU end, the driver's mark 0.16 ms after).
+  - [x] Step 2: the residency table and its writers (the design doc's list), the arena
         and the ring, the demand path (the four storage queues, the event coordinator, the
         bounded pread reader at four threads and two batches), with the three step-zero
         facts stated as invariants: the store is the publish; a torn entry reads as a miss;
-        the generation is host bookkeeping.
-  - [ ] Step 3: prefill and the turn in summary (the matrix path, the routed tiles, the
+        the generation is host bookkeeping. **DONE 2026-09-07** (the sections "Residency"
+        and "The demand path", the lock order as a fourth invariant).
+  - [x] Step 3: prefill and the turn in summary (the matrix path, the routed tiles, the
         resident sweep, the prompt cache's settle and rewrite), each with its pointer to
-        the chapter doc and the number that keeps it.
-  - [ ] Step 4: the four v4 invariants re-verified: the budget as input (the flag, the
+        the chapter doc and the number that keeps it. **DONE 2026-09-07** (the sections
+        "Prefill and the turn" and "The serving layer").
+  - [x] Step 4: the four v4 invariants re-verified: the budget as input (the flag, the
         slot derivation, the arena sized from it); the streaming section re-cited from
         production's per-read cost (v15 and v16's `fetch_ms` per token and the reading
         layers' 12.6 to 13.6 per token) with the rig-era rates retired; the round-trip
         section rewritten for the classifier; the C99 line count re-counted with `wc -l`
-        on `sources/ShrikeKernelsC`.
-  - [ ] Step 5: the per-knob table (name, read site, binaries, users, class, citation,
+        on `sources/ShrikeKernelsC`. **DONE 2026-09-07**: all four still hold; the budget
+        default is 8 GiB (`defaultExpertCacheBudgetBytes`) against a stale 1 GiB comment
+        in `ServerInference.load` noted for Task 4; the C target is 577 lines of C in two
+        files plus 173 of headers against v4's 439; the rig-era rates retired.
+  - [x] Step 5: the per-knob table (name, read site, binaries, users, class, citation,
         disposition), every disposition of the design doc's family table confirmed or
         corrected against the cited chapter doc; the four stale names in `docs/` noted;
         the surviving set written out (modelled at 13) and checked against `tools/*.sh`,
         `tools/mini-deploy.sh`'s launch line and `tools/decode-rig.sh`'s `SERVER_ENV`.
-  - [ ] Step 6: the link check (gate 3), a fresh reviewer on the document against the
+        **DONE 2026-09-07**: 66 rows, the surviving set 13 names; the tools set only the
+        four diagnostics that stay, the rig's `SERVER_ENV` examples name three knobs Task 2
+        rewrites; `SHRIKE_IO_MAX_*` recorded as C compile-time bounds, not knobs.
+  - [x] Step 6: the link check (gate 3), a fresh reviewer on the document against the
         tree (every claim a line reference or a citation), the fixes folded; committed.
+        **DONE 2026-09-07.** The review (131 line references checked, 125 right; three
+        HIGH, eight MEDIUM, eight LOW) and the disposition: HIGH, the "torn entry reads as
+        a miss" argument had one uncovered transition, the reservation over an unleased
+        resident landing storing `{slot', loading}` over `{cell, resident}` in one 16-byte
+        store (the invariant rewritten: thirteen writers by the argument, that one by
+        ordering, since no classifier reads the layer's table between the plan and the
+        next token; Task 3's single store removes it); `tools/mini-deploy.sh` does not set
+        the route trace (corrected); the fourth planner is `Model.fetchRoutedExperts`, not
+        a `Model.loadExpertsCached` (corrected). MEDIUM: three declarations cited at a line
+        inside their body (`encodeDecodeTailStage` 3639, `makeExpertCachePlan` 707,
+        `beginExpertCachePlan` 890, corrected); the recall curve's numbers had no record
+        left once the old text went (restored in the ring section); the fused probe's
+        figure cited from v15's rows; writer 1 writes before any lock and writers 2 to 11
+        go through `publishResidencyUnlocked` (corrected); the split-read null cited to
+        the v10 plan; "fails open" marked by one stated rule (28 of 66, the design doc's
+        15 corrected by amend into the opening commit). LOW: two more line references,
+        the readback's 32-bit words and its hit positions, the softmax command in the held
+        set, the one test that reads `resolved_generations`, the `Attention.swift` path,
+        the classifier overload's line, the top-m bound's site: all folded.
 
 ### Task 2: the knobs
 
