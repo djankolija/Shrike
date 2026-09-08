@@ -5,10 +5,7 @@ import ShrikeAppCore
 import ShrikeDecodeProtocol
 
 @main enum ShrikeDecodeServiceMain {
-    /// lint:allow-long the decode service's command loop: one `case` per
-    /// protocol message, each with its reply. Splitting it per command would
-    /// hide the exhaustive switch that makes an unhandled message a
-    /// compile-visible gap, and the cases share the session state.
+    /// The decode service's command loop: one `case` per protocol message, each with its reply.
     static func main() async {
         let socketPath = argument(after: "--socket")
         let launchLabel = argument(after: "--launch-label")
@@ -59,136 +56,15 @@ import ShrikeDecodeProtocol
         while let command = await nextCommand(commands) {
             switch command {
             case .load(let request):
-                let directory = URL(fileURLWithPath: request.modelPath)
-                let started = Date()
-                // D5: the load runs in a cancellable task so an incoming
-                // `.cancel` can abort it on the service side. Progress phases
-                // are streamed to the app (D10); the task also emits a
-                // heartbeat so the app-side load-phase timeout never fires
-                // during a long verification.
-                let loadTask = Task { () -> LoadOutcome in
-                    let progress = LoadPhaseReporter()
-                    let heartbeat = Task {
-                        while !Task.isCancelled {
-                            try? await Task.sleep(for: .seconds(10))
-                            guard !Task.isCancelled, let phase = progress.phaseLabel else {
-                                continue
-                            }
-                            writeBestEffort(DecodeServiceEvent(
-                                kind: .loading, generationID: request.requestID,
-                                loadPhase: phase), to: handles.output)
-                        }
-                    }
-                    defer { heartbeat.cancel() }
-                    do {
-                        let options = try appRuntimeOptions(request.runtimeOptions)
-                        try Task.checkCancellation()
-                        try await client.ensureLoaded(
-                            modelDirectory: directory,
-                            maxContextTokens: request.maxContextTokens,
-                            options: options,
-                            forceLogitsHead: request.forceLogitsHead) { state in
-                            switch state {
-                            case .loading(let phase):
-                                progress.phaseLabel = phase.label
-                                writeBestEffort(DecodeServiceEvent(
-                                    kind: .loading, generationID: request.requestID,
-                                    loadPhase: phase.label), to: handles.output)
-                            case .ready, .failed, .notLoaded, .cancelling, .unloading:
-                                break
-                            }
-                        }
-                        try Task.checkCancellation()
-                        return .success(Date().timeIntervalSince(started))
-                    } catch is CancellationError {
-                        return .cancelled
-                    } catch {
-                        return .failure(error)
-                    }
-                }
-                session.loadTask = loadTask
-                switch await loadTask.value {
-                case .success(let loadSeconds):
-                    modelDirectory = directory
-                    loadedOptions = request.runtimeOptions
-                    let memory = memorySampler.sample()
-                    writeBestEffort(DecodeServiceEvent(
-                        kind: .ready, generationID: request.requestID,
-                        loadSeconds: loadSeconds,
-                        currentMemoryBytes: memory, peakMemoryBytes: memory),
-                        to: handles.output)
-                case .cancelled:
-                    // D11: a cancelled load must not leave stale session state.
-                    modelDirectory = nil
-                    loadedOptions = nil
-                    writeBestEffort(DecodeServiceEvent(
-                        kind: .failed, generationID: request.requestID,
-                        error: "model load cancelled"), to: handles.output)
-                case .failure(let error):
-                    // D11: clear stale state and emit a `failed` event so the
-                    // app resets its load state.
-                    modelDirectory = nil
-                    loadedOptions = nil
-                    writeBestEffort(DecodeServiceEvent(
-                        kind: .failed, generationID: request.requestID,
-                        error: "\(error)"), to: handles.output)
-                }
-                session.loadTask = nil
+                await handleLoad(request, client: client, session: session,
+                                 memorySampler: memorySampler, output: handles.output,
+                                 modelDirectory: &modelDirectory,
+                                 loadedOptions: &loadedOptions)
             case .generate(let request):
-                guard let modelDirectory else {
-                    writeBestEffort(DecodeServiceEvent(
-                        kind: .failed, generationID: request.generationID,
-                        error: "model is not loaded"), to: handles.output)
-                    continue
-                }
-                guard request.runtimeOptions == loadedOptions else {
-                    writeBestEffort(DecodeServiceEvent(
-                        kind: .failed, generationID: request.generationID,
-                        error: "generation runtime options do not match the loaded session"),
-                        to: handles.output)
-                    continue
-                }
-
-                let outbox = DecodeServiceOutbox(generationID: request.generationID)
-                let writerFinished = DispatchSemaphore(value: 0)
-                let writer = Thread {
-                    defer { writerFinished.signal() }
-                    do { try outbox.runWriter(to: handles.output) }
-                    catch {
-                        FileHandle.standardError.write(Data("IPC writer failed: \(error)\n".utf8))
-                    }
-                }
-                writer.name = "Shrike.DecodeService.Writer"
-                writer.qualityOfService = .userInitiated
-                writer.start()
-
-                session.activeGenerationID = request.generationID
-                do {
-                    let options = try appRuntimeOptions(request.runtimeOptions)
-                    let generation = AppGenerationRequest(
-                        modelDirectory: modelDirectory, prompt: request.prompt,
-                        maxNewTokens: request.maxNewTokens,
-                        maxContextTokens: request.maxContextTokens,
-                        temperature: request.temperature,
-                        topK: request.topK,
-                        topP: request.topP,
-                        presencePenalty: request.presencePenalty,
-                        repetitionPenalty: request.repetitionPenalty,
-                        runtimeOptions: options)
-                    for try await event in client.generate(generation) {
-                        outbox.publish(event)
-                    }
-                    outbox.finish()
-                } catch {
-                    outbox.finish(error: error)
-                }
-                session.activeGenerationID = nil
-                await withCheckedContinuation { continuation in
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        writerFinished.wait()
-                        continuation.resume()
-                    }
-                }
+                await handleGenerate(request, client: client, session: session,
+                                     output: handles.output,
+                                     modelDirectory: modelDirectory,
+                                     loadedOptions: loadedOptions)
             case .cancel(let id):
                 // Re-affirm the cancel once the current operation completes: a
                 // `.cancel` that arrived before the load task was registered is
@@ -204,6 +80,152 @@ import ShrikeDecodeProtocol
             case .shutdown:
                 await client.unload()
                 return
+            }
+        }
+    }
+
+    private static func handleLoad(_ request: DecodeLoadRequest,
+                                   client: RealInferenceClient,
+                                   session: ServiceSession,
+                                   memorySampler: AppMemorySampler,
+                                   output: FileHandle,
+                                   modelDirectory: inout URL?,
+                                   loadedOptions: inout DecodeRuntimeOptions?) async {
+        let directory = URL(fileURLWithPath: request.modelPath)
+        let started = Date()
+        // D5: the load runs in a cancellable task so an incoming
+        // `.cancel` can abort it on the service side. Progress phases
+        // are streamed to the app (D10); the task also emits a
+        // heartbeat so the app-side load-phase timeout never fires
+        // during a long verification.
+        let loadTask = Task { () -> LoadOutcome in
+            let progress = LoadPhaseReporter()
+            let heartbeat = Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(10))
+                    guard !Task.isCancelled, let phase = progress.phaseLabel else {
+                        continue
+                    }
+                    writeBestEffort(DecodeServiceEvent(
+                        kind: .loading, generationID: request.requestID,
+                        loadPhase: phase), to: output)
+                }
+            }
+            defer { heartbeat.cancel() }
+            do {
+                let options = try appRuntimeOptions(request.runtimeOptions)
+                try Task.checkCancellation()
+                try await client.ensureLoaded(
+                    modelDirectory: directory,
+                    maxContextTokens: request.maxContextTokens,
+                    options: options,
+                    forceLogitsHead: request.forceLogitsHead) { state in
+                    switch state {
+                    case .loading(let phase):
+                        progress.phaseLabel = phase.label
+                        writeBestEffort(DecodeServiceEvent(
+                            kind: .loading, generationID: request.requestID,
+                            loadPhase: phase.label), to: output)
+                    case .ready, .failed, .notLoaded, .cancelling, .unloading:
+                        break
+                    }
+                }
+                try Task.checkCancellation()
+                return .success(Date().timeIntervalSince(started))
+            } catch is CancellationError {
+                return .cancelled
+            } catch {
+                return .failure(error)
+            }
+        }
+        session.loadTask = loadTask
+        switch await loadTask.value {
+        case .success(let loadSeconds):
+            modelDirectory = directory
+            loadedOptions = request.runtimeOptions
+            let memory = memorySampler.sample()
+            writeBestEffort(DecodeServiceEvent(
+                kind: .ready, generationID: request.requestID,
+                loadSeconds: loadSeconds,
+                currentMemoryBytes: memory, peakMemoryBytes: memory),
+                to: output)
+        case .cancelled:
+            // D11: a cancelled load must not leave stale session state.
+            modelDirectory = nil
+            loadedOptions = nil
+            writeBestEffort(DecodeServiceEvent(
+                kind: .failed, generationID: request.requestID,
+                error: "model load cancelled"), to: output)
+        case .failure(let error):
+            // D11: clear stale state and emit a `failed` event so the
+            // app resets its load state.
+            modelDirectory = nil
+            loadedOptions = nil
+            writeBestEffort(DecodeServiceEvent(
+                kind: .failed, generationID: request.requestID,
+                error: "\(error)"), to: output)
+        }
+        session.loadTask = nil
+    }
+
+    private static func handleGenerate(_ request: DecodeGenerationRequest,
+                                       client: RealInferenceClient,
+                                       session: ServiceSession,
+                                       output: FileHandle,
+                                       modelDirectory: URL?,
+                                       loadedOptions: DecodeRuntimeOptions?) async {
+        guard let modelDirectory else {
+            writeBestEffort(DecodeServiceEvent(
+                kind: .failed, generationID: request.generationID,
+                error: "model is not loaded"), to: output)
+            return
+        }
+        guard request.runtimeOptions == loadedOptions else {
+            writeBestEffort(DecodeServiceEvent(
+                kind: .failed, generationID: request.generationID,
+                error: "generation runtime options do not match the loaded session"),
+                to: output)
+            return
+        }
+
+        let outbox = DecodeServiceOutbox(generationID: request.generationID)
+        let writerFinished = DispatchSemaphore(value: 0)
+        let writer = Thread {
+            defer { writerFinished.signal() }
+            do { try outbox.runWriter(to: output) }
+            catch {
+                FileHandle.standardError.write(Data("IPC writer failed: \(error)\n".utf8))
+            }
+        }
+        writer.name = "Shrike.DecodeService.Writer"
+        writer.qualityOfService = .userInitiated
+        writer.start()
+
+        session.activeGenerationID = request.generationID
+        do {
+            let options = try appRuntimeOptions(request.runtimeOptions)
+            let generation = AppGenerationRequest(
+                modelDirectory: modelDirectory, prompt: request.prompt,
+                maxNewTokens: request.maxNewTokens,
+                maxContextTokens: request.maxContextTokens,
+                temperature: request.temperature,
+                topK: request.topK,
+                topP: request.topP,
+                presencePenalty: request.presencePenalty,
+                repetitionPenalty: request.repetitionPenalty,
+                runtimeOptions: options)
+            for try await event in client.generate(generation) {
+                outbox.publish(event)
+            }
+            outbox.finish()
+        } catch {
+            outbox.finish(error: error)
+        }
+        session.activeGenerationID = nil
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                writerFinished.wait()
+                continuation.resume()
             }
         }
     }
