@@ -104,12 +104,6 @@ static inline float gelu_pytorch_tanh(float x) {
     return 0.5f * x * (1.0f + tanh(inner));
 }
 
-struct ExpertResidencyGPU {
-    uint slot;
-    uint state;
-    ulong generation;
-};
-
 /// Indirect threadgroup counts for the speculative phase-1/phase-2/residual
 /// command buffers, in MTLDispatchThreadgroupsIndirectArguments layout.
 struct MoESpecDispatchArgs {
@@ -123,30 +117,29 @@ struct MoESpecDispatchArgs {
 /// router order in both compact lists. Returns the miss count.
 static inline uint moe_classify_residency_body(
     device const uint* topk_indices,
-    device const ExpertResidencyGPU* residency,
+    device const ulong* residency,
     device uint* hit_count,
     device uint* hit_positions,
     device uint* miss_count,
     device uint* miss_positions,
     device uint* miss_experts,
     device uint* resolved_slots,
-    device ulong* resolved_generations,
     uint top_k,
     uint num_experts) {
     uint hits = 0, misses = 0;
     for (uint position = 0; position < top_k; ++position) {
         const uint expert = min(topk_indices[position], num_experts - 1u);
-        const ExpertResidencyGPU entry = residency[expert];
-        if (entry.state == 2u && entry.slot != 0xffffffffu) {
+        const ulong word = residency[expert];
+        const uint slot = uint(word & 0xffffffffu);
+        const uint state = uint(word >> 32);
+        if (state == 2u && slot != 0xffffffffu) {
             hit_positions[hits++] = position;
-            resolved_slots[position] = entry.slot;
-            resolved_generations[position] = entry.generation;
+            resolved_slots[position] = slot;
         } else {
             miss_positions[misses] = position;
             miss_experts[misses] = expert;
             ++misses;
             resolved_slots[position] = 0xffffffffu;
-            resolved_generations[position] = entry.generation;
         }
     }
     hit_count[0] = hits;
@@ -190,14 +183,13 @@ static inline void moe_publish_router_readback(
 /// command buffers size themselves without a CPU readback.
 kernel void moe_classify_expert_residency_spec(
     device const uint* topk_indices [[buffer(0)]],
-    device const ExpertResidencyGPU* residency [[buffer(1)]],
+    device const ulong* residency [[buffer(1)]],
     device uint* hit_count [[buffer(2)]],
     device uint* hit_positions [[buffer(3)]],
     device uint* miss_count [[buffer(4)]],
     device uint* miss_positions [[buffer(5)]],
     device uint* miss_experts [[buffer(6)]],
     device uint* resolved_slots [[buffer(7)]],
-    device ulong* resolved_generations [[buffer(8)]],
     constant uint& top_k [[buffer(9)]],
     constant uint& num_experts [[buffer(10)]],
     constant MoESpecDispatchArgs& spec_full_grids [[buffer(11)]],
@@ -211,7 +203,7 @@ kernel void moe_classify_expert_residency_spec(
     const uint misses = moe_classify_residency_body(
         topk_indices, residency, hit_count, hit_positions,
         miss_count, miss_positions, miss_experts,
-        resolved_slots, resolved_generations, top_k, num_experts);
+        resolved_slots, top_k, num_experts);
     const bool all_hit = (misses == 0u);
     for (uint i = 0; i < 3; ++i) {
         const uint zero_grid = (i == 0u) ? 0u : 1u;

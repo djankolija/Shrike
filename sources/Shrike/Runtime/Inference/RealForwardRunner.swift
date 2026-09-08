@@ -214,7 +214,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var residencyMissPositions: MTLBuffer { residencyReadback.missPositions }
     private var residencyMissExperts: MTLBuffer { residencyReadback.missExperts }
     private var residencyResolvedSlots: MTLBuffer { residencyReadback.resolvedSlots }
-    private var residencyResolvedGenerations: MTLBuffer { residencyReadback.resolvedGenerations }
     private var routerHostReadback: MTLBuffer { residencyReadback.hostReadback }
     private var greedyTokenBuf: MTLBuffer { decodeScratch.greedyTokenBuf } // 4 B UInt32 fused-head output
     // Qwen 3.6 decode scratch (nil on architectures that never use it).
@@ -834,7 +833,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let missPositions: MTLBuffer
         let missExperts: MTLBuffer
         let resolvedSlots: MTLBuffer
-        let resolvedGenerations: MTLBuffer
         let hostReadback: MTLBuffer
     }
 
@@ -855,8 +853,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             missPositions: try buf(topK, u32, label: "decode.residencyMissPositions"),
             missExperts: try buf(topK, u32, label: "decode.residencyMissExperts"),
             resolvedSlots: try buf(topK, u32, label: "decode.residencyResolvedSlots"),
-            resolvedGenerations: try buf(topK, MemoryLayout<UInt64>.size,
-                                         label: "decode.residencyResolvedGenerations"),
             hostReadback: try buf(RouterHostReadback.wordCount(topK: topK), u32,
                                   label: "decode.routerHostReadback"))
     }
@@ -2486,7 +2482,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             missPositions: residencyMissPositions,
             missExperts: residencyMissExperts,
             resolvedSlots: residencyResolvedSlots,
-            resolvedGenerations: residencyResolvedGenerations,
             topK: UInt32(cfg.topKExperts),
             numExperts: UInt32(cfg.numExperts),
             speculative: speculative,
@@ -5368,7 +5363,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             blobs = try model.routedExpertBuffers(for: eventLoad.plan)
             totalExpertIOHostWaitsAvoided &+= 1
         } else if let plannedFetch, plannedFetch.misses.isEmpty {
-            // An all-hit layer has already pinned its current slot generations.
+            // An all-hit layer has already pinned its current cell generations.
             // Do not manufacture a completed storage operation and an async
             // continuation only to retrieve the same cache views.
             blobs = try model.routedExpertBuffers(for: plannedFetch)

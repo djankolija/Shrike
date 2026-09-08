@@ -14,7 +14,7 @@ extension PreadExpertStreamerTests {
       layout: Self.makeLayout(path: url.path), device: device, slotCount: 2)
 
     for e in 0..<Self.numExperts {
-      let r = try streamer.loadExpert(layer: 0, expert: e)
+      let r = try streamer.loadExpertsCached(experts: [e])[0]
       #expect(r.size == UInt64(Self.expertStride))
       let got = Self.bytes(of: r.buffer, offset: r.offset, count: Self.expertStride)
       #expect(
@@ -23,24 +23,7 @@ extension PreadExpertStreamerTests {
     }
   }
 
-  @Test func shortRead_throwsSizeMismatch() throws {
-    let url = try Self.writeSyntheticLayer()
-    defer { try? FileManager.default.removeItem(at: url) }
-    let device = try MetalContext().device
-    let streamer = try PreadExpertStreamer(
-      layout: Self.makeLayout(path: url.path), device: device, slotCount: 1)
-
-    // Truncate the file on disk to just past expert 0; the already-open fd
-    // now hits EOF mid-read for any later expert.
-    let truncatedLen = off_t(Self.streamOffset) + off_t(Self.expertStride)
-    #expect(truncate(url.path, truncatedLen) == 0)
-
-    #expect(throws: StreamerError.self) {
-      _ = try streamer.loadExpert(layer: 0, expert: Self.numExperts - 1)
-    }
-  }
-
-  @Test func slotReuse_roundRobinOverwrites() throws {
+  @Test func slotReuse_evictionOverwrites() throws {
     let url = try Self.writeSyntheticLayer()
     defer { try? FileManager.default.removeItem(at: url) }
     let device = try MetalContext().device
@@ -50,10 +33,10 @@ extension PreadExpertStreamerTests {
     // With slotCount=2, experts 0,1,2,3 land in slots 0,1,0,1: expert 2
     // reuses slot 0's storage, which must then hold expert 2's tag. Slot
     // identity is the (buffer, offset) pair — pool layout shares one slab.
-    let r0 = try streamer.loadExpert(layer: 0, expert: 0)
-    let r1 = try streamer.loadExpert(layer: 0, expert: 1)
-    let r2 = try streamer.loadExpert(layer: 0, expert: 2)
-    let r3 = try streamer.loadExpert(layer: 0, expert: 3)
+    let r0 = try streamer.loadExpertsCached(experts: [0])[0]
+    let r1 = try streamer.loadExpertsCached(experts: [1])[0]
+    let r2 = try streamer.loadExpertsCached(experts: [2])[0]
+    let r3 = try streamer.loadExpertsCached(experts: [3])[0]
 
     #expect(r0.buffer === r2.buffer && r0.offset == r2.offset,
             "expert 0 and 2 should share slot 0")

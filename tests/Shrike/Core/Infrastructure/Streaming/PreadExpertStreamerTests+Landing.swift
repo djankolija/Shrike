@@ -37,6 +37,30 @@ extension PreadExpertStreamerTests {
         return fixture.arena.cell(atOffset: buffers[index].offset)
     }
 
+    private static func table(of fixture: Landed) -> [ExpertResidencyEntry] {
+        let resources = fixture.streamer.expertResidencyResources()
+        return (0..<resources.expertCount).map { expert in
+            resources.table.contents().load(
+                fromByteOffset: expert * MemoryLayout<ExpertResidencyEntry>.stride,
+                as: ExpertResidencyEntry.self)
+        }
+    }
+
+    private static func word(of fixture: Landed, expert: Int) -> UInt64 {
+        fixture.streamer.expertResidencyResources().table.contents()
+            .load(fromByteOffset: expert * MemoryLayout<UInt64>.stride, as: UInt64.self)
+    }
+
+    private static func resident(_ cell: Int) -> ExpertResidencyEntry {
+        ExpertResidencyEntry(slot: UInt32(cell), state: ExpertResidencyEntry.resident)
+    }
+
+    private static func loading(_ cell: Int) -> ExpertResidencyEntry {
+        ExpertResidencyEntry(slot: UInt32(cell), state: ExpertResidencyEntry.loading)
+    }
+
+    private static let empty = ExpertResidencyEntry()
+
     @Test func aClaimedLandingIsLoadingAtItsCellAndNeitherAHitNorAVictim() throws {
         let fixture = try Self.makeLanded()
         defer { try? FileManager.default.removeItem(at: fixture.url) }
@@ -80,7 +104,7 @@ extension PreadExpertStreamerTests {
         let swapped = fixture.streamer.residencyEntry(expert: 1)
         #expect(swapped.state == ExpertResidencyEntry.resident)
         #expect(swapped.slot == UInt32(ringCell))
-        #expect(swapped.generation == plan.assignedGenerations[1])
+        #expect(fixture.arena.cellGeneration(ringCell) == plan.assignedGenerations[1])
         #expect(fixture.streamer.residentExperts() == [0, 1, 2])
 
         let lease = try fixture.streamer.pin(plan)
@@ -245,5 +269,131 @@ extension PreadExpertStreamerTests {
         #expect(bytes.allSatisfy { $0 == Self.tagByte(3) })
         #expect(fixture.streamer.residentExperts() == [0, 1, 2])
         #expect(try fixture.streamer.planExpertsCached(experts: [3], leasedLandings: [3]).hits == 1)
+    }
+
+    @Test func aLandingThePoolOvertookIsDiscardedAtItsCompletion() throws {
+        let fixture = try Self.makeLanded()
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        let ringCell = fixture.ringCells[0]
+        #expect(fixture.streamer.claimLanding(expert: 1, cell: ringCell))
+        #expect(fixture.arena.cellGeneration(ringCell) == 1)
+        #expect(Self.table(of: fixture) == [Self.empty, Self.loading(ringCell), Self.empty, Self.empty])
+
+        _ = try fixture.streamer.loadExpertsCached(experts: [1])
+        let poolCell = Int(fixture.streamer.residencyEntry(expert: 1).slot)
+        #expect((0..<4).contains(poolCell))
+        #expect(fixture.arena.cellGeneration(poolCell) == 2)
+        #expect(Self.table(of: fixture) == [Self.empty, Self.resident(poolCell), Self.empty, Self.empty])
+
+        #expect(!fixture.streamer.completeLanding(expert: 1, cell: ringCell))
+        #expect(Self.table(of: fixture) == [Self.empty, Self.resident(poolCell), Self.empty, Self.empty])
+        #expect(fixture.arena.cellGeneration(ringCell) == 1)
+        #expect(fixture.streamer.claimLanding(expert: 3, cell: ringCell))
+        #expect(fixture.arena.cellGeneration(ringCell) == 3)
+    }
+
+    @Test func aDemandCompletionAgainstABumpedCellGenerationThrows() throws {
+        let fixture = try Self.makeLanded(slotCount: 1)
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        let stale = try fixture.streamer.planExpertsCached(experts: [1])
+        #expect(stale.assignedSlots == [0])
+        #expect(stale.assignedGenerations == [1])
+        #expect(Self.table(of: fixture) == [Self.empty, Self.loading(0), Self.empty, Self.empty])
+
+        fixture.streamer.abandonExpertCachePlan(stale)
+        #expect(fixture.arena.cellGeneration(0) == 1)
+        #expect(Self.table(of: fixture) == [Self.empty, Self.empty, Self.empty, Self.empty])
+
+        let current = try fixture.streamer.planExpertsCached(experts: [2])
+        #expect(current.assignedSlots == [0])
+        #expect(current.assignedGenerations == [2])
+        #expect(fixture.arena.cellGeneration(0) == 2)
+        #expect(Self.table(of: fixture) == [Self.empty, Self.empty, Self.loading(0), Self.empty])
+
+        #expect {
+            _ = try fixture.streamer.executeExpertCachePlan(stale)
+        } throws: { error in
+            guard case ModelError.internalInconsistency(let detail) = error else { return false }
+            return detail.contains("generation changed")
+        }
+        #expect(Self.table(of: fixture) == [Self.empty, Self.empty, Self.loading(0), Self.empty])
+        #expect(fixture.streamer.statistics().loadingSlots == 1)
+
+        _ = try fixture.streamer.executeExpertCachePlan(current)
+        #expect(fixture.arena.cellGeneration(0) == 2)
+        #expect(Self.table(of: fixture) == [Self.empty, Self.empty, Self.resident(0), Self.empty])
+        let bytes = Self.bytes(of: fixture.arena.buffer, offset: fixture.arena.offset(cell: 0),
+                               count: Self.expertStride)
+        #expect(bytes.allSatisfy { $0 == Self.tagByte(2) })
+    }
+
+    @Test func aSwapThenAnEvictionOfTheSameSlotPublishesEmptyOnceAtTheCell() throws {
+        let fixture = try Self.makeLanded(slotCount: 2)
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        _ = try fixture.streamer.loadExpertsCached(experts: [0, 2])
+        let ringCell = fixture.ringCells[0]
+        try Self.land(fixture, expert: 1, cell: ringCell)
+        let landed = Self.word(of: fixture, expert: 1)
+        #expect(Self.table(of: fixture) == [Self.resident(0), Self.resident(ringCell), Self.resident(1), Self.empty])
+
+        let swap = try fixture.streamer.planExpertsCached(experts: [0, 1], leasedLandings: [1])
+        #expect(swap.hits == 2)
+        #expect(swap.assignedSlots == [0, 1])
+        #expect(swap.freedCells == [1: 1])
+        #expect(swap.assignedGenerations == [1, 3])
+        #expect(fixture.arena.cellGeneration(1) == 4)
+        #expect(fixture.arena.cellGeneration(ringCell) == 3)
+        #expect(Self.word(of: fixture, expert: 1) == landed)
+        #expect(Self.table(of: fixture) == [Self.resident(0), Self.resident(ringCell), Self.empty, Self.empty])
+
+        let evict = try fixture.streamer.planExpertsCached(experts: [3])
+        #expect(evict.assignedSlots == [1])
+        #expect(evict.assignedGenerations == [5])
+        #expect(fixture.arena.cellGeneration(ringCell) == 5)
+        #expect(Self.table(of: fixture) == [Self.resident(0), Self.empty, Self.empty, Self.loading(ringCell)])
+
+        _ = try fixture.streamer.executeExpertCachePlan(evict)
+        #expect(fixture.arena.cellGeneration(ringCell) == 5)
+        #expect(Self.table(of: fixture) == [Self.resident(0), Self.empty, Self.empty, Self.resident(ringCell)])
+    }
+
+    @Test func aStaleCompletionAfterADropPublishesNothing() throws {
+        let fixture = try Self.makeLanded()
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        let ringCell = fixture.ringCells[0]
+        #expect(fixture.streamer.claimLanding(expert: 1, cell: ringCell))
+        #expect(fixture.arena.cellGeneration(ringCell) == 1)
+        fixture.streamer.dropLanding(expert: 1, cell: ringCell)
+        #expect(Self.table(of: fixture) == [Self.empty, Self.empty, Self.empty, Self.empty])
+
+        #expect(fixture.streamer.claimLanding(expert: 3, cell: ringCell))
+        #expect(fixture.arena.cellGeneration(ringCell) == 2)
+        #expect(Self.table(of: fixture) == [Self.empty, Self.empty, Self.empty, Self.loading(ringCell)])
+
+        #expect(!fixture.streamer.completeLanding(expert: 1, cell: ringCell))
+        #expect(Self.table(of: fixture) == [Self.empty, Self.empty, Self.empty, Self.loading(ringCell)])
+        #expect(fixture.streamer.completeLanding(expert: 3, cell: ringCell))
+        #expect(Self.table(of: fixture) == [Self.empty, Self.empty, Self.empty, Self.resident(ringCell)])
+        #expect(fixture.arena.cellGeneration(ringCell) == 2)
+    }
+
+    @Test func anEntryIsOneEightByteWordWithTheStateAboveTheCell() throws {
+        #expect(MemoryLayout<ExpertResidencyEntry>.size == 8)
+        #expect(MemoryLayout<ExpertResidencyEntry>.stride == 8)
+        let fixture = try Self.makeLanded()
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        #expect(Self.word(of: fixture, expert: 0) == UInt64(ExpertResidencyEntry.notResidentSlot))
+
+        _ = try fixture.streamer.loadExpertsCached(experts: [2])
+        let cell = Int(fixture.streamer.residencyEntry(expert: 2).slot)
+        #expect(Self.word(of: fixture, expert: 2)
+                == UInt64(ExpertResidencyEntry.resident) << 32 | UInt64(cell))
+
+        let ringCell = fixture.ringCells[1]
+        #expect(fixture.streamer.claimLanding(expert: 3, cell: ringCell))
+        #expect(Self.word(of: fixture, expert: 3)
+                == UInt64(ExpertResidencyEntry.loading) << 32 | UInt64(ringCell))
+        fixture.streamer.dropLanding(expert: 3, cell: ringCell)
+        #expect(Self.word(of: fixture, expert: 3) == UInt64(ExpertResidencyEntry.notResidentSlot))
     }
 }

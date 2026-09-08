@@ -5,9 +5,7 @@ enum StreamerError: Error, CustomStringConvertible {
     case sizeMismatch(expected: UInt64, actual: UInt64)
     case offsetOutOfRange(UInt64)
     case bufferWrapFailed
-    case preadFailed(errno: Int32)
     case allocFailed(errno: Int32)
-    case slotOutOfRange(Int)
 
     public var description: String {
         switch self {
@@ -19,12 +17,8 @@ enum StreamerError: Error, CustomStringConvertible {
             return "offset \(offset) is outside the streamed range"
         case .bufferWrapFailed:
             return "failed to wrap expert cache memory in an MTLBuffer"
-        case .preadFailed(let error):
-            return "pread failed: errno \(error)"
         case .allocFailed(let error):
             return "posix_memalign failed: errno \(error)"
-        case .slotOutOfRange(let slot):
-            return "expert cache slot \(slot) is out of range"
         }
     }
 }

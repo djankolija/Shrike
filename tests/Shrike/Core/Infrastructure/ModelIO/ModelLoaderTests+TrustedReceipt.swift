@@ -36,7 +36,7 @@ extension ModelLoaderTests {
     }
   }
 
-  @Test func trustedReceiptModeSkipsSameSizeLayerShaMismatch() throws {
+  @Test func trustedReceiptModeSkipsSameSizeLayerShaMismatch() async throws {
     let dir = try Self.writeToySynthetic()
     defer { try? FileManager.default.removeItem(at: dir) }
     try Self.writeVerifiedInstallReceipt(directoryURL: dir)
@@ -47,12 +47,12 @@ extension ModelLoaderTests {
     try Self.flipByte(in: layerURL, at: 64)
     let device = try #require(MTLCreateSystemDefaultDevice())
 
-    #expect {
+    await #expect {
       let defaultModel = try Model.load(
         directoryURL: dir,
         device: device,
         expecting: .qwenToy())
-      _ = try defaultModel.routedExpert(layer: 0, expert: 0)
+      _ = try await defaultModel.fetchRoutedExperts(layer: 0, experts: [0])
     } throws: { error in
       if case ModelError.checksumMismatch = error { return true }
       return false
@@ -63,7 +63,7 @@ extension ModelLoaderTests {
       device: device,
       expecting: .qwenToy(),
       integrityPolicy: .sizeCheckTrustedReceipt)
-    _ = try trustedModel.routedExpert(layer: 0, expert: 0)
+    _ = try await trustedModel.fetchRoutedExperts(layer: 0, experts: [0])
   }
 
   @Test func trustedReceiptModeRejectsWrongSizedLayerFile() throws {

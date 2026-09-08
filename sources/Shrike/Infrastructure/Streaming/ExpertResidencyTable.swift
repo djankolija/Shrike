@@ -9,14 +9,11 @@ public struct ExpertResidencyEntry: Sendable, Equatable {
 
     public var slot: UInt32
     public var state: UInt32
-    public var generation: UInt64
 
     public init(slot: UInt32 = ExpertResidencyEntry.notResidentSlot,
-                state: UInt32 = ExpertResidencyEntry.empty,
-                generation: UInt64 = 0) {
+                state: UInt32 = ExpertResidencyEntry.empty) {
         self.slot = slot
         self.state = state
-        self.generation = generation
     }
 }
 

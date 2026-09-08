@@ -15,8 +15,8 @@ public struct ExpertCachePlan: Sendable, Equatable {
     public let layer: Int
     public let experts: [Int]
     public let assignedSlots: [Int]
-    /// Slot incarnation captured when this plan reserved or hit each slot.
-    /// A command may use the slot only while this generation still matches.
+    /// The generation of the cell under each slot when this plan reserved or
+    /// hit it. A command may use the slot only while this generation still matches.
     public let assignedGenerations: [UInt64]
     public let misses: [Int]
     public let hits: Int
@@ -168,8 +168,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public let slotCount: Int
     public let poolSlotStride: Int
 
-    private let fd: Int32
-
     /// Bounded-footprint reader.
     ///
     /// Opens its own F_NOCACHE descriptors so expert reads never enter the unified
@@ -192,6 +190,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private var slotBufferOffsets: [UInt64]
     private let arena: ExpertCellArena
     private let residencyTable: MTLBuffer
+    private let residencyWords: UnsafeMutablePointer<UInt64>
 
     private struct Landing {
         let cell: Int
@@ -200,9 +199,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     }
 
     private var landings: [Int: Landing] = [:]
-    private var landingGeneration: UInt64 = 0
-
-    private var nextSlot = 0
 
     private enum SlotState: UInt8 {
         case empty
@@ -215,7 +211,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private var slotExpert: [Int]
     private var slotLastUse: [Int]
     private var slotState: [SlotState]
-    private var slotGeneration: [UInt64]
     private var slotPinCount: [Int]
     private var expertUseCount: [Int]
     private var expertLoadCount: [Int]
@@ -254,19 +249,18 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         guard openedFD >= 0 else {
             throw StreamerError.openFailed(path: layout.path, errno: errno)
         }
-        self.fd = openedFD
 
         var fileStats = stat()
         // K9: fstat failure must not silently skip size validation — a
         // truncated file would then be read out of bounds by pread.
-        guard fstat(openedFD, &fileStats) == 0 else {
-            let statErrno = errno
-            close(openedFD)
+        let statResult = fstat(openedFD, &fileStats)
+        let statErrno = errno
+        close(openedFD)
+        guard statResult == 0 else {
             throw ModelError.posixFailed(call: "fstat(\(layout.path))", errno: statErrno)
         }
         let required = layout.streamOffset + layout.streamSize
         if UInt64(fileStats.st_size) < required {
-            close(openedFD)
             throw StreamerError.sizeMismatch(
                 expected: required,
                 actual: UInt64(fileStats.st_size))
@@ -288,40 +282,28 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 * MemoryLayout<ExpertResidencyEntry>.stride,
             options: .storageModeShared)
         else {
-            close(openedFD)
             throw StreamerError.bufferWrapFailed
         }
         self.residencyTable = residencyTable
-        let residencyEntries = residencyTable.contents()
-            .bindMemory(to: ExpertResidencyEntry.self,
-                        capacity: max(1, layout.expertsPerLayer))
-        for expert in 0..<max(1, layout.expertsPerLayer) {
-            residencyEntries[expert] = ExpertResidencyEntry()
-        }
+        self.residencyWords = residencyTable.contents()
+            .bindMemory(to: UInt64.self, capacity: max(1, layout.expertsPerLayer))
 
         let cells: ExpertCellArena
         let range: Range<Int>
         if let arena {
             guard arena.stride == poolSlotStride else {
-                close(openedFD)
                 throw ModelError.internalInconsistency(
                     detail: "expert cell arena stride \(arena.stride) differs from the pool's \(poolSlotStride)")
             }
             guard let cellRange, cellRange.count == slotCount,
                   cellRange.lowerBound >= 0, cellRange.upperBound <= arena.cellCount else {
-                close(openedFD)
                 throw ModelError.internalInconsistency(
                     detail: "expert cell range \(String(describing: cellRange)) does not fit \(slotCount) slots of a \(arena.cellCount)-cell arena")
             }
             cells = arena
             range = cellRange
         } else {
-            do {
-                cells = try ExpertCellArena(device: device, cellCount: slotCount, stride: poolSlotStride)
-            } catch {
-                close(openedFD)
-                throw error
-            }
+            cells = try ExpertCellArena(device: device, cellCount: slotCount, stride: poolSlotStride)
             range = 0..<slotCount
         }
         self.arena = cells
@@ -331,16 +313,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             bufferOffsets.append(cells.offset(cell: cell))
         }
 
-        do {
-            self.boundedReader = try ParallelExpertReader(
-                path: layout.path,
-                expertStride: Int(layout.expertStride),
-                threads: BoundedReaderConfiguration.defaultThreads,
-                batchDepth: BoundedReaderConfiguration.defaultBatchDepth)
-        } catch {
-            close(openedFD)
-            throw error
-        }
+        self.boundedReader = try ParallelExpertReader(
+            path: layout.path,
+            expertStride: Int(layout.expertStride),
+            threads: BoundedReaderConfiguration.defaultThreads,
+            batchDepth: BoundedReaderConfiguration.defaultBatchDepth)
 
         self.slotPointers = pointers
         self.slotBuffers = buffers
@@ -348,101 +325,12 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.slotExpert = [Int](repeating: -1, count: slotCount)
         self.slotLastUse = [Int](repeating: 0, count: slotCount)
         self.slotState = [SlotState](repeating: .empty, count: slotCount)
-        self.slotGeneration = [UInt64](repeating: 0, count: slotCount)
         self.slotPinCount = [Int](repeating: 0, count: slotCount)
         self.expertUseCount = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
         self.expertLoadCount = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
-    }
-
-    deinit {
-        close(fd)
-    }
-
-    public func loadExpert(layer: Int, expert: Int) throws
-        -> (buffer: MTLBuffer, offset: UInt64, size: UInt64) {
-        // K12: slot selection and fill share one critical section so the
-        // round-robin path never lands on a slot a concurrent plan reserved
-        // (`loading`) and no fill can interleave with another pread.
-        cacheLock.lock()
-        defer { cacheLock.unlock() }
-        var candidate = nextSlot
-        var scanned = 0
-        while (slotState[candidate] == .loading || slotPinCount[candidate] > 0)
-            && scanned < slotCount {
-            candidate = (candidate + 1) % slotCount
-            scanned += 1
+        for expert in 0..<layout.expertsPerLayer {
+            publish(expert: expert, cell: -1, state: ExpertResidencyEntry.empty)
         }
-        guard scanned < slotCount else {
-            throw ModelError.expertCacheUnplaceable(
-                detail: "all \(slotCount) expert-cache slots are loading or pinned")
-        }
-        nextSlot = (candidate + 1) % slotCount
-        return try loadExpertUnlocked(layer: layer, expert: expert, slot: candidate)
-    }
-
-    public func loadExpert(layer: Int, expert: Int, slot: Int) throws
-        -> (buffer: MTLBuffer, offset: UInt64, size: UInt64) {
-        guard slot >= 0 && slot < slotCount else {
-            throw StreamerError.slotOutOfRange(slot)
-        }
-        // K12: the pread fill and the slot bookkeeping share one critical
-        // section so a concurrent plan/execute or another load cannot write
-        // into this slot while the pread is in flight.
-        cacheLock.lock()
-        defer { cacheLock.unlock() }
-        guard slotState[slot] != .loading, slotPinCount[slot] == 0 else {
-            throw ModelError.expertCacheUnplaceable(
-                detail: "expert-cache slot \(slot) is loading or pinned")
-        }
-        return try loadExpertUnlocked(layer: layer, expert: expert, slot: slot)
-    }
-
-    /// Fill `slot` with `expert` and update bookkeeping. Callers hold
-    /// `cacheLock`.
-    private func loadExpertUnlocked(layer: Int, expert: Int, slot: Int) throws
-        -> (buffer: MTLBuffer, offset: UInt64, size: UInt64) {
-        let regionOffset = layout.expertOffset(layer: layer, expert: expert)
-        guard regionOffset + layout.expertStride <= layout.streamSize else {
-            throw StreamerError.offsetOutOfRange(regionOffset)
-        }
-        slotGeneration[slot] &+= 1
-        let previousExpert = slotExpert[slot]
-        if previousExpert >= 0 {
-            publishResidencyUnlocked(expert: previousExpert,
-                                     slot: slot,
-                                     state: ExpertResidencyEntry.empty,
-                                     generation: slotGeneration[slot])
-        }
-        slotExpert[slot] = expert
-        slotState[slot] = .loading
-        publishResidencyUnlocked(expert: expert,
-                                 slot: slot,
-                                 state: ExpertResidencyEntry.loading,
-                                 generation: slotGeneration[slot])
-        let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        do {
-            try readFull(
-                into: slotPointers[slot],
-                fileOffset: layout.streamOffset + regionOffset,
-                count: Int(layout.expertStride))
-            slotState[slot] = .resident
-            publishResidencyUnlocked(expert: expert,
-                                     slot: slot,
-                                     state: ExpertResidencyEntry.resident,
-                                     generation: slotGeneration[slot])
-            slotLastUse[slot] = useClock
-            recordSuccessfulLoadsUnlocked(
-                experts: [expert], elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
-        } catch {
-            slotState[slot] = .empty
-            slotExpert[slot] = -1
-            publishResidencyUnlocked(expert: expert,
-                                     slot: slot,
-                                     state: ExpertResidencyEntry.empty,
-                                     generation: slotGeneration[slot])
-            throw error
-        }
-        return (slotBuffers[slot], slotBufferOffsets[slot], layout.expertStride)
     }
 
     public func loadExpertsCached(experts: [Int]) throws
@@ -571,42 +459,30 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             let previousExpert = slotExpert[slot]
             assignedSlots[index] = slot
             reservedSlots[slot] = true
-            let nextGeneration = slotGeneration[slot] &+ 1
+            let cell = cellIndexUnlocked(slot)
+            arena.bumpCellGeneration(cell)
             if previousExpert >= 0 {
-                publishResidencyUnlocked(expert: previousExpert,
-                                         slot: slot,
-                                         state: ExpertResidencyEntry.empty,
-                                         generation: nextGeneration)
+                publish(expert: previousExpert, cell: cell, state: ExpertResidencyEntry.empty)
             }
             if leasedLandings.contains(experts[index]),
                let landing = landings[experts[index]], landing.resident {
                 landings[experts[index]] = nil
-                freedCells[experts[index]] = cellIndexUnlocked(slot)
+                freedCells[experts[index]] = cell
                 slotPointers[slot] = arena.pointer(cell: landing.cell)
                 slotBufferOffsets[slot] = arena.offset(cell: landing.cell)
-                slotGeneration[slot] = nextGeneration
                 slotExpert[slot] = experts[index]
                 slotLastUse[slot] = clock
                 slotState[slot] = .resident
-                // The same cell the classifier may have read, under the slot's generation.
-                publishResidencyUnlocked(expert: experts[index],
-                                         slot: slot,
-                                         state: ExpertResidencyEntry.resident,
-                                         generation: nextGeneration)
                 landedExperts.append(experts[index])
                 if gpuMissedExperts?.contains(experts[index]) == true {
                     adoptedIndices.append(index)
                 }
                 continue
             }
-            slotGeneration[slot] = nextGeneration
             slotExpert[slot] = experts[index]
             slotLastUse[slot] = clock
             slotState[slot] = .loading
-            publishResidencyUnlocked(expert: experts[index],
-                                     slot: slot,
-                                     state: ExpertResidencyEntry.loading,
-                                     generation: slotGeneration[slot])
+            publish(expert: experts[index], cell: cell, state: ExpertResidencyEntry.loading)
             misses.append(index)
         }
 
@@ -623,7 +499,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         return ExpertCachePlan(
             experts: experts,
             assignedSlots: assignedSlots,
-            assignedGenerations: assignedSlots.map { slotGeneration[$0] },
+            assignedGenerations: assignedSlots.map { arena.cellGeneration(cellIndexUnlocked($0)) },
             misses: misses,
             hits: experts.count - misses.count,
             layer: layer,
@@ -746,9 +622,9 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         precondition(expert >= 0 && expert < layout.expertsPerLayer)
         cacheLock.lock()
         defer { cacheLock.unlock() }
-        return residencyTable.contents()
-            .bindMemory(to: ExpertResidencyEntry.self,
-                        capacity: layout.expertsPerLayer)[expert]
+        return residencyTable.contents().load(
+            fromByteOffset: expert * MemoryLayout<ExpertResidencyEntry>.stride,
+            as: ExpertResidencyEntry.self)
     }
 
     /// Fills the first `missCount` entries of `victimSlotsScratch` with the
@@ -815,7 +691,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         for index in plan.experts.indices {
             let slot = plan.assignedSlots[index]
             guard slot >= 0, slot < slotCount,
-                  slotGeneration[slot] == plan.assignedGenerations[index],
+                  arena.cellGeneration(cellIndexUnlocked(slot)) == plan.assignedGenerations[index],
                   slotExpert[slot] == plan.experts[index],
                   slotState[slot] != .empty else {
                 throw ModelError.internalInconsistency(
@@ -833,7 +709,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         for (slot, generation) in zip(slots, generations)
-            where slot >= 0 && slot < slotCount && slotGeneration[slot] == generation {
+            where slot >= 0 && slot < slotCount
+            && arena.cellGeneration(cellIndexUnlocked(slot)) == generation {
             precondition(slotPinCount[slot] > 0, "expert-cache slot pin underflow")
             slotPinCount[slot] -= 1
         }
@@ -884,11 +761,9 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         defer { cacheLock.unlock() }
         guard landings[expert] == nil, !slotExpert.contains(expert),
               !landings.values.contains(where: { $0.cell == cell }) else { return false }
-        landingGeneration &+= 1
-        landings[expert] = Landing(cell: cell, resident: false, generation: landingGeneration)
-        writeResidencyEntryUnlocked(expert: expert, cell: cell,
-                                    state: ExpertResidencyEntry.loading,
-                                    generation: landingGeneration)
+        landings[expert] = Landing(cell: cell, resident: false,
+                                   generation: arena.bumpCellGeneration(cell))
+        publish(expert: expert, cell: cell, state: ExpertResidencyEntry.loading)
         return true
     }
 
@@ -898,7 +773,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public func completeLanding(expert: Int, cell: Int) -> Bool {
         cacheLock.lock()
         defer { cacheLock.unlock() }
-        guard let landing = landings[expert], landing.cell == cell, !landing.resident else {
+        guard let landing = landings[expert], landing.cell == cell, !landing.resident,
+              arena.cellGeneration(cell) == landing.generation else {
             return false
         }
         if slotExpert.contains(expert) {
@@ -906,9 +782,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             return false
         }
         landings[expert]?.resident = true
-        writeResidencyEntryUnlocked(expert: expert, cell: cell,
-                                    state: ExpertResidencyEntry.resident,
-                                    generation: landing.generation)
+        publish(expert: expert, cell: cell, state: ExpertResidencyEntry.resident)
         return true
     }
 
@@ -924,9 +798,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         guard let landing = landings[expert], landing.cell == cell else { return }
         landings[expert] = nil
         if !slotExpert.contains(expert) {
-            writeResidencyEntryUnlocked(expert: expert, cell: cell,
-                                        state: ExpertResidencyEntry.empty,
-                                        generation: landing.generation)
+            publish(expert: expert, cell: cell, state: ExpertResidencyEntry.empty)
         }
     }
 
@@ -1007,9 +879,9 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         defer { cacheLock.unlock() }
         for index in plan.misses {
             let slot = plan.assignedSlots[index]
-            guard slotGeneration[slot] == plan.assignedGenerations[index] else {
+            guard arena.cellGeneration(cellIndexUnlocked(slot)) == plan.assignedGenerations[index] else {
                 throw ModelError.internalInconsistency(
-                    detail: "expert-cache slot generation changed during expert load")
+                    detail: "expert-cache cell generation changed during expert load")
             }
         }
         for index in plan.misses {
@@ -1017,10 +889,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             slotState[slot] = .resident
             slotExpert[slot] = plan.experts[index]
             slotLastUse[slot] = useClock
-            publishResidencyUnlocked(expert: plan.experts[index],
-                                     slot: slot,
-                                     state: ExpertResidencyEntry.resident,
-                                     generation: plan.assignedGenerations[index])
+            publish(expert: plan.experts[index], cell: cellIndexUnlocked(slot),
+                    state: ExpertResidencyEntry.resident)
         }
     }
 
@@ -1037,14 +907,12 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         for index in plan.misses {
             let slot = plan.assignedSlots[index]
             guard slot >= 0, slot < slotCount,
-                  slotGeneration[slot] == plan.assignedGenerations[index],
+                  arena.cellGeneration(cellIndexUnlocked(slot)) == plan.assignedGenerations[index],
                   slotState[slot] == .loading else { continue }
             slotState[slot] = .empty
             slotExpert[slot] = -1
-            publishResidencyUnlocked(expert: plan.experts[index],
-                                     slot: slot,
-                                     state: ExpertResidencyEntry.empty,
-                                     generation: plan.assignedGenerations[index])
+            publish(expert: plan.experts[index], cell: cellIndexUnlocked(slot),
+                    state: ExpertResidencyEntry.empty)
         }
     }
 
@@ -1057,27 +925,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// immediately after reservation; resident is written only after every
     /// byte lands. Event-driven consumers additionally wait on the batch's
     /// shared-event value, which is the CPU/GPU release/acquire boundary.
-    private func publishResidencyUnlocked(expert: Int,
-                                          slot: Int,
-                                          state: UInt32,
-                                          generation: UInt64) {
-        writeResidencyEntryUnlocked(expert: expert, cell: cellIndexUnlocked(slot),
-                                    state: state, generation: generation)
-    }
-
-    private func writeResidencyEntryUnlocked(expert: Int,
-                                             cell: Int,
-                                             state: UInt32,
-                                             generation: UInt64) {
+    private func publish(expert: Int, cell: Int, state: UInt32) {
         guard expert >= 0 && expert < layout.expertsPerLayer else { return }
-        let entries = residencyTable.contents()
-            .bindMemory(to: ExpertResidencyEntry.self,
-                        capacity: layout.expertsPerLayer)
-        entries[expert] = ExpertResidencyEntry(
-            slot: state == ExpertResidencyEntry.empty
-                ? ExpertResidencyEntry.notResidentSlot : UInt32(cell),
-            state: state,
-            generation: generation)
+        let slot = state == ExpertResidencyEntry.empty
+            ? ExpertResidencyEntry.notResidentSlot : UInt32(cell)
+        shrike_store_release_u64(residencyWords + expert, UInt64(state) << 32 | UInt64(slot))
     }
 
     private func recordSuccessfulLoadsUnlocked(experts: [Int], elapsedNanos: UInt64,
@@ -1117,29 +969,9 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         guard index < 16 else { return UInt64.max }
         return 125_000 << UInt64(index)
     }
-
-    private func readFull(into destination: UnsafeMutableRawPointer,
-                          fileOffset: UInt64,
-                          count: Int) throws {
-        var filled = 0
-        while filled < count {
-            let readCount = pread(
-                fd,
-                destination.advanced(by: filled),
-                count - filled,
-                off_t(fileOffset) + off_t(filled))
-            if readCount < 0 {
-                throw StreamerError.preadFailed(errno: errno)
-            }
-            if readCount == 0 {
-                throw StreamerError.sizeMismatch(expected: UInt64(count), actual: UInt64(filled))
-            }
-            filled += readCount
-        }
-    }
 }
 
-/// Pins exact slot generations until every GPU command using them completes.
+/// Pins exact cell generations until every GPU command using them completes.
 /// Release is idempotent so error cleanup and normal command completion can
 /// safely converge on the same lifetime operation.
 /// unchecked-invariant: immutable slot metadata is published at init and the

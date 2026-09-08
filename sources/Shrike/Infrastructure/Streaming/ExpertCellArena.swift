@@ -1,11 +1,15 @@
 import Darwin
 import Foundation
 import Metal
+import Synchronization
 
 /// Every expert cell the classifier can name in one buffer, so a cell can
 /// change owner at a landing's swap without a byte moving.
-/// unchecked-invariant: immutable after init; a cell's bytes are owned by the
-/// streamer or the ring holding that cell, under their own locks.
+/// unchecked-invariant: the handles are immutable after init; a cell's bytes
+/// are owned by the streamer or the ring holding that cell, under their own
+/// locks, and its generation is read and written only under the cache lock of
+/// the layer that owns the cell, ownership moving through the ring's lock
+/// (ring then cache, never the reverse).
 public final class ExpertCellArena: @unchecked Sendable {
     public static let allocationAlignment = 2 * 1024 * 1024
 
@@ -13,6 +17,8 @@ public final class ExpertCellArena: @unchecked Sendable {
     public let stride: Int
     public let buffer: MTLBuffer
     private let base: UnsafeMutableRawPointer
+    private let generations: UnsafeMutablePointer<UInt64>
+    private let clock = Atomic<UInt64>(0)
 
     public init(device: MTLDevice, cellCount: Int, stride: Int) throws {
         let pageSize = Int(getpagesize())
@@ -38,10 +44,29 @@ public final class ExpertCellArena: @unchecked Sendable {
             throw StreamerError.bufferWrapFailed
         }
         buffer.label = "expert.cells"
+        let generations = UnsafeMutablePointer<UInt64>.allocate(capacity: cellCount)
+        generations.initialize(repeating: 0, count: cellCount)
         self.cellCount = cellCount
         self.stride = stride
         self.buffer = buffer
         self.base = pointer
+        self.generations = generations
+    }
+
+    deinit {
+        generations.deallocate()
+    }
+
+    public func cellGeneration(_ cell: Int) -> UInt64 {
+        precondition(cell >= 0 && cell < cellCount, "expert cell out of range")
+        return generations[cell]
+    }
+
+    @discardableResult
+    func bumpCellGeneration(_ cell: Int) -> UInt64 {
+        precondition(cell >= 0 && cell < cellCount, "expert cell out of range")
+        generations[cell] = clock.add(1, ordering: .relaxed).newValue
+        return generations[cell]
     }
 
     public func pointer(cell: Int) -> UnsafeMutableRawPointer {

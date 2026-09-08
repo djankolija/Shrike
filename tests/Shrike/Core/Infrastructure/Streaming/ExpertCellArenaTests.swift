@@ -22,6 +22,21 @@ import Testing
         }
     }
 
+    @Test func everyCellStartsAtZeroAndEveryBumpDrawsAGreaterValueFromOneClock() throws {
+        let device = try MetalContext().device
+        let arena = try ExpertCellArena(device: device, cellCount: 3, stride: 2 * Int(getpagesize()))
+        #expect((0..<3).map { arena.cellGeneration($0) } == [0, 0, 0])
+        let first = arena.bumpCellGeneration(1)
+        let second = arena.bumpCellGeneration(2)
+        let third = arena.bumpCellGeneration(1)
+        #expect(first > 0)
+        #expect(second > first)
+        #expect(third > second)
+        #expect(arena.cellGeneration(0) == 0)
+        #expect(arena.cellGeneration(1) == third)
+        #expect(arena.cellGeneration(2) == second)
+    }
+
     @Test func anEmptyOrUnalignedGeometryIsRefused() throws {
         let device = try MetalContext().device
         let pageSize = Int(getpagesize())

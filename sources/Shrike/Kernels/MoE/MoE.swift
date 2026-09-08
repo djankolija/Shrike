@@ -478,7 +478,6 @@ final class MoE {
         missPositions: MTLBuffer,
         missExperts: MTLBuffer,
         resolvedSlots: MTLBuffer,
-        resolvedGenerations: MTLBuffer,
         topK: UInt32,
         numExperts: UInt32,
         speculative: SpeculativeDispatchArguments,
@@ -493,7 +492,6 @@ final class MoE {
             hitCount: hitCount, hitPositions: hitPositions,
             missCount: missCount, missPositions: missPositions,
             missExperts: missExperts, resolvedSlots: resolvedSlots,
-            resolvedGenerations: resolvedGenerations,
             topK: topK, numExperts: numExperts,
             speculative: speculative,
             hostReadback: hostReadback)
@@ -510,7 +508,6 @@ final class MoE {
         missPositions: MTLBuffer,
         missExperts: MTLBuffer,
         resolvedSlots: MTLBuffer,
-        resolvedGenerations: MTLBuffer,
         topK: UInt32,
         numExperts: UInt32,
         speculative: SpeculativeDispatchArguments,
@@ -536,7 +533,6 @@ final class MoE {
         encoder.setBuffer(missPositions, offset: 0, index: 5)
         encoder.setBuffer(missExperts, offset: 0, index: 6)
         encoder.setBuffer(resolvedSlots, offset: 0, index: 7)
-        encoder.setBuffer(resolvedGenerations, offset: 0, index: 8)
         encoder.setBytes(&topKValue, length: MemoryLayout<UInt32>.stride, index: 9)
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 10)
         var grids: [UInt32] = [

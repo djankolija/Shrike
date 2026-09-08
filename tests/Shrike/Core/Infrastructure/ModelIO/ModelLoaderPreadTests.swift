@@ -11,7 +11,7 @@ import Metal
         return [UInt8](UnsafeRawBufferPointer(start: base, count: Int(view.length)))
     }
 
-    @Test func loadsUnderPread_routedExpertBytesAndLazyOpen() throws {
+    @Test func loadsUnderPread_routedExpertBytesAndLazyOpen() async throws {
         let dir = try ModelLoaderTests.writeToySynthetic()
         defer { try? FileManager.default.removeItem(at: dir) }
         let device = try #require(MTLCreateSystemDefaultDevice())
@@ -20,7 +20,7 @@ import Metal
                                    streamingMode: .pread(slotCount: 2))
 
         #expect(model.openLayerFileCount() == 0)
-        let view = try model.routedExpert(layer: 1, expert: 4)
+        let view = try await model.fetchRoutedExperts(layer: 1, experts: [4])[0]
         #expect(model.openLayerFileCount() == 1)
 
         // The view is a cache cell of the shared arena, not the expert's file offset:
@@ -50,7 +50,7 @@ import Metal
         #expect(model.openLayerFileCount() == 0)
     }
 
-    @Test func beginOpeningRoutedExpertStreamerIsCompatibleWithLazyFetch() throws {
+    @Test func beginOpeningRoutedExpertStreamerIsCompatibleWithLazyFetch() async throws {
         let dir = try ModelLoaderTests.writeToySynthetic()
         defer { try? FileManager.default.removeItem(at: dir) }
         let device = try #require(MTLCreateSystemDefaultDevice())
@@ -59,7 +59,7 @@ import Metal
                                    streamingMode: .pread(slotCount: 2))
 
         model.beginOpeningRoutedExpertStreamer(layer: 1)
-        let view = try model.routedExpert(layer: 1, expert: 4)
+        let view = try await model.fetchRoutedExperts(layer: 1, experts: [4])[0]
 
         #expect(model.openLayerFileCount() == 1)
         let b = Self.readBytes(view)

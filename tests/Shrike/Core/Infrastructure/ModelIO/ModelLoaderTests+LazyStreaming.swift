@@ -5,7 +5,7 @@ import Testing
 @testable import Shrike
 
 extension ModelLoaderTests {
-  @Test func touchingOneLayerOpensExactlyOneStreamer() throws {
+  @Test func touchingOneLayerOpensExactlyOneStreamer() async throws {
     let dir = try Self.writeToySynthetic()
     defer { try? FileManager.default.removeItem(at: dir) }
     let device = try #require(MTLCreateSystemDefaultDevice())
@@ -13,24 +13,24 @@ extension ModelLoaderTests {
       directoryURL: dir, device: device,
       expecting: .qwenToy())
     #expect(model.openLayerFileCount() == 0)
-    _ = try model.routedExpert(layer: 0, expert: 3)
+    _ = try await model.fetchRoutedExperts(layer: 0, experts: [3])
     #expect(model.openLayerFileCount() == 1)
     // Touch layer 0 again — no new open.
-    _ = try model.routedExpert(layer: 0, expert: 5)
+    _ = try await model.fetchRoutedExperts(layer: 0, experts: [5])
     #expect(model.openLayerFileCount() == 1)
     // Touch layer 1 — second open.
-    _ = try model.routedExpert(layer: 1, expert: 0)
+    _ = try await model.fetchRoutedExperts(layer: 1, experts: [0])
     #expect(model.openLayerFileCount() == 2)
   }
 
-  @Test func routedExpertBytesRoundTrip() throws {
+  @Test func routedExpertBytesRoundTrip() async throws {
     let dir = try Self.writeToySynthetic()
     defer { try? FileManager.default.removeItem(at: dir) }
     let device = try #require(MTLCreateSystemDefaultDevice())
     let model = try Model.load(
       directoryURL: dir, device: device,
       expecting: .qwenToy())
-    let view = try model.routedExpert(layer: 1, expert: 4)
+    let view = try await model.fetchRoutedExperts(layer: 1, experts: [4])[0]
     let bufContents = view.buffer.contents()
     let b0 = bufContents.load(fromByteOffset: Int(view.offset), as: UInt8.self)
     let b1 = bufContents.load(fromByteOffset: Int(view.offset) + 1, as: UInt8.self)
@@ -42,7 +42,7 @@ extension ModelLoaderTests {
     #expect(b3 == 0xC2)
   }
 
-  @Test func tamperedLayerFileFailsOnFirstTouch() throws {
+  @Test func tamperedLayerFileFailsOnFirstTouch() async throws {
     let dir = try Self.writeToySynthetic()
     defer { try? FileManager.default.removeItem(at: dir) }
     let device = try #require(MTLCreateSystemDefaultDevice())
@@ -57,10 +57,10 @@ extension ModelLoaderTests {
     try data.write(to: url)
 
     // Layer 0 still loads.
-    _ = try model.routedExpert(layer: 0, expert: 0)
+    _ = try await model.fetchRoutedExperts(layer: 0, experts: [0])
     // Layer 1 first touch fails with checksumMismatch.
-    #expect {
-      _ = try model.routedExpert(layer: 1, expert: 0)
+    await #expect {
+      _ = try await model.fetchRoutedExperts(layer: 1, experts: [0])
     } throws: { error in
       if case ModelError.checksumMismatch(let f) = error {
         return f == "packed_experts/layer_01.bin"

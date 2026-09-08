@@ -76,7 +76,7 @@ extension ModelLoaderTests {
     }
   }
 
-  @Test func integrityPoliciesExposeIdenticalResidentAndRoutedBytes() throws {
+  @Test func integrityPoliciesExposeIdenticalResidentAndRoutedBytes() async throws {
     let dir = try Self.writeToySynthetic()
     defer { try? FileManager.default.removeItem(at: dir) }
     try Self.writeVerifiedInstallReceipt(directoryURL: dir)
@@ -100,8 +100,8 @@ extension ModelLoaderTests {
       by: Int(trustedEmbedding.offset))
     #expect(memcmp(fullEmbeddingBytes, trustedEmbeddingBytes, Int(fullEmbedding.length)) == 0)
 
-    let fullExpert = try full.routedExpert(layer: 0, expert: 0)
-    let trustedExpert = try trusted.routedExpert(layer: 0, expert: 0)
+    let fullExpert = try await full.fetchRoutedExperts(layer: 0, experts: [0])[0]
+    let trustedExpert = try await trusted.fetchRoutedExperts(layer: 0, experts: [0])[0]
     #expect(fullExpert.length == trustedExpert.length)
     let fullExpertBytes = fullExpert.buffer.contents().advanced(by: Int(fullExpert.offset))
     let trustedExpertBytes = trustedExpert.buffer.contents().advanced(by: Int(trustedExpert.offset))

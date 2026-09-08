@@ -128,7 +128,7 @@ import ShrikeValidationSupport
             device: ctx.device,
             slotCount: 1)
         let kernel = try DequantInt4GEMV(context: ctx)
-        let expert = try streamer.loadExpert(layer: 0, expert: 0)
+        let expert = try streamer.loadExpertsCached(experts: [0])[0]
         let weightsBuf = expert.buffer
 
         guard let xBuf = ctx.device.makeBuffer(length: Sizes.N * MemoryLayout<Float16>.size,

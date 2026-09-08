@@ -339,29 +339,6 @@ public struct Model {
 
     // MARK: - Routed expert (lazy)
 
-    /// First touch of layer L opens its backend + verifies SHA-256; subsequent
-    /// touches reuse the open backend. The backend resolves the expert to an
-    /// cache-slot `(MTLBuffer, offset)` pair.
-    public func routedExpert(layer L: Int, expert E: Int) throws -> TensorView {
-        try ensureLayerOpened(L)
-        let backend = streamersQueue.sync { streamersBox.streamers[L]! }
-        // The streamer is per-layer: `openLayerLocked(L)` bound it to layer
-        // L's file with `expertOffsets = layers[L].experts.map(\.offset)`, and
-        // `StreamLayout.expertOffset(layer: 0, ...)` is the branch that
-        // consults that per-layer offset table. Passing the actual layer here
-        // would select the dense cross-layer formula and mis-offset every
-        // expert on layers above 0 — layer 0 is intentional.
-        let r = try backend.loadExpert(layer: 0, expert: E)
-        return TensorView(
-            buffer: r.buffer,
-            offset: r.offset,
-            length: r.size,
-            scaleOffset: 0, scaleLength: 0,
-            biasOffset:  0, biasLength:  0,
-            shape: (UInt32(L), UInt32(E), 0, 0),
-            dtype: 0)
-    }
-
     /// Open layer L's file + verify SHA, idempotent.
     func ensureLayerOpened(_ L: Int) throws {
         try streamersQueue.sync {
@@ -479,7 +456,7 @@ extension Model {
 
     /// Open a `.gturbo/` directory and return a typed handle. Eagerly verifies
     /// SHA-256 of `model_weights.bin` and `packed_experts/layout.json`; layer
-    /// files are verified lazily on first `routedExpert(...)` touch.
+    /// files are verified lazily on the layer's first touch.
     /// lint:allow-long a sequential load pipeline -- open, hash, verify the
     /// receipt, decode the layout, map the resident buffer -- whose stages
     /// share a descriptor, sizes and timing stats. Extracting any of them

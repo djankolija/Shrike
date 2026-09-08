@@ -9,7 +9,6 @@ import Testing
         let misses: [UInt32]
         let missExperts: [UInt32]
         let slots: [UInt32]
-        let generations: [UInt64]
         var specArgs: [UInt32] = []
         var hostReadback: RouterHostReadback?
     }
@@ -51,7 +50,6 @@ import Testing
         #expect(result.missExperts == [1, 3])
         #expect(result.slots[0] != ExpertResidencyEntry.notResidentSlot)
         #expect(result.slots[2] != ExpertResidencyEntry.notResidentSlot)
-        #expect(result.generations[0] > 0)
 
         _ = try streamer.loadExpertsCached(experts: [1, 3])
         result = try classify([0, 1, 2, 3], streamer: streamer,
@@ -142,7 +140,6 @@ import Testing
         let missPositions = buffer([UInt32](repeating: 0, count: experts.count))
         let missExperts = buffer([UInt32](repeating: 0, count: experts.count))
         let slots = buffer([UInt32](repeating: 0, count: experts.count))
-        let generations = buffer([UInt64](repeating: 0, count: experts.count))
         let resources = streamer.expertResidencyResources()
         let specArgsBuffer = context.device.makeBuffer(length: MoE.specDispatchArgsLength,
                                                        options: .storageModeShared)!
@@ -163,7 +160,6 @@ import Testing
             missPositions: missPositions,
             missExperts: missExperts,
             resolvedSlots: slots,
-            resolvedGenerations: generations,
             topK: UInt32(experts.count),
             numExperts: UInt32(resources.expertCount),
             speculative: MoE.SpeculativeDispatchArguments(
@@ -192,7 +188,6 @@ import Testing
             misses: values(missPositions, count: missN, as: UInt32.self),
             missExperts: values(missExperts, count: missN, as: UInt32.self),
             slots: values(slots, count: experts.count, as: UInt32.self),
-            generations: values(generations, count: experts.count, as: UInt64.self),
             specArgs: values(specArgsBuffer, count: 9, as: UInt32.self),
             hostReadback: readbackWords.flatMap { words in
                 RouterHostReadback.decode(

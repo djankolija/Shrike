@@ -5,9 +5,8 @@ import Metal
 @testable import Shrike
 
 /// Unit tests for the synchronous `pread` backend: round-trip correctness,
-/// exact file-byte reads, the short-read failure path,
-/// and round-robin slot reuse. No real model weights — a synthetic layer file
-/// of tagged expert blobs.
+/// exact file-byte reads and slot reuse. No real model weights — a synthetic
+/// layer file of tagged expert blobs.
 @Suite struct PreadExpertStreamerTests {
 
     static let pageSize = Int(getpagesize())
