@@ -129,13 +129,18 @@ public struct ServerArguments: Equatable, Sendable {
       --help                 Show this help.
     """
 
-    /// lint:allow-long a flag table: one `case` per option plus its
-    /// validation. Splitting it into per-group parsers would hide the
-    /// exhaustive switch that makes an unhandled flag a compile-visible gap.
+    /// A flag table: one `case` per option plus its validation.
     public static func parse(
         _ input: [String],
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> ServerArguments {
+        var context = try ParseContext(environment: environment)
+        try context.applyFlags(input)
+        try context.validate()
+        return context.makeArguments()
+    }
+
+    private struct ParseContext {
         var model: String?
         var port = 8080
         var modelIDOverride: String?
@@ -150,19 +155,9 @@ public struct ServerArguments: Equatable, Sendable {
         var prefillChunkTokens: Int?
         var kvCachePrecision: KVCachePrecision = .int8
         var ropeScalingMode: RuntimeRoPEScalingMode = .none
-        var thinkingMode = ModelThinkingMode.resolved(environment: environment)
-        if let raw = environment["SHRIKE_REASONING_EFFORT"],
-           ReasoningEffort(rawValue: raw.lowercased()) == nil {
-            throw ServerArgumentError.invalid(
-                "SHRIKE_REASONING_EFFORT must be low, medium or high")
-        }
-        var reasoningEffort = ReasoningEffort.resolved(environment: environment)
-        if let raw = environment["SHRIKE_REASONING_RETENTION"],
-           ReasoningRetention(rawValue: raw.lowercased()) == nil {
-            throw ServerArgumentError.invalid(
-                "SHRIKE_REASONING_RETENTION must be as-generated or stripped")
-        }
-        var reasoningRetention = ReasoningRetention.resolved(environment: environment)
+        var thinkingMode: ModelThinkingMode
+        var reasoningEffort: ReasoningEffort?
+        var reasoningRetention: ReasoningRetention?
         var expertCacheSlots: Int?
         var expertCacheBudgetBytes: Int?
         var lazyLoad = false
@@ -171,28 +166,51 @@ public struct ServerArguments: Equatable, Sendable {
         var configPath: String?
         var modelsDir: String?
         var preload = false
-        var index = 0
-        while index < input.count {
-            let flag = input[index]
-            if flag == "--help" || flag == "-h" { throw ServerArgumentError.help }
-            // Valueless flags are consumed before the "requires a value" guard
-            // below; otherwise `--lazy-load --port 9999` would swallow --port
-            // as this flag's value and then reject it as unknown.
-            if flag == "--lazy-load" {
-                lazyLoad = true
-                index += 1
-                continue
+
+        init(environment: [String: String]) throws {
+            thinkingMode = ModelThinkingMode.resolved(environment: environment)
+            if let raw = environment["SHRIKE_REASONING_EFFORT"],
+               ReasoningEffort(rawValue: raw.lowercased()) == nil {
+                throw ServerArgumentError.invalid(
+                    "SHRIKE_REASONING_EFFORT must be low, medium or high")
             }
-            if flag == "--preload" {
-                preload = true
-                index += 1
-                continue
+            reasoningEffort = ReasoningEffort.resolved(environment: environment)
+            if let raw = environment["SHRIKE_REASONING_RETENTION"],
+               ReasoningRetention(rawValue: raw.lowercased()) == nil {
+                throw ServerArgumentError.invalid(
+                    "SHRIKE_REASONING_RETENTION must be as-generated or stripped")
             }
-            guard index + 1 < input.count else {
-                throw ServerArgumentError.invalid("\(flag) requires a value")
+            reasoningRetention = ReasoningRetention.resolved(environment: environment)
+        }
+
+        mutating func applyFlags(_ input: [String]) throws {
+            var index = 0
+            while index < input.count {
+                let flag = input[index]
+                if flag == "--help" || flag == "-h" { throw ServerArgumentError.help }
+                // Valueless flags are consumed before the "requires a value" guard
+                // below; otherwise `--lazy-load --port 9999` would swallow --port
+                // as this flag's value and then reject it as unknown.
+                if flag == "--lazy-load" {
+                    lazyLoad = true
+                    index += 1
+                    continue
+                }
+                if flag == "--preload" {
+                    preload = true
+                    index += 1
+                    continue
+                }
+                guard index + 1 < input.count else {
+                    throw ServerArgumentError.invalid("\(flag) requires a value")
+                }
+                let value = input[index + 1]
+                index += 2
+                try apply(flag: flag, value: value)
             }
-            let value = input[index + 1]
-            index += 2
+        }
+
+        mutating func apply(flag: String, value: String) throws {
             switch flag {
             case "--model":
                 model = value
@@ -202,10 +220,7 @@ public struct ServerArguments: Equatable, Sendable {
                 }
                 port = parsed
             case "--model-id":
-                guard !value.isEmpty else {
-                    throw ServerArgumentError.invalid("--model-id must not be empty")
-                }
-                modelIDOverride = value
+                modelIDOverride = try requireNonEmpty(value, flag: flag)
             case "--max-context":
                 guard let parsed = Int(value),
                       (1...RuntimeConfiguration.maximumContextTokens).contains(parsed) else {
@@ -242,11 +257,7 @@ public struct ServerArguments: Equatable, Sendable {
                 }
                 promptCacheMemoryMiB = parsed
             case "--prompt-cache-disk":
-                guard !value.isEmpty else {
-                    throw ServerArgumentError.invalid(
-                        "--prompt-cache-disk must not be empty")
-                }
-                promptCacheDiskDirectory = value
+                promptCacheDiskDirectory = try requireNonEmpty(value, flag: flag)
             case "--prompt-cache-disk-mib":
                 guard let parsed = Int(value), (0...65_536).contains(parsed) else {
                     throw ServerArgumentError.invalid(
@@ -304,59 +315,66 @@ public struct ServerArguments: Equatable, Sendable {
                 idleUnloadSeconds = parsed
                 idleUnloadWasSet = true
             case "--config":
-                guard !value.isEmpty else {
-                    throw ServerArgumentError.invalid("--config must not be empty")
-                }
-                configPath = value
+                configPath = try requireNonEmpty(value, flag: flag)
             case "--models-dir":
-                guard !value.isEmpty else {
-                    throw ServerArgumentError.invalid("--models-dir must not be empty")
-                }
-                modelsDir = value
+                modelsDir = try requireNonEmpty(value, flag: flag)
             default:
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
         }
-        if model != nil, configPath != nil || modelsDir != nil {
-            throw ServerArgumentError.invalid(
-                "--model serves exactly one model; it cannot be combined with --config or --models-dir")
+
+        mutating func validate() throws {
+            if model != nil, configPath != nil || modelsDir != nil {
+                throw ServerArgumentError.invalid(
+                    "--model serves exactly one model; it cannot be combined with --config or --models-dir")
+            }
+            if model == nil, modelIDOverride != nil {
+                throw ServerArgumentError.invalid(
+                    "--model-id requires --model; config mode names models in the config file")
+            }
+            if preload, lazyLoad {
+                throw ServerArgumentError.invalid("--preload and --lazy-load contradict each other")
+            }
+            if ropeScalingMode == .yarn, !maxContextWasSet {
+                maxContext = RuntimeConfiguration.defaultYaRNContextTokens
+            }
+            try validateMaxContext(maxContext, ropeScalingMode: ropeScalingMode)
         }
-        if model == nil, modelIDOverride != nil {
-            throw ServerArgumentError.invalid(
-                "--model-id requires --model; config mode names models in the config file")
+
+        func makeArguments() -> ServerArguments {
+            return ServerArguments(model: model,
+                                   port: port,
+                                   modelIDOverride: modelIDOverride,
+                                   maxContext: maxContext,
+                                   queueLimit: queueLimit,
+                                   promptCacheMode: promptCacheMode,
+                                   promptCacheMaximumEntries: promptCacheMaximumEntries,
+                                   promptCacheMemoryMiB: promptCacheMemoryMiB,
+                                   promptCacheDiskDirectory: promptCacheDiskDirectory,
+                                   promptCacheDiskMiB: promptCacheDiskMiB,
+                                   prefillChunkTokens: prefillChunkTokens,
+                                   kvCachePrecision: kvCachePrecision,
+                                   ropeScalingMode: ropeScalingMode,
+                                   thinkingMode: thinkingMode,
+                                   reasoningEffort: reasoningEffort,
+                                   reasoningRetention: reasoningRetention,
+                                   expertCacheSlots: expertCacheSlots,
+                                   expertCacheBudgetBytes: expertCacheBudgetBytes,
+                                   lazyLoad: lazyLoad,
+                                   idleUnloadSeconds: idleUnloadSeconds,
+                                   configPath: configPath,
+                                   modelsDir: modelsDir,
+                                   preload: preload,
+                                   maxContextWasSet: maxContextWasSet,
+                                   idleUnloadWasSet: idleUnloadWasSet)
         }
-        if preload, lazyLoad {
-            throw ServerArgumentError.invalid("--preload and --lazy-load contradict each other")
+    }
+
+    private static func requireNonEmpty(_ value: String, flag: String) throws -> String {
+        guard !value.isEmpty else {
+            throw ServerArgumentError.invalid("\(flag) must not be empty")
         }
-        if ropeScalingMode == .yarn, !maxContextWasSet {
-            maxContext = RuntimeConfiguration.defaultYaRNContextTokens
-        }
-        try validateMaxContext(maxContext, ropeScalingMode: ropeScalingMode)
-        return ServerArguments(model: model,
-                               port: port,
-                               modelIDOverride: modelIDOverride,
-                               maxContext: maxContext,
-                               queueLimit: queueLimit,
-                               promptCacheMode: promptCacheMode,
-                               promptCacheMaximumEntries: promptCacheMaximumEntries,
-                               promptCacheMemoryMiB: promptCacheMemoryMiB,
-                               promptCacheDiskDirectory: promptCacheDiskDirectory,
-                               promptCacheDiskMiB: promptCacheDiskMiB,
-                               prefillChunkTokens: prefillChunkTokens,
-                               kvCachePrecision: kvCachePrecision,
-                               ropeScalingMode: ropeScalingMode,
-                               thinkingMode: thinkingMode,
-                               reasoningEffort: reasoningEffort,
-                               reasoningRetention: reasoningRetention,
-                               expertCacheSlots: expertCacheSlots,
-                               expertCacheBudgetBytes: expertCacheBudgetBytes,
-                               lazyLoad: lazyLoad,
-                               idleUnloadSeconds: idleUnloadSeconds,
-                               configPath: configPath,
-                               modelsDir: modelsDir,
-                               preload: preload,
-                               maxContextWasSet: maxContextWasSet,
-                               idleUnloadWasSet: idleUnloadWasSet)
+        return value
     }
 
     private static func validateMaxContext(_ value: Int,
