@@ -189,14 +189,34 @@ public final class RemoteStreamingRepacker {
         try Posix.fsyncDirectory(paths.parentDirectory)
     }
 
-    /// lint:allow-long the install pipeline for one prepared plan: fetch
-    /// ranges, verify, write, checkpoint, promote. The stages share the
-    /// checkpoint, the byte budget and the progress reporter, and their order
-    /// is the resumability contract -- separating them would move that
-    /// contract into parameter lists.
+    private struct PreparedInstall {
+        let saved: RemoteInstallCheckpoint?
+        let remote: HuggingFaceRemoteSource
+        let snapshot: RemoteSnapshot
+        let plan: RepackPlan
+        let rangePlan: RangeCopyPlan
+        var checkpoint: RemoteInstallCheckpoint
+    }
+
+    /// The install pipeline for one prepared plan: fetch ranges, verify, write, checkpoint, promote.
     private func runPrepared(paths: RemoteInstallPaths,
                              progress: @escaping @Sendable (ModelInstallProgress) -> Void) async throws
         -> RemoteStreamingRepackResult {
+        var prepared = try await validateResume(paths: paths, progress: progress)
+        if let dryRunResult = try reserveOutput(prepared, paths: paths, progress: progress) {
+            return dryRunResult
+        }
+        let totals = try await copyRanges(&prepared, paths: paths, progress: progress)
+        return try await finalizeInstall(prepared,
+                                         paths: paths,
+                                         reusedBytes: totals.reusedBytes,
+                                         payloadDownloadStart: totals.payloadDownloadStart,
+                                         progress: progress)
+    }
+
+    private func validateResume(paths: RemoteInstallPaths,
+                                progress: @escaping @Sendable (ModelInstallProgress) -> Void) async throws
+        -> PreparedInstall {
         try Task.checkCancellation()
         let saved = options.resume
             ? try RemoteInstallCheckpoint.load(from: paths.checkpointFile)
@@ -271,11 +291,23 @@ public final class RemoteStreamingRepacker {
                 to: paths.checkpointFile,
                 parentDirectory: paths.parentDirectory)
         }
-        let outputBytes = plan.resident.totalSize
-            + plan.layers.reduce(UInt64(0)) { $0 + $1.fileSize }
-        progress(.planning(downloadBytes: rangePlan.remoteBytesToDownload,
+        return PreparedInstall(saved: saved,
+                               remote: remote,
+                               snapshot: snapshot,
+                               plan: plan,
+                               rangePlan: rangePlan,
+                               checkpoint: checkpoint)
+    }
+
+    private func reserveOutput(_ prepared: PreparedInstall,
+                               paths: RemoteInstallPaths,
+                               progress: @escaping @Sendable (ModelInstallProgress) -> Void) throws
+        -> RemoteStreamingRepackResult? {
+        let outputBytes = prepared.plan.resident.totalSize
+            + prepared.plan.layers.reduce(UInt64(0)) { $0 + $1.fileSize }
+        progress(.planning(downloadBytes: prepared.rangePlan.remoteBytesToDownload,
                            outputBytes: outputBytes))
-        let reusedDestinationBytes = checkpoint.completedRanges.reduce(UInt64(0)) {
+        let reusedDestinationBytes = prepared.checkpoint.completedRanges.reduce(UInt64(0)) {
             $0 + $1.destinationBytes
         }
         let remainingOutputBytes = outputBytes > reusedDestinationBytes
@@ -293,46 +325,53 @@ public final class RemoteStreamingRepacker {
 
         audit.remoteRepoID = options.repoID
         audit.remoteRequestedRevision = options.revision
-        audit.remoteResolvedCommit = snapshot.resolvedCommit
+        audit.remoteResolvedCommit = prepared.snapshot.resolvedCommit
         audit.remoteRangeStreamingSupported = true
-        audit.remoteGapBytesDownloaded = rangePlan.remoteGapBytesDownloaded
-        audit.sourceSnapshotSha256 = snapshot.metadata.indexSha256Hex
-        audit.bitWidthOverridesHonored = snapshot.metadata.bitsOverrides.count
-        audit.tensorsDroppedMultimodal = plan.excludedMultimodalTensorNames
+        audit.remoteGapBytesDownloaded = prepared.rangePlan.remoteGapBytesDownloaded
+        audit.sourceSnapshotSha256 = prepared.snapshot.metadata.indexSha256Hex
+        audit.bitWidthOverridesHonored = prepared.snapshot.metadata.bitsOverrides.count
+        audit.tensorsDroppedMultimodal = prepared.plan.excludedMultimodalTensorNames
         audit.packedExpertLayoutMode = "identity"
 
         if options.dryRunSpaceCheck {
-            if saved == nil {
+            if prepared.saved == nil {
                 try? FileManager.default.removeItem(atPath: paths.partialDirectory)
             }
             return RemoteStreamingRepackResult(outputDir: options.outputDir,
-                                               resolvedCommit: snapshot.resolvedCommit,
-                                               plan: plan,
+                                               resolvedCommit: prepared.snapshot.resolvedCommit,
+                                               plan: prepared.plan,
                                                // Dry run issues no HTTP requests,
                                                // so report the planned count.
-                                               rangeRequestCount: rangePlan.coalescedCopies.count,
-                                               remoteBytesToDownload: rangePlan.remoteBytesToDownload,
-                                               remoteGapBytesDownloaded: rangePlan.remoteGapBytesDownloaded,
+                                               rangeRequestCount: prepared.rangePlan.coalescedCopies.count,
+                                               remoteBytesToDownload: prepared.rangePlan.remoteBytesToDownload,
+                                               remoteGapBytesDownloaded: prepared.rangePlan.remoteGapBytesDownloaded,
                                                remoteRetryCount: audit.remoteRangeRetries,
-                                               reusedBytes: checkpoint.completedRanges.reduce(0) {
+                                               reusedBytes: prepared.checkpoint.completedRanges.reduce(0) {
                                                    $0 + $1.sourceBytes
                                                },
                                                downloadedThisRunBytes: 0,
                                                dryRun: true)
         }
 
-        if saved == nil {
+        if prepared.saved == nil {
             progress(.reservingOutput(bytes: outputBytes))
-            try createOutputFiles(plan: plan, paths: paths)
-            try checkpoint.write(
+            try createOutputFiles(plan: prepared.plan, paths: paths)
+            try prepared.checkpoint.write(
                 to: paths.checkpointFile,
                 parentDirectory: paths.parentDirectory)
         }
+        return nil
+    }
 
-        let provider = HTTPRangeSourceByteProvider(remote: remote.pinned(commit: snapshot.resolvedCommit),
-                                                   files: snapshot.remoteFiles,
+    private func copyRanges(_ prepared: inout PreparedInstall,
+                            paths: RemoteInstallPaths,
+                            progress: @escaping @Sendable (ModelInstallProgress) -> Void) async throws
+        -> (reusedBytes: UInt64, payloadDownloadStart: UInt64) {
+        let rangePlan = prepared.rangePlan
+        let provider = HTTPRangeSourceByteProvider(remote: prepared.remote.pinned(commit: prepared.snapshot.resolvedCommit),
+                                                   files: prepared.snapshot.remoteFiles,
                                                    writeTileBytes: options.writeTileBytes)
-        let reusedBytes = checkpoint.completedRanges.reduce(UInt64(0)) {
+        let reusedBytes = prepared.checkpoint.completedRanges.reduce(UInt64(0)) {
             $0 + $1.sourceBytes
         }
         let payloadDownloadStart = audit.remoteBytesDownloaded
@@ -351,7 +390,7 @@ public final class RemoteStreamingRepacker {
         var pendingCheckpointBytes: UInt64 = 0
         try await provider.copyBatch(
             rangePlan.coalescedCopies,
-            completedRangeIDs: Set(checkpoint.completedRanges.map(\.id)),
+            completedRangeIDs: Set(prepared.checkpoint.completedRanges.map(\.id)),
             partialDirectory: paths.partialDirectory,
             temporaryPath: paths.rangeTemporaryFile,
             audit: audit,
@@ -362,9 +401,9 @@ public final class RemoteStreamingRepacker {
                     totalBytes: rangePlan.remoteBytesToDownload))
             },
             commit: { completed in
-                checkpoint.completedRanges.removeAll { $0.id == completed.id }
-                checkpoint.completedRanges.append(completed)
-                checkpoint.completedRanges.sort { $0.id < $1.id }
+                prepared.checkpoint.completedRanges.removeAll { $0.id == completed.id }
+                prepared.checkpoint.completedRanges.append(completed)
+                prepared.checkpoint.completedRanges.sort { $0.id < $1.id }
                 rangesSinceCheckpointWrite += 1
                 pendingCheckpointBytes += completed.sourceBytes
                 // The first commit is written immediately (an early
@@ -375,19 +414,27 @@ public final class RemoteStreamingRepacker {
                     || rangesSinceCheckpointWrite % 16 == 0
                     || pendingCheckpointBytes >= 64 * 1024 * 1024 {
                     pendingCheckpointBytes = 0
-                    try checkpoint.write(
+                    try prepared.checkpoint.write(
                         to: paths.checkpointFile,
                         parentDirectory: paths.parentDirectory)
                 }
             })
-        try checkpoint.write(
+        try prepared.checkpoint.write(
             to: paths.checkpointFile,
             parentDirectory: paths.parentDirectory)
+        return (reusedBytes: reusedBytes, payloadDownloadStart: payloadDownloadStart)
+    }
 
+    private func finalizeInstall(_ prepared: PreparedInstall,
+                                 paths: RemoteInstallPaths,
+                                 reusedBytes: UInt64,
+                                 payloadDownloadStart: UInt64,
+                                 progress: @escaping @Sendable (ModelInstallProgress) -> Void) async throws
+        -> RemoteStreamingRepackResult {
         try recordOutputFile(relativePath: "model_weights.bin",
-                             path: plan.resident.path,
+                             path: prepared.plan.resident.path,
                              progress: progress)
-        for layer in plan.layers where layer.expertsPerLayer > 0 {
+        for layer in prepared.plan.layers where layer.expertsPerLayer > 0 {
             try Task.checkCancellation()
             let rel = "packed_experts/" + (layer.path as NSString).lastPathComponent
             try recordOutputFile(relativePath: rel, path: layer.path, progress: progress)
@@ -396,10 +443,10 @@ public final class RemoteStreamingRepacker {
         let layoutPath = ((paths.partialDirectory as NSString)
             .appendingPathComponent("packed_experts") as NSString)
             .appendingPathComponent("layout.json")
-        let expertStride = plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertStride ?? 0
-        let layoutData = try GTurboJSON.encodeLayout(plan: plan, expertStride: expertStride)
+        let expertStride = prepared.plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertStride ?? 0
+        let layoutData = try GTurboJSON.encodeLayout(plan: prepared.plan, expertStride: expertStride)
         try writeSmall(path: layoutPath, data: layoutData)
-        try GTurboLayoutValidator.validate(path: layoutPath, plan: plan)
+        try GTurboLayoutValidator.validate(path: layoutPath, plan: prepared.plan)
         try recordOutputFile(relativePath: "packed_experts/layout.json",
                              path: layoutPath,
                              progress: progress)
@@ -409,9 +456,9 @@ public final class RemoteStreamingRepacker {
         // draft layer. It shares tokenization, embedding and lm_head with the
         // target bundle, so copying tokenizer/config sidecars would be both
         // redundant and a misleading standalone-model contract.
-        if plan.arch.family != .qwen36MTP {
-            try await copyRemoteMetadataSidecars(snapshot: snapshot,
-                                                 remote: remote,
+        if prepared.plan.arch.family != .qwen36MTP {
+            try await copyRemoteMetadataSidecars(snapshot: prepared.snapshot,
+                                                 remote: prepared.remote,
                                                  partialDir: paths.partialDirectory,
                                                  progress: progress)
         }
@@ -419,11 +466,11 @@ public final class RemoteStreamingRepacker {
         try? FileManager.default.removeItem(atPath: paths.metadataDirectory)
         progress(.finalizing)
         try Task.checkCancellation()
-        try writeManifest(plan: plan,
+        try writeManifest(plan: prepared.plan,
                           partialDir: paths.partialDirectory,
-                          metadata: snapshot.metadata,
+                          metadata: prepared.snapshot.metadata,
                           expertStride: expertStride,
-                          resolvedCommit: snapshot.resolvedCommit,
+                          resolvedCommit: prepared.snapshot.resolvedCommit,
                           modelIDOverride: nil)
 
         try Task.checkCancellation()
@@ -446,16 +493,16 @@ public final class RemoteStreamingRepacker {
         }
 
         return RemoteStreamingRepackResult(outputDir: options.outputDir,
-                                           resolvedCommit: snapshot.resolvedCommit,
-                                           plan: plan,
+                                           resolvedCommit: prepared.snapshot.resolvedCommit,
+                                           plan: prepared.plan,
                                            // Actual ranged HTTP requests issued
                                            // this run, counted by the byte
                                            // provider (retries are separate).
                                            rangeRequestCount: Int(min(
                                                audit.remoteRangeRequests,
                                                UInt64(Int.max))),
-                                           remoteBytesToDownload: rangePlan.remoteBytesToDownload,
-                                           remoteGapBytesDownloaded: rangePlan.remoteGapBytesDownloaded,
+                                           remoteBytesToDownload: prepared.rangePlan.remoteBytesToDownload,
+                                           remoteGapBytesDownloaded: prepared.rangePlan.remoteGapBytesDownloaded,
                                            remoteRetryCount: audit.remoteRangeRetries,
                                            reusedBytes: reusedBytes,
                                            downloadedThisRunBytes:
