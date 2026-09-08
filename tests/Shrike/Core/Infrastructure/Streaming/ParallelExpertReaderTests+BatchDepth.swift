@@ -124,7 +124,7 @@ extension ParallelExpertReaderTests {
             }
             group.addTask {
                 for _ in 0..<50 {
-                    try Self.withDestinations(1) { buffers in
+                    _ = Self.withDestinations(1) { buffers in
                         #expect(throws: ParallelExpertReader.Failure.self) {
                             try reader.fetch(experts: [UInt32(count + 5)], into: buffers)
                         }

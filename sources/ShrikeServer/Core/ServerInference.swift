@@ -1023,7 +1023,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         return (promptIDs, cacheRequest, effectiveMessages, needsToolTemplate)
     }
 
-    private func cacheDiag(_ line: String) {
+    private func writeDiagnosticLine(_ line: String) {
         FileHandle.standardError.write(Data((line + "\n").utf8))
     }
 
@@ -1031,7 +1031,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// conversation whose settles start failing has one of these lines at its
     /// root, and without them the whole contagion is invisible.
     private func declined(_ reason: KVNormalizationDecline) {
-        cacheDiag("Shrike prompt_cache normalize kind=declined "
+        writeDiagnosticLine("Shrike prompt_cache normalize kind=declined "
                 + "reason=\(reason.rawValue)")
     }
 
@@ -1086,7 +1086,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                     // position). Anything else falls through to a snapshot
                     // restore or a full prefill instead of resuming from a
                     // stale or mismatched KV.
-                    cacheDiag(
+                    writeDiagnosticLine(
                         "Shrike prompt_cache hit tier=live "
                             + "cached_tokens=\(cached) entry=\(entryID.uuidString.lowercased())")
                 } else {
@@ -1103,7 +1103,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                         if runner.continuationPosition != cached {
                             try runner.rewind(to: cached)
                         }
-                        cacheDiag(
+                        writeDiagnosticLine(
                             "Shrike prompt_cache hit tier=\(tier) "
                                 + "cached_tokens=\(cached) entry=\(entryID.uuidString.lowercased())")
                     } catch {
@@ -1413,7 +1413,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         if case .reconstruct(let target, let rewindTo, let announcement) = plan,
            let publishedEntryID {
             if let announcement {
-                cacheDiag(announcement
+                writeDiagnosticLine(announcement
                     + " entry=\(publishedEntryID.uuidString.lowercased())")
             }
             startRewrite(target: target, rewindTo: rewindTo, entryID: publishedEntryID)
@@ -1526,7 +1526,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         } catch {
             return .done(.unchanged)
         }
-        cacheDiag(line)
+        writeDiagnosticLine(line)
         return .done(.rewritten(dropped))
     }
 
@@ -1585,7 +1585,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             // cannot, the truncation is reconstructed like any other target,
             // with an empty remainder to prefill.
             guard runner.supportsPartialRewind else {
-                cacheDiag(line)
+                writeDiagnosticLine(line)
                 return .reconstruct(target: settled,
                                     rewindTo: common,
                                     announcement: nil)
@@ -1595,10 +1595,10 @@ public actor ServerModelSession: ServerInferenceBackend {
             } catch {
                 return .done(.unchanged)
             }
-            cacheDiag(line)
+            writeDiagnosticLine(line)
             return .done(.rewritten(settled))
         }
-        cacheDiag(line)
+        writeDiagnosticLine(line)
         return .reconstruct(target: settled, rewindTo: common, announcement: nil)
     }
 
@@ -1665,13 +1665,13 @@ public actor ServerModelSession: ServerInferenceBackend {
             if runner.continuationPosition != position {
                 try runner.rewind(to: position)
             }
-            cacheDiag("Shrike prompt_cache normalize kind=settle_rewind "
+            writeDiagnosticLine("Shrike prompt_cache normalize kind=settle_rewind "
                     + "at=\(position) settled=\(target.count) entry=\(settling)")
         case .restore(let source, let position):
             guard let promptStateStore else {
                 throw ServerPromptStateStoreError.missing(source)
             }
-            cacheDiag("Shrike prompt_cache normalize kind=settle_restore "
+            writeDiagnosticLine("Shrike prompt_cache normalize kind=settle_restore "
                     + "from=\(source.uuidString.lowercased()) at=\(position) "
                     + "settled=\(target.count) entry=\(settling)")
             do {
@@ -1685,7 +1685,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 throw error
             }
         case .reset(let reason):
-            cacheDiag("Shrike prompt_cache normalize kind=settle_reset "
+            writeDiagnosticLine("Shrike prompt_cache normalize kind=settle_reset "
                     + "reason=\(reason.rawValue) settled=\(target.count) "
                     + "entry=\(settling)")
             runner.reset()
@@ -1712,7 +1712,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         // Disowning that would cost the aborting request its live tier — and in
         // single-prefix the whole cache — for work that never began.
         guard !Task.isCancelled else {
-            cacheDiag("Shrike prompt_cache normalize kind=settle_skipped "
+            writeDiagnosticLine("Shrike prompt_cache normalize kind=settle_skipped "
                     + "reason=cancelled settled=\(target.count) "
                     + "entry=\(entryID.uuidString.lowercased())")
             return
@@ -1755,7 +1755,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             // matches it is withdrawn.
             if promptCacheMode == .singlePrefix { promptCache.invalidate() }
             activePromptCacheEntryID = nil
-            cacheDiag("Shrike prompt_cache normalize kind=settle_lost "
+            writeDiagnosticLine("Shrike prompt_cache normalize kind=settle_lost "
                     + "settled=\(target.count) entry=\(entryID.uuidString.lowercased())")
             return
         }
@@ -1771,7 +1771,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             activePromptCacheEntryID = nil
             return
         }
-        cacheDiag("Shrike prompt_cache normalize kind=settle_done "
+        writeDiagnosticLine("Shrike prompt_cache normalize kind=settle_done "
                 + "settled=\(target.count) entry=\(entryID.uuidString.lowercased())")
         guard promptCacheMode == .multiPrefix, let promptStateStore else { return }
         do {
@@ -1787,7 +1787,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                     ("Shrike prompt_cache disk_write_failed error=\(diskError) "
                         + "entry=\(entry.id.uuidString.lowercased())\n").utf8))
             }
-            cacheDiag("Shrike prompt_cache stored "
+            writeDiagnosticLine("Shrike prompt_cache stored "
                     + "tokens=\(entry.kvPosition) "
                     + "state_bytes=\(snapshot.payload.count) "
                     + "ram_bytes=\(saved.memoryBytes) "
@@ -1818,7 +1818,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             render: renderedPromptIDs,
             cancel: { pending.task.cancel() },
             wait: { await pending.task.value })
-        cacheDiag("Shrike prompt_cache arbitrate decision=\(decision.rawValue) "
+        writeDiagnosticLine("Shrike prompt_cache arbitrate decision=\(decision.rawValue) "
                 + "target=\(pending.target.count) render=\(renderedPromptIDs.count)")
     }
 
@@ -1950,7 +1950,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     ) {
         let decodeRate = result.decodeSeconds > 0
             ? Double(result.newTokens) / result.decodeSeconds : 0
-        cacheDiag(String(format:
+        writeDiagnosticLine(String(format:
             "Shrike generation prefill_s=%.3f decode_s=%.3f decode_tok_s=%.3f",
             result.prefillSeconds,
             result.decodeSeconds,
@@ -2027,7 +2027,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         } else {
             rankMass = "n/a"
         }
-        cacheDiag(String(
+        writeDiagnosticLine(String(
             format: "Shrike runner cb1_ms=%.3f io_ms=%.3f cb2_ms=%.3f "
                 + "head_ms=%.3f head_fused_ms=%.3f "
                 + "wait_ms=%.3f body_ms=%.3f "
@@ -2097,25 +2097,25 @@ public actor ServerModelSession: ServerInferenceBackend {
         let summary = runner.kernelGPUTimingSummary()
         let totalGPU = summary.reduce(0) { $0 + $1.millis }
         for entry in summary {
-            cacheDiag(String(
+            writeDiagnosticLine(String(
                 format: "Shrike kernel role=%@ gpu_ms=%.3f per_token_ms=%.3f count=%d",
                 entry.role, entry.millis, entry.millis / Double(tokens), entry.count))
         }
         // Role sums overlap by design. Merged busy/span is the actual queue
         // occupancy and distinguishes useful concurrency from idle gaps.
         let occupancy = runner.kernelGPUOccupancy()
-        cacheDiag(String(format: "Shrike kernel total_gpu_ms=%.3f gpu_share_of_decode=%.1f%%",
+        writeDiagnosticLine(String(format: "Shrike kernel total_gpu_ms=%.3f gpu_share_of_decode=%.1f%%",
             totalGPU,
             result.decodeSeconds > 0
                 ? totalGPU / (result.decodeSeconds * 1000) * 100 : 0))
         for gap in runner.kernelGPUGaps().prefix(12) {
-            cacheDiag(String(
+            writeDiagnosticLine(String(
                 format: "Shrike gap %@ total_ms=%.1f per_token_ms=%.3f count=%d "
                     + "host_ms=%.1f driver_ms=%.1f queue_ms=%.1f",
                 gap.transition, gap.millis, gap.millis / Double(tokens), gap.count,
                 gap.hostMillis, gap.driverMillis, gap.queueMillis))
         }
-        cacheDiag(String(format: "Shrike kernel busy_ms=%.3f span_ms=%.3f "
+        writeDiagnosticLine(String(format: "Shrike kernel busy_ms=%.3f span_ms=%.3f "
             + "occupancy=%.1f%% busy_share_of_decode=%.1f%% busy_per_token_ms=%.3f",
             occupancy.busyMillis, occupancy.spanMillis,
             occupancy.spanMillis > 0

@@ -194,12 +194,6 @@ extension Model {
         return streamer.residentExperts()
     }
 
-    public func routedExpertByteStride(layer: Int) throws -> Int {
-        try ensureLayerOpened(layer)
-        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
-        return Int(streamer.layout.expertStride)
-    }
-
     public func beginRoutedExpertPrefetch(layer: Int,
                                            experts: [Int],
                                            cells: [Int]) throws
