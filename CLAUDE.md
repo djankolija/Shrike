@@ -45,13 +45,13 @@ Nothing runs them for you — there is no CI — so run them yourself
 before calling work done. All of them constrain how code gets written here:
 
 1. **Release build with zero warnings.** A new warning fails the build.
-2. **`swiftlint lint --strict --baseline .swiftlint-baseline.json`** — three rules:
-   `force_cast`, `force_try`, and `function_body_length` (warn 120, error 400). A
-   force cast or force try needs `// swiftlint:disable:next force_cast` (or
-   `force_try`) on the line above it, with the reason stated in a comment. The 18
-   functions already over 120 lines are recorded in the baseline; anything new fails.
-   Regenerate with `swiftlint lint --write-baseline .swiftlint-baseline.json` when you
-   legitimately fix one, or the gate fails on a stale entry. Decompose as you write.
+2. **`swiftlint lint --strict`**: three rules, `force_cast`, `force_try`, and
+   `function_body_length` (warn 120, error 400). A force cast or force try needs
+   `// swiftlint:disable:next force_cast` (or `force_try`) on the line above it, with
+   the reason stated in a comment. No function body is over 120 lines (v17 Task 4
+   emptied the baseline and retired the file, 2026-09-08), so there is no baseline to
+   pass and any new one fails the gate. Decompose as you write: a sequence of named
+   stage methods over a small context struct, in the order the work runs.
 3. **Markdown link check** — globs every `*.md` in the repo, so it binds on any document
    you add. Relative links must resolve.
 4. **`swift test --no-parallel`** — serial, always. Pass `--filter` through as needed.
