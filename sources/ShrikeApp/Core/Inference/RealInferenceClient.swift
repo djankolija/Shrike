@@ -281,10 +281,7 @@ actor RealInferenceSession {
         loadedKey = nil
     }
 
-    /// lint:allow-long one generation on the app's in-process client: build
-    /// the request, stream events back to the caller, and report the final
-    /// state. The event callback closes over the loop's mutable progress, so
-    /// the stages cannot be separated without hoisting that state.
+    /// One generation on the app's in-process client: build the request, stream events back to the caller, and report the final state.
     func run(request: AppGenerationRequest,
              memorySampler: AppMemorySampler,
              continuation: AsyncThrowingStream<AppInferenceEvent, Error>.Continuation) async {
@@ -310,25 +307,7 @@ actor RealInferenceSession {
                 throw AppInferenceError.modelLoadFailed("session lost its loaded state")
             }
 
-            var messages: [GFTokenizer.Message] = [
-                GFTokenizer.Message(role: .user, content: request.prompt)
-            ]
-            if request.runtimeOptions.conciseMode {
-                // Concise mode injects the per-quantization system prompt.
-                // The routed expert bit width comes from the manifest.
-                let bits = ((try? ManifestReader.peekFamily(
-                        directoryURL: request.modelDirectory))
-                    .flatMap { ArchConfig.knownArchitectures[$0] }
-                    .flatMap { expected in
-                        try? ManifestReader.load(
-                            directoryURL: request.modelDirectory,
-                            expecting: expected).quant?.routedExpert.weightBits }) ?? 4
-                messages = ConcisePrompt.appendingSystemPrompt(
-                    ConcisePrompt.prompt(forRoutedExpertBits: bits),
-                    to: messages)
-            }
-            let renderedPrompt = try tokenizer.applyChatTemplate(messages)
-            let promptIds = tokenizer.encode(renderedPrompt, addBOS: false)
+            let promptIds = try renderPrompt(request: request, tokenizer: tokenizer)
             progress.promptTokenCount = promptIds.count
             // D23: reject only when prompt + 1 exceeds the context, so a
             // prompt that fills the context exactly can still produce one
@@ -387,19 +366,10 @@ actor RealInferenceSession {
             continuation.yield(.finished(diagnostics))
             continuation.finish()
         } catch is CancellationError {
-            let diagnostics = makeDiagnostics(request: request,
-                                              memorySampler: memorySampler,
-                                              progress: progress,
-                                              stopReason: .cancelled,
-                                              prefillSeconds: progress.elapsedPrefillSeconds,
-                                              decodeSeconds: progress.elapsedDecodeSeconds,
-                                              generated: progress.generated,
-                                              prefill: PrefillExecutionDiagnostics(
-                                                config: prefillConfig,
-                                                executedMode: prefillConfig.mode == .chunked ? .chunked : .off,
-                                                kvStorageMode: PrefillKVStorageMode(
-                                                    precision: request.runtimeOptions
-                                                        .kvCachePrecision)))
+            let diagnostics = cancellationDiagnostics(request: request,
+                                                      memorySampler: memorySampler,
+                                                      progress: progress,
+                                                      prefillConfig: prefillConfig)
             continuation.yield(.cancelled(diagnostics))
             continuation.finish(throwing: AppInferenceError.cancelled)
         } catch let prefillError as PrefillError {
@@ -422,6 +392,49 @@ actor RealInferenceSession {
             failGeneration(.unknown("\(error)"), request: request, memorySampler: memorySampler,
                            progress: progress, continuation: continuation)
         }
+    }
+
+    private func renderPrompt(request: AppGenerationRequest,
+                              tokenizer: GFTokenizer) throws -> [Int32] {
+        var messages: [GFTokenizer.Message] = [
+            GFTokenizer.Message(role: .user, content: request.prompt)
+        ]
+        if request.runtimeOptions.conciseMode {
+            // Concise mode injects the per-quantization system prompt.
+            // The routed expert bit width comes from the manifest.
+            let bits = ((try? ManifestReader.peekFamily(
+                    directoryURL: request.modelDirectory))
+                .flatMap { ArchConfig.knownArchitectures[$0] }
+                .flatMap { expected in
+                    try? ManifestReader.load(
+                        directoryURL: request.modelDirectory,
+                        expecting: expected).quant?.routedExpert.weightBits }) ?? 4
+            messages = ConcisePrompt.appendingSystemPrompt(
+                ConcisePrompt.prompt(forRoutedExpertBits: bits),
+                to: messages)
+        }
+        let renderedPrompt = try tokenizer.applyChatTemplate(messages)
+        let promptIds = tokenizer.encode(renderedPrompt, addBOS: false)
+        return promptIds
+    }
+
+    private func cancellationDiagnostics(request: AppGenerationRequest,
+                                         memorySampler: AppMemorySampler,
+                                         progress: ProgressState,
+                                         prefillConfig: PrefillRuntimeConfig) -> AppDiagnostics {
+        makeDiagnostics(request: request,
+                        memorySampler: memorySampler,
+                        progress: progress,
+                        stopReason: .cancelled,
+                        prefillSeconds: progress.elapsedPrefillSeconds,
+                        decodeSeconds: progress.elapsedDecodeSeconds,
+                        generated: progress.generated,
+                        prefill: PrefillExecutionDiagnostics(
+                            config: prefillConfig,
+                            executedMode: prefillConfig.mode == .chunked ? .chunked : .off,
+                            kvStorageMode: PrefillKVStorageMode(
+                                precision: request.runtimeOptions
+                                    .kvCachePrecision)))
     }
 
     private func failGeneration(_ error: AppInferenceError,
