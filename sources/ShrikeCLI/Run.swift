@@ -44,9 +44,19 @@ public struct RunResult: Equatable, Sendable {
     public init(exitCode: Int32) { self.exitCode = exitCode }
 }
 
-/// lint:allow-long the CLI driver: parse messages, load the model, run one
-/// completion, print the timing footer. It is the top-level script for a
-/// one-shot tool, and its steps have no other caller.
+private enum StageOutcome<Value> {
+    case value(Value)
+    case exit(RunResult)
+}
+
+private struct LoadedRuntime {
+    let context: MetalContext
+    let runtime: RuntimeConfiguration
+    let runner: RealForwardRunner
+    let scratch: RawCompletionScratch
+}
+
+/// The CLI driver: parse messages, load the model, run one completion, print the timing footer.
 public func run(args: Args,
                 stdout: FileHandle = .standardOutput,
                 stderr: FileHandle = .standardError) async -> RunResult {
@@ -60,60 +70,22 @@ public func run(args: Args,
         // expert bit width comes from the manifest so the right prompt
         // variant is selected before the full model load.
         let expectedArch: ArchConfig
-        do {
-            let family = try ManifestReader.peekFamily(directoryURL: modelURL)
-            guard let baseline = ArchConfig.knownArchitectures[family] else {
-                return errored(stderr,
-                               "no compiled baseline for family \(family.rawValue)", 1)
-            }
-            expectedArch = baseline
-        } catch {
-            return errored(stderr, "cannot read model manifest: \(error)", 1)
-        }
-        let concisePrompt: String?
-        if args.concise {
-            let bits = (try? ManifestReader.load(
-                directoryURL: modelURL,
-                expecting: expectedArch).quant?.routedExpert.weightBits) ?? 4
-            concisePrompt = ConcisePrompt.prompt(forRoutedExpertBits: bits)
-        } else {
-            concisePrompt = nil
+        switch resolveExpectedArch(modelURL: modelURL, stderr: stderr) {
+        case .value(let arch):
+            expectedArch = arch
+        case .exit(let result):
+            return result
         }
         let promptIds: [Int32]
-        if let rawPrompt = args.prompt {
-            if let concisePrompt {
-                let messages = ConcisePrompt.appendingSystemPrompt(
-                    concisePrompt,
-                    to: [GFTokenizer.Message(role: .user, content: rawPrompt)])
-                let rendered = try tokenizer.applyChatTemplate(messages)
-                promptIds = tokenizer.encode(rendered, addBOS: false)
-            } else {
-                promptIds = tokenizer.encode(rawPrompt, addBOS: true)
-            }
-        } else if let messagesFile = args.messagesFile {
-            let data = try Data(contentsOf: URL(fileURLWithPath: messagesFile),
-                                options: [.mappedIfSafe])
-            let rows = try JSONDecoder().decode([MessageJSON].self, from: data)
-            var messages = try rows.map { row -> GFTokenizer.Message in
-                guard let role = GFTokenizer.Role(rawValue: row.role) else {
-                    throw GFTokenizerError.invalidChatTemplate("unsupported role \(row.role)")
-                }
-                return GFTokenizer.Message(role: role, content: row.content)
-            }
-            if let concisePrompt {
-                messages = ConcisePrompt.appendingSystemPrompt(concisePrompt, to: messages)
-            }
-            let rendered = try tokenizer.applyChatTemplate(messages)
-            promptIds = tokenizer.encode(rendered, addBOS: false)
-        } else {
-            return errored(stderr, "one of --prompt or --messages-file is required", 2)
-        }
-        guard !promptIds.isEmpty else { return errored(stderr, "empty prompt", 2) }
-        guard promptIds.count < args.maxContext else {
-            return errored(
-                stderr,
-                "context overflow: prompt \(promptIds.count) reaches maxContext \(args.maxContext)",
-                2)
+        switch try buildPrompt(args: args,
+                               modelURL: modelURL,
+                               tokenizer: tokenizer,
+                               expectedArch: expectedArch,
+                               stderr: stderr) {
+        case .value(let ids):
+            promptIds = ids
+        case .exit(let result):
+            return result
         }
         let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
         let config = GenerationConfig(
@@ -126,59 +98,26 @@ public func run(args: Args,
             seed: args.seed,
             stopStrings: args.stops,
             extraStopTokens: [])
-        let loadRuntime = try RuntimeConfiguration(
-            expertCacheSlots: args.expertCacheSlots,
-            forceLogitsHead: !config.isPureGreedy,
-            prefetchTracePath: RuntimeConfiguration.environmentPrefetchTracePath())
-
-        guard MTLCreateSystemDefaultDevice() != nil else {
-            return errored(stderr, "no Metal device", 1)
+        let loaded: LoadedRuntime
+        switch try buildRuntime(args: args,
+                                modelURL: modelURL,
+                                expectedArch: expectedArch,
+                                config: config,
+                                promptIds: promptIds,
+                                stderr: stderr) {
+        case .value(let value):
+            loaded = value
+        case .exit(let result):
+            return result
         }
-        let context = try MetalContext()
-        let model = try Model.load(
-            directoryURL: modelURL,
-            device: context.device,
-            expecting: expectedArch,
-            streamingMode: .pread(slotCount: loadRuntime.expertCacheSlots),
-            integrityPolicy: .resolved(directoryURL: modelURL))
-        let prefillChunkTokens: Int
-        switch args.prefillChunk {
-        case .fixed(let tokens):
-            prefillChunkTokens = tokens
-        case .auto:
-            prefillChunkTokens = RuntimeConfiguration.allowedPrefillChunkTokens
-                .first(where: { $0 >= promptIds.count })
-                ?? PrefillRuntimeConfig.maxChunkTokens
-        case nil:
-            prefillChunkTokens = model.config.family == .qwen36
-                ? RuntimeConfiguration.qwenLongPrefillChunkTokens
-                : loadRuntime.prefillChunkTokens
-        }
-        let runtime = try RuntimeConfiguration(
-            expertCacheSlots: loadRuntime.expertCacheSlots,
-            prefillChunkTokens: prefillChunkTokens,
-            forceLogitsHead: !config.isPureGreedy,
-            prefetchTracePath: loadRuntime.prefetchTracePath,
-            kvCachePrecision: args.kvCachePrecision,
-            ropeScalingMode: args.ropeScalingMode,
-            yarnContextTokens: args.ropeScalingMode == .yarn
-                ? args.maxContext : RuntimeConfiguration.defaultYaRNContextTokens)
-        let runner = try RealForwardRunner(
-            model: model,
-            context: context,
-            maxContext: args.maxContext,
-            runtimeConfiguration: runtime)
-        let scratch = try RawCompletionScratch(context: context,
-                                               vocab: model.config.vocabSize,
-                                               logitSoftcap: Float(model.config.finalLogitSoftcap))
         let stats = try await runRawCompletion(
-            producer: runner,
+            producer: loaded.runner,
             tokenizer: tokenizer,
             promptIds: promptIds,
             config: config,
-            context: context,
-            scratch: scratch,
-            prefillConfig: runtime.prefillConfig) { progress in
+            context: loaded.context,
+            scratch: loaded.scratch,
+            prefillConfig: loaded.runtime.prefillConfig) { progress in
                 switch progress {
                 case .prefill:
                     break
@@ -190,11 +129,7 @@ public func run(args: Args,
             }
 
         if !args.quiet {
-            let tokensPerSecond = stats.decodeSeconds > 0
-                ? Double(stats.newTokens) / stats.decodeSeconds
-                : 0
-            let footer = "\n[stop=\(String(describing: stats.reason)) prefill=\(stats.prefillTokens)tok/\(String(format: "%.2f", stats.prefillSeconds))s new=\(stats.newTokens)tok decode=\(String(format: "%.2f", stats.decodeSeconds))s tok/s=\(String(format: "%.3f", tokensPerSecond))]\n"
-            stderr.write(Data(footer.utf8))
+            writeFooter(stats: stats, stderr: stderr)
         }
         return RunResult(exitCode: 0)
     } catch is CancellationError {
@@ -203,6 +138,138 @@ public func run(args: Args,
     } catch {
         return errored(stderr, "\(error)", 1)
     }
+}
+
+private func resolveExpectedArch(modelURL: URL,
+                                 stderr: FileHandle) -> StageOutcome<ArchConfig> {
+    do {
+        let family = try ManifestReader.peekFamily(directoryURL: modelURL)
+        guard let baseline = ArchConfig.knownArchitectures[family] else {
+            return .exit(errored(stderr,
+                                 "no compiled baseline for family \(family.rawValue)", 1))
+        }
+        return .value(baseline)
+    } catch {
+        return .exit(errored(stderr, "cannot read model manifest: \(error)", 1))
+    }
+}
+
+private func buildPrompt(args: Args,
+                         modelURL: URL,
+                         tokenizer: GFTokenizer,
+                         expectedArch: ArchConfig,
+                         stderr: FileHandle) throws -> StageOutcome<[Int32]> {
+    let concisePrompt: String?
+    if args.concise {
+        let bits = (try? ManifestReader.load(
+            directoryURL: modelURL,
+            expecting: expectedArch).quant?.routedExpert.weightBits) ?? 4
+        concisePrompt = ConcisePrompt.prompt(forRoutedExpertBits: bits)
+    } else {
+        concisePrompt = nil
+    }
+    let promptIds: [Int32]
+    if let rawPrompt = args.prompt {
+        if let concisePrompt {
+            let messages = ConcisePrompt.appendingSystemPrompt(
+                concisePrompt,
+                to: [GFTokenizer.Message(role: .user, content: rawPrompt)])
+            let rendered = try tokenizer.applyChatTemplate(messages)
+            promptIds = tokenizer.encode(rendered, addBOS: false)
+        } else {
+            promptIds = tokenizer.encode(rawPrompt, addBOS: true)
+        }
+    } else if let messagesFile = args.messagesFile {
+        let data = try Data(contentsOf: URL(fileURLWithPath: messagesFile),
+                            options: [.mappedIfSafe])
+        let rows = try JSONDecoder().decode([MessageJSON].self, from: data)
+        var messages = try rows.map { row -> GFTokenizer.Message in
+            guard let role = GFTokenizer.Role(rawValue: row.role) else {
+                throw GFTokenizerError.invalidChatTemplate("unsupported role \(row.role)")
+            }
+            return GFTokenizer.Message(role: role, content: row.content)
+        }
+        if let concisePrompt {
+            messages = ConcisePrompt.appendingSystemPrompt(concisePrompt, to: messages)
+        }
+        let rendered = try tokenizer.applyChatTemplate(messages)
+        promptIds = tokenizer.encode(rendered, addBOS: false)
+    } else {
+        return .exit(errored(stderr, "one of --prompt or --messages-file is required", 2))
+    }
+    guard !promptIds.isEmpty else { return .exit(errored(stderr, "empty prompt", 2)) }
+    guard promptIds.count < args.maxContext else {
+        return .exit(errored(
+            stderr,
+            "context overflow: prompt \(promptIds.count) reaches maxContext \(args.maxContext)",
+            2))
+    }
+    return .value(promptIds)
+}
+
+private func buildRuntime(args: Args,
+                          modelURL: URL,
+                          expectedArch: ArchConfig,
+                          config: GenerationConfig,
+                          promptIds: [Int32],
+                          stderr: FileHandle) throws -> StageOutcome<LoadedRuntime> {
+    let loadRuntime = try RuntimeConfiguration(
+        expertCacheSlots: args.expertCacheSlots,
+        forceLogitsHead: !config.isPureGreedy,
+        prefetchTracePath: RuntimeConfiguration.environmentPrefetchTracePath())
+
+    guard MTLCreateSystemDefaultDevice() != nil else {
+        return .exit(errored(stderr, "no Metal device", 1))
+    }
+    let context = try MetalContext()
+    let model = try Model.load(
+        directoryURL: modelURL,
+        device: context.device,
+        expecting: expectedArch,
+        streamingMode: .pread(slotCount: loadRuntime.expertCacheSlots),
+        integrityPolicy: .resolved(directoryURL: modelURL))
+    let prefillChunkTokens: Int
+    switch args.prefillChunk {
+    case .fixed(let tokens):
+        prefillChunkTokens = tokens
+    case .auto:
+        prefillChunkTokens = RuntimeConfiguration.allowedPrefillChunkTokens
+            .first(where: { $0 >= promptIds.count })
+            ?? PrefillRuntimeConfig.maxChunkTokens
+    case nil:
+        prefillChunkTokens = model.config.family == .qwen36
+            ? RuntimeConfiguration.qwenLongPrefillChunkTokens
+            : loadRuntime.prefillChunkTokens
+    }
+    let runtime = try RuntimeConfiguration(
+        expertCacheSlots: loadRuntime.expertCacheSlots,
+        prefillChunkTokens: prefillChunkTokens,
+        forceLogitsHead: !config.isPureGreedy,
+        prefetchTracePath: loadRuntime.prefetchTracePath,
+        kvCachePrecision: args.kvCachePrecision,
+        ropeScalingMode: args.ropeScalingMode,
+        yarnContextTokens: args.ropeScalingMode == .yarn
+            ? args.maxContext : RuntimeConfiguration.defaultYaRNContextTokens)
+    let runner = try RealForwardRunner(
+        model: model,
+        context: context,
+        maxContext: args.maxContext,
+        runtimeConfiguration: runtime)
+    let scratch = try RawCompletionScratch(context: context,
+                                           vocab: model.config.vocabSize,
+                                           logitSoftcap: Float(model.config.finalLogitSoftcap))
+    return .value(LoadedRuntime(context: context,
+                                runtime: runtime,
+                                runner: runner,
+                                scratch: scratch))
+}
+
+private func writeFooter(stats: RawDecodeResult, stderr: FileHandle) {
+    let tokensPerSecond = stats.decodeSeconds > 0
+        ? Double(stats.newTokens) / stats.decodeSeconds
+        : 0
+    let footer = "\n[stop=\(String(describing: stats.reason)) prefill=\(stats.prefillTokens)tok/\(String(format: "%.2f", stats.prefillSeconds))s new=\(stats.newTokens)tok decode=\(String(format: "%.2f", stats.decodeSeconds))s tok/s=\(String(format: "%.3f", tokensPerSecond))]\n"
+    stderr.write(Data(footer.utf8))
 }
 
 private func errored(_ stderr: FileHandle, _ message: String, _ code: Int32) -> RunResult {
