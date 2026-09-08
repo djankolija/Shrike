@@ -413,6 +413,79 @@ flag and `CLAUDE.md`'s gate text go.
 
 Real: the baseline's entries, to zero. Free: golden per commit, the arms at the end.
 
+**Built (2026-09-08), twelve commits on `refactor/v17-consolidation`, one per file, one
+for the baseline and one for the fold's last marker (`4de6bd1`), each with the four gates
+and the local golden identical on both profiles:** the fourteen functions became stage methods, every statement moved once in
+its order and every commit, wait, event, counter, timing mark, log line, error text, lock
+span, early exit and `defer` where it was, each move checked by the implementer as a line
+multiset against the previous tree and the decode path's four by a step-scoped review that
+walked the originals beside the stages.
+
+| commit | file | function, body lines before to after | the stages |
+| --- | --- | --- | --- |
+| `89f5185` | `RealForwardRunner.swift` | `encodeDecodeRoutedMoE` 289 to 36; `produceToken` 220 to 68; `executePrefillChunk` 165 to 100; `encodeFullAttentionPrefill` 199 to 96 | the routed stage's ten over `DecodeRoutedLayerContext` (the readback, the join, the plan, the pin, the partition, the hit split, the I/O acquisition, the speculative hand-off, the fixup build, the pending hand-off); the dense layer, the routed layer, the head; the validation, the token buffer, the embed, the ANE probe, the close-out; the RoPE epilogue, the causal dispatch |
+| `ac9bf94` | `ServerInference.swift` | `generate` 256 to 87; `load` 140 to 91 | the snapshot init, a `StreamingSink`, the decode, the structured finish, the cache settlement; the slots, the runner, the cache domain, the cache |
+| `091db14` | `Model.swift` | `load` 148 to 68 | eight, one per comment section, the stats `inout` |
+| `01199ef` | `RawCompletion.swift` | `runRawCompletion` 168 to 87 | the prefill, the decode loop |
+| `79e693d` | `RealInferenceClient.swift` | `run` 126 to 101 | the prompt rendering, the cancellation diagnostics |
+| `bc362b3` | `ShrikeCLI/Args.swift` | `parse` 162 to 5 | the flag loop, the validation, the construction over a parse context; two typed helpers |
+| `2eaf680` | `ServerArguments.swift` | `parse` 218 to 4 | the loop, the switch, the validation, the construction; one emptiness helper |
+| `8542586` | `ShrikeCLI/Run.swift` | `run` 148 to 74 | the arch resolution, the prompt, the runtime, the footer, the exits as a stage outcome |
+| `c0367d3` | `ShrikeDecodeService/Entry.swift` | `main` 177 to 66 | the load and generate handlers |
+| `ecc6613` | `RemoteStreamingRepacker.swift` | `runPrepared` 231 to 10 | the resume, the output reservation, the ranges, the finalize over `PreparedInstall` |
+| `1184875` | `.swiftlint-baseline.json`, `CLAUDE.md` | | the empty file deleted, the gate `swiftlint lint --strict`, the gate text rewritten |
+
+The count, at `4de6bd1` against `62edee3`:
+
+| what | before | after |
+| --- | ---: | ---: |
+| swiftlint baseline entries | 14 | 0, the file gone |
+| the longest function body | 289 lines | 110 (the server parser's switch, ten from the bar: the next two or three flags put it over, and the honest split then is by option group) |
+| `lint:allow-long` doc paragraphs (prose only) | 18 | 0 |
+| the ten files | 11830 lines | 12472 (+642: signatures, structs, calls, returns) |
+| lines under `sources/` | | +1792 −1152 |
+| the serial suite | 1234 tests, 201 s | 1234 tests, 201 s |
+
+What the work settled that the plan left open: a stage beyond the named seams is right when the named ones leave a function over the bar or an exit belongs with its block (the server's structured finish and cache settlement, the CLI driver's arch resolution, the repacker's output reservation, the server parser's switch); a seam the code no longer has is dropped (`selectProducer`, after Task 2's MTP deletion); the swap between a context struct and plain parameters follows whether the stages hand state forward (the routed stage, the parsers, the repacker) or only share inputs (the token producer, the prefill, the loader, the raw completion, the decode service, whose load case's escaping task cannot capture an `inout` context); and Swift 6 shapes two seams, the server's sink built inside the decode stage because region isolation refuses to send non-Sendable closures whose capture is a parameter, and one `let` copy in the repacker's copy stage because an `inout` cannot be captured by an escaping `Sendable` closure.
+
+**The arms (2026-09-08, the mini at Step 5's build before the review's fold, deployed at
+the bare launch; the fold's commits differ from it by comment lines alone, so the code is
+the final tree's and only the embedded line numbers moved; golden identical on both
+profiles there; two production lifetimes per shape through the rig, beside Task 3's arms
+read the same way):**
+
+| shape | v17 T3 tok/s | v17 T4 tok/s | misses per token | landed hits per token | reading layers per token | answer |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| the card | 15.32 / 15.02 / 15.59 / 15.61 | 15.57 / 15.62 | 20.0 / 20.0 | 7.48, 7.24, 7.21, 6.99 / 7.25, 7.16 | 12.74, 12.77, 12.75, 12.74 / 12.74, 12.76 | identical |
+| the 300 | 16.08 / 16.44 | 16.43 / 16.30 | 20.0, 19.9 / 19.9, 20.0 | 5.89, 6.09 / 6.19, 6.04 | 13.55, 13.52 / 13.52, 13.53 | identical |
+| the 1k | 16.30 / 16.28 | 16.14 / 16.16 | 18.8 / 18.8 | 6.43, 6.38 / 6.40, 6.47 | 12.58, 12.57 / 12.59, 12.59 | identical |
+
+Free: flat within the drift on all three shapes, the sixty-odd stage calls a token now
+makes invisible against its 60 ms; every answer identical to Task 3's, the misses to the
+tenth, the ring's counts and the reading layers per token within the noise. The turn rig's
+300-token pair: the warm second turn 3.09 to 3.13 s against Task 3's 3.09 to 3.20, the cold
+first turn 7.67 against 7.75.
+
+**The reviews (2026-09-08).** The runner's commit had its own review before it landed
+(order preserved in all four functions with no deviation, five Minor findings, two folded
+before the commit, three carried to the task's review). The task's review by a fresh
+reviewer over the eleven commits found the spec met (every function under the bar, every
+plan stage present under its name or a narrower justified one, the five unplanned stages
+each needed and faithful, the dropped seam right, the baseline gone and the gate text
+accurate, no type beyond context structs, the plan's sink and return shapes) and the
+order preserved with no deviation (the nine non-runner functions walked statement by
+statement against the base, `produceToken` end to end, the routed stage's diff in full,
+the parsers' typed helpers and the 51-field snapshot init exact folds); no Critical or
+Important finding, five Minor, approved; the three carried minors judged fit to stay. The
+fold, comment lines only, into the owning commits by fixup and autosquash: a one-line role
+summary restored on the eight functions whose only doc line went with their length
+paragraph (the runner's fold had kept one), the moved comment that said "the load below"
+now naming `Model.load`, and the five length paragraphs still standing on functions that
+were never long retired (the runner's four and the OpenAI models' one), since the gate
+text now says decompose as you write. Kept by ruling: the raw completion's result as a
+struct where three files used labelled tuples. The fold's tree: the release build clean,
+the flagless lint clean, 1234 tests, the local golden identical on both profiles.
+
 ## Method
 
 v16's, with the chapter's own gates: the four gates per code commit; golden identical on

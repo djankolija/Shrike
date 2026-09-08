@@ -342,8 +342,13 @@ marked modelled.
 
 ### Task 4: the runner decomposed
 
-- [ ] **T4: the baseline to zero entries, the file and the gate's flag with it.** One
-  commit per file, in this order so the decode path's functions go first.
+- [x] **T4: the baseline to zero entries, the file and the gate's flag with it.** One
+  commit per file, in this order so the decode path's functions go first. **DONE
+  2026-09-08** (twelve commits `89f5185` to `4de6bd1`: the fourteen functions to stage
+  methods with no behaviour change, the longest body 289 to 110 lines, the baseline 14
+  entries to none and the file gone, the gate `swiftlint lint --strict`; 11 files
+  +1792 −1152; 1234 tests throughout; golden identical on both boxes; the arms flat within
+  the drift with every answer identical).
 
   **Steps.**
   - [ ] Step 1: `RealForwardRunner.swift`. `encodeDecodeRoutedMoE` over a
@@ -358,27 +363,75 @@ marked modelled.
         embed-or-blit, the ANE probe, the close-out as methods. `encodeFullAttentionPrefill`:
         the RoPE epilogue and the causal attention dispatch as methods. Each commit: gates,
         golden, the baseline regenerated and diffed (the runner's entries gone, none
-        added).
-  - [ ] Step 2: `ServerInference.swift`. `RunnerCounterSnapshot.init(_ runner:)` (the
+        added). **DONE 2026-09-08** (`89f5185`, one commit): the routed stage 289 to 36
+        body lines over the struct with the ten stages in the map's order, the
+        lease-releasing `defer` still in the outer after the pin and the speculative
+        return still taken at its point; `produceToken` 220 to 68 over plain parameters;
+        `executePrefillChunk` 165 to 100 (the embed, no blit left to name);
+        `encodeFullAttentionPrefill` 199 to 96; a scripted move comparison and a
+        step-scoped review (order preserved, no deviation, 0 Critical, 0 Important, 5
+        Minor, two folded before the commit); the baseline 14 to 10.
+  - [x] Step 2: `ServerInference.swift`. `RunnerCounterSnapshot.init(_ runner:)` (the
         app's client already has it) replaces the 60-line literal in `generate`; a
         `StreamingSink` holds the content, reasoning, calls, stop matcher and `publish`;
         `selectProducer` picks the runner. `load`: `resolveExpertCacheSlots`, `makeRunner`,
-        `makePromptCacheDomain`, `makePromptCache`. Gates, golden.
-  - [ ] Step 3: `PreadExpertStreamer.init` (already shrunk by Task 2's deletions;
+        `makePromptCacheDomain`, `makePromptCache`. Gates, golden. **DONE 2026-09-08**
+        (`ac9bf94`): `generate` 256 to 87 and `load` 140 to 91; the snapshot init one
+        assignment per field in the literal's order; the sink built inside `runDecode`
+        and returned, since Swift 6 region isolation refuses the non-Sendable closures
+        when their capture is a parameter; two stages beyond the plan's (the structured
+        finish, the cache settlement) since the named seams left `generate` near 200;
+        `selectProducer` dropped, Task 2's MTP deletion having left one producer; the
+        baseline 10 to 8.
+  - [x] Step 3: `PreadExpertStreamer.init` (already shrunk by Task 2's deletions;
         `allocateCells` and `makeReader` if still over), `Model.load` (one method per
         comment section, `ModelLoadStats` threaded), `RawCompletion` (`runPrefill` and
         `runDecodeLoop`), `RealInferenceClient.run` (`failureDiagnostics`,
-        `renderPrompt`). Gates, golden.
-  - [ ] Step 4: `Args.parse` and `ServerArguments.parse` (`validate()` for the post-loop
+        `renderPrompt`). Gates, golden. **DONE 2026-09-08** (three commits, `091db14`,
+        `01199ef`, `79e693d`): the streamer's init already under the bar after Tasks 2
+        and 3, nothing to do; `Model.load` 148 to 68 with eight section stages and the
+        stats `inout`, the three file-closing `defer`s kept in `load`; `runRawCompletion`
+        168 to 87 with the prefill returning the seed and the loop returning an outcome,
+        all sixteen loop tests unchanged; `RealInferenceClient.run` 126 to 101, the
+        plan's `failureDiagnostics` narrowed to `cancellationDiagnostics` (the one arm
+        that builds them inline); the baseline 8 to 5.
+  - [x] Step 4: `Args.parse` and `ServerArguments.parse` (`validate()` for the post-loop
         block, typed value helpers), `Run.run` (`buildPrompt`, `buildRuntime`, the footer),
         `Entry.main` (`handleLoad`, `handleGenerate`), `RemoteStreamingRepacker.runPrepared`
-        (`validateResume`, `copyRanges`, `finalizeInstall`). Gates.
-  - [ ] Step 5: the baseline empty: `.swiftlint-baseline.json` deleted, the gate becomes
+        (`validateResume`, `copyRanges`, `finalizeInstall`). Gates. **DONE 2026-09-08**
+        (five commits, `bc362b3`, `2eaf680`, `8542586`, `c0367d3`, `ecc6613`, each with
+        the four gates and the local golden): the two parsers 162 and 218 to 5 and 4 over
+        a parse context with the flag loop, the validation and the construction as
+        mutating stages (the server's exhaustive switch a stage of its own), typed
+        helpers only where every folded case threw the same text; `Run.run` 148 to 74
+        with the six early exits as a stage outcome carrying the same bytes to stderr;
+        `Entry.main` 177 to 66 with the load and generate handlers, the other three cases
+        inline; `runPrepared` 231 to 10 with the output reservation as a fourth stage for
+        the dry-run exit and one added `let` copy Swift 6 required; the baseline 5 to 0.
+  - [x] Step 5: the baseline empty: `.swiftlint-baseline.json` deleted, the gate becomes
         `swiftlint lint --strict`, `CLAUDE.md`'s gate 2 text updated (the 18 functions'
         sentence gone). Gates, golden on both boxes, the turn rig's pair, the arms on the
-        mini (deploy leave asked first).
-  - [ ] Step 6: a fresh reviewer over the task (no behaviour change: every commit, wait
-        and counter in the same order), the fixes folded, the docs commit.
+        mini (deploy leave asked first). **DONE 2026-09-08** (`1184875`; the deploy under
+        the session's leave, at this step's build before the review's fold, from which the
+        final tree differs by comment lines alone): the file gone, the flagless lint
+        clean, the gate text rewritten; the four gates (1234 tests in 170 suites), golden
+        identical on both boxes and both profiles; the arms beside Task 3's: the card
+        15.57 / 15.62 tok/s
+        against 15.32 / 15.02 / 15.59 / 15.61, the 300 16.43 / 16.30 against 16.08 /
+        16.44, the 1k 16.14 / 16.16 against 16.30 / 16.28, every answer identical, misses
+        20.0 / 20.0 / 18.8 to the tenth; the pair's warm 300-token turn 3.09 to 3.13 s
+        against 3.09 to 3.20, the cold 7.67 against 7.75. Free within the drift.
+  - [x] Step 6: a fresh reviewer over the task (no behaviour change: every commit, wait
+        and counter in the same order), the fixes folded, the docs commit. **DONE
+        2026-09-08**: the review over the eleven commits found the spec met and the order
+        preserved with no deviation in all fourteen functions (the nine non-runner ones
+        walked statement by statement against the base, the runner's four by their own
+        earlier review and a spot walk), 0 Critical, 0 Important, 5 Minor, approved; the
+        fold comment-only by fixup and autosquash (the eight lost role summaries
+        restored, one moved comment reworded, the five stale length paragraphs retired,
+        the last one in `OpenAIModels.swift` as `4de6bd1`); the result struct in the raw
+        completion kept by ruling; the folded tree's gates and local golden clean; the
+        docs commit follows.
 
 ## Candidates (not scheduled)
 
