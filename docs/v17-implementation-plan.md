@@ -180,12 +180,12 @@ marked modelled.
         configuration's cases for the deleted knobs go. Gates, golden; the golden's
         prefetch-off cell is no longer a cell.
   - [ ] Step 5, prefill and the kernels, MTP and ShrikeBench, as two commits. **The first
-        DONE 2026-09-08 as 25ccdf7**: MTP (the runtime's, 5943 lines with its kernels,
+        DONE 2026-09-08 as efdc628**: MTP (the runtime's, 5943 lines with its kernels,
         scratch, checkpoint, server plumbing and tools; the format's family kept, the
         roster's exclusion kept) and ShrikeBench (the target, four library helpers only it
         used, the bench-only Metal variants); the baseline 17 to 14, none added; 1281
         tests; golden identical on both profiles. **The second DONE 2026-09-08 as
-        ceeed38**: the twenty-one prefill and kernel knobs to constants, the losing tile,
+        471cadc**: the twenty-one prefill and kernel knobs to constants, the losing tile,
         tensor-ops, block-router, per-expert GEMM, sweep and MPP variants deleted with
         their kernels and reference tests, the tiled attention and serial GDN kernels
         kept as the default's own fallbacks, the banner one line; 30 files, +322 −3439;
@@ -204,7 +204,7 @@ marked modelled.
         ShrikeBench: the target, `sources/ShrikeBench/`, its `Package.swift` product,
         `README.md`'s mention go. Gates, golden, and the prefill ledger's shapes (300 / 1k
         / 2k pairs through `tools/turn-rig.sh pair`) within v13's numbers.
-  - [x] Step 6, product, diagnostics and the tripwire. **DONE 2026-09-08 as f373569**: the
+  - [x] Step 6, product, diagnostics and the tripwire. **DONE 2026-09-08 as 4003388**: the
         slot-count override and the five diagnostics without a reader gone; the tripwire
         at every launch (the server's main, the session's load, the CLI, the app client),
         the 53 deleted names refused by test and verified end to end on both binaries; the
@@ -226,7 +226,7 @@ marked modelled.
   - [x] Step 7: the arms on the mini (deploy leave asked first): the golden at the default
         on the mini's build, two production lifetimes per shape through the rig, the rows
         beside v16's close; the turn rig's `pair 300`. Real: the before-and-after table.
-        Free: within the drift. **DONE 2026-09-08** (Davor's leave; `f373569`'s build
+        Free: within the drift. **DONE 2026-09-08** (Davor's leave; `4003388`'s build
         before the review's fold deployed at the bare launch 00:55, golden identical on
         both profiles on the mini;
         the card 15.62 / 15.58 against 15.34 / 15.35, the 300 16.23 / 16.11 against
@@ -251,7 +251,7 @@ marked modelled.
 ### Task 3: one residency publish path
 
 - [x] **T3: one state machine per cell, one generation space, an 8-byte entry, one
-  publish function.** **DONE 2026-09-08** (`29e152e`, one code commit: 19 files, +287
+  publish function.** **DONE 2026-09-08** (`744cb05`, one code commit: 19 files, +287
   −332; the entry 16 to 8 bytes written by one 64-bit release store from one function,
   read by the classifier as one word; one generation space per cell with the values from
   one clock; the round-robin load and its four writers gone; the streamer 1174 to 1006
@@ -267,7 +267,7 @@ marked modelled.
         throws; a swap followed by an eviction of the same slot publishes `empty` once at
         the cell; a stale completion after a drop publishes nothing; the whole-table read
         after each transition matches the expected entries. RED as a compile failure on
-        the missing API. **DONE 2026-09-08** (`29e152e`): RED as 360 compile errors on the
+        the missing API. **DONE 2026-09-08** (`744cb05`): RED as 360 compile errors on the
         arena's missing `cellGeneration` and `bumpCellGeneration`; the five transitions,
         the torn-store witness (the entry's eight bytes read back as one word equal to
         `state << 32 | cell`, `size` and `stride` 8) and a whole-table read after every
@@ -312,7 +312,7 @@ marked modelled.
   - [x] Step 5: the targeted suites GREEN, the four gates, golden on both boxes and both
         profiles at the default, the turn rig's pair; the arms on the mini (deploy leave
         asked first). Free: within the drift, misses to the tenth. **DONE 2026-09-08**
-        (Davor's leave with the go; `29e152e`'s build deployed at the bare launch 03:12,
+        (Davor's leave with the go; `744cb05`'s build deployed at the bare launch 03:12,
         the stale ShrikeBench binary retired from the mini's bin): 99 targeted tests, the
         four gates (1234 tests in 170 suites, 201 s), golden identical on both boxes and
         both profiles; the card 15.32 / 15.02 then 15.59 / 15.61 tok/s against T2's
@@ -338,13 +338,13 @@ marked modelled.
         re-review with no new breakage; one kept by ruling (the C header's doc line
         mirrors its sibling's); one deferred to the close (two pre-existing test-target
         warnings in `ParallelExpertReaderTests+BatchDepth.swift`, outside the diff). The
-        docs commit follows `29e152e`.
+        docs commit follows `744cb05`.
 
 ### Task 4: the runner decomposed
 
 - [x] **T4: the baseline to zero entries, the file and the gate's flag with it.** One
   commit per file, in this order so the decode path's functions go first. **DONE
-  2026-09-08** (twelve commits `89f5185` to `4de6bd1`: the fourteen functions to stage
+  2026-09-08** (twelve commits `fd6c876` to `8e81f7e`: the fourteen functions to stage
   methods with no behaviour change, the longest body 289 to 110 lines, the baseline 14
   entries to none and the file gone, the gate `swiftlint lint --strict`; 11 files
   +1792 −1152; 1234 tests throughout; golden identical on both boxes; the arms flat within
@@ -363,7 +363,7 @@ marked modelled.
         embed-or-blit, the ANE probe, the close-out as methods. `encodeFullAttentionPrefill`:
         the RoPE epilogue and the causal attention dispatch as methods. Each commit: gates,
         golden, the baseline regenerated and diffed (the runner's entries gone, none
-        added). **DONE 2026-09-08** (`89f5185`, one commit): the routed stage 289 to 36
+        added). **DONE 2026-09-08** (`fd6c876`, one commit): the routed stage 289 to 36
         body lines over the struct with the ten stages in the map's order, the
         lease-releasing `defer` still in the outer after the pin and the speculative
         return still taken at its point; `produceToken` 220 to 68 over plain parameters;
@@ -376,7 +376,7 @@ marked modelled.
         `StreamingSink` holds the content, reasoning, calls, stop matcher and `publish`;
         `selectProducer` picks the runner. `load`: `resolveExpertCacheSlots`, `makeRunner`,
         `makePromptCacheDomain`, `makePromptCache`. Gates, golden. **DONE 2026-09-08**
-        (`ac9bf94`): `generate` 256 to 87 and `load` 140 to 91; the snapshot init one
+        (`fe6445d`): `generate` 256 to 87 and `load` 140 to 91; the snapshot init one
         assignment per field in the literal's order; the sink built inside `runDecode`
         and returned, since Swift 6 region isolation refuses the non-Sendable closures
         when their capture is a parameter; two stages beyond the plan's (the structured
@@ -387,8 +387,8 @@ marked modelled.
         `allocateCells` and `makeReader` if still over), `Model.load` (one method per
         comment section, `ModelLoadStats` threaded), `RawCompletion` (`runPrefill` and
         `runDecodeLoop`), `RealInferenceClient.run` (`failureDiagnostics`,
-        `renderPrompt`). Gates, golden. **DONE 2026-09-08** (three commits, `091db14`,
-        `01199ef`, `79e693d`): the streamer's init already under the bar after Tasks 2
+        `renderPrompt`). Gates, golden. **DONE 2026-09-08** (three commits, `c634dc1`,
+        `55c9612`, `b457f52`): the streamer's init already under the bar after Tasks 2
         and 3, nothing to do; `Model.load` 148 to 68 with eight section stages and the
         stats `inout`, the three file-closing `defer`s kept in `load`; `runRawCompletion`
         168 to 87 with the prefill returning the seed and the loop returning an outcome,
@@ -399,7 +399,7 @@ marked modelled.
         block, typed value helpers), `Run.run` (`buildPrompt`, `buildRuntime`, the footer),
         `Entry.main` (`handleLoad`, `handleGenerate`), `RemoteStreamingRepacker.runPrepared`
         (`validateResume`, `copyRanges`, `finalizeInstall`). Gates. **DONE 2026-09-08**
-        (five commits, `bc362b3`, `2eaf680`, `8542586`, `c0367d3`, `ecc6613`, each with
+        (five commits, `55cee4b`, `8925996`, `2f1fb4d`, `4eba3a0`, `14d1f95`, each with
         the four gates and the local golden): the two parsers 162 and 218 to 5 and 4 over
         a parse context with the flag loop, the validation and the construction as
         mutating stages (the server's exhaustive switch a stage of its own), typed
@@ -411,7 +411,7 @@ marked modelled.
   - [x] Step 5: the baseline empty: `.swiftlint-baseline.json` deleted, the gate becomes
         `swiftlint lint --strict`, `CLAUDE.md`'s gate 2 text updated (the 18 functions'
         sentence gone). Gates, golden on both boxes, the turn rig's pair, the arms on the
-        mini (deploy leave asked first). **DONE 2026-09-08** (`1184875`; the deploy under
+        mini (deploy leave asked first). **DONE 2026-09-08** (`1de4fb3`; the deploy under
         the session's leave, at this step's build before the review's fold, from which the
         final tree differs by comment lines alone): the file gone, the flagless lint
         clean, the gate text rewritten; the four gates (1234 tests in 170 suites), golden
@@ -429,7 +429,7 @@ marked modelled.
         earlier review and a spot walk), 0 Critical, 0 Important, 5 Minor, approved; the
         fold comment-only by fixup and autosquash (the eight lost role summaries
         restored, one moved comment reworded, the five stale length paragraphs retired,
-        the last one in `OpenAIModels.swift` as `4de6bd1`); the result struct in the raw
+        the last one in `OpenAIModels.swift` as `8e81f7e`); the result struct in the raw
         completion kept by ruling; the folded tree's gates and local golden clean; the
         docs commit follows.
 
@@ -448,6 +448,11 @@ marked modelled.
 
 ## Close
 
-- [ ] The full suite under ThreadSanitizer, a whole-branch review by a fresh reviewer, the
+- [x] The full suite under ThreadSanitizer, a whole-branch review by a fresh reviewer, the
   fixes folded into their owning commits, the design doc's closing block with the
   before-and-after table, Davor's go, the fast-forward merge to `main` and the push.
+  **DONE 2026-09-08** up to the merge: ThreadSanitizer 1234 tests in 170 suites, zero reports, 13.5 minutes (809 s; a first run on the pre-fold tree the same, 856 s); the whole-branch
+  review ready to merge after its fold (0 Critical, 5 Important, 8 Minor, all outside the
+  surviving path, folded by fixup and autosquash and one closing commit); the
+  architecture document brought to the final tree; the closing block written; the final
+  tree's gates clean, the local golden identical on both profiles; the final build (the fold folded in, binary 52da55b07d7ec8b9 on both boxes) deployed to the mini at the bare launch at 14:20 with the golden identical on both profiles there and the turn rig's pair at 3.17 s warm and 7.36 s cold (Task 4's build 3.09 to 3.13 and 7.67), production restored at 14:22. The merge and the push on Davor's go.

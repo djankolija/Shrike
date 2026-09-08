@@ -230,11 +230,11 @@ gates and the local golden identical on both profiles:**
 | eef39e1 | rdadvise | the policy engine dead at the only path: the policy, its adaptive state, the stage, the CLI flag, the app's option, picker, protocol fields and diagnostics rows, the runner line's three fields; the load-time warm kept | 29 | +70 −672 | 1308 |
 | 9a70a1e | the streamer | one layout (the arena required), one reader (the bounded C pread at four threads and two batches), one policy (aging-LFU), chunk protection always, the pin always; the Metal IO backend with its staging and finalize paths, the legacy cached-pread path | 28 | +132 −1295 | 1299 |
 | 3597ad1 | the prefetch | the seven knobs and `RuntimePrefetch`; the ring always built with the top-k plus one cells, one in flight, distance one, the 400 us join, the after placement, the fused probe; the trace path kept | 13 | +223 −430 | 1296 |
-| 25ccdf7 | MTP and ShrikeBench | the runtime's speculative decode (the draft runner, the verify pair, the sidecar load, the two-row kernels, the GDN speculative checkpoint, the server's flags and session plumbing, the prompt-cache forcing, the tool); the bench target, four library helpers and the bench-only Metal variants; the format's MTP family kept and the roster's exclusion kept | 49 | +185 −5943 | 1281 |
-| ceeed38 | prefill and the kernels | the twenty-one knobs to constants; the r32s4, r64s8, g4k128d and flash attention tiles, the tensor-ops 2D path, the block router, the per-expert routed GEMM with its gather and scatter, the four losing sweep orders and the carry plumbing, the MPP n32b2, n64b1 and n64b2 instantiations; the tiled attention and serial GDN kernels kept as the default's own fallbacks; the banner one line | 30 | +322 −3439 | 1221 |
-| f373569 | diagnostics and the tripwire | the slot-count override and the five diagnostics without a reader; `refuseUnknownEnvironment` at every launch, 53 names refused by test, verified end to end on the CLI and the server | 10 | +187 −214 | 1223 |
+| efdc628 | MTP and ShrikeBench | the runtime's speculative decode (the draft runner, the verify pair, the sidecar load, the two-row kernels, the GDN speculative checkpoint, the server's flags and session plumbing, the prompt-cache forcing, the tool); the bench target, four library helpers and the bench-only Metal variants; the format's MTP family kept and the roster's exclusion kept | 49 | +185 −5943 | 1281 |
+| 471cadc | prefill and the kernels | the twenty-one knobs to constants; the r32s4, r64s8, g4k128d and flash attention tiles, the tensor-ops 2D path, the block router, the per-expert routed GEMM with its gather and scatter, the four losing sweep orders and the carry plumbing, the MPP n32b2, n64b1 and n64b2 instantiations; the tiled attention and serial GDN kernels kept as the default's own fallbacks; the banner one line | 30 | +322 −3439 | 1221 |
+| 4003388 | diagnostics and the tripwire | the slot-count override and the five diagnostics without a reader; `refuseUnknownEnvironment` at every launch, 53 names refused by test, verified end to end on the CLI and the server | 10 | +187 −214 | 1223 |
 
-The count, at `f373569` against `e959d55`:
+The count, at `4003388` against `e959d55`:
 
 | what | before | after |
 | --- | ---: | ---: |
@@ -256,7 +256,7 @@ re-key once after the deploy, a one-time miss with no numerics involved; and the
 delta-step kernels keep a checkpoint parameter whose only writer was MTP (a production
 kernel signature, left for a decision of its own; the review's fold takes it out).
 
-**The arms (2026-09-08, the mini at `f373569`'s build before the review's fold, deployed
+**The arms (2026-09-08, the mini at `4003388`'s build before the review's fold, deployed
 at the bare launch; golden identical on both profiles there; two production lifetimes per
 shape through the rig, beside v16's close read the same way):**
 
@@ -320,7 +320,7 @@ the plan's) stay as the tripwires.
 Real: the writers, the generation spaces, the entry's bytes. Free: golden by construction
 (the same experts are computed), the arms confirm.
 
-**Built (2026-09-08), one commit `29e152e` on `refactor/v17-consolidation`, tests RED
+**Built (2026-09-08), one commit `744cb05` on `refactor/v17-consolidation`, tests RED
 first, the four gates and the golden identical on both boxes:** the entry is
 `{ slot: UInt32, state: UInt32 }`, eight bytes, and `PreadExpertStreamer.publish(expert:cell:state:)`
 is the only writer: it packs the state above the slot and stores the word once through
@@ -340,7 +340,7 @@ compare against the cell now under the slot. The round-robin load went whole:
 `loadExpertUnlocked`, `readFull`, the descriptor the streamer held idle after it, and two
 error cases; its tests moved to the plan path with their assertions kept.
 
-The count, at `29e152e` against `2ab2de4`:
+The count, at `744cb05` against `a2b77ff`:
 
 | what | before | after |
 | --- | ---: | ---: |
@@ -367,7 +367,7 @@ on the surviving path (a loading or pinned slot is never a victim, and only the 
 planner swaps, planning and pinning on one thread), but the tripwire exists for a caller-
 ordering bug, so the values come from one clock and the compare is exact again.
 
-**The arms (2026-09-08, the mini at `29e152e`'s build, deployed at the bare launch;
+**The arms (2026-09-08, the mini at `744cb05`'s build, deployed at the bare launch;
 golden identical on both profiles there; production lifetimes per shape through the rig,
 beside Task 2's arms read the same way):**
 
@@ -414,7 +414,7 @@ flag and `CLAUDE.md`'s gate text go.
 Real: the baseline's entries, to zero. Free: golden per commit, the arms at the end.
 
 **Built (2026-09-08), twelve commits on `refactor/v17-consolidation`, one per file, one
-for the baseline and one for the fold's last marker (`4de6bd1`), each with the four gates
+for the baseline and one for the fold's last marker (`8e81f7e`), each with the four gates
 and the local golden identical on both profiles:** the fourteen functions became stage methods, every statement moved once in
 its order and every commit, wait, event, counter, timing mark, log line, error text, lock
 span, early exit and `defer` where it was, each move checked by the implementer as a line
@@ -423,19 +423,19 @@ walked the originals beside the stages.
 
 | commit | file | function, body lines before to after | the stages |
 | --- | --- | --- | --- |
-| `89f5185` | `RealForwardRunner.swift` | `encodeDecodeRoutedMoE` 289 to 36; `produceToken` 220 to 68; `executePrefillChunk` 165 to 100; `encodeFullAttentionPrefill` 199 to 96 | the routed stage's ten over `DecodeRoutedLayerContext` (the readback, the join, the plan, the pin, the partition, the hit split, the I/O acquisition, the speculative hand-off, the fixup build, the pending hand-off); the dense layer, the routed layer, the head; the validation, the token buffer, the embed, the ANE probe, the close-out; the RoPE epilogue, the causal dispatch |
-| `ac9bf94` | `ServerInference.swift` | `generate` 256 to 87; `load` 140 to 91 | the snapshot init, a `StreamingSink`, the decode, the structured finish, the cache settlement; the slots, the runner, the cache domain, the cache |
-| `091db14` | `Model.swift` | `load` 148 to 68 | eight, one per comment section, the stats `inout` |
-| `01199ef` | `RawCompletion.swift` | `runRawCompletion` 168 to 87 | the prefill, the decode loop |
-| `79e693d` | `RealInferenceClient.swift` | `run` 126 to 101 | the prompt rendering, the cancellation diagnostics |
-| `bc362b3` | `ShrikeCLI/Args.swift` | `parse` 162 to 5 | the flag loop, the validation, the construction over a parse context; two typed helpers |
-| `2eaf680` | `ServerArguments.swift` | `parse` 218 to 4 | the loop, the switch, the validation, the construction; one emptiness helper |
-| `8542586` | `ShrikeCLI/Run.swift` | `run` 148 to 74 | the arch resolution, the prompt, the runtime, the footer, the exits as a stage outcome |
-| `c0367d3` | `ShrikeDecodeService/Entry.swift` | `main` 177 to 66 | the load and generate handlers |
-| `ecc6613` | `RemoteStreamingRepacker.swift` | `runPrepared` 231 to 10 | the resume, the output reservation, the ranges, the finalize over `PreparedInstall` |
-| `1184875` | `.swiftlint-baseline.json`, `CLAUDE.md` | | the empty file deleted, the gate `swiftlint lint --strict`, the gate text rewritten |
+| `fd6c876` | `RealForwardRunner.swift` | `encodeDecodeRoutedMoE` 289 to 36; `produceToken` 220 to 68; `executePrefillChunk` 165 to 100; `encodeFullAttentionPrefill` 199 to 96 | the routed stage's ten over `DecodeRoutedLayerContext` (the readback, the join, the plan, the pin, the partition, the hit split, the I/O acquisition, the speculative hand-off, the fixup build, the pending hand-off); the dense layer, the routed layer, the head; the validation, the token buffer, the embed, the ANE probe, the close-out; the RoPE epilogue, the causal dispatch |
+| `fe6445d` | `ServerInference.swift` | `generate` 256 to 87; `load` 140 to 91 | the snapshot init, a `StreamingSink`, the decode, the structured finish, the cache settlement; the slots, the runner, the cache domain, the cache |
+| `c634dc1` | `Model.swift` | `load` 148 to 68 | eight, one per comment section, the stats `inout` |
+| `55c9612` | `RawCompletion.swift` | `runRawCompletion` 168 to 87 | the prefill, the decode loop |
+| `b457f52` | `RealInferenceClient.swift` | `run` 126 to 101 | the prompt rendering, the cancellation diagnostics |
+| `55cee4b` | `ShrikeCLI/Args.swift` | `parse` 162 to 5 | the flag loop, the validation, the construction over a parse context; two typed helpers |
+| `8925996` | `ServerArguments.swift` | `parse` 218 to 4 | the loop, the switch, the validation, the construction; one emptiness helper |
+| `2f1fb4d` | `ShrikeCLI/Run.swift` | `run` 148 to 74 | the arch resolution, the prompt, the runtime, the footer, the exits as a stage outcome |
+| `4eba3a0` | `ShrikeDecodeService/Entry.swift` | `main` 177 to 66 | the load and generate handlers |
+| `14d1f95` | `RemoteStreamingRepacker.swift` | `runPrepared` 231 to 10 | the resume, the output reservation, the ranges, the finalize over `PreparedInstall` |
+| `1de4fb3` | `.swiftlint-baseline.json`, `CLAUDE.md` | | the empty file deleted, the gate `swiftlint lint --strict`, the gate text rewritten |
 
-The count, at `4de6bd1` against `62edee3`:
+The count, at `8e81f7e` against `3bfcd89`:
 
 | what | before | after |
 | --- | ---: | ---: |
@@ -532,3 +532,79 @@ app targets' own structure beyond what a deleted path forces.
 - The suite shrinks as modes and kernels go; a test deleted for a losing kernel must be
   the kernel's own reference test, never a test of the surviving path that happened to
   run under the knob.
+
+## The chapter's close (2026-09-08)
+
+The full suite under ThreadSanitizer on the final tree: 1234 tests in 170 suites, zero reports, 13.5 minutes (809 s; a first run on the pre-fold tree the same, 856 s). The whole-branch
+review by a fresh reviewer over the branch found it ready to merge after its fold: no
+behaviour change on a surviving path, no deleted path still running, no data race, every
+fold of the four task reviews landed in its owning commit, the tripwire's thirteen names
+equal to the read set under `sources/` with the tools setting only survivors, Task 3's
+store, load, generation and lock order holding, three of Task 4's functions walked once
+more as pure moves. Its findings, five Important and eight Minor, all sat outside the
+runtime's surviving path: the deploy script polled a banner field Task 2 deleted, so
+every deploy this chapter reported the launch as not logged; a tools parser read a
+deleted line; two bench-only kernels and a callerless helper chain were still compiled;
+the README still presented MTP; the Task 2 record cited the hashes of a rewritten
+history and the counts of a pre-fold tree; a stderr writer kept the name of a deleted
+switch; two test-target warnings and an unused function predated the chapter. All of it
+folded into the owning commits by fixup and autosquash and one closing commit; the
+architecture document brought to the final tree with its line references re-verified by
+script; the folded tree's gates clean and the local golden identical on both profiles.
+
+The count across the chapter, at the close against `e959d55`:
+
+| what | at `e959d55` | at the close |
+| --- | ---: | ---: |
+| `SHRIKE_*` knobs read under `sources/` | 66 | 13 |
+| of which fail open | 28 | 0 (a name outside the thirteen fails the launch by name) |
+| decode expert execution enum cases | 5 | one path |
+| expert cache layouts | 2 | 1 |
+| expert readers | 3 | 1 |
+| writers of the residency table | 14 | 8 call sites of one function |
+| generation spaces | 2 | 1, one clock |
+| the residency entry | 16 bytes, a struct store | 8 bytes, one release store, one load |
+| functions over 120 lines | 18 | 0, no baseline |
+| Metal kernels | 82 | 65 |
+| source files | 250 | 235 |
+| `RealForwardRunner.swift` | 7326 lines | 5623 |
+| `PreadExpertStreamer.swift` | 1716 lines | 1006 |
+| lines under `sources/` | | +2519 −11076 across 77 files |
+| the serial suite | 1327 tests, 604 s | 1234 tests, 206 s |
+| the suite under ThreadSanitizer | 41 min | 14 min |
+| stale knob names in `docs/` | 4 | 4, left as history |
+
+What the chapter settled:
+
+- **The rule held at every deletion.** Fifty-three knobs went, each a losing arm of a
+  measured A/B or a diagnostic without a reader, with the path it gated and that path's
+  tests; the thirteen that stay are eight product settings, four diagnostics the tools
+  read and the one open switch. A stale name no longer takes a default in silence: the
+  launch fails and names it.
+- **One publish path.** The residency entry is what the GPU reads and nothing more,
+  written once as one word and read once as one word, so the torn-read argument that
+  needed an ordering exception at `e959d55` needs none; the generation is the host's, one
+  word per cell drawn from one clock, and the classifier writes nothing back. The
+  round-robin load that had no production caller went with its four writers.
+- **Decomposition with no behaviour change is checkable.** Fourteen functions became
+  stage methods over context structs, each move checked as a line multiset against the
+  previous tree and the decode path's four walked statement by statement by two reviews;
+  the arms could not tell the trees apart. The gate reads `swiftlint lint --strict` and
+  CLAUDE.md says decompose as you write.
+- **Free, measured.** Golden byte-identical on both boxes at every code commit; the arms
+  on the mini after Tasks 2, 3 and 4 flat within the repeats' drift on all three shapes
+  with every answer identical and the misses to the tenth; the one dip (the card's first
+  two lifetimes after Task 3's deploy) resolved by two more lifetimes at the previous
+  values rather than by a story.
+
+**Production on the mini at the close:** the arms at Task 4's build 15.57 / 15.62,
+16.43 / 16.30, 16.14 / 16.16 tok/s on the card / the 300 / the 1k (v16's close: 15.34 /
+15.35, 16.46 / 16.48, 16.12 / 16.14), the same answers, the same misses; the final build (the fold folded in, binary 52da55b07d7ec8b9 on both boxes) deployed to the mini at the bare launch at 14:20 with the golden identical on both profiles there and the turn rig's pair at 3.17 s warm and 7.36 s cold (Task 4's build 3.09 to 3.13 and 7.67), production restored at 14:22.
+
+**What remains.** The reading layers themselves, 12.6 to 13.6 per token at production's
+per-read cost, the next chapter's object from this smaller tree. Recorded and not
+scheduled: the ANE prefill's switch (its own record decides); the `.gturbo` format's MTP
+family and the two sidecar bundles on the mini (a delete is Davor's); the server parser's
+exhaustive switch at 110 lines, ten from the bar (split by option group when the next
+flags come); the markdown link checker globbing the gitignored SDD workspace (a review
+package with a diff of markdown links trips it; keep those out of the repo directory).

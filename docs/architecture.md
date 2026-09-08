@@ -1,12 +1,12 @@
 # Architecture
 
-How the engine is built and why, written from the tree at `e959d55` (2026-09-07, v16
-merged) in the v17 consolidation chapter ([v17-consolidation.md](v17-consolidation.md)),
-replacing the v4-era document. Every piece below carries the measurement that keeps it
-and the chapter that measured it; every candidate for removal carries its measured status.
-Numbers are measured on the Mac mini (M1, 16 GB, the deploy target) unless marked
-modelled or counted; line references are at `e959d55` and will move as the chapter
-deletes code.
+How the engine is built and why, written from the tree at v17's close (`0dbeba0`,
+2026-09-08), replacing the v4-era document. Every piece below carries the measurement
+that keeps it and the chapter that measured it. Numbers are measured on the Mac mini
+(M1, 16 GB, the deploy target) unless marked modelled or counted; line references are at
+that tree. The chapter's own record, what each task deleted and what it counted, is
+[v17-consolidation.md](v17-consolidation.md) beside its plan; git history holds the paths
+the chapter removed.
 
 The product claim is bounded memory: run a mixture-of-experts model larger than RAM by
 streaming routed experts from SSD into a cache whose size is declared, not discovered.
@@ -17,26 +17,27 @@ token's pace set by the reading layers' SSD chain (56.6 / 38.7 / 36.0 ms of read
 
 ## The decode path, token by token
 
-`RealForwardRunner.produceToken` (`RealForwardRunner.swift:3153`) runs one token: the
-embed, a loop over the layers, the head. The loop pipelines each layer's GPU commands
-against the host's work for the previous layer, and the routed experts' reads against
-both.
+`RealForwardRunner.produceToken` (`RealForwardRunner.swift:1973`) runs one token: the
+embed, then a loop that calls `produceDenseLayer` (`:2073`) or `produceRoutedLayer`
+(`:2136`) per layer, then `emitHead` (`:2207`). The loop pipelines each layer's GPU
+commands against the host's work for the previous layer, and the routed experts' reads
+against both.
 
 ### The layer's held command
 
-`encodeLayerCommands(layer:position:)` (`:3051`) encodes one layer into a
-`HeldLayerCommands`: the attention command (`attnCB`: input norm, attention, o_proj), a
-tail that folds into it on GDN, MLA and gated-attention layers (one submission and one
-boundary per layer; gpt-oss and the plain path keep a separate softmax command and a
-separate `tailCB`, because their o_proj must follow the softmax), and either a
-shared-expert command or the speculative command. The tail (`encodeDecodeTailStage`,
-`:3639`) is the post-attention norm, the layer's router, the next layer's router run on
-the same hidden state (the prefetch's probe, fused into the tail since v15), and the
-residency classifier.
+`encodeLayerCommands(layer:position:)` (`:1885`) encodes one layer into a
+`HeldLayerCommands` (`:1855`): the attention command (`attnCB`: input norm, attention,
+o_proj), a tail that folds into it on GDN, MLA and gated-attention layers (one submission
+and one boundary per layer; gpt-oss and the plain path keep a separate softmax command and
+a separate `tailCB`, because their o_proj must follow the softmax), and the speculative
+command, at whose head the shared-expert chain rides. The tail
+(`encodeDecodeTailStage`, `:2476`) is the residual fold, the post-attention norm, the
+layer's router, the next layer's router run on the same hidden state (the prefetch's
+probe, fused into the tail since v15), and the residency classifier.
 
-`commitHeldLayerCommands` (`:3040`) commits attention, softmax, tail, shared and the
-speculative command together, before the host waits on the router, so the GPU runs the
-shared expert and the whole speculative routed layer while the host waits for the routing.
+`commitHeldLayerCommands` (`:1875`) commits attention, softmax, tail and the speculative
+command together, before the host waits on the router, so the GPU runs the shared expert
+and the whole speculative routed layer while the host waits for the routing.
 
 **Kept by:** the encoder merge and the fused tail, v10 ("no per-layer round trip" made
 concrete: one boundary per layer); the fused probe, v15 (the fusion took 1.3 to 2.7 ms
@@ -45,84 +46,102 @@ per token off the wall; the separate probe as an arm measured −3.5 / −5.0 / 
 
 ### The speculative command
 
-`encodeSpeculativeRouted` (`:6799`) encodes, a layer ahead of the host's knowledge of the
+`encodeSpeculativeRouted` (`:5136`) encodes, a layer ahead of the host's knowledge of the
 route, the shared-expert chain and a pool-addressed phase 1 and phase 2 whose grids size
 themselves from the classifier's indirect arguments
-(`moe_phase1_gate_up_act_spec_u16load`, `moe_phase2_down_reduce_spec_k8` in
-`Metal/MoE/moe.metal`). The classifier (`moe_classify_expert_residency_spec`, `:218`) runs
-as the tail's last kernel: for each of the router's top-k experts it reads the layer's
-residency table, counts hits and misses, writes the hit positions and their resolved cells
-for the speculative phase 1, the miss list for the host, and a tagged host readback word.
-On a layer where every expert is resident, the speculative command is the routed command:
-nothing more is built for the layer (`encodeDecodeRoutedMoE` stage 21, `:7232`). On a
-miss layer it computes the hits and the host builds a fixup for the misses.
+(`moe_phase1_gate_up_act_spec_u16load` at `Metal/MoE/moe.metal:1114`,
+`moe_phase2_down_reduce_spec_k8` at `:1166`). The classifier
+(`moe_classify_expert_residency_spec`, `:184`) runs as the tail's last kernel: for each of
+the router's top-k experts it reads the layer's residency table, counts hits and misses,
+writes the hit positions and their resolved cells for the speculative phase 1, the miss
+list for the host, and a tagged host readback word. On a layer where every expert is
+resident, the speculative command is the routed command: nothing more is built for the
+layer (`handOffDecodeSpeculativeAllHit`, `:5541`). On a miss layer it computes the hits
+and the host builds a fixup for the misses.
 
-The runner encodes layer L+1's held command while layer L's commands run (`:3301`), so
-the encode cost is off the critical path.
+`produceRoutedLayer` encodes layer L+1's held command while layer L's commands run
+(`:2152`), so the encode cost is off the critical path.
 
 **Kept by:** v9 (the speculative routed dispatch; the per-slot to pool flip alone halved
 the GPU idle gap, 32.6 to 16.7 ms per token on the rig, `v9-speculative-routed-dispatch.md`);
 the decode chapter's arithmetic across v9 to v11, rig 111.6 to 38.1 ms per token
-(`v10-implementation-plan.md`). The classic path (`barrier`), the CPU-planned partition
-(`hit-fixup`), the readback-authoritative mode (`gpu-residency`) and the cross-checking
-mode (`speculative-validate`) survive at `e959d55` only as A/B arms of
-`SHRIKE_DECODE_EXPERT_EXECUTION`; v17 Task 2 deletes them.
+(`v10-implementation-plan.md`). It is the only decode execution path: the classic
+`barrier`, the CPU-planned `hit-fixup`, the readback-authoritative `gpu-residency` and the
+cross-checking `speculative-validate` arms went with their knob in v17.
 
 ### The word wake
 
 The host does not wait for the tail command to complete. `waitForRouterReadback`
-(`:4244`) spins on the classifier's tagged readback word, which lands 0.063 ms after the
+(`:3052`) spins on the classifier's tagged readback word, which lands 0.063 ms after the
 router command's GPU end while the driver's completion mark comes 0.16 ms after it on
 every layer (v14, measured), with a one-second fallback to the status wait so a failed
 command still surfaces.
 The readback (`RouterHostReadback.swift`) carries the top-k ids and weights, the hit and
 miss positions and the probe's predictions in 32-bit words, each a 16-bit tag over a
 16-bit value, read with an acquire load (`shrike_load_acquire_u32`,
-`ShrikeKernelsC/include/shrike_atomics.h`).
+`ShrikeKernelsC/include/shrike_atomics.h:7`).
 
 **Kept by:** v14 lever B, the shipping default: +2.8 to +3.6 % tok/s on the three shapes,
 the router wake's 4.0 ms of stat and 2.1 to 2.5 ms of wall per token recovered
-(`v14-decode.md`). The status wake (`SHRIKE_ROUTER_WAKE=status`) and the parked host
-wait (`SHRIKE_HOST_WAIT=wait`, the spin the T5 default of v10) are its A/B arms; v17
-Task 2 deletes both.
+(`v14-decode.md`). It is the only wake the routed path takes: the status wake and the
+parked host wait went with their knobs in v17. `waitForRouterCompletion` (`:3036`), the
+spinning status wait of v10 T5, survives as this wake's one-second fallback and as the
+wait on a layer whose classifier did not run.
 
 ### The routed stage: the plan, the swap, the fixup
 
-`encodeDecodeRoutedMoE` (`:6878`, 389 lines, 25 stages) runs once per routed layer after
-the wake, with the previous layer's routed command still in flight:
+`encodeDecodeRoutedMoE` (`:5227`) runs once per routed layer after the wake, with the
+previous layer's routed command still in flight. Its body is ten private stage methods
+over one `DecodeRoutedLayerContext` (`:5189`), which carries the layer's locals from stage
+to stage, in the order the work runs:
 
-1. The route is read from the readback; the ring's landed predictions for this layer are
-   collected (`readyCells`, joining a read still in flight for up to 400 us).
-2. The plan (`PreadExpertStreamer.makeExpertCachePlan`, `PreadExpertStreamer.swift:707`)
-   decides, under the layer's cache lock, which experts are hits, which landed
-   predictions the layer swaps in (a leased ring cell becomes the slot's, the slot's old
-   cell goes back to the ring, no bytes move), and which are misses needing a slot and a
-   read; victims come from the aging-LFU with chunk protection (v13).
-3. The misses are submitted at once to the storage threads (immediate submission, v10
-   T5) with a shared-event token the GPU will wait on (event sync, v10 T5).
-4. The classifier's hit and miss sets are cross-checked against the plan's, fail-closed
-   (`:7037`); a landing the classifier missed but the plan swapped in is reported
-   "adopted" and computed by the fixup.
-5. The fixup (`buildAndCommitMissFixupCommand`, `:4127`) is built and committed only on a
-   miss layer: the event wait, phase 1 for the misses (`moe_phase1_gate_up_act_subset_u16load`),
-   the phase-2 reduce (`moe_phase2_down_reduce_k8`) over hits and misses, the residual.
-   The host never waits for the read: the GPU does, on the event.
-6. A `PendingRoutedCommand` records the layer's routed command and its lease;
-   `finishPendingRoutedCommand` (`:6520`) releases the lease at the next layer's wake.
+1. `readDecodeRouterReadback` (`:5279`) reads the route from the readback (or from the raw
+   index buffer when no classifier ran) and records the route trace.
+2. `joinDecodePrefetch` (`:5319`) collects the ring's landed predictions for this layer
+   (`readyCells`, joining a read still in flight for up to 400 us) and takes the
+   classifier's miss set as it stood before this plan.
+3. `planDecodeRoutedExperts` (`:5331`) runs the plan
+   (`PreadExpertStreamer.makeExpertCachePlan`, `PreadExpertStreamer.swift:382`), which
+   decides, under the layer's cache lock, which experts are hits, which landed predictions
+   the layer swaps in (a leased ring cell becomes the slot's, the slot's old cell goes back
+   to the ring, no bytes move), and which are misses needing a slot and a read; victims
+   come from the aging-LFU with chunk protection (v13). The stage then consumes the ring's
+   leases, handing the freed cells back, and writes the prefetch trace.
+4. `pinAndSubmitDecodeRoutedExperts` (`:5364`) pins the plan's slots and submits the misses
+   at once to the storage threads (immediate submission, v10 T5) with a shared-event token
+   the GPU will wait on (event sync, v10 T5).
+5. `partitionDecodeRoutedExperts` (`:5381`) splits the top-k into hit and miss positions
+   and cross-checks the classifier's miss set against the plan's, fail-closed (`:5404`); a
+   landing the classifier missed but the plan swapped in is reported "adopted" and computed
+   by the fixup.
+6. `encodeDecodeHitSplit` (`:5415`) encodes and commits phase 1 for the hits on its own
+   command buffer, when the layer has both hits and misses, while the misses are still
+   reading.
+7. `acquireDecodeRoutedIO` (`:5486`) takes the miss batch's buffers without waiting on the
+   read (the GPU waits, on the event) and issues the next layer's prediction.
+8. `handOffDecodeSpeculativeAllHit` (`:5541`) returns on an all-hit layer: the speculative
+   command already is the routed command, and it becomes the `PendingRoutedCommand`.
+9. `buildDecodeFixup` (`:5574`) builds and commits the fixup on a miss layer
+   (`buildAndCommitMissFixupCommand`, `:2943`): the event wait, phase 1 for the misses
+   (`moe_phase1_gate_up_act_subset_u16load`), the phase-2 reduce
+   (`moe_phase2_down_reduce_k8`) over hits and misses, the residual.
+10. `handOffDecodeFixup` (`:5599`) records that command and its lease as the
+    `PendingRoutedCommand`; `finishPendingRoutedCommand` (`:4937`) releases the lease at
+    the next layer's wake.
 
 **Kept by:** the miss window chapter, v15 (the placement gate, the 400 us join and the
 fused probe: 14.1 / 14.8 / 15.0 to 15.4 to 15.6 / 16.3 / 16.2 tok/s, `v15-miss-window.md`);
 the landing, v16 (the swap at the plan: the classifier saw 70 / 59 / 69 % of landed
 predictions resident, the adopted-only fixup commands per token down 56 to 69 %, tok/s
 flat within the drift, misses unchanged; kept as a subtraction, `v16-landing.md`). The
-rdadvise stage (`:7145`) runs only under deferred submission, an arm production never
-takes; v17 Task 2 deletes it.
+stages are v17 Task 4's shape, not a behaviour change: the sixty-odd stage calls a token
+makes are invisible against its 60 ms (`v17-consolidation.md`).
 
 ### The deferred GPU records
 
 Under the word wake the host runs ahead of the driver's completion marks, so a command's
 GPU timestamps and its error are not yet readable when the host would record them.
-`deferredGPURecords` (`:4340`, `drainDeferredGPURecords`) holds the kernel records, the
+`deferredGPURecords` (`:308`, `drainDeferredGPURecords` at `:3145`) holds the kernel records, the
 router wake, the routed command's timings and v16's prefetch race until the driver marks
 the commands complete; a failed command throws from the drain with its name, since the
 immediate error checks ran before the mark existed. The drain runs after each wake and
@@ -133,86 +152,85 @@ chapter's rows are read from (`tools/decode-rows.py`).
 
 ### The head
 
-`produceToken`'s tail (`:3371`): the final norm and the lm_head GEMV, or the fused greedy
-head that writes the argmax token directly when the sampler is greedy (`useFusedGreedyHead`);
-the sampler's tiled top-k kernel otherwise (`Kernels/Sampling`).
+`emitHead` (`:2207`): the final norm and the lm_head GEMV, or the fused greedy head that
+writes the argmax token directly when the sampler is greedy (`useFusedGreedyHead`); the
+sampler's tiled top-k kernel otherwise (`Sampler.swift`, the generic kernels kept for
+greedy and for k above 64).
 
 ### The dense layers
 
-Layers below `numLeadingDenseLayers` (Kimi's layer 0) take an inline path in the loop
-(`:3232`): norm, attention, the dense SwiGLU, three commits and a status wait, no
-classifier and no routed stage. v17 Task 4 lifts it into `produceDenseLayer`.
+Layers below `numLeadingDenseLayers` (Kimi's layer 0) take `produceDenseLayer` (`:2073`):
+norm, attention, the dense SwiGLU, three commits and a status wait, no classifier and no
+routed stage.
 
 ## Residency
 
 ### The table
 
 One table per routed layer, owned by the layer's `PreadExpertStreamer`
-(`ExpertResidencyTable.swift:4`): `ExpertResidencyEntry { slot: UInt32, state: UInt32,
-generation: UInt64 }`, 16 bytes per expert, a shared Metal buffer allocated at the layer's
-first touch (`PreadExpertStreamer.swift:438`) and bound to the classifier at buffer index
-1 (`MoE.encodeResidencyClassification`, `Kernels/MoE/MoE.swift:506`). States: `empty`,
-`loading`, `resident`. Under the pool layout `slot` is the expert's global arena cell.
-The GPU hit test is `state == resident && slot != notResidentSlot` (`moe.metal:141`).
+(`ExpertResidencyTable.swift:4`): `ExpertResidencyEntry { slot: UInt32, state: UInt32 }`,
+eight bytes per expert, one word, a shared Metal buffer allocated at the layer's first
+touch (`PreadExpertStreamer.swift:280`, from `Model.ensureLayerOpened`) and bound to the
+classifier at buffer index 1 (`MoE.encodeResidencyClassification`,
+`Kernels/MoE/MoE.swift:529`). States: `empty`, `loading`, `resident`. `slot` is the
+expert's global arena cell. The classifier takes the table as `device const ulong*` and
+unpacks each entry from one 64-bit load (`moe.metal:132`); the hit test is
+`state == resident && slot != notResidentSlot` (`:135`).
 
 ### The writers
 
-Fourteen at `e959d55`, every one a 16-byte struct store: writers 2 to 11 through
-`publishResidencyUnlocked` (`PreadExpertStreamer.swift:1573`) and writers 12 to 14
-directly, both into `writeResidencyEntryUnlocked` (`:1581`) under the streamer's
-`cacheLock`; the init's fill (writer 1) runs before any reader exists:
+One function writes the table: `PreadExpertStreamer.publish(expert:cell:state:)`
+(`PreadExpertStreamer.swift:928`), which packs the state above the slot and stores the word
+once with `shrike_store_release_u64` (`ShrikeKernelsC/include/shrike_atomics.h:12`). No
+caller writes the buffer. It has eight call sites, all but the init's fill under the
+streamer's `cacheLock`; the init's fill runs before any reader exists:
 
-| # | writer | thread | trigger and what is written |
+| # | call site | thread | trigger and what is written |
 | ---: | --- | --- | --- |
-| 1 | `init` (`:447`) | the streamers queue | the layer's first touch: every entry `empty` |
-| 2 to 5 | `loadExpertUnlocked` (`:621`, `:631`, `:642`, `:652`) | the caller's | the single-expert round-robin load: evict, reserve, complete, fail; no production caller (tests only) |
-| 6 | `makeExpertCachePlan`, the victim (`:789`) | the planner's | the evicted expert `empty` at the slot's next generation |
-| 7 | `makeExpertCachePlan`, the swap (`:795`, the store at `:806`) | the planner's | a leased landing is resident: the slot takes its cell, republished `resident` at the slot's bumped generation |
-| 8 | `makeExpertCachePlan`, the reservation (`:816`) | the planner's | a miss: `loading` at the slot's cell |
-| 9 | `markPlanMissesResident` (`:1501`) | the storage thread | the demand read completed: `resident`, the generation re-validated first |
-| 10 | `markStagedMetalPlanResident` (`:1527`) | the runner's | the Metal backend's staged blit completed (never in production) |
-| 11 | `resetLoadingMissesUnlocked` (`:1549`) | the failed read's, the abandoned prefill plan's, the failed staged plan's | `loading` back to `empty` |
-| 12 | `claimLanding` (`:1364`) | the issuing thread (decode or storage) | a ring cell claimed: `loading` at the ring cell, the landing's own generation |
-| 13 | `completeLanding` (`:1382`) | the storage thread | the speculative read landed: `resident` at the ring cell |
-| 14 | `dropLanding` / `failLanding` (`:1399`) | the storage thread, the issuing thread, the ring's reclaim | `empty`, only if the pool does not own the expert |
+| 1 | `init` (`:332`) | the streamers queue | the layer's first touch: every entry `empty` |
+| 2 | `makeExpertCachePlan`, the victim (`:465`) | the planner's | the evicted expert `empty`, after the cell's generation is bumped |
+| 3 | `makeExpertCachePlan`, the reservation (`:485`) | the planner's | a miss: `loading` at the slot's cell |
+| 4 | `markPlanMissesResident` (`:892`) | the storage thread | the demand read completed: `resident`, every miss's cell generation re-validated first |
+| 5 | `resetLoadingMissesUnlocked` (`:914`) | the failed read's, the abandoned plan's | `loading` back to `empty` |
+| 6 | `claimLanding` (`:766`) | the issuing thread (decode or storage) | a ring cell claimed: `loading` at the ring cell, whose generation the claim bumps |
+| 7 | `completeLanding` (`:785`) | the storage thread | the speculative read landed: `resident` at the ring cell |
+| 8 | `dropLanding` / `failLanding` (`:801`) | the storage thread, the issuing thread, the ring's reclaim | `empty`, only if the pool does not own the expert |
 
-The planners are the decode runner (`RealForwardRunner.swift:6949`), prefill's union and
-tile planners (`:5400`, `:6087`) and `Model.fetchRoutedExperts(layer:experts:)`
-(`ModelExpertIO.swift:284`, through the streamer's `loadExpertsCached`, `:661`). Only the
-decode planner holds a ring lease, so only it swaps; every other planner reads a landed
+The swap writes nothing (`:467` to `:481`): a landing already stands `{cell, resident}` in
+the table, so the slot takes the landing's cell and only the host's bookkeeping moves.
+
+The planners are the decode runner (`planDecodeRoutedExperts`,
+`RealForwardRunner.swift:5335`), prefill's tile fetches
+(`PrefillGroupedRoutedMoE.swift:579`, `:631`) with the tile scheduler's lookahead
+(`RealForwardRunner.swift:4532`), and `Model.fetchRoutedExperts(layer:experts:)`
+(`ModelExpertIO.swift:236`, through the streamer's `loadExpertsCached`, `:336`). Only the
+decode planner passes a ring lease, so only it swaps; every other planner reads a landed
 expert into the pool and the landing is dropped at the ring's reclaim (v16's review fold).
 
 ### The invariants
 
 - **The store is the publish.** There is no memcpy, no encode-time copy and no publish
-  step: the host's struct store into the shared buffer is what the GPU reads at its next
+  step: the host's store into the shared buffer is what the GPU reads at its next
   dispatch. v16's kernel-boundary probe measured when a later dispatch of a running
   command sees a host write: always, once the command has streamed 1 MB, at every margin;
   never without memory traffic. Production's attention command streams tens of MB on
   both sides of any write.
-- **A torn entry reads as a miss, with one exception that ordering covers.** The 16-byte
-  store is not atomic and Swift does not order its fields. For thirteen of the fourteen
-  writers no transition changes `slot` while `state` stays `resident` (a swap keeps the
-  cell, an eviction goes through `empty`), and the hit test needs both fields, so a read
-  that mixes the old and the new entry is a miss. The exception is the reservation
-  (writer 8, `:819`) over an unleased resident landing: an expert the ring delivered to
-  cell C and no decode plan leased is reserved at a pool slot in one store of `{S',
-  loading}` over `{C, resident}`, and a reader mixing the new slot with the old state would
-  see a hit at bytes not yet landed. That transition is taken by prefill's planners, the
-  loader's fetch, and the decode planner for a landing that completed past the join bound;
-  in every case the layer's classifier for this token has already run and the next reader
-  of the table is the next token's, so the tear is unreachable by ordering, not by the
-  argument. A miss is always safe: the plan fails closed on the classifier's miss set.
-  v17 Task 3 makes the pair one 64-bit release store, which removes the exception.
-- **The generation is host bookkeeping.** It guards a stale completion against publishing
-  over a newer occupant (`:1506`). The classifier writes `resolved_generations`
-  (`Kernels/MoE/MoE.swift:546`) and nothing in `sources/` reads it; one test does
-  (`GPUExpertResidencyTests.swift:207`). Two generation spaces land in the field, the
-  slot's (`slotGeneration`) and the landing's (`landingGeneration`, `:1371`), because a
-  ring cell belongs to no slot until the swap. v17 Task 3 unifies them per cell and drops
-  the field from the entry.
+- **The pair is never torn, on either side, by construction.** The host writes the slot
+  and the state as one aligned 64-bit release store; the classifier reads them back as one
+  `ulong` and unpacks the halves in registers. Neither side can observe half an entry, so
+  the reservation over an unleased resident landing (v16's one exception, closed by ordering
+  rather than by construction) is no longer an exception at all. A miss stays safe in any
+  case: the plan fails closed on the classifier's miss set (`RealForwardRunner.swift:5404`).
+- **The generation is host bookkeeping, one word per arena cell.** It lives on
+  `ExpertCellArena` (`ExpertCellArena.swift:60`, bumped at `:66`), not in the table, and
+  the classifier neither reads nor writes it. Every value comes from one atomic clock, so
+  no two cells' bumps can coincide and a stale plan's recorded generation can never equal a
+  different cell's by chance. It is read and written under the owning layer's cache lock,
+  and it guards a stale completion against publishing over a newer occupant
+  (`PreadExpertStreamer.swift:882`). The swap moves the landing's cell under the slot and
+  its generation with it.
 - **Lock order.** The ring's lock, then a layer's cache lock, never the reverse
-  (`ExpertPrefetchRing.swift:35`). `beginPrefetch` takes the cache lock once per claim, so
+  (`ExpertPrefetchRing.swift:38`). `beginPrefetch` takes the cache lock once per claim, so
   a batch's claims are not atomic as a group.
 
 ### The arena and the ring
@@ -225,10 +243,12 @@ device's 8.88 GiB `maxBufferLength` with 0.43 to spare (v16); a larger budget th
 the kernels given a second base (v16's candidate). A cell changes owner at a swap without
 a byte moving; that is the whole reason for one address space.
 
-`ExpertPrefetchRing` (`Runtime/Inference/ExpertPrefetchRing.swift`) owns nine cells and
-at most one read in flight across all layers (v15 step zero: a read still in flight shares
-the drive with the next demand read). At layer L's wake the probe's top-k for layer L+1 is
-issued after the demand submission (the placement gate, v15); a prediction lands in a
+`ExpertPrefetchRing` (`Runtime/Inference/ExpertPrefetchRing.swift:39`) owns the top-k plus
+one cells, nine on this model (`RealForwardRunner.swift:421`), and at most one read in
+flight across all layers (`inFlightBudget`, `ExpertPrefetchRing.swift:46`; v15 step zero: a
+read still in flight shares the drive with the next demand read). At layer L's wake the
+probe's top-k for layer L+1 is issued after the demand submission, one layer ahead (the
+placement gate and distance one, v15's constants); a prediction lands in a
 ring cell and is published `resident` from the storage thread, so layer L+1's classifier
 can hit it; the plan swaps a wanted landing in and returns the freed cell; the reclaim
 drops an unwanted one when the ring needs the cell. The probe distance above one and the
@@ -246,45 +266,53 @@ demand read) and its two-distance queue, measured null.
 30.2 / 28.1 misses per token against production's 15.3 / 16.5 / 16.1 at 20.0 / 20.0 /
 18.8; `tools/expert-pool-replay.py --fill-mode ring-retain` reproduces production's misses
 within 0.2 per token and the no-fills control to the tenth, so the control survives in the
-instrument. The off switch, the placement, probe, distance, in-flight and join knobs are
-v17 Task 2's deletions.
+instrument, not in the binary. The ring is always built: the off switch and the placement,
+probe, distance, in-flight and join knobs went in v17, each at its measured winner.
 
 ## The demand path
 
-A miss is read by `PreadExpertStreamer.beginExpertCachePlan` (`:890`) on
-`ExpertIOScheduler` (`ExpertLoadOperation.swift:199`): four `.userInitiated` worker
-queues, demand batches queued ahead of speculative ones. The read itself is the bounded
-pread reader in C (`ShrikeKernelsC/expert_io.c`, `shrike_expert_io.h`): fixed reader
-threads (four: v4's knee, and v13 measured that a second four buys nothing at a tile's
-three to four misses), `F_NOCACHE` reads, at most two published batches (v13's winner). A batch carries an `ExpertIOCompletionToken`
-(`ExpertIOEventCoordinator.swift`): one shared Metal timeline for the model, a status word
-per batch (loading, complete, failed) the GPU's fixup waits on; out-of-order completions
-are held until every preceding value is terminal, since advancing the timeline past an
-unfinished batch would release its GPU wait early. The completion publishes `resident`
-on the storage thread (writer 9) and wakes the ring's deferred issue.
+A miss is read by `PreadExpertStreamer.beginExpertCachePlan` (`:544`) on
+`ExpertIOScheduler` (`ExpertLoadOperation.swift:175`): four `.userInitiated` worker
+queues, demand batches queued ahead of speculative ones. The only reader is the bounded
+pread reader in C (`ShrikeKernelsC/expert_io.c`, `shrike_expert_io.h`) behind
+`ParallelExpertReader` (`ParallelExpertReader.swift`): fixed reader threads (four: v4's
+knee, and v13 measured that a second four buys nothing at a tile's three to four misses),
+`F_NOCACHE` reads, at most two published batches (v13's winner), both constants in
+`BoundedReaderConfiguration` (`PreadExpertStreamer.swift:146`). A batch carries an
+`ExpertIOCompletionToken` (`ExpertIOEventCoordinator.swift`): one shared Metal timeline
+for the model, a status word per batch (loading, complete, failed) the GPU's fixup waits
+on; out-of-order completions are held until every preceding value is terminal, since
+advancing the timeline past an unfinished batch would release its GPU wait early. The
+completion publishes `resident` on the storage thread (`markPlanMissesResident`) and wakes
+the ring's deferred issue. The gate on the GPU's side is a function constant: the runner
+builds its `MoE` with `eventGatedIO: true` (`RealForwardRunner.swift:648`), and the
+parameter's `false` default (`Kernels/MoE/MoE.swift:90`) exists only so the kernel tests
+can build a `MoE` without a coordinator; the un-gated arm of `moe_io_ready` is the tests'
+path, not a mode.
 
 Production's per-read cost on the mini is 0.73 to 0.80 ms at p50 inside a 1.0 to 1.1 ms
 reading layer (v15's ledger), 12.6 to 13.6 reading layers per token: the term no chapter
 since v13 has moved and the next chapter's object.
 
-The legacy cached-pread path (`ParallelExpertReader.swift`, `SHRIKE_BOUNDED_IO=0`) and
-the Metal IO backend (`MetalExpertReader.swift`, `MetalExpertStagingPool.swift`,
-`SHRIKE_EXPERT_IO_BACKEND=metal`; its A/B of 2026-09-01: rig wait 43.29 ms sd 9.2 %
-against pread's 38.68 sd 2.2 %, and the server died mid-prefill,
-`v10-implementation-plan.md`) are v17 Task 2's deletions.
+Two other readers stood beside it until v17 and are gone with their knobs: the legacy
+cached-pread path, and the Metal IO backend (its A/B of 2026-09-01: rig wait 43.29 ms sd
+9.2 % against pread's 38.68 sd 2.2 %, and the server died mid-prefill,
+`v10-implementation-plan.md`).
 
 ## Prefill and the turn
 
-Prefill (`executePrefillChunk`, `RealForwardRunner.swift:2683`) runs the prompt in chunks:
+Prefill (`executePrefillChunk`, `RealForwardRunner.swift:1550`) runs the prompt in chunks:
 per layer the attention on the matrix path (`Metal/Prefill/attention_matrix.metal`, the
-causal-matrix tile `g2k256d`, matrix min rows 16), the router over the chunk, then the
-routed experts as tiles over the union of the chunk's experts, fetched two tiles deep
-through the same streamer with a sweep order that starts from what is resident
-(`SHRIKE_PREFILL_SWEEP=resident`, v13). The record is
+causal-matrix tile `g2k256d` at `PrefillAttention.swift:88`, matrix min rows 16 at
+`RealForwardRunner.swift:282`), the router over the chunk, then the routed experts as tiles
+over the union of the chunk's experts, fetched two tiles deep through the same streamer
+(`prefillRoutedTileSchedulerConfig`, `:268`) with a sweep order that starts from what is
+resident (v13). The record is
 [v12-prefill-matrix-kernels.md](v12-prefill-matrix-kernels.md): the mini's 12k-token
 prefill 725 to 68.4 s (5.57 ms per token), the 3.7k 110.7 to 20.6 s. The ANE prefill
-attention ([ane-prefill.md](ane-prefill.md), `SHRIKE_PREFILL_ANE=on`) is an opt-in
-experiment with its own record, the one switch v17 keeps.
+attention ([ane-prefill.md](ane-prefill.md), `SHRIKE_PREFILL_ANE=on`,
+`ANEPrefillAttention.swift:21`) is an opt-in experiment with its own record, the one code
+path v17 left behind an environment switch.
 
 The turn ([v13-the-turn.md](v13-the-turn.md)) is the server's prompt cache
 (`ServerPromptCache.swift`, [v6-dialect-normalized-cache.md](v6-dialect-normalized-cache.md):
@@ -293,11 +321,16 @@ plus the settle and the rewrite after an answer, the resident sweep and fetch de
 the 305-token first turn 5.47 to 3.54 s on the mini, the 1,085 8.08 to 6.47, the 2,125
 11.24 to 10.30, warm first turns after an answer 3.45 / 6.39 / 10.29.
 
-The v12 kernel variants and tuning knobs (the tile families, the block router, the
-per-expert routed GEMM, the tiled attention path, the losing sweep orders, the serial GDN
-scan) survive at `e959d55` as A/B arms of twenty-one knobs; v17 Task 2 deletes them at
-their defaults. MTP (`StreamingMTP.swift`, `encodeRoutedMoEVerifyPair`) was retired at
-v12's P17 (rig acceptance 20.6 %) and goes with them.
+v12's losing kernel variants and its twenty-one tuning knobs went in v17 at their measured
+defaults: the alternate attention tiles and the tensor-ops 2D path, the block router, the
+per-expert routed GEMM with its gather and scatter, the four losing sweep orders and the
+carry plumbing, three MPP instantiations. The tiled attention kernel and the serial GDN
+scan stay as the winners' own fallbacks: the tiled kernel for a chunk the matrix tile
+refuses (`matrixPathAccepts`, `PrefillAttention.swift:256`), the serial scan for a chunk
+under the chunk size. Speculative decode (MTP) went with them: it was retired at v12's P17
+(rig acceptance 20.6 %) and v17 deleted the code. The `.gturbo` format keeps its MTP
+family and the roster still excludes a sidecar bundle, which the loader refuses by family
+before any tensor check (`Model.swift:635`, `:825`).
 
 ## The serving layer
 
@@ -311,16 +344,15 @@ spawns `ShrikeDecodeService` out of process over a socket. Multi-model serving i
 in [multi-model-serving.md](multi-model-serving.md); the channel-faithful turn design in
 [channel-faithful-turns.md](channel-faithful-turns.md).
 
-## The four invariants of v4, re-verified at `e959d55`
+## The four invariants of v4, re-verified at v17's close
 
-1. **RAM budget is an input, not an outcome.** Still true. `--ram-budget` (`ServerArguments.swift:312`,
-   `RuntimeConfiguration.parseBudgetBytes`) defaults to 8 GiB
-   (`defaultExpertCacheBudgetBytes`, `RuntimeConfiguration.swift:342`); the slot count is
+1. **RAM budget is an input, not an outcome.** Still true. `--ram-budget`
+   (`ServerArguments.swift:304`, `RuntimeConfiguration.parseBudgetBytes`) defaults to 8 GiB
+   (`defaultExpertCacheBudgetBytes`, `RuntimeConfiguration.swift:98`); the slot count is
    the ladder value (8 to 128) nearest budget over stride times routed layers
-   (`expertCacheSlots`, `:375`); the arena is sized from that count plus the ring's nine.
-   The load path's comment at `ServerInference.swift:700` still describes a 1 GiB default
-   with 16 slots at 4-bit; that is stale and v17 Task 4 removes it with the function's
-   decomposition. The mini runs `--ram-budget 8G`, 128 slots, about 9.06 GB allocated.
+   (`expertCacheSlots`, `:131`, resolved at `ServerInference.swift:798`); the arena is
+   sized from that count plus the ring's nine. The mini runs `--ram-budget 8G`, 128 slots,
+   about 9.06 GB allocated.
 2. **Streaming that genuinely uses the disk.** Still true, with the figures replaced.
    The v4 rates (2.83 GB/s at prefill, 2.6 at decode against a 3.92 ceiling) were rig-era
    and described the old reader. Production's term is per read: 0.73 to 0.80 ms at p50 on
@@ -335,128 +367,70 @@ in [multi-model-serving.md](multi-model-serving.md); the channel-faithful turn d
    8 % miss rate is gone; what remains per reading layer is the read itself.
 4. **C99 for hot loops, Swift for structure.** Still true; the target grew.
    `ShrikeKernelsC` is 577 lines of C in two files (`expert_io.c` 442, `int4_affine_gemv.c`
-   135) plus 173 of headers, counted at `e959d55`, against v4's 439. The int4 GEMV's 2.9x
-   and the reader's threads are v4's measurements; the acquire load the word wake uses is
-   the third thing the target owns.
+   135) plus 178 of headers, counted from the tree, against v4's 439. The int4 GEMV's 2.9x
+   and the reader's threads are v4's measurements; the atomics the word wake and the
+   residency publish use are the third thing the target owns (`shrike_atomics.h`, an
+   acquire load of a 32-bit word and a release store of a 64-bit one).
 
 ## The knobs
 
-Sixty-six `SHRIKE_*` names read under `sources/` at `e959d55`, counted from the tree.
-"Users" are references outside the reading code (`tools/`, `docs/`, `tests/`, `CLAUDE.md`,
-`README.md`); "class" is diagnostic (output only), mode (selects a code path), config (a
-size, a path, a count) or gate (a retired name refused); "fails open" marks a knob whose
-unrecognised value silently takes the default instead of failing the launch (28 of the
-66; the enum knobs read through `environmentValue` throw). The disposition column is v17
-Task 2's, from the rule that a knob is useful only if something uses it; the citation is
-the record that measured the default.
+Thirteen `SHRIKE_*` names are read under `sources/`, counted from the tree: eight product
+settings, four instruments and the ANE prefill switch. Nothing else selects a code path.
+Every performance choice the chapters measured is a constant at its winner, and the losing
+arm is deleted; git history and each chapter's design doc are the record of what the arms
+were.
 
-| knob | read at | class | default and values | users | measured record | disposition |
-| --- | --- | --- | --- | --- | --- | --- |
-| `SHRIKE_DECODE_EXPERT_EXECUTION` | `RuntimeConfiguration.swift:42` | mode | `speculative`; `hit-fixup`, `barrier`, `gpu-residency`, `speculative-validate` | v9, v12, v14 docs; tests | v9 the speculative dispatch, v10 T5 the default | delete; one path |
-| `SHRIKE_SPEC_PHASE1` | `:77` | mode | `all-hit`; `hits` | v14 docs; tests | v14 lever A, a null | delete |
-| `SHRIKE_ROUTER_WAKE` | `:97` | mode | `word`; `status` | v14 docs; tests | v14 lever B, +2.8 to +3.6 % | delete |
-| `SHRIKE_HOST_WAIT` | `RealForwardRunner.swift:483` | mode, fails open | spin; `wait` | CLAUDE.md, v9, v14 docs | v10 T5 | delete |
-| `SHRIKE_EXPERT_IO_SYNC` | `RuntimeConfiguration.swift:59` | mode | `event`; `host` | v9, v10, v14 docs; tests | v10 T5 | delete |
-| `SHRIKE_EXPERT_IO_SUBMISSION` | `:238` | mode | `immediate`; `deferred` | tests | v10 T5 | delete |
-| `SHRIKE_RDADVISE_POLICY` | `ServerInference.swift:740` | mode, fails open | default; `off`, `bounded`, `adaptive` | none | dead under immediate submission | delete with the stage |
-| `SHRIKE_EXPERT_CACHE_LAYOUT` | `PreadExpertStreamer.swift:228` | mode | `pool`; `per-slot` | CLAUDE.md, v9, v12 docs; tests | v9's loss, v10 T5 | delete; the arena |
-| `SHRIKE_EXPERT_IO_BACKEND` | `:212` | mode | `pread`; `metal` | v10 docs; tests | the 2026-09-01 A/B, a loss | delete |
-| `SHRIKE_BOUNDED_IO` | `:539` | mode, fails open | on; `0` | v12 docs | the bounded reader, v12 | delete the legacy path |
-| `SHRIKE_PARALLEL_IO` | `:875` | mode, fails open | parallel; `0` (legacy path only) | none | | delete |
-| `SHRIKE_EXPERT_IO_THREADS` | `:250` | config | 4, `1...16` | v13 docs; tests | four the knee | constant |
-| `SHRIKE_EXPERT_IO_BATCH_DEPTH` | `:251` | config | 2, `1...2` | v13 docs; tests | v13's two batches | constant |
-| `SHRIKE_EXPERT_CACHE_POLICY` | `:389` | mode | `aging-lfu`; `lfu`, `lru` | v13 docs | v13 | delete the losers |
-| `SHRIKE_EXPERT_CACHE_PROTECT` | `:196` | mode | `chunk`; `off` | v13, v14 docs; the replay; tests | v13's chunk protection | delete; always on |
-| `SHRIKE_NO_PIN` | `ResidentBuffer.swift:65` | mode | pins; presence skips `mlock` | none | | delete |
-| `SHRIKE_PREDICTIVE_PREFETCH` | `RuntimeConfiguration.swift:168` | mode | on; `0` | architecture, v13 to v16 docs; the rig; tests | the off control, v16 | delete; the replay keeps the control |
-| `SHRIKE_PREFETCH_TOP_M` | `:175` (the `1...topK` bound in the runner, `RealForwardRunner.swift:959`) | config | top-k, `1...topK` | v14, v15 docs; the rig; tests | v14 top-4 vs top-8 | constant |
-| `SHRIKE_PREFETCH_INFLIGHT` | `:176` | config | 1, `1...8` | v15 docs; tests | v15's queue, a null | constant |
-| `SHRIKE_PREFETCH_PROBE_DISTANCE` | `:188` | config | 1, `1...8` | architecture, v14, v15 docs; the rig; tests | the recall curve, closed | constant; the reclaim window goes |
-| `SHRIKE_PREFETCH_JOIN_US` | `:196`, `:202` | config and gate | 400, `1...2000`; `0` refused | v15 docs; tests | v15's 400 us join | constant |
-| `SHRIKE_PREFETCH_PLACEMENT` | `:179` | mode | `after`; `beside` | v15 docs; tests | v15's placement gate | delete |
-| `SHRIKE_PREFETCH_PROBE` | `:205` | mode | `fused`; `separate` | v15 docs; tests | v15's fused probe | delete |
-| `SHRIKE_PREFETCH_ADOPT` | `:191` | gate | any value refused | v15, v16 docs; tests | removed by v16's merge | delete; the tripwire |
-| `SHRIKE_PREFETCH_TRACE` | `:190` | diagnostic | a JSONL path | the rig, the replay, the coverage tool | | stays |
-| `SHRIKE_ATTN_MATRIX_TILE` | `PrefillAttention.swift:91` | mode, fails open | `g2k256d`; six others | v12 docs | v12's tile arms | delete the losers |
-| `SHRIKE_MPP_TILE_N`, `_TILE_K`, `_DEQUANT_BUFFERS` | `MPPPrefillInt4QMM.swift:44` to `:46` | mode, fails open | the `n32k256b1` variant | v12 docs | v12's tensor-core arms | delete the losers |
-| `SHRIKE_MPP_WEIGHT_LOADS` | `:52` | mode, fails open | `vector`; `byte` | v12 docs | v12 | delete |
-| `SHRIKE_PREFILL_ATTENTION` | `RealForwardRunner.swift:624` | mode, fails open | `matrix`; `tiled` | v12 docs | v12's matrix path | delete the tiled path |
-| `SHRIKE_PREFILL_ROUTER` | `PrefillRouter.swift:55` | mode, fails open | `tiled`; `block` | v12 docs | v12 | delete the block router |
-| `SHRIKE_PREFILL_ROUTER_TOKENS` | `:61` | config, fails open | 12, `4...24` | v12 docs | v12 | constant |
-| `SHRIKE_PREFILL_ROUTED_GEMM` | `RealForwardRunner.swift:829` | mode, fails open | grouped; `per-expert` | v12 docs | v12's grouped dispatch | delete the per-expert path |
-| `SHRIKE_PREFILL_ROUTE_OVERLAP` | `:831` | mode, fails open | on; `off` | v12 docs | v12 | delete the knob only |
-| `SHRIKE_PREFILL_POOL_RESIDENCY` | `:677` | mode, fails open | on; `none` | v12 docs | v12 | delete the knob only |
-| `SHRIKE_PREFILL_TAIL_TILE` | `:647` | mode, fails open | `32`; `off` | v12 docs | v12 | delete the knob only |
-| `SHRIKE_PREFILL_TILE_BATCH` | `:688` | config, fails open | 1, `1...16` | v12 docs; the replay | v12 | constant |
-| `SHRIKE_PREFILL_TILE_DEPTH` | `:708` | config, fails open | 2, `1...8` | v12 docs; the replay | v12 | constant |
-| `SHRIKE_PREFILL_FETCH_DEPTH` | `:726` | config, fails open | 2, `1...2` | v13 docs; the replay | v13's fetch depth 2 | constant |
-| `SHRIKE_PREFILL_MATRIX_MIN_ROWS` | `:672` | config, fails open | 16, `3...32` | v13 docs | v13's min rows 16 | constant |
-| `SHRIKE_PREFILL_SWEEP` | `:618` | mode | `resident`; `alternate`, `fixed`, `carry`, `recency` | v12 to v14 docs; the replay; the turn rig | v13's resident sweep | delete the losers |
-| `SHRIKE_PREFILL_SWEEP_TAIL` | `:642` | config | `min(96, upper)`, `8...expertCount` (recency only) | v13 docs; the replay | v13 | delete with `recency` |
-| `SHRIKE_GDN_PREFILL_SCAN` | `:823` | mode, fails open | chunked; `serial` | v12 docs | v12's chunked scan | delete the serial path |
-| `SHRIKE_ATTN_FULL_CHUNKS` | `Kernels/Attention/Attention.swift:102` | config, fails open | 16, `1...max` | v10 docs | v10 | constant |
-| `SHRIKE_SAMPLER_PATH` | `Sampler.swift:107` | mode | `tiled`; `generic` | tests | the tiled top-k | delete the generic path |
-| `SHRIKE_PREFILL_ANE` | `ANEPrefillAttention.swift:21` | mode | `off`; `on` | README, ane-prefill.md, the probes; tests | an open candidate | stays |
-| `SHRIKE_MTP_VERIFY` | `StreamingMTP.swift:238` | mode | `pair`; `tile` | v12 docs; tests | MTP retired at v12 P17 | delete with MTP |
-| `SHRIKE_MTP_EXPERT_SLOTS` | `:30` | config, fails open | 8, of the ladder | tests | | delete with MTP |
-| `SHRIKE_THINKING_MODE` | `Tokenizer.swift:50` | mode, fails open | off; on, `adaptive` | tests | product | stays |
-| `SHRIKE_REASONING_EFFORT` | `:68` (the server validates at `ServerArguments.swift:161`) | config | medium; `low`, `high` | v7 docs; tests | product | stays |
-| `SHRIKE_REASONING_RETENTION` | `:86` (the server validates at `ServerArguments.swift:167`) | mode | `as-generated`; `stripped` | v6.1 docs | product | stays |
-| `SHRIKE_STRIP_CLI_PROMPT` | `CLIStrip.swift:34` | mode, fails open | off; on | multi-model-serving.md; tests | product | stays |
-| `SHRIKE_STRIP_TAGS` | `:44` | config | `system-reminder` | tests | product | stays |
-| `SHRIKE_CONCISE_MODE` | `ServerInference.swift:912` | mode, fails open | off; on | none | product | stays |
-| `SHRIKE_TOKENIZER_DIR` | `Tokenizer.swift:184` | config | unset | none | product | stays |
-| `SHRIKE_MODEL` | `AppModelInstallDescriptor.swift:119` | config, fails open | Ornith 1.5 8-bit; four names | none | the app's selector | stays |
-| `SHRIKE_EXPERT_CACHE_SLOTS` | `ServerInference.swift:697` | config, fails open | unset; the ladder | the flag's help | duplicates `--expert-cache-slots` | delete |
-| `SHRIKE_RUNNER_STATS` | `RealForwardRunner.swift:2169` | diagnostic | off | CLAUDE.md; the rigs, the deploy script, the parsers | | stays |
-| `SHRIKE_KERNEL_STATS` | `:2167` | diagnostic | off | CLAUDE.md; the rigs, the deploy script, the ledger | | stays |
-| `SHRIKE_ROUTE_TRACE` | `:2211` | diagnostic | a path | the rig, the replay, the coverage tool | | stays |
-| `SHRIKE_LAYER_TRACE` | `:2171` | diagnostic | off | none | | delete |
-| `SHRIKE_GPU_CAPTURE_DIR` | `:2176` | diagnostic | unset | v10 docs | | delete |
-| `SHRIKE_CACHE_DIAG` | `ServerPromptCache.swift:489` | diagnostic | off | v7 docs | | delete |
-| `SHRIKE_GEN_DIAG` | `ServerInference.swift:72` | diagnostic | off | v7, v8 docs | | delete |
-| `SHRIKE_PHASES` | `RealForwardRunner.swift:2812`, `Run.swift:206` | diagnostic | off | v12, v13 docs | | delete |
+| knob | read at | what it does |
+| --- | --- | --- |
+| `SHRIKE_THINKING_MODE` | `Tokenizer.swift:50` | off, on or `adaptive` thinking for a dialect that has it |
+| `SHRIKE_REASONING_EFFORT` | `Tokenizer.swift:68` (the server validates at `ServerArguments.swift:172`) | low, medium or high, the default medium ([v7-reasoning-effort.md](v7-reasoning-effort.md)) |
+| `SHRIKE_REASONING_RETENTION` | `Tokenizer.swift:86` (validated at `ServerArguments.swift:178`) | `as-generated` or `stripped` reasoning in the turn's history ([v6.1-reasoning-retention.md](v6.1-reasoning-retention.md)) |
+| `SHRIKE_TOKENIZER_DIR` | `Tokenizer.swift:184` | an override tokenizer folder, unset by default |
+| `SHRIKE_MODEL` | `AppModelInstallDescriptor.swift:119` | the app's model selector, one of the roster's names |
+| `SHRIKE_STRIP_CLI_PROMPT` | `CLIStrip.swift:34` | drop a coding CLI's system and developer boilerplate from the prompt |
+| `SHRIKE_STRIP_TAGS` | `CLIStrip.swift:44` | the block tags that strip removes, `system-reminder` by default |
+| `SHRIKE_CONCISE_MODE` | `ServerInference.swift:956` | the per-quant concise instruction, off by default |
+| `SHRIKE_RUNNER_STATS` | `RealForwardRunner.swift:1235` (the server's footer at `ServerInference.swift:1958`) | the runner line: the per-stage split every chapter's rows are read from |
+| `SHRIKE_KERNEL_STATS` | `RealForwardRunner.swift:1233` (the footer at `ServerInference.swift:1962`) | the per-kernel GPU timeline |
+| `SHRIKE_ROUTE_TRACE` | `RealForwardRunner.swift:1241` | a path: every layer's top-k, what the replay and the coverage tool read |
+| `SHRIKE_PREFETCH_TRACE` | `RuntimeConfiguration.swift:188` | a JSONL path: the ring's predictions, landings and misses per layer |
+| `SHRIKE_PREFILL_ANE` | `ANEPrefillAttention.swift:21` | `off` or `on`: the ANE prefill attention experiment ([ane-prefill.md](ane-prefill.md)) |
 
-The surviving set, thirteen names: `SHRIKE_THINKING_MODE`, `SHRIKE_REASONING_EFFORT`,
-`SHRIKE_REASONING_RETENTION`, `SHRIKE_STRIP_CLI_PROMPT`, `SHRIKE_STRIP_TAGS`,
-`SHRIKE_CONCISE_MODE`, `SHRIKE_TOKENIZER_DIR`, `SHRIKE_MODEL`, `SHRIKE_PREFILL_ANE`,
-`SHRIKE_RUNNER_STATS`, `SHRIKE_KERNEL_STATS`, `SHRIKE_ROUTE_TRACE`, `SHRIKE_PREFETCH_TRACE`.
-Checked against what sets a knob outside the code: `tools/mini-deploy.sh`'s launch line
-sets `SHRIKE_RUNNER_STATS` and `SHRIKE_KERNEL_STATS`; `tools/decode-rig.sh`'s every launch
-sets those two and `SHRIKE_ROUTE_TRACE`; the rig's `PREFETCH_TRACE=1` sets `SHRIKE_PREFETCH_TRACE`; its
-`SERVER_ENV` examples name `SHRIKE_PREDICTIVE_PREFETCH`, `SHRIKE_PREFETCH_TOP_M` and
-`SHRIKE_PREFETCH_PROBE_DISTANCE`, which Task 2 rewrites when those go. Four names in
-`docs/` have no reader at all (`SHRIKE_ATTN_DECODE_LOOP`, `SHRIKE_EXPERT_IDLE_REFILL`,
-`SHRIKE_MPP_ROW_TILE`, `SHRIKE_MTP_REJECT_KEEP`): history. `SHRIKE_IO_MAX_THREADS` and
-`SHRIKE_IO_MAX_BATCHES` are C compile-time bounds in `shrike_expert_io.h`, not knobs.
+The two stats names are what `tools/mini-deploy.sh` sets at the production launch and what
+`tools/decode-rig.sh` and `tools/turn-rig.sh` set on every launch of theirs, the rig adding
+the route trace and, under `PREFETCH_TRACE=1`, the prefetch trace.
 
-After Task 2 one tripwire replaces the refused names: any `SHRIKE_*` variable in the
-environment outside the surviving set fails the launch by name.
+One tripwire guards the set. `RuntimeConfiguration.refuseUnknownEnvironment`
+(`RuntimeConfiguration.swift:200`) scans the environment for any `SHRIKE_*` name outside
+`knownEnvironmentNames` (`:191`) and fails the launch by name, listing the offenders
+sorted and naming the chapter that removed them (`:56`). It runs first at the server's
+launch (`ShrikeServer/Command/main.swift:18`) and again in the session's load
+(`ServerInference.swift:698`), in the CLI's run (`ShrikeCLI/Run.swift:64`) and in the app
+client's load (`RealInferenceClient.swift:76`), all before any model load, so a stale
+launch script fails loudly instead of quietly taking a default. The 53 names v17 removed,
+each with the measurement that closed it, are in
+[v17-consolidation.md](v17-consolidation.md).
 
 ## The long functions
 
-The swiftlint baseline's eighteen entries at `e959d55`, the map v17 Task 4 decomposes
-from (stages from the design doc's step zero):
+There are none: no function body is over 120 lines, there is no swiftlint baseline, and
+the gate is a bare `swiftlint lint --strict` over `force_cast`, `force_try` and
+`function_body_length` (warn 120, error 400). The shape the chapter settled on, and the
+one CLAUDE.md now asks for as code is written, is a sequence of named stage methods over a
+small context struct, in the order the work runs, with the caller reading as the stage
+list: `encodeDecodeRoutedMoE`'s ten stages over `DecodeRoutedLayerContext` are the
+worked example, above.
 
-| function | lines | shape and the first seam |
-| --- | ---: | --- |
-| `RealForwardRunner.encodeDecodeRoutedMoE` (`:6878`) | 389 | 25 stages under 7 mode knobs; the classification, the hit-split encode, the I/O acquisition |
-| `RealForwardRunner.produceToken` (`:3153`) | 229 | the embed, the layer loop (7 sub-stages), the head; the dense-layer body first |
-| `RealForwardRunner.executePrefillChunk` (`:2683`) | 225 | 12 stages; the validation, the token buffer, the embed-or-blit, the ANE probe, the close-out |
-| `RealForwardRunner.encodeRoutedMoEVerifyPair` (`:5340`) | 214 | MTP's width-2 verify; deleted in Task 2 |
-| `RealForwardRunner.encodeFullAttentionPrefill` (`:4997`) | 204 | 9 stages, no `self` mutation; the RoPE epilogue, the causal dispatch |
-| `ServerInference.generate` (`:1112`) | 284 | 21 stages; a 60-line counter snapshot the app's client already has as an init |
-| `ServerInference.load` (`:642`) | 189 | 13 stages; the slot derivation, the runner, the cache domain, the cache |
-| `ServerArguments.parse` (`:140`) | 241 | a flag switch and 40 lines of validation |
-| `RemoteStreamingRepacker.runPrepared` (`:197`) | 231 | the install pipeline: resume, copy ranges, finalize |
-| `RawCompletion.runRawCompletion` (`:89`) | 180 | prefill then the decode loop |
-| `ShrikeDecodeService` `Entry.main` (`:12`) | 177 | a command switch; one handler per case |
-| `ShrikeCLI` `Run.run` (`:50`) | 176 | the driver: the prompt, the runtime, the footer |
-| `ShrikeCLI` `Args.parse` (`:139`) | 170 | a flag switch and validation |
-| `PreadExpertStreamer.init` (`:375`) | 167 | resource acquisition; the layout and reader branches go in Task 2 |
-| `Model.load` (`:607`) | 149 | a verify-then-map pipeline already sectioned by comments |
-| `RealInferenceClient.run` (`:288`) | 126 | one `do` with three `catch` arms |
-| `ShrikeBench.runMoE` (`:192`), `runGDN` (`:407`) | 179, 175 | deleted with the target in Task 2 |
+Where the headroom is thin, so a reader knows what a new branch costs:
+
+| function | body lines |
+| --- | ---: |
+| `ServerArguments.ParseContext.apply(flag:value:)` (`ServerArguments.swift:213`) | 110, an exhaustive flag switch; the next two or three flags put it over, and the honest split then is by option group |
+| `RealInferenceSession.run` (`RealInferenceClient.swift:285`) | 101 |
+| `RealForwardRunner.executePrefillChunk` (`:1550`) | 100 |
+
+The per-function record, the fourteen bodies that were over the bar and what each became,
+is [v17-consolidation.md](v17-consolidation.md)'s Task 4 table.
 
 ## The instruments
 
@@ -464,13 +438,17 @@ from (stages from the design doc's step zero):
   byte-identical, two profiles per machine tag under `baselines/`.
 - `tools/decode-rig.sh` with `tools/decode-rows.py`: the three request shapes on the
   mini, a fresh server per shape, every token's arrival streamed, one row per request.
+  Every launch carries `SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1` and a
+  `SHRIKE_ROUTE_TRACE` path; `PREFETCH_TRACE=1` adds a `SHRIKE_PREFETCH_TRACE` path.
 - `tools/turn-rig.sh` with `tools/turn-summary.py`: the turn's shapes (a pair, a suffix,
-  the multi-turn chain).
+  the multi-turn chain), the same two stats names on every launch.
 - `tools/expert-pool-replay.py`: a route trace replayed against the pool's policy and
-  the ring's fills; trustworthy for misses, blind to milliseconds (v16).
-- `tools/prefetch-coverage.py`: a prediction priced offline against a trace.
+  the ring's fills; trustworthy for misses, blind to milliseconds (v16). It keeps the
+  fill-mode controls, including no fills, that the runtime no longer has.
+- `tools/prefetch-coverage.py`: a prefetch trace's predictions priced offline against a
+  route trace.
 - `tools/prefill-ledger.py`, `tools/parse-kernel-stats.py`, `tools/parse-runner-stats.py`:
-  the stats lines read into ledgers.
+  the runner and kernel stats lines read into ledgers.
 - `tools/mini-deploy.sh`: the release binaries and their bundles to the mini, optionally
   a restart at the production launch.
 
@@ -500,5 +478,12 @@ the status of record.
   15.4 to 15.6 / 16.3 / 16.2 tok/s.
 - v16 ([v16-landing.md](v16-landing.md)): the landing, the ring merged into the pool's
   address space, the wall flat.
-- v17 ([v17-consolidation.md](v17-consolidation.md)): this document, the knobs, one
-  residency path, the runner decomposed.
+- v17 ([v17-consolidation.md](v17-consolidation.md)): the consolidation. This document,
+  then the knobs 66 to 13 behind a tripwire (the decode execution enum to one path, two
+  cache layouts to one, three expert readers to one, Metal kernels 82 to 67, source files
+  250 to 235, +908 −12621 lines, MTP and the bench target gone), one residency publish
+  path (the entry 16 bytes to 8 in one release store, fourteen writer sites to eight calls
+  of one function, two generation spaces to one per cell), and the runner decomposed (the
+  swiftlint baseline 18 entries to none and the file gone, the longest body 289 lines to
+  110). The wall flat within the drift on all three shapes at every task's end, every
+  answer identical, the misses to the tenth.
