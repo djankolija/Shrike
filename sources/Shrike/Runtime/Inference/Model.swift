@@ -457,11 +457,6 @@ extension Model {
     /// Open a `.gturbo/` directory and return a typed handle. Eagerly verifies
     /// SHA-256 of `model_weights.bin` and `packed_experts/layout.json`; layer
     /// files are verified lazily on the layer's first touch.
-    /// lint:allow-long a sequential load pipeline -- open, hash, verify the
-    /// receipt, decode the layout, map the resident buffer -- whose stages
-    /// share a descriptor, sizes and timing stats. Extracting any of them
-    /// needs six or seven parameters, trading one readable sequence for
-    /// several functions with unwieldy signatures.
     public static func load(directoryURL: URL,
                             device: MTLDevice,
                             expecting: ArchConfig = .qwen36_35B_A3B,
@@ -476,14 +471,98 @@ extension Model {
 
         // -- create the directory handle and open manifest
         let modelDirectory = try GTurboModelDirectory(rootURL: directoryURL)
+        let manifestFD = try openManifest(modelDirectory: modelDirectory,
+                                          directoryURL: directoryURL)
+        defer { close(manifestFD) }
+
+        let (manifestData, manifestSize, manifestSha) = try readManifest(
+            modelDirectory: modelDirectory,
+            fileDescriptor: manifestFD,
+            stats: &stats)
+
+        let (receipt, trustedReceiptUsable) = try loadTrustedReceipt(
+            modelDirectory: modelDirectory,
+            directoryURL: directoryURL,
+            manifestSha256: manifestSha,
+            resolvedIntegrityPolicy: resolvedIntegrityPolicy,
+            stats: &stats)
+
+        let manifest = try decodeManifest(data: manifestData,
+                                          expecting: expecting,
+                                          receipt: receipt,
+                                          directoryURL: directoryURL,
+                                          manifestSha256: manifestSha,
+                                          manifestSize: manifestSize,
+                                          stats: &stats)
+
+        // -- verify the small, always-touched files before mapping model data
+        let weightsURL = directoryURL.appendingPathComponent("model_weights.bin")
+        let (weightsEntry, layoutEntry) = try resolveEagerFileEntries(manifest: manifest)
+
+        let weightsFD = try modelDirectory.openFile("model_weights.bin")
+        defer { close(weightsFD) }
+        let layoutFD = try modelDirectory.openFile("packed_experts/layout.json")
+        defer { close(layoutFD) }
+
+        let (layoutData, weightsSize) = try verifyEagerFiles(
+            modelDirectory: modelDirectory,
+            weightsFD: weightsFD,
+            layoutFD: layoutFD,
+            weightsEntry: weightsEntry,
+            layoutEntry: layoutEntry,
+            resolvedIntegrityPolicy: resolvedIntegrityPolicy,
+            trustedReceiptUsable: trustedReceiptUsable,
+            stats: &stats)
+
+        let layout = try decodeLayout(layoutData: layoutData,
+                                      manifest: manifest,
+                                      modelDirectory: modelDirectory,
+                                      trustedReceiptUsable: trustedReceiptUsable,
+                                      stats: &stats)
+
+        let residentIndex = try loadResidentIndex(weightsFD: weightsFD,
+                                                  layout: layout,
+                                                  manifest: manifest,
+                                                  expecting: expecting,
+                                                  weightsSize: weightsSize)
+
+        // -- create resident buffer, reusing the opened FD
+        let residentBuffer = try ResidentBuffer(
+            fileURL: weightsURL,
+            fileOffset: residentIndex.header.indexSize,
+            residentSize: residentIndex.header.residentSize,
+            device: device,
+            fileDescriptor: weightsFD)
+
+        return Model(
+            device: device,
+            config: expecting,
+            streamingMode: streamingMode,
+            integrityPolicy: resolvedIntegrityPolicy,
+            residentBuffer: residentBuffer,
+            residentIndex: residentIndex,
+            packedExpertsLayout: layout,
+            manifest: manifest,
+            directoryURL: directoryURL,
+            modelDirectory: modelDirectory)
+    }
+
+    private static func openManifest(modelDirectory: GTurboModelDirectory,
+                                     directoryURL: URL) throws -> Int32 {
         let manifestFD: Int32
         do {
             manifestFD = try modelDirectory.openFile("manifest.json")
         } catch ModelError.missingFile {
             throw ModelError.partialInstall(path: directoryURL.path)
         }
-        defer { close(manifestFD) }
+        return manifestFD
+    }
 
+    private static func readManifest(
+        modelDirectory: GTurboModelDirectory,
+        fileDescriptor manifestFD: Int32,
+        stats: inout ModelLoadStats
+    ) throws -> (data: Data, size: UInt64, sha256: String) {
         // -- read manifest data and compute hash from the in-memory buffer
         let manifestData = try modelDirectory.readMetadata(
             fileDescriptor: manifestFD,
@@ -493,7 +572,16 @@ extension Model {
         let manifestShaStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let manifestSha = Sha256Verifier.hashData(manifestData)
         stats.manifestSha256Nanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - manifestShaStart
+        return (manifestData, manifestSize, manifestSha)
+    }
 
+    private static func loadTrustedReceipt(
+        modelDirectory: GTurboModelDirectory,
+        directoryURL: URL,
+        manifestSha256 manifestSha: String,
+        resolvedIntegrityPolicy: ModelIntegrityPolicy,
+        stats: inout ModelLoadStats
+    ) throws -> (receipt: VerifiedInstallReceipt?, usable: Bool) {
         // -- optional trusted-receipt validation
         let receipt: VerifiedInstallReceipt?
         var trustedReceiptUsable = false
@@ -531,7 +619,18 @@ extension Model {
         } else {
             receipt = nil
         }
+        return (receipt, trustedReceiptUsable)
+    }
 
+    private static func decodeManifest(
+        data manifestData: Data,
+        expecting: ArchConfig,
+        receipt: VerifiedInstallReceipt?,
+        directoryURL: URL,
+        manifestSha256 manifestSha: String,
+        manifestSize: UInt64,
+        stats: inout ModelLoadStats
+    ) throws -> Manifest {
         let manifest = try ManifestReader.decode(data: manifestData, expecting: expecting)
         if expecting.family == .qwen36MTP { throw Self.mtpSidecarRefused }
         if let receipt {
@@ -543,21 +642,31 @@ extension Model {
                                                       manifestSize: manifestSize)
             stats.receiptValidationNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - receiptStart
         }
+        return manifest
+    }
 
-        // -- verify the small, always-touched files before mapping model data
-        let weightsURL = directoryURL.appendingPathComponent("model_weights.bin")
+    private static func resolveEagerFileEntries(
+        manifest: Manifest
+    ) throws -> (weights: ManifestFileEntry, layout: ManifestFileEntry) {
         guard let weightsEntry = manifest.files["model_weights.bin"] else {
             throw ModelError.missingFile(name: "model_weights.bin")
         }
         guard let layoutEntry = manifest.files["packed_experts/layout.json"] else {
             throw ModelError.missingFile(name: "packed_experts/layout.json")
         }
+        return (weightsEntry, layoutEntry)
+    }
 
-        let weightsFD = try modelDirectory.openFile("model_weights.bin")
-        defer { close(weightsFD) }
-        let layoutFD = try modelDirectory.openFile("packed_experts/layout.json")
-        defer { close(layoutFD) }
-
+    private static func verifyEagerFiles(
+        modelDirectory: GTurboModelDirectory,
+        weightsFD: Int32,
+        layoutFD: Int32,
+        weightsEntry: ManifestFileEntry,
+        layoutEntry: ManifestFileEntry,
+        resolvedIntegrityPolicy: ModelIntegrityPolicy,
+        trustedReceiptUsable: Bool,
+        stats: inout ModelLoadStats
+    ) throws -> (layoutData: Data, weightsSize: UInt64) {
         // Read layout.json and validate size via modelDirectory
         let layoutData = try modelDirectory.readMetadata(
             fileDescriptor: layoutFD,
@@ -599,7 +708,16 @@ extension Model {
         } else {
             _ = RDAdvice.call(fd: weightsFD, offset: 0, byteCount: weightsSize)
         }
+        return (layoutData, weightsSize)
+    }
 
+    private static func decodeLayout(
+        layoutData: Data,
+        manifest: Manifest,
+        modelDirectory: GTurboModelDirectory,
+        trustedReceiptUsable: Bool,
+        stats: inout ModelLoadStats
+    ) throws -> PackedExpertsLayout {
         // -- decode layout from ShrikeFormat wire codec
         let layout = try PackedExpertsLayoutReader.decode(data: layoutData,
                                                           manifest: manifest)
@@ -610,7 +728,16 @@ extension Model {
                                                   layout: layout)
             stats.receiptValidationNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - receiptStart
         }
+        return layout
+    }
 
+    private static func loadResidentIndex(
+        weightsFD: Int32,
+        layout: PackedExpertsLayout,
+        manifest: Manifest,
+        expecting: ArchConfig,
+        weightsSize: UInt64
+    ) throws -> ResidentIndex {
         // -- load resident index using the FD passed from openFile()
         let residentIndex = try ResidentIndexReader.load(
             fileDescriptor: weightsFD, displayPath: "model_weights.bin")
@@ -630,26 +757,7 @@ extension Model {
                 \(residentIndex.header.residentSize) = \(expectedSize)
                 """)
         }
-
-        // -- create resident buffer, reusing the opened FD
-        let residentBuffer = try ResidentBuffer(
-            fileURL: weightsURL,
-            fileOffset: residentIndex.header.indexSize,
-            residentSize: residentIndex.header.residentSize,
-            device: device,
-            fileDescriptor: weightsFD)
-
-        return Model(
-            device: device,
-            config: expecting,
-            streamingMode: streamingMode,
-            integrityPolicy: resolvedIntegrityPolicy,
-            residentBuffer: residentBuffer,
-            residentIndex: residentIndex,
-            packedExpertsLayout: layout,
-            manifest: manifest,
-            directoryURL: directoryURL,
-            modelDirectory: modelDirectory)
+        return residentIndex
     }
 
     private static func validateTrustedReceiptLayerLayout(
