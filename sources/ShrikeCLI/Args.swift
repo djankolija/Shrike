@@ -129,9 +129,16 @@ extension Args {
       --help                    Show this message.
     """
 
-    /// lint:allow-long same shape as ServerArguments.parse: a flag table
-    /// where the exhaustive switch is the point.
+    /// Same shape as ServerArguments.parse: a flag table.
     public static func parse(_ argv: [String]) throws -> Args {
+        var context = ParseContext()
+        try context.applyFlags(argv)
+        guard let model = context.model else { throw ArgsError.requiredMissing("--model") }
+        try context.validate()
+        return context.makeArgs(model: model)
+    }
+
+    private struct ParseContext {
         var model: String?
         var prompt: String?
         var messagesFile: String?
@@ -152,150 +159,137 @@ extension Args {
         var kvCachePrecision: KVCachePrecision = .int8
         var ropeScalingMode: RuntimeRoPEScalingMode = .none
 
-        var index = 0
-        while index < argv.count {
-            let flag = argv[index]
-            switch flag {
-            case "--help":
-                throw ArgsError.helpRequested
-            case "--quiet":
-                quiet = true
-                index += 1
-            case "--concise":
-                concise = true
-                index += 1
-            case "--thinking":
-                let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = ModelThinkingMode(rawValue: value) else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
+        mutating func applyFlags(_ argv: [String]) throws {
+            var index = 0
+            while index < argv.count {
+                let flag = argv[index]
+                switch flag {
+                case "--help":
+                    throw ArgsError.helpRequested
+                case "--quiet":
+                    quiet = true
+                    index += 1
+                case "--concise":
+                    concise = true
+                    index += 1
+                case "--thinking":
+                    thinkingMode = try takeRawValue(argv, &index, flag: flag)
+                case "--model":
+                    model = try takeValue(argv, &index, flag: flag)
+                case "--prompt":
+                    prompt = try takeValue(argv, &index, flag: flag)
+                case "--messages-file":
+                    messagesFile = try takeValue(argv, &index, flag: flag)
+                case "--max-new":
+                    maxNew = try takeInt(argv, &index, flag: flag,
+                                         in: 1...RuntimeConfiguration.maximumContextTokens)
+                case "--max-context":
+                    maxContext = try takeInt(argv, &index, flag: flag,
+                                             in: 1...RuntimeConfiguration.maximumContextTokens)
+                    maxContextWasSet = true
+                case "--rope-scaling":
+                    ropeScalingMode = try takeRawValue(argv, &index, flag: flag)
+                case "--temperature":
+                    let value = try takeValue(argv, &index, flag: flag)
+                    guard let parsed = Float(value), parsed >= 0, parsed <= 2 else {
+                        throw ArgsError.invalidValue(flag: flag, value: value)
+                    }
+                    temperature = parsed
+                case "--top-k":
+                    let parsed = try takeInt(argv, &index, flag: flag, in: 0...256)
+                    topK = parsed == 0 ? nil : parsed
+                case "--top-p":
+                    let value = try takeValue(argv, &index, flag: flag)
+                    guard let parsed = Float(value), parsed > 0, parsed <= 1 else {
+                        throw ArgsError.invalidValue(flag: flag, value: value)
+                    }
+                    topP = parsed
+                case "--repetition-penalty":
+                    let value = try takeValue(argv, &index, flag: flag)
+                    guard let parsed = Float(value), parsed > 0 else {
+                        throw ArgsError.invalidValue(flag: flag, value: value)
+                    }
+                    repetitionPenalty = parsed
+                case "--seed":
+                    let value = try takeValue(argv, &index, flag: flag)
+                    guard let parsed = UInt64(value) else {
+                        throw ArgsError.invalidValue(flag: flag, value: value)
+                    }
+                    seed = parsed
+                case "--expert-cache-slots":
+                    let value = try takeValue(argv, &index, flag: flag)
+                    guard let parsed = Int(value),
+                          RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) else {
+                        throw ArgsError.invalidValue(flag: flag, value: value)
+                    }
+                    expertCacheSlots = parsed
+                case "--prefill-chunk":
+                    let value = try takeValue(argv, &index, flag: flag)
+                    if value == "auto" {
+                        prefillChunk = .auto
+                    } else if let parsed = Int(value),
+                              RuntimeConfiguration.allowedPrefillChunkTokens.contains(parsed) {
+                        prefillChunk = .fixed(parsed)
+                    } else {
+                        throw ArgsError.invalidValue(flag: flag, value: value)
+                    }
+                case "--kv-bits":
+                    let value = try takeValue(argv, &index, flag: flag)
+                    guard let bits = Int(value),
+                          let parsed = KVCachePrecision(rawValue: bits) else {
+                        throw ArgsError.invalidValue(flag: flag, value: value)
+                    }
+                    kvCachePrecision = parsed
+                case "--stop":
+                    stops.append(try takeValue(argv, &index, flag: flag))
+                default:
+                    throw ArgsError.unknownFlag(flag)
                 }
-                thinkingMode = parsed
-            case "--model":
-                model = try takeValue(argv, &index, flag: flag)
-            case "--prompt":
-                prompt = try takeValue(argv, &index, flag: flag)
-            case "--messages-file":
-                messagesFile = try takeValue(argv, &index, flag: flag)
-            case "--max-new":
-                let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Int(value),
-                      (1...RuntimeConfiguration.maximumContextTokens).contains(parsed) else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
-                }
-                maxNew = parsed
-            case "--max-context":
-                let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Int(value),
-                      (1...RuntimeConfiguration.maximumContextTokens).contains(parsed) else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
-                }
-                maxContext = parsed
-                maxContextWasSet = true
-            case "--rope-scaling":
-                let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = RuntimeRoPEScalingMode(rawValue: value) else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
-                }
-                ropeScalingMode = parsed
-            case "--temperature":
-                let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Float(value), parsed >= 0, parsed <= 2 else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
-                }
-                temperature = parsed
-            case "--top-k":
-                let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Int(value), (0...256).contains(parsed) else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
-                }
-                topK = parsed == 0 ? nil : parsed
-            case "--top-p":
-                let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Float(value), parsed > 0, parsed <= 1 else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
-                }
-                topP = parsed
-            case "--repetition-penalty":
-                let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Float(value), parsed > 0 else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
-                }
-                repetitionPenalty = parsed
-            case "--seed":
-                let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = UInt64(value) else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
-                }
-                seed = parsed
-            case "--expert-cache-slots":
-                let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Int(value),
-                      RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
-                }
-                expertCacheSlots = parsed
-            case "--prefill-chunk":
-                let value = try takeValue(argv, &index, flag: flag)
-                if value == "auto" {
-                    prefillChunk = .auto
-                } else if let parsed = Int(value),
-                          RuntimeConfiguration.allowedPrefillChunkTokens.contains(parsed) {
-                    prefillChunk = .fixed(parsed)
-                } else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
-                }
-            case "--kv-bits":
-                let value = try takeValue(argv, &index, flag: flag)
-                guard let bits = Int(value),
-                      let parsed = KVCachePrecision(rawValue: bits) else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
-                }
-                kvCachePrecision = parsed
-            case "--stop":
-                stops.append(try takeValue(argv, &index, flag: flag))
-            default:
-                throw ArgsError.unknownFlag(flag)
             }
         }
 
-        guard let model else { throw ArgsError.requiredMissing("--model") }
-        if prompt != nil && messagesFile != nil {
-            throw ArgsError.mutuallyExclusive("--prompt", "--messages-file")
-        }
-        if prompt == nil && messagesFile == nil { throw ArgsError.modeMissing }
-        if temperature > 0, topK == nil, let topP, topP < 1 {
-            throw ArgsError.invalidValue(
-                flag: "--top-p",
-                value: "\(topP) requires --top-k between 1 and 256")
-        }
-        if ropeScalingMode == .yarn {
-            if !maxContextWasSet {
-                maxContext = RuntimeConfiguration.defaultYaRNContextTokens
+        mutating func validate() throws {
+            if prompt != nil && messagesFile != nil {
+                throw ArgsError.mutuallyExclusive("--prompt", "--messages-file")
             }
-            guard RuntimeConfiguration.supportedYaRNContextTokens.contains(maxContext) else {
+            if prompt == nil && messagesFile == nil { throw ArgsError.modeMissing }
+            if temperature > 0, topK == nil, let topP, topP < 1 {
+                throw ArgsError.invalidValue(
+                    flag: "--top-p",
+                    value: "\(topP) requires --top-k between 1 and 256")
+            }
+            if ropeScalingMode == .yarn {
+                if !maxContextWasSet {
+                    maxContext = RuntimeConfiguration.defaultYaRNContextTokens
+                }
+                guard RuntimeConfiguration.supportedYaRNContextTokens.contains(maxContext) else {
+                    throw ArgsError.invalidValue(flag: "--max-context", value: String(maxContext))
+                }
+            } else if maxContext > RuntimeConfiguration.nativeMaximumContextTokens {
                 throw ArgsError.invalidValue(flag: "--max-context", value: String(maxContext))
             }
-        } else if maxContext > RuntimeConfiguration.nativeMaximumContextTokens {
-            throw ArgsError.invalidValue(flag: "--max-context", value: String(maxContext))
         }
-        return Args(model: model,
-                    prompt: prompt,
-                    messagesFile: messagesFile,
-                    maxNew: maxNew,
-                    maxContext: maxContext,
-                    temperature: temperature,
-                    topK: topK,
-                    topP: topP,
-                    repetitionPenalty: repetitionPenalty,
-                    seed: seed,
-                    stops: stops,
-                    quiet: quiet,
-                    concise: concise,
-                    thinkingMode: thinkingMode,
-                    expertCacheSlots: expertCacheSlots,
-                    prefillChunk: prefillChunk,
-                    kvCachePrecision: kvCachePrecision,
-                    ropeScalingMode: ropeScalingMode)
+
+        func makeArgs(model: String) -> Args {
+            return Args(model: model,
+                        prompt: prompt,
+                        messagesFile: messagesFile,
+                        maxNew: maxNew,
+                        maxContext: maxContext,
+                        temperature: temperature,
+                        topK: topK,
+                        topP: topP,
+                        repetitionPenalty: repetitionPenalty,
+                        seed: seed,
+                        stops: stops,
+                        quiet: quiet,
+                        concise: concise,
+                        thinkingMode: thinkingMode,
+                        expertCacheSlots: expertCacheSlots,
+                        prefillChunk: prefillChunk,
+                        kvCachePrecision: kvCachePrecision,
+                        ropeScalingMode: ropeScalingMode)
+        }
     }
 
     private static func takeValue(_ argv: [String],
@@ -305,5 +299,27 @@ extension Args {
         let value = argv[index + 1]
         index += 2
         return value
+    }
+
+    private static func takeInt(_ argv: [String],
+                                _ index: inout Int,
+                                flag: String,
+                                in range: ClosedRange<Int>) throws -> Int {
+        let value = try takeValue(argv, &index, flag: flag)
+        guard let parsed = Int(value), range.contains(parsed) else {
+            throw ArgsError.invalidValue(flag: flag, value: value)
+        }
+        return parsed
+    }
+
+    private static func takeRawValue<T: RawRepresentable>(_ argv: [String],
+                                                          _ index: inout Int,
+                                                          flag: String) throws -> T
+    where T.RawValue == String {
+        let value = try takeValue(argv, &index, flag: flag)
+        guard let parsed = T(rawValue: value) else {
+            throw ArgsError.invalidValue(flag: flag, value: value)
+        }
+        return parsed
     }
 }
