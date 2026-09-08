@@ -456,6 +456,60 @@ private struct RunnerCounterSnapshot {
     let ioQueue: UInt64
     let ioHostWaitsAvoided: UInt64
     let expertStreaming: ExpertStreamingStatistics
+
+    init(_ runner: RealForwardRunner) {
+        cb1 = runner.totalCb1Nanos
+        io = runner.totalIoNanos
+        cb2 = runner.totalCb2Nanos
+        head = runner.totalHeadNanos
+        headFused = runner.totalHeadFusedNanos
+        wait = runner.totalWaitNanos
+        body = runner.totalBodyNanos
+        missIo = runner.totalMissIoNanos
+        exposedIo = runner.totalExposedIoNanos
+        fixupWake = runner.totalFixupWakeNanos
+        hitFixupLayers = runner.totalHitFixupLayers
+        routerReadback = runner.totalRouterReadbackNanos
+        rankWeightMass = runner.totalRankWeightMass
+        rankWeightLayers = runner.totalRankWeightLayers
+        loopSample = runner.totalLoopSampleNanos
+        loopDetok = runner.totalLoopDetokNanos
+        loopProgress = runner.totalLoopProgressNanos
+        loopProduce = runner.totalLoopProduceNanos
+        cachePlan = runner.totalCachePlanNanos
+        prefetchBegin = runner.totalPrefetchBeginNanos
+        prefetchIssued = runner.prefetchStatistics.issued
+        prefetchAdopted = runner.prefetchStatistics.adopted
+        prefetchReclaimed = runner.prefetchStatistics.reclaimed
+        prefetchDeferred = runner.prefetchStatistics.deferred
+        prefetchOverlapped = runner.prefetchStatistics.overlapped
+        prefetchLate = runner.prefetchStatistics.late
+        prefetchRefused = runner.prefetchStatistics.refused
+        prefetchFailed = runner.prefetchStatistics.failed
+        prefetchJoined = runner.prefetchStatistics.joined
+        prefetchLandedHits = runner.totalPrefetchLandedHits
+        prefetchBeforeClassify = runner.totalPrefetchBeforeClassify
+        prefetchDuringTail = runner.totalPrefetchDuringTail
+        prefetchDuringLastFifty = runner.totalPrefetchDuringLastFifty
+        prefetchDuringFiftyToOneFifty = runner.totalPrefetchDuringFiftyToOneFifty
+        prefetchDuringEarlier = runner.totalPrefetchDuringEarlier
+        prefetchAfterClassify = runner.totalPrefetchAfterClassify
+        prefetchRaceUnknown = runner.totalPrefetchRaceUnknown
+        prefetchHookFailures = runner.prefetchStatistics.hookFailures
+        pathPin = runner.totalRoutedPinNanos
+        pathSubmit = runner.totalRoutedSubmitNanos
+        pathArgBuf = runner.totalHitSplitArgBufNanos
+        pathHitEncode = runner.totalHitSplitEncodeNanos
+        pathFixupBuild = runner.totalFixupBuildNanos
+        pathHitCommitToKernel = runner.totalHitCommitToKernelNanos
+        pathHitKernelToGPU = runner.totalHitKernelToGPUNanos
+        pathFixupCommitToKernel = runner.totalFixupCommitToKernelNanos
+        pathRouterWake = runner.totalRouterWakeNanos
+        pathRouterWakeFallbacks = runner.totalRouterWakeFallbacks
+        ioQueue = runner.totalIOQueueNanos
+        ioHostWaitsAvoided = runner.totalExpertIOHostWaitsAvoided
+        expertStreaming = runner.expertStreamingStatistics()
+    }
 }
 
 /// Prefill a KV rewrite's tokens, discarding the head output. A free function
@@ -505,6 +559,41 @@ private enum KVNormalizationPlan: Sendable, Equatable {
         switch self {
         case .done(let normalization): return normalization
         case .reconstruct: return .unchanged
+        }
+    }
+}
+
+private final class StreamingSink {
+    var stopMatcher: StreamingStopMatcher
+    var content = ""
+    var reasoning = ""
+    var calls: [ParsedToolCall] = []
+    var decodingError: Error?
+    var shouldStop = false
+    private let onEvent: @Sendable (ServerInferenceEvent) -> Void
+
+    init(stops: [String], onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void) {
+        stopMatcher = StreamingStopMatcher(stops: stops)
+        self.onEvent = onEvent
+    }
+
+    func publish(_ events: [StructuredAssistantEvent]) {
+        for event in events {
+            switch event {
+            case .content(let text):
+                let visible = stopMatcher.push(text)
+                if !visible.isEmpty {
+                    content += visible
+                    onEvent(.content(visible))
+                }
+                if stopMatcher.isStopped { shouldStop = true }
+            case .thinking(let text):
+                reasoning += text
+                onEvent(.thinking(text))
+            case .toolCall(let call):
+                calls.append(call)
+                onEvent(.toolCall(call))
+            }
         }
     }
 }
@@ -589,10 +678,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         request ?? defaultEffort
     }
 
-    /// lint:allow-long a sequential construction pipeline: tokenizer, Metal
-    /// context, runtime config, model, runner, scratch.
-    /// Each step consumes the last, so extracting any of them would return a
-    /// tuple straight back into the next -- the same shape as Model.load.
+    /// A sequential construction pipeline: tokenizer, Metal context, runtime config, model, runner, scratch.
     public static func load(modelDirectory: URL,
                             maxContext: Int,
                             promptCacheMode: ServerPromptCacheMode = .multiPrefix,
@@ -642,9 +728,6 @@ public actor ServerModelSession: ServerInferenceBackend {
         let loadRuntime = try RuntimeConfiguration(
             forceLogitsHead: true,
             prefetchTracePath: RuntimeConfiguration.environmentPrefetchTracePath())
-        // Precedence: --expert-cache-slots, then the ladder value nearest the
-        // budget (--ram-budget, default RuntimeConfiguration.defaultExpertCacheBudgetBytes)
-        // over the model's expert stride times its layers.
         let expectedArch: ArchConfig
         do {
             let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
@@ -654,6 +737,70 @@ public actor ServerModelSession: ServerInferenceBackend {
             }
             expectedArch = baseline
         }
+        let loadSlots = resolveExpertCacheSlots(
+            modelDirectory: modelDirectory,
+            expectedArch: expectedArch,
+            requestedExpertCacheSlots: requestedExpertCacheSlots,
+            expertCacheBudgetBytes: expertCacheBudgetBytes)
+        let model = try Model.load(
+            directoryURL: modelDirectory,
+            device: context.device,
+            expecting: expectedArch,
+            streamingMode: .pread(slotCount: loadSlots),
+            integrityPolicy: .resolved(directoryURL: modelDirectory))
+        let (runtime, runner) = try makeRunner(
+            model: model,
+            context: context,
+            maxContext: maxContext,
+            expertCacheSlots: loadSlots,
+            requestedPrefillChunkTokens: requestedPrefillChunkTokens,
+            loadRuntime: loadRuntime,
+            kvCachePrecision: kvCachePrecision,
+            ropeScalingMode: ropeScalingMode)
+        let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize,
+                                               logitSoftcap: Float(model.config.finalLogitSoftcap))
+        let promptCacheDomain = try makePromptCacheDomain(
+            templateURL: templateURL,
+            model: model,
+            runtime: runtime,
+            maxContext: maxContext)
+        let (promptStateStore, promptCache) = try makePromptCache(
+            promptCacheMode: promptCacheMode,
+            promptCacheMaximumEntries: promptCacheMaximumEntries,
+            promptCacheMemoryLimitBytes: promptCacheMemoryLimitBytes,
+            promptCacheDiskDirectory: promptCacheDiskDirectory,
+            promptCacheDiskLimitBytes: promptCacheDiskLimitBytes,
+            promptCacheDomain: promptCacheDomain,
+            runner: runner)
+        let session = ServerModelSession(context: context,
+                                         model: model,
+                                         tokenizer: tokenizer,
+                                         defaultReasoningEffort: resolvedReasoningEffort.effort,
+                                         reasoningRetention: resolvedRetention,
+                                         runner: runner,
+                                         scratch: scratch,
+                                         prefillConfig: runtime.prefillConfig,
+                                         expertCacheSlots: loadSlots,
+                                         maxContext: maxContext,
+                                         promptCacheMode: promptCacheMode,
+                                         promptCacheDomain: promptCacheDomain,
+                                         promptCache: promptCache,
+                                         promptStateStore: promptStateStore,
+                                         concisePrompt: conciseModeEnabled()
+                                           ? ConcisePrompt.prompt(for: model) : nil)
+        ServerLog.residency(session.prefillDescription)
+        return session
+    }
+
+    // Precedence: --expert-cache-slots, then the ladder value nearest the
+    // budget (--ram-budget, default RuntimeConfiguration.defaultExpertCacheBudgetBytes)
+    // over the model's expert stride times its layers.
+    private static func resolveExpertCacheSlots(
+        modelDirectory: URL,
+        expectedArch: ArchConfig,
+        requestedExpertCacheSlots: Int?,
+        expertCacheBudgetBytes: Int?
+    ) -> Int {
         let derivedSlots: Int
         if let manifest = try? ManifestReader.load(directoryURL: modelDirectory,
                                                   expecting: expectedArch) {
@@ -663,17 +810,24 @@ public actor ServerModelSession: ServerInferenceBackend {
                 budgetBytes: expertCacheBudgetBytes
                     ?? RuntimeConfiguration.defaultExpertCacheBudgetBytes)
         } else {
-            // Unreadable manifest means the load below will fail with a better
-            // message than anything this could throw, so pick the safe small end.
+            // Unreadable manifest means the `Model.load` that follows this stage's
+            // call will fail with a better message than anything this could throw,
+            // so pick the safe small end.
             derivedSlots = RuntimeConfiguration.allowedExpertCacheSlots.first ?? 8
         }
-        let loadSlots = requestedExpertCacheSlots ?? derivedSlots
-        let model = try Model.load(
-            directoryURL: modelDirectory,
-            device: context.device,
-            expecting: expectedArch,
-            streamingMode: .pread(slotCount: loadSlots),
-            integrityPolicy: .resolved(directoryURL: modelDirectory))
+        return requestedExpertCacheSlots ?? derivedSlots
+    }
+
+    private static func makeRunner(
+        model: Model,
+        context: MetalContext,
+        maxContext: Int,
+        expertCacheSlots loadSlots: Int,
+        requestedPrefillChunkTokens: Int?,
+        loadRuntime: RuntimeConfiguration,
+        kvCachePrecision: KVCachePrecision,
+        ropeScalingMode: RuntimeRoPEScalingMode
+    ) throws -> (runtime: RuntimeConfiguration, runner: RealForwardRunner) {
         let runtime = try RuntimeConfiguration(
             expertCacheSlots: loadSlots,
             prefillChunkTokens: requestedPrefillChunkTokens
@@ -690,8 +844,15 @@ public actor ServerModelSession: ServerInferenceBackend {
                                            context: context,
                                            maxContext: maxContext,
                                            runtimeConfiguration: runtime)
-        let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize,
-                                               logitSoftcap: Float(model.config.finalLogitSoftcap))
+        return (runtime, runner)
+    }
+
+    private static func makePromptCacheDomain(
+        templateURL: URL,
+        model: Model,
+        runtime: RuntimeConfiguration,
+        maxContext: Int
+    ) throws -> ServerPromptCacheDomain {
         let templateDigest = SHA256.hash(data: try Data(contentsOf: templateURL))
             .map { String(format: "%02x", $0) }
             .joined()
@@ -707,7 +868,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         let runtimeDigest = SHA256.hash(data: Data(runtimeIdentity.utf8))
             .map { String(format: "%02x", $0) }
             .joined()
-        let promptCacheDomain = ServerPromptCacheDomain(
+        return ServerPromptCacheDomain(
             modelID: model.modelID,
             sourceSnapshotHash: model.sourceSnapshotHash,
             runtimeProfileHash: runtimeDigest,
@@ -715,6 +876,17 @@ public actor ServerModelSession: ServerInferenceBackend {
             kvStorage: runtime.kvCachePrecision.label,
             fp16RingEnabled: runtime.fp16RingEnabled,
             templateSHA256: templateDigest)
+    }
+
+    private static func makePromptCache(
+        promptCacheMode: ServerPromptCacheMode,
+        promptCacheMaximumEntries: Int,
+        promptCacheMemoryLimitBytes: Int,
+        promptCacheDiskDirectory: URL?,
+        promptCacheDiskLimitBytes: Int,
+        promptCacheDomain: ServerPromptCacheDomain,
+        runner: RealForwardRunner
+    ) throws -> (store: ServerPromptStateStore?, cache: ServerPromptCache) {
         let promptStateStore: ServerPromptStateStore?
         let promptCache: ServerPromptCache
         if promptCacheMode == .multiPrefix {
@@ -740,24 +912,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 maximumEntries: 1,
                 allowsPartialSalvage: runner.supportsPartialRewind)
         }
-        let session = ServerModelSession(context: context,
-                                         model: model,
-                                         tokenizer: tokenizer,
-                                         defaultReasoningEffort: resolvedReasoningEffort.effort,
-                                         reasoningRetention: resolvedRetention,
-                                         runner: runner,
-                                         scratch: scratch,
-                                         prefillConfig: runtime.prefillConfig,
-                                         expertCacheSlots: loadSlots,
-                                         maxContext: maxContext,
-                                         promptCacheMode: promptCacheMode,
-                                         promptCacheDomain: promptCacheDomain,
-                                         promptCache: promptCache,
-                                         promptStateStore: promptStateStore,
-                                         concisePrompt: conciseModeEnabled()
-                                           ? ConcisePrompt.prompt(for: model) : nil)
-        ServerLog.residency(session.prefillDescription)
-        return session
+        return (promptStateStore, promptCache)
     }
 
     private init(context: MetalContext,
@@ -993,11 +1148,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         return (effectivePromptIDs, completionStart)
     }
 
-    /// lint:allow-long the request orchestrator: prompt preparation, cache
-    /// resolution, decode, publish, and the completion. Each of those is its
-    /// own method; what remains is the sequence plus a nested failure builder
-    /// that closes over eight locals -- hoisting it would mean an
-    /// eight-parameter signature for a twenty-line body.
+    /// The request orchestrator: prompt preparation, cache resolution, decode, publish, and the completion.
     public func generate(
         _ request: ValidatedChatRequest,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
@@ -1014,58 +1165,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         await arbitratePendingRewrite(renderedPromptIDs: prepared.promptIDs)
         // Stage-split measurement (SHRIKE_RUNNER_STATS): snapshot the runner's
         // lifetime counters so the footer can report this request's delta.
-        let runnerSnapshot = RunnerCounterSnapshot(
-            cb1: runner.totalCb1Nanos,
-            io: runner.totalIoNanos,
-            cb2: runner.totalCb2Nanos,
-            head: runner.totalHeadNanos,
-            headFused: runner.totalHeadFusedNanos,
-            wait: runner.totalWaitNanos,
-            body: runner.totalBodyNanos,
-            missIo: runner.totalMissIoNanos,
-            exposedIo: runner.totalExposedIoNanos,
-            fixupWake: runner.totalFixupWakeNanos,
-            hitFixupLayers: runner.totalHitFixupLayers,
-            routerReadback: runner.totalRouterReadbackNanos,
-            rankWeightMass: runner.totalRankWeightMass,
-            rankWeightLayers: runner.totalRankWeightLayers,
-            loopSample: runner.totalLoopSampleNanos,
-            loopDetok: runner.totalLoopDetokNanos,
-            loopProgress: runner.totalLoopProgressNanos,
-            loopProduce: runner.totalLoopProduceNanos,
-            cachePlan: runner.totalCachePlanNanos,
-            prefetchBegin: runner.totalPrefetchBeginNanos,
-            prefetchIssued: runner.prefetchStatistics.issued,
-            prefetchAdopted: runner.prefetchStatistics.adopted,
-            prefetchReclaimed: runner.prefetchStatistics.reclaimed,
-            prefetchDeferred: runner.prefetchStatistics.deferred,
-            prefetchOverlapped: runner.prefetchStatistics.overlapped,
-            prefetchLate: runner.prefetchStatistics.late,
-            prefetchRefused: runner.prefetchStatistics.refused,
-            prefetchFailed: runner.prefetchStatistics.failed,
-            prefetchJoined: runner.prefetchStatistics.joined,
-            prefetchLandedHits: runner.totalPrefetchLandedHits,
-            prefetchBeforeClassify: runner.totalPrefetchBeforeClassify,
-            prefetchDuringTail: runner.totalPrefetchDuringTail,
-            prefetchDuringLastFifty: runner.totalPrefetchDuringLastFifty,
-            prefetchDuringFiftyToOneFifty: runner.totalPrefetchDuringFiftyToOneFifty,
-            prefetchDuringEarlier: runner.totalPrefetchDuringEarlier,
-            prefetchAfterClassify: runner.totalPrefetchAfterClassify,
-            prefetchRaceUnknown: runner.totalPrefetchRaceUnknown,
-            prefetchHookFailures: runner.prefetchStatistics.hookFailures,
-            pathPin: runner.totalRoutedPinNanos,
-            pathSubmit: runner.totalRoutedSubmitNanos,
-            pathArgBuf: runner.totalHitSplitArgBufNanos,
-            pathHitEncode: runner.totalHitSplitEncodeNanos,
-            pathFixupBuild: runner.totalFixupBuildNanos,
-            pathHitCommitToKernel: runner.totalHitCommitToKernelNanos,
-            pathHitKernelToGPU: runner.totalHitKernelToGPUNanos,
-            pathFixupCommitToKernel: runner.totalFixupCommitToKernelNanos,
-            pathRouterWake: runner.totalRouterWakeNanos,
-            pathRouterWakeFallbacks: runner.totalRouterWakeFallbacks,
-            ioQueue: runner.totalIOQueueNanos,
-            ioHostWaitsAvoided: runner.totalExpertIOHostWaitsAvoided,
-            expertStreaming: runner.expertStreamingStatistics())
+        let runnerSnapshot = RunnerCounterSnapshot(runner)
         runner.resetKernelGPUTimings()
         var completed = false
         defer {
@@ -1103,32 +1203,74 @@ public actor ServerModelSession: ServerInferenceBackend {
                 tokenizer: tokenizer,
                 allowedTools: Set(request.tools.map(\.name)))
             : nil
-        var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
-        var content = ""
-        var reasoning = ""
-        var calls: [ParsedToolCall] = []
-        var decodingError: Error?
-        var shouldStop = false
-
-        func publish(_ events: [StructuredAssistantEvent]) {
-            for event in events {
-                switch event {
-                case .content(let text):
-                    let visible = stopMatcher.push(text)
-                    if !visible.isEmpty {
-                        content += visible
-                        onEvent(.content(visible))
-                    }
-                    if stopMatcher.isStopped { shouldStop = true }
-                case .thinking(let text):
-                    reasoning += text
-                    onEvent(.thinking(text))
-                case .toolCall(let call):
-                    calls.append(call)
-                    onEvent(.toolCall(call))
-                }
-            }
+        let decoded = try await runDecode(
+            effectivePromptIDs: effectivePromptIDs,
+            config: config,
+            start: completionStart,
+            decoder: decoder,
+            stops: request.generationConfig.stopStrings,
+            onEvent: onEvent)
+        let result = decoded.result
+        let sink = decoded.sink
+        emitGenerationDiagnostics(result: result,
+                                  snapshot: runnerSnapshot,
+                                  expertAtDecodeStart: decoded.expertAtDecodeStart)
+        try finishStructuredDecode(
+            decoder: decoder,
+            needsToolTemplate: needsToolTemplate,
+            result: result,
+            promptIDs: promptIDs,
+            effectivePromptIDs: effectivePromptIDs,
+            config: config,
+            sink: sink)
+        let tail = sink.stopMatcher.finish()
+        if !tail.isEmpty {
+            sink.content += tail
+            onEvent(.content(tail))
         }
+        let reason: String
+        if !sink.calls.isEmpty {
+            reason = "tool_calls"
+        } else if result.reason == .maxTokens {
+            reason = "length"
+        } else {
+            reason = "stop"
+        }
+        settleCacheEntry(
+            effectiveMessages: prepared.effectiveMessages,
+            cacheRequest: cacheRequest,
+            result: result,
+            effectivePromptIDs: effectivePromptIDs,
+            decoder: decoder,
+            reasoningEffort: effectiveReasoningEffort,
+            sink: sink)
+        completed = true
+        return ServerCompletion(
+            content: sink.content,
+            reasoningContent: sink.reasoning.isEmpty ? nil : sink.reasoning,
+            toolCalls: sink.calls,
+            finishReason: reason,
+            // S26: completion_tokens reports the number of GENERATED tokens,
+            // matching OpenAI's "completion_tokens = tokens in the generated
+            // completion". A stop-string-hidden suffix is therefore counted as
+            // generated even though it is filtered from the visible content.
+            usage: OpenAIUsage(promptTokens: result.prefillTokens,
+                               completionTokens: result.newTokens,
+                               totalTokens: result.prefillTokens + result.newTokens,
+                               cachedTokens: result.cachedPromptTokens))
+    }
+
+    private func runDecode(
+        effectivePromptIDs: [Int32],
+        config: GenerationConfig,
+        start completionStart: RawCompletionStart,
+        decoder: StructuredAssistantDecoder?,
+        stops: [String],
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> (result: RawDecodeResult,
+                       expertAtDecodeStart: ExpertStreamingStatistics?,
+                       sink: StreamingSink) {
+        let sink = StreamingSink(stops: stops, onEvent: onEvent)
         let statsRunner = runner
         var expertAtDecodeStart: ExpertStreamingStatistics?
         let result = try await runRawCompletion(
@@ -1140,7 +1282,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             scratch: scratch,
             prefillConfig: prefillConfig,
             start: completionStart,
-            shouldStop: { shouldStop }) { progress in
+            shouldStop: { sink.shouldStop }) { progress in
                 switch progress {
                 case .prefill(let done, let total):
                     if done == total, expertAtDecodeStart == nil {
@@ -1149,7 +1291,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 default:
                     break
                 }
-                guard decodingError == nil else { return }
+                guard sink.decodingError == nil else { return }
                 do {
                     switch progress {
                     case .prefill:
@@ -1160,34 +1302,43 @@ public actor ServerModelSession: ServerInferenceBackend {
                         } else {
                             delta.isEmpty ? [] : [StructuredAssistantEvent.content(delta)]
                         }
-                        publish(events)
+                        sink.publish(events)
                     case .tail(let text):
                         let events = if let decoder {
                             try decoder.consumeTail(text)
                         } else {
                             text.isEmpty ? [] : [StructuredAssistantEvent.content(text)]
                         }
-                        publish(events)
+                        sink.publish(events)
                     }
                 } catch {
-                    decodingError = error
-                    shouldStop = true
+                    sink.decodingError = error
+                    sink.shouldStop = true
                 }
         }
-        emitGenerationDiagnostics(result: result,
-                                  snapshot: runnerSnapshot,
-                                  expertAtDecodeStart: expertAtDecodeStart)
+        return (result, expertAtDecodeStart, sink)
+    }
+
+    private func finishStructuredDecode(
+        decoder: StructuredAssistantDecoder?,
+        needsToolTemplate: Bool,
+        result: RawDecodeResult,
+        promptIDs: [Int32],
+        effectivePromptIDs: [Int32],
+        config: GenerationConfig,
+        sink: StreamingSink
+    ) throws {
         // Harmony ends at a stop token the generation loop never forwards
         // (`<|return|>` or `<|call|>`, both mapped to `.eos`); the decoder
         // needs it to finalize a buffered tool call or close the turn, so
         // replay the uncommitted boundary token here.
-        if tokenizer.dialect == .harmony, let decoder, decodingError == nil,
+        if tokenizer.dialect == .harmony, let decoder, sink.decodingError == nil,
            result.reason == .eos,
            let boundary = result.uncommittedBoundaryTokenIDs.first {
             do {
-                publish(try decoder.consume(tokenID: boundary, delta: ""))
+                sink.publish(try decoder.consume(tokenID: boundary, delta: ""))
             } catch {
-                decodingError = error
+                sink.decodingError = error
             }
         }
         func structuredFailure(
@@ -1204,15 +1355,15 @@ public actor ServerModelSession: ServerInferenceBackend {
                     effectivePromptIDs: effectivePromptIDs,
                     result: result,
                     maxCompletionTokens: config.maxNewTokens,
-                    decodedCalls: calls.count,
-                    visibleBytes: content.utf8.count,
-                    stopStringMatched: stopMatcher.isStopped,
+                    decodedCalls: sink.calls.count,
+                    visibleBytes: sink.content.utf8.count,
+                    stopStringMatched: sink.stopMatcher.isStopped,
                     toolStartID: tokenizer.toolCallStartID,
                     toolEndID: tokenizer.toolCallEndID,
                     toolResponseID: tokenizer.toolResponseID,
                     toolResponseEndID: tokenizer.toolResponseEndID))
         }
-        if let decodingError {
+        if let decodingError = sink.decodingError {
             throw structuredFailure(
                 kind: .decoderConsume,
                 cause: .classify(decodingError),
@@ -1228,36 +1379,34 @@ public actor ServerModelSession: ServerInferenceBackend {
                 unknownToolName: StructuredOutputFailureCause
                     .unknownToolName(error))
         }
-        if needsToolTemplate, result.reason == .toolCalls, calls.isEmpty {
+        if needsToolTemplate, result.reason == .toolCalls, sink.calls.isEmpty {
             throw structuredFailure(kind: .orphanToolResponse, cause: .none)
         }
-        let tail = stopMatcher.finish()
-        if !tail.isEmpty {
-            content += tail
-            onEvent(.content(tail))
-        }
-        let reason: String
-        if !calls.isEmpty {
-            reason = "tool_calls"
-        } else if result.reason == .maxTokens {
-            reason = "length"
-        } else {
-            reason = "stop"
-        }
+    }
+
+    private func settleCacheEntry(
+        effectiveMessages: [GFTokenizer.Message],
+        cacheRequest: ValidatedChatRequest,
+        result: RawDecodeResult,
+        effectivePromptIDs: [Int32],
+        decoder: StructuredAssistantDecoder?,
+        reasoningEffort effectiveReasoningEffort: ReasoningEffort,
+        sink: StreamingSink
+    ) {
         let plan = normalizeCompletedKV(
-            messages: prepared.effectiveMessages,
+            messages: effectiveMessages,
             tools: cacheRequest.tools,
-            content: content,
+            content: sink.content,
             result: result,
             promptTokenCount: effectivePromptIDs.count,
             thoughtChannelClosed: decoder?.thoughtChannelClosed ?? true,
-            emittedToolCalls: !calls.isEmpty,
-            stopStringFiltered: stopMatcher.isStopped,
+            emittedToolCalls: !sink.calls.isEmpty,
+            stopStringFiltered: sink.stopMatcher.isStopped,
             reasoningEffort: effectiveReasoningEffort)
         let publishedEntryID = publishCacheEntry(
             cacheRequest: cacheRequest,
             result: result,
-            stopStringFiltered: stopMatcher.isStopped,
+            stopStringFiltered: sink.stopMatcher.isStopped,
             normalization: plan.completedNormalization)
         // Nothing suspends between the publish and this, so no request can see
         // the entry before the rewrite that will replace it is arbitrable.
@@ -1269,20 +1418,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             }
             startRewrite(target: target, rewindTo: rewindTo, entryID: publishedEntryID)
         }
-        completed = true
-        return ServerCompletion(
-            content: content,
-            reasoningContent: reasoning.isEmpty ? nil : reasoning,
-            toolCalls: calls,
-            finishReason: reason,
-            // S26: completion_tokens reports the number of GENERATED tokens,
-            // matching OpenAI's "completion_tokens = tokens in the generated
-            // completion". A stop-string-hidden suffix is therefore counted as
-            // generated even though it is filtered from the visible content.
-            usage: OpenAIUsage(promptTokens: result.prefillTokens,
-                               completionTokens: result.newTokens,
-                               totalTokens: result.prefillTokens + result.newTokens,
-                               cachedTokens: result.cachedPromptTokens))
     }
 
     /// The entry as the KV rewrite left it, or as published when the rewrite
