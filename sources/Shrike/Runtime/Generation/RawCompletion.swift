@@ -81,11 +81,6 @@ extension GenerationConfig {
 /// logits buffer is never written; the loop then requires a pure-greedy config
 /// and reads `lastGreedyToken`. Callers with sampling configs must construct
 /// the runner with `forceLogitsHead: true`.
-/// lint:allow-long the generation loop: continuation validation, the prefill
-/// mode switch, then token-by-token decode with stop matching and progress
-/// reporting. The loop body reads and writes the same half-dozen pieces of
-/// decode state on every iteration, so splitting it would thread that state
-/// back through parameters on every call.
 public func runRawCompletion(producer: any LogitProducer,
                              tokenizer: GFTokenizer,
                              promptIds: [Int32],
@@ -160,7 +155,55 @@ public func runRawCompletion(producer: any LogitProducer,
     }
     let prefillStart = Date()
     var position = cachedPromptTokens
-    var prefillSeed: PrefillSeed?
+    let prefillSeed = try await runPrefill(producer: producer,
+                                           promptIds: promptIds,
+                                           cachedPromptTokens: cachedPromptTokens,
+                                           config: config,
+                                           scratch: scratch,
+                                           prefillConfig: prefillConfig,
+                                           fusedGreedy: fusedGreedy,
+                                           position: &position,
+                                           history: &history,
+                                           onProgress: onProgress)
+
+    let decodeStart = Date()
+    let prefillSeconds = decodeStart.timeIntervalSince(prefillStart)
+    let outcome = try await runDecodeLoop(producer: producer,
+                                          tokenizer: tokenizer,
+                                          config: config,
+                                          context: context,
+                                          scratch: scratch,
+                                          fusedRunner: fusedRunner,
+                                          fusedGreedy: fusedGreedy,
+                                          prefillSeed: prefillSeed,
+                                          detok: &detok,
+                                          history: &history,
+                                          position: &position,
+                                          shouldStop: shouldStop,
+                                          onProgress: onProgress)
+
+    return RawDecodeResult(prefillTokens: promptIds.count,
+                           cachedPromptTokens: cachedPromptTokens,
+                           computedPrefillTokens: computedPrefillTokens,
+                           prefillSeconds: prefillSeconds,
+                           newTokens: outcome.generated,
+                           decodeSeconds: Date().timeIntervalSince(decodeStart),
+                           reason: outcome.reason,
+                           kvPosition: position,
+                           kvBackedTokenIDs: history,
+                           uncommittedBoundaryTokenIDs: outcome.uncommittedBoundaryTokenIDs)
+}
+
+private func runPrefill(producer: any LogitProducer,
+                        promptIds: [Int32],
+                        cachedPromptTokens: Int,
+                        config: GenerationConfig,
+                        scratch: RawCompletionScratch,
+                        prefillConfig: PrefillRuntimeConfig,
+                        fusedGreedy: Bool,
+                        position: inout Int,
+                        history: inout [Int32],
+                        onProgress: (RawDecodeProgress) -> Void) async throws -> PrefillSeed? {
     let prefillTokens = promptIds[cachedPromptTokens...]
     switch prefillConfig.mode {
     case .chunked where producer is any ChunkedPrefillRunner:
@@ -185,8 +228,9 @@ public func runRawCompletion(producer: any LogitProducer,
                 "RawCompletion chunked prefill returned a greedy token for a sampling config")
         }
         position = result.newPosition
-        prefillSeed = result.seed
+        let seed = result.seed
         history.append(contentsOf: prefillTokens)
+        return seed
     case .chunked:
         throw PrefillError.chunkedUnsupported(
             PrefillError.chunkedRequiresChunkedRunnerReason)
@@ -198,10 +242,29 @@ public func runRawCompletion(producer: any LogitProducer,
             history.append(t)
             onProgress(.prefill(done: position, total: promptIds.count))
         }
+        return nil
     }
+}
 
-    let decodeStart = Date()
-    let prefillSeconds = decodeStart.timeIntervalSince(prefillStart)
+private struct DecodeLoopOutcome {
+    let generated: Int
+    let reason: StopReason
+    let uncommittedBoundaryTokenIDs: [Int32]
+}
+
+private func runDecodeLoop(producer: any LogitProducer,
+                           tokenizer: GFTokenizer,
+                           config: GenerationConfig,
+                           context: MetalContext,
+                           scratch: RawCompletionScratch,
+                           fusedRunner: RealForwardRunner?,
+                           fusedGreedy: Bool,
+                           prefillSeed: PrefillSeed?,
+                           detok: inout GFDetokenizer,
+                           history: inout [Int32],
+                           position: inout Int,
+                           shouldStop: () -> Bool,
+                           onProgress: (RawDecodeProgress) -> Void) async throws -> DecodeLoopOutcome {
     // The scratch sampler persists across generations; its incremental
     // repetition-penalty history is per-generation (R25).
     scratch.sampler.resetPenaltyHistory()
@@ -281,16 +344,8 @@ public func runRawCompletion(producer: any LogitProducer,
         uncommittedBoundaryTokenIDs.removeAll(keepingCapacity: true)
     }
 
-    return RawDecodeResult(prefillTokens: promptIds.count,
-                           cachedPromptTokens: cachedPromptTokens,
-                           computedPrefillTokens: computedPrefillTokens,
-                           prefillSeconds: prefillSeconds,
-                           newTokens: generated,
-                           decodeSeconds: Date().timeIntervalSince(decodeStart),
-                           reason: reason,
-                           kvPosition: position,
-                           kvBackedTokenIDs: history,
-                           uncommittedBoundaryTokenIDs: uncommittedBoundaryTokenIDs)
+    return DecodeLoopOutcome(generated: generated, reason: reason,
+                             uncommittedBoundaryTokenIDs: uncommittedBoundaryTokenIDs)
 }
 
 /// Samples one token id.
