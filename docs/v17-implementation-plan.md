@@ -250,8 +250,13 @@ marked modelled.
 
 ### Task 3: one residency publish path
 
-- [ ] **T3: one state machine per cell, one generation space, an 8-byte entry, one
-  publish function.**
+- [x] **T3: one state machine per cell, one generation space, an 8-byte entry, one
+  publish function.** **DONE 2026-09-08** (`29e152e`, one code commit: 19 files, +287
+  −332; the entry 16 to 8 bytes written by one 64-bit release store from one function,
+  read by the classifier as one word; one generation space per cell with the values from
+  one clock; the round-robin load and its four writers gone; the streamer 1174 to 1006
+  lines; the baseline 14 throughout; 1234 tests; golden identical on both boxes; the arms
+  flat within the drift with every answer identical).
 
   **Steps.**
   - [ ] Step 1 (tests RED first): `ExpertResidencyEntry` as `{ slot: UInt32, state:
@@ -262,26 +267,78 @@ marked modelled.
         throws; a swap followed by an eviction of the same slot publishes `empty` once at
         the cell; a stale completion after a drop publishes nothing; the whole-table read
         after each transition matches the expected entries. RED as a compile failure on
-        the missing API.
-  - [ ] Step 2: the entry's shrink through the Metal side: `ExpertResidencyGPU` in
+        the missing API. **DONE 2026-09-08** (`29e152e`): RED as 360 compile errors on the
+        arena's missing `cellGeneration` and `bumpCellGeneration`; the five transitions,
+        the torn-store witness (the entry's eight bytes read back as one word equal to
+        `state << 32 | cell`, `size` and `stride` 8) and a whole-table read after every
+        transition in `PreadExpertStreamerTests+Landing`, the clock's ordering in
+        `ExpertCellArenaTests`; GREEN with the code.
+  - [x] Step 2: the entry's shrink through the Metal side: `ExpertResidencyGPU` in
         `moe.metal` to two fields, the `resolved_generations` output and its buffer
         removed from `moe_classify_expert_residency`, its spec twin and
         `MoE.encodeResidencyClassification`; the argument layout's stride 16 to 8.
-  - [ ] Step 3: the atomic store: `shrike_store_release_u64` beside the existing
+        **DONE 2026-09-08**: further than planned, the struct deleted rather than
+        shrunk: the classifier takes the table as `device const ulong*` and unpacks
+        each entry from one 64-bit load, so the reader's side is torn-free by
+        construction and not by the compiler's choice for a two-`uint` struct (the
+        implementer's concern, ruled a fix before the review); buffer 8 gone from the
+        kernel, the encoder and the runner's readback buffers, no other index renumbered.
+  - [x] Step 3: the atomic store: `shrike_store_release_u64` beside the existing
         `shrike_load_acquire_u32` in `ShrikeKernelsC`, the entry packed as
         `UInt64(state) << 32 | UInt64(slot)` and stored once; `writeResidencyEntryUnlocked`
-        becomes the one call site.
-  - [ ] Step 4: the generation unified: `ExpertCellArena` owns `cellGeneration`; the
+        becomes the one call site. **DONE 2026-09-08**: the one call site is
+        `publish(expert:cell:state:)`, into which `publishResidencyUnlocked` and
+        `writeResidencyEntryUnlocked` were folded (the pre-flight ruling on the plan's
+        two names); the table bound once at init as words and indexed by `publish`; the
+        init's fill through it too, so no caller writes the buffer directly.
+  - [x] Step 4: the generation unified: `ExpertCellArena` owns `cellGeneration`; the
         plan's victim, swap and reservation bump the cell's; `claimLanding` bumps the ring
         cell's; `markPlanMissesResident` and `completeLanding` validate against the cell's;
         the swap moves the cell under the slot with no republish; `assignedGenerations`
         keyed by cell. `Model.routedExpert(layer:expert:)` and `loadExpertUnlocked` go, their
-        tests moved to the plan path.
-  - [ ] Step 5: the targeted suites GREEN, the four gates, golden on both boxes and both
+        tests moved to the plan path. **DONE 2026-09-08**: one bump per victimised slot
+        per plan (the reservation takes it, the swap bumps nothing and stores nothing),
+        `claimLanding` bumps the ring cell, `pin`, `unpin`, `markPlanMissesResident`,
+        `resetLoadingMissesUnlocked` and `completeLanding` compare against the cell now
+        under the slot (or the landing's cell); every value drawn from one atomic clock
+        on the arena with storage still one word per cell, the review's hardening for a
+        stale plan checked after a swap (unreachable on the surviving path, the tripwire
+        exact again). Gone with the round-robin load: both `loadExpert` entry points,
+        `loadExpertUnlocked`, `readFull`, the streamer's descriptor held idle after it,
+        `StreamerError.preadFailed` and `slotOutOfRange`; the round-trip and slot-reuse
+        tests through `loadExpertsCached`, the loader's seven through
+        `fetchRoutedExperts`, each keeping its assertions; the short-read test deleted as a
+        duplicate of the planned read's failure case.
+  - [x] Step 5: the targeted suites GREEN, the four gates, golden on both boxes and both
         profiles at the default, the turn rig's pair; the arms on the mini (deploy leave
-        asked first). Free: within the drift, misses to the tenth.
-  - [ ] Step 6: a fresh reviewer (the torn-read argument, the lock order ring then cache,
-        every former writer's call site), the fixes folded, the docs commit.
+        asked first). Free: within the drift, misses to the tenth. **DONE 2026-09-08**
+        (Davor's leave with the go; `29e152e`'s build deployed at the bare launch 03:12,
+        the stale ShrikeBench binary retired from the mini's bin): 99 targeted tests, the
+        four gates (1234 tests in 170 suites, 201 s), golden identical on both boxes and
+        both profiles; the card 15.32 / 15.02 then 15.59 / 15.61 tok/s against T2's
+        15.62 / 15.58 (the first two lifetimes slow right after the deploy and the golden
+        cell, with the wake and submit terms up 0.4 and 0.3 ms per token and the second
+        one's fetch up 1.4 ms; the next two at T2's values on every term), the 300
+        16.08 / 16.44 against 16.23 / 16.11, the 1k 16.30 / 16.28 against 16.11 / 16.20,
+        every answer identical, misses 20.0 / 20.0 / 18.8 to the tenth, the ring's counts
+        and the reading layers per token within the noise; the pair's warm 300-token turn
+        3.09 to 3.20 s against T2's 3.17, the cold 7.75 against 7.61; production restored
+        03:19 and again after the extra lifetimes.
+  - [x] Step 6: a fresh reviewer (the torn-read argument, the lock order ring then cache,
+        every former writer's call site), the fixes folded, the docs commit. **DONE
+        2026-09-08**: the review before the commit this time, on the working tree: spec
+        compliant (the fourteen writer sites at `e959d55` accounted for one by one, the
+        six tests verified, the two rulings honoured), 0 Critical, 0 Important, 8 Minor,
+        approved; the torn-read argument judged closed on both sides, the lock order
+        verified at every ring call site, the per-cell coincidence judged unreachable
+        (only the decode planner swaps, and it plans, consumes and pins on one thread).
+        Six of the eight folded before the commit (the descriptor closed after `fstat`,
+        the table bound once, the atomic clock, the lease's doc word, the error text
+        naming the cell, the stale-plan test pinned to its detail), verified by a scoped
+        re-review with no new breakage; one kept by ruling (the C header's doc line
+        mirrors its sibling's); one deferred to the close (two pre-existing test-target
+        warnings in `ParallelExpertReaderTests+BatchDepth.swift`, outside the diff). The
+        docs commit follows `29e152e`.
 
 ### Task 4: the runner decomposed
 

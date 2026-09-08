@@ -320,6 +320,84 @@ the plan's) stay as the tripwires.
 Real: the writers, the generation spaces, the entry's bytes. Free: golden by construction
 (the same experts are computed), the arms confirm.
 
+**Built (2026-09-08), one commit `29e152e` on `refactor/v17-consolidation`, tests RED
+first, the four gates and the golden identical on both boxes:** the entry is
+`{ slot: UInt32, state: UInt32 }`, eight bytes, and `PreadExpertStreamer.publish(expert:cell:state:)`
+is the only writer: it packs the state above the slot and stores the word once through
+`shrike_store_release_u64` into the table bound once as words; the init's fill, the plan's
+victim and reservation, the demand completion, the reset, the claim, the landing's
+completion and the drop are its eight call sites, and the swap stores nothing, since the
+landing's `{C, resident}` already stands and only the host's bookkeeping moves. The
+classifier takes the table as `device const ulong*` and unpacks each entry from one 64-bit
+load, so the pair is torn-free on both sides by construction, not by the compiler's choice
+for a two-`uint` struct; `ExpertResidencyGPU`, the `resolved_generations` output and its
+buffer are gone. The generation lives on the arena, one word per cell, every value drawn
+from one atomic clock so no two bumps ever coincide; the plan's victim bumps the cell under
+the slot (the reservation takes that value), `claimLanding` bumps the ring cell, and `pin`,
+`unpin`, `markPlanMissesResident`, `resetLoadingMissesUnlocked` and `completeLanding`
+compare against the cell now under the slot. The round-robin load went whole:
+`Model.routedExpert(layer:expert:)`, both `loadExpert` entry points,
+`loadExpertUnlocked`, `readFull`, the descriptor the streamer held idle after it, and two
+error cases; its tests moved to the plan path with their assertions kept.
+
+The count, at `29e152e` against `2ab2de4`:
+
+| what | before | after |
+| --- | ---: | ---: |
+| functions that write the residency table | 2 (`publishResidencyUnlocked`, `writeResidencyEntryUnlocked`) | 1 (`publish`) |
+| writer sites | 13 (14 at `e959d55`) | 8 calls of the one function |
+| generation spaces | 2 (the slot's, the landing's) | 1 (the cell's, one clock) |
+| the entry | 16 bytes, a struct store | 8 bytes, one release store |
+| the classifier's reads of an entry | a two-field struct | one `ulong` |
+| the classifier's buffers | 17 | 16 |
+| descriptors held idle per routed layer | 1 | 0 |
+| `PreadExpertStreamer.swift` | 1174 lines | 1006 |
+| `ExpertCellArena.swift` | 62 lines | 87 |
+| lines under `sources/` and `tests/` | | +287 −332 |
+| swiftlint baseline entries | 14 | 14 |
+| the serial suite | 1229 tests, 205 s | 1234 tests, 201 s |
+
+Two things the work surfaced. The design's "never torn" claim needs the reader's side as
+much as the writer's: the store was one aligned word, but a two-`uint` struct read in MSL
+is one load only by Apple's codegen, so the kernel now reads a `ulong` (the implementer's
+concern, ruled a fix before the review). And per-cell counters that start at zero can
+coincide across cells: after a swap put a different cell under a slot, a stale plan's
+recorded generation could equal the new cell's by chance. The trace found it unreachable
+on the surviving path (a loading or pinned slot is never a victim, and only the decode
+planner swaps, planning and pinning on one thread), but the tripwire exists for a caller-
+ordering bug, so the values come from one clock and the compare is exact again.
+
+**The arms (2026-09-08, the mini at `29e152e`'s build, deployed at the bare launch;
+golden identical on both profiles there; production lifetimes per shape through the rig,
+beside Task 2's arms read the same way):**
+
+| shape | v17 T2 tok/s | v17 T3 tok/s | misses per token | landed hits per token | reading layers per token | answer |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| the card | 15.62 / 15.58 | 15.32 / 15.02, then 15.59 / 15.61 | 20.0 / 20.0 | 7.14, 7.37 / 7.48, 7.24, 7.21, 6.99 | 12.74, 12.73 / 12.74, 12.77, 12.75, 12.74 | identical |
+| the 300 | 16.23 / 16.11 | 16.08 / 16.44 | 20.0 / 20.0, 19.9 | 6.06, 6.12 / 5.89, 6.09 | 13.53, 13.55 / 13.55, 13.52 | identical |
+| the 1k | 16.11 / 16.20 | 16.30 / 16.28 | 18.8 / 18.8 | 6.33, 6.37 / 6.43, 6.38 | 12.57, 12.57 / 12.58, 12.57 | identical |
+
+Free: the 300 and the 1k flat to +1 %, the card's first two lifetimes at −1.9 and −3.6 %
+against Task 2's pair with the wake and submit terms up 0.4 and 0.3 ms per token and the
+second one's fetch up 1.4 ms, then two more lifetimes at 15.59 / 15.61 with every term at
+Task 2's values: slow lifetimes right after the deploy and the golden cell, not a cost of
+the change, which has no per-token work (one release store in place of a struct store,
+one atomic add per bump, one load in place of two). Every answer identical to Task 2's,
+the misses to the tenth, the ring's issued, adopted, landed and joined counts and the race
+split within the noise. The turn rig's 300-token pair: the warm second turn 3.09 to 3.20 s
+against Task 2's 3.17, the cold first turn 7.75 against 7.61.
+
+**The review (2026-09-08, a fresh reviewer on the working tree before the commit)**
+found the diff spec-compliant with the fourteen writer sites of `e959d55` accounted for
+one by one, the six tests asserting what their names say, the torn-read argument closed
+on both sides, the lock order (ring, then cache) verified at every ring call site, and
+no Critical or Important finding. Its eight Minor findings and their disposition: six
+folded before the commit (the descriptor closed right after `fstat`, the table bound
+once instead of `assumingMemoryBound`, the clock, the lease's doc word, the error text
+naming the cell, the stale-plan test pinned to its detail) and verified by a scoped
+re-review with no new breakage; the C header's doc line kept by ruling (its sibling has
+one); two pre-existing test-target warnings outside the diff deferred to the close.
+
 ### Task 4: the runner decomposed
 
 Each function over 120 lines becomes a sequence of named stage calls over a small context
