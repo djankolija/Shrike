@@ -602,6 +602,18 @@ error surfacing when a whole token is one command (a failed read's fail-closed g
 must still name its layer); the stop check's late cancel with two in flight (at most
 two wasted passes).
 
+**Re-priced after Task 6 (T6.7, 2026-09-09), graded.** Task 6 measured encoder and
+dispatch boundaries; the command boundary's cost, about 10 µs over an encoder
+boundary, remains Tasks 3 and 4's two-lifetime reading and is a T. The fold's terms:
+the forty layer-to-layer command boundaries, 0.2 to 0.4 ms per token (C from that T
+unit); Task 4's one remaining boundary gap, 0.25 (M, Task 4's arms); C6's slice, 0.2
+(C, from T2.0). About 0.6 to 0.85 ms per token, 1.0 to 1.4 % of a 59 ms token. The
+floor sits under what two lifetimes per shape can resolve (the drift is 1.7 %) and at
+the edge of what an eight-pair A/B by position can (about 0.5 % standard error on the
+mean pair). Under the grading rule the fold is not a speed task at its floor; it is a
+structural question, one command per token with two in flight against the agreed-cell
+mechanism and the cancel path, and its ruling is Davor's.
+
 ### Task 6: the walls (D1; scheduled by Davor's ruling, 2026-09-09, after Task 3)
 
 **What.** The GPU's own boundaries. Task 3 measured the gap between two dependent
@@ -827,6 +839,28 @@ at most 3 between small independent GEMVs (T6.1; M, an upper bound), about 5.5 a
 an indirect kernel before a tiny one (T6.3; M), about 1.6 for the same pair on the
 miss path (T6.3; M), and 12 between dependent routed kernels (v10; T, not re-measured
 on this tree).
+
+**Task 6 record (T6.7, 2026-09-09).** The task set out to remove six dispatch walls
+per layer at 12 µs each, about 2.2 ms per token with the slack rule, and to price the
+wall by its kind first. What landed: T6.0, the speculative command and the fixup on
+one encoder each, 3.3 ms per token of GPU role time and +1.6 to +2.8 % on the wall
+(M, two lifetimes per shape, at the drift's edge, never A/B'd); T6.0b, the boundary
+command on one encoder, 0.06 to 0.09 ms of role time, the wall inside the drift (M);
+T6.1, the gate and up GEMVs as one grid, the roles unresolved against the drift, the
+wall flat on an eight-lifetime A/B (M), kept; T6.3, the residual folded into phase 2,
+0.25 ms of role time with every A/B lifetime separated (M), the wall flat on sixteen
+(M), kept. Not built, by Davor's floor rule: the scalar gate into the gate/up grid,
+the select plus the classifier, conv plus qk norm, the norm into the in-projection,
+each a small-to-small wall with a floor of zero. The sum: about 3.7 ms per token of
+GPU role time left the token, of which about 1.0 to 1.7 reached the wall, all of it
+from the encoder-boundary step; the four dispatch merges were worth about 0.35 ms of
+role time between them and nothing the wall could see. What the task settles for the
+board: the encoder boundary was the expensive kind and the dispatch boundary is small
+and kind-dependent (at most 3, about 5.5, about 1.6, and v10's 12 where it was
+measured), so D1's single 12 µs unit was 2 to 4× high for every pair but the one v10
+measured; and a GPU saving inside the speculative command reaches the wall only in
+part, as the slack rule said it would. Dispatches per token after Task 6: about 724
+(820 less T6.1's 40, T6.3's 40 and its 15.7 on the fixup path).
 
 ## Method
 

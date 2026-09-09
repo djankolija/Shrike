@@ -644,6 +644,23 @@ the tail alone is five or six of them. v10 landed mergers where the bits allowed
   larger term, an encoder boundary costs about twice a dispatch boundary, and the
   merges' pricing at 12 stands. The boundary command's nine encoders are the next
   encoder-only step (T6.0b, about 0.18 ms).
+  **Task 6 closed (T6.7, 2026-09-09).** T6.0b landed inside the drift (about 10 µs
+  an encoder boundary between the sampler's small kernels). Of the six merges two were
+  built: the gate and up GEMVs as one grid (T6.1: a measured null, the dispatch wall
+  between two small independent GEMVs at most 3 µs, kept) and spec phase 2 plus its
+  residual (T6.3: 0.25 ms per token of GPU role time, about 5.5 µs a wall on the
+  speculative side and 1.6 on the fixup path, every A/B lifetime separated, the wall
+  flat over sixteen, kept); the other four were not built, by Davor's floor rule
+  (small-to-small walls, floor zero; their reads at the T6 archive). The count of 820
+  stands (about 724 now); the 12 µs unit does not transfer: measured per kind, an
+  encoder boundary about 22 around indirect dispatches and 10 around small kernels
+  (M), a dispatch boundary at most 3 between small independent GEMVs, about 5.5
+  after an indirect kernel before a tiny one, about 1.6 for the same pair on the miss
+  path (M), and 12 between dependent routed kernels only where v10 measured it (T).
+  The 2.2 ms modelled for the six merges came to about 0.35 ms of GPU time and
+  nothing the wall could see; the encoder step (T6.0) was the prize, 3.3 ms of GPU
+  time and 1.0 to 1.7 on the wall. The record is the design doc's Task 6 section;
+  the grading rule this ruling produced is in its Method.
 - **D2. The in-projection at the roof?** (needs a finer instrument). The role covers
   the chain; a per-kernel split needs a Metal capture or a kernel-level stats mode.
   14.2 MB per layer is 227 µs at the roof; if the GEMV runs slower than that, the
@@ -1048,6 +1065,16 @@ against the agreed-cell mechanism, two commands in flight and the cancel path.
 Davor's ruling on Task 5, taken after Task 6 (the walls, D1) has re-measured the
 boundary costs the fold is priced on.
 
+**Re-priced after Task 6 (T6.7, 2026-09-09), graded.** Task 6 measured encoder and
+dispatch boundaries, not command boundaries; the 10 µs a command boundary costs over
+an encoder boundary remains Tasks 3 and 4's two-lifetime reading (T). The fold's
+terms: the forty layer-to-layer command boundaries 0.2 to 0.4 ms per token (C from
+that T unit), Task 4's remaining gap 0.25 (M), C6's slice 0.2 (C); 0.6 to 0.85 ms per
+token, 1.0 to 1.4 %. The floor is under two-lifetime arms' resolution and at the edge
+of an eight-pair A/B's. Under the grading rule the fold is not a speed task at its
+floor; it is a structural question (one command per token, two in flight, the agreed
+cell, the cancel path) for Davor's ruling, with the chapter's close the alternative.
+
 The steps are the avenues in order, each measurable on its own: C5 (the hits in the
 speculative command), C6 (the fixup as a speculative command, reads into agreed
 cells, the plan after), one command per layer (attention and speculative merged,
@@ -1205,6 +1232,14 @@ transitions' arms; 0.9 to 2.7 ms modelled, the transitions the term that decides
 **2026-09-09, after Task 3, Davor:** the kernel merges (D1's six, about 2.2 ms
 modelled with the slack rule) had no phase; they are v18's Task 6, after Task 3
 and before the fold's ruling, so nothing on the board is left unowned.
+
+**2026-09-09, after T6.1 and T6.3, Davor:** every performance number carries a grade
+(M, T, C, R) and a range, tasks rank by the floor, a floor under the rig's noise is
+not built for speed, and numbers are regraded when they become load-bearing rather
+than retrofitted (the design doc's Method). T6.1 kept as a null; T6.3 built and kept;
+T6.2, T6.4, T6.5 and T6.6 not built by the floor rule; Task 6 closed with T6.7. The
+fold's ruling next, re-priced at 0.6 to 0.85 ms per token with its floor under the
+noise, or the chapter's close.
 
 **Phase 2, the SSD mechanism chosen in phase 0.** A1 or A2's product first if the
 replay pays (a slot allocation is small code), then A9's predictor or A0's width,

@@ -12,7 +12,10 @@ ThreadSanitizer once at the close.
 Order after T2.0 (Davor's ruling, 2026-09-09): Task 4, then Task 3, then Task 5
 decided on Task 3's arms; Task 2 skipped as a performance task, its mechanism folded
 into T5.1. After Task 3 (Davor's ruling, 2026-09-09): Task 6, the walls, runs next,
-and the fold's ruling follows it on the boundary costs Task 6 re-measures.
+and the fold's ruling follows it on the boundary costs Task 6 re-measures. Task 6
+closed 2026-09-09 (T6.7: T6.0, T6.0b, T6.1 and T6.3 landed, the other four merges not
+built by the floor rule); next is the fold's ruling, re-priced at 0.6 to 0.85 ms per
+token with its floor under the noise, or the chapter's close.
 
 ## Step zero: the board priced once (no runtime code)
 
@@ -256,8 +259,14 @@ and the fold's ruling follows it on the boundary costs Task 6 re-measures.
 - [x] **T6.6 The input norm into the in-projection**: NOT BUILT (the same ruling): a
       one-threadgroup kernel before a large one, the launch paid either way; a class-1
       merge recomputes the 256-thread reduction in 1,544 threadgroups.
-- [ ] **T6.7 The record**: the task record in the design doc, D1 updated with what
-      each wall cost, the fold re-priced for its ruling.
+- [x] **T6.7 The record**: DONE 2026-09-09; the Task 6 record in the design doc (about
+      3.7 ms per token of GPU role time left the token, 1.0 to 1.7 reaching the wall,
+      all from T6.0; the dispatch merges about 0.35 of role time and nothing on the
+      wall; the wall by its kind graded; about 724 dispatches per token now), D1 closed
+      on the board (the count stands, the 12 µs unit does not transfer), the fold
+      re-priced with grades at 0.6 to 0.85 ms per token with its floor under the noise
+      (the design doc's Task 5 section and the board's K), the board's section 6 carrying
+      the grading ruling.
 
 ## Close
 
