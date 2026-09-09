@@ -91,6 +91,28 @@ miss window.
 
 GPU busy on decode roles is 41.8 ms (69 %), GPU idle 18.6 ms (31 %) on the 300.
 
+### The shadow ledger (Davor's rule, 2026-09-09)
+
+"X is hidden by Y" describes today's dependency graph, not X: it holds only while
+nothing shortens Y by more than X's slack. Every hidden item stays here with its cost,
+what hides it, its slack and its exposer, so that the task which shortens a Y knows
+what it will find on the path and pre-registers it (the design document's method).
+Costs measured on the mini in Task 1's arms (the 300); the slack modelled from the
+ledger's rows.
+
+| item | ms per token | hidden by | slack | exposer |
+| --- | ---: | --- | ---: | --- |
+| the fixup's build and commit on miss layers (`path_fixup_build_ms` 0.17, `path_fixup_commit_to_kernel_ms` 0.40) | 0.57 | the read's flight | about 1.0 ms a layer | a read under about 70 µs; not this drive |
+| the word's visibility on the 24 all-hit layers (61 µs each; A8) | 1.5 | the speculative command's own work | about 0.3 ms a layer | a speculative command under 100 µs; bandwidth-bound, not plausible |
+| the all-hit layers' plan, pin, submit and the next layer's commit | about 0.2 | the same | about 0.3 ms a layer | the same |
+| the hit command (deleted in Task 1) | was 2.1 | the read's flight | about 1.0 ms a layer | none: deleted, a simplification paid ahead |
+
+The rule cuts the other way too. An item on the path today can have shrinkers and no
+exposer: C6's slice (the host's plan, pin and submit on miss layers, at most 0.34 ms
+per token by T2.0) is serial now, but every lever ahead of it (A9 hiding the word,
+A1 and A2 cutting misses) turns miss layers into hit layers and takes the slice into
+the shadow with them, so its price is a ceiling, not a floor.
+
 ## 3. The row the fixed shapes hide: attention grows with context
 
 Only the ten full-attention layers scale with context; the thirty GDN layers keep a
@@ -220,7 +242,7 @@ further miss 0.61 to 0.72 (transfer, overlapped only in latency). The drive is i
 for two thirds of the token, during the GPU-busy stretches, and saturated inside the
 windows. Three consequences: no change to the wake, the thread count, the placement
 or the join can take the window below about 10 ms while the twenty demand reads stay
-inside it (A5 is worth at most its 2 ms); the levers that move the floor are lead
+inside it (A5 and A8 are worth at most their 2 and 0.8 ms); the levers that move the floor are lead
 (reads issued during the idle two thirds: A0, A9), fewer misses (A1, A2) and fewer
 bytes per read (H2); and the "further miss" cost is the drive's transfer rate, so
 splitting the fixup per expert (running the first landed expert while the second
@@ -237,7 +259,7 @@ lands) hides 30 µs of compute per expert and nothing else.
   width eight's numbers exactly. At width eight, full-layer coverage is 0.442 / 0.428
   / 0.462 (the 300 / the 1k / the card) at distance one and 0.342 / 0.337 / 0.367 at
   distance two. Pricing a wider net needs one capture with the probe's top-24 logged,
-  a diagnostic change and a model run; it goes to v19's step zero.
+  a diagnostic change and a model run; it goes to v20's step zero.
 - **A1. Fewer misses by a better slot split** (priceable offline). 128 slots per layer
   is uniform. If some layers route more concentrated than others, their spare slots
   belong to the flat layers. `tools/expert-pool-replay.py` reproduces the box's miss
@@ -264,13 +286,13 @@ lands) hides 30 µs of compute per expert and nothing else.
   300, so A2 is worth about a miss per token, cheap but small; and the clairvoyant
   bound is 2.5 to 2.8× below every online policy, so the prize in this surface is
   knowledge of the next tokens' routes, not a better heuristic. That is A9's
-  direction, and it names a variant for v19's step zero: a policy that evicts against
+  direction, and it names a variant for v20's step zero: a policy that evicts against
   a predicted future (prompt lookup's next tokens through the token-id table) rather
   than a past frequency, priced by feeding the replay's Belady path a predicted
   future instead of the real one. The slot split (A1) was not run: the replay takes
   one slot count for all layers, and the U-shaped profile says the split would move
   slots from the middle layers to both ends; a small patch of the replay prices it,
-  deferred to v19's step zero with the rest of the SSD pricing.
+  deferred to v20's step zero with the rest of the SSD pricing.
 - **A3. Earlier prediction** (idea; one arm measured null). The ring predicts the next
   layer's top-8 from the router probe at distance one and lands 6 to 7 hits per token.
   The two-distance queue measured null in v15 (remembered). Unexplored: predicting
@@ -287,13 +309,33 @@ lands) hides 30 µs of compute per expert and nothing else.
   wake, the spin host wait and the landing race; 0.155 ms per miss layer remains
   between the pread's completion and the fixup's GPU start. Unexplored: what the
   0.155 is made of now (the host's publish, the event signal, the command buffer's
-  scheduling), from a trace of one miss layer.
+  scheduling), from a trace of one miss layer. T2.0 (2026-09-09) adds the hand-off
+  on the way in to the same family: `io_queue_ms`, 26 µs per miss layer, 0.35 ms per
+  token, from the submit to the reader thread's `markInFlight`, a parked thread
+  woken through a condition variable; a spinning demand reader is the probe, and
+  the 155's own anatomy still wants the trace.
 - **A6. Hide the wait** (numerics; rejected by policy). Running the next layer on the
   resident experts only and correcting later changes the output. Recorded so nobody
   re-proposes it.
 - **A7. Calibration only, not an avenue.** All 40 layers' experts are 18.1 GB. A box
   that holds them makes this surface zero. The mini is the target (Davor's ruling);
   this line exists to state what the surface is worth: about 13 ms of the token.
+- **A8. The word's visibility, 0.8 ms on the path** (idea; T2.0's finding, 2026-09-09).
+  The other half of A5's round trip. The host sees the classifier's word 61 µs after
+  the tail command's GPU end (`path_router_wake_ms`, 2.4 ms per token over the 40
+  layers in Task 1's arms; v14 measured 63). On an all-hit layer it sits under the
+  speculative command's own work; on a miss layer the read cannot be issued until the
+  word is seen, so the landing and the fixup behind it arrive 61 µs late, 13.5 layers a
+  token, about 0.8 ms. It is the largest item in the 112 µs between the tail's end and
+  the pread (T2.0: 61 of visibility, at most 25 of the host's plan, pin and submit, 26
+  of the reader thread's hand-off). C6 concedes it, since the miss list arrives with
+  the word; A3, A9 and H3 hide it by reading before the word exists; no avenue asks
+  what the 61 is made of. Unexplored, from a trace of one layer: how much is the GPU's
+  drain after the last kernel, how much the driver's completion path, and whether the
+  host can observe the write earlier than the command's end (whether anything runs
+  after the classifier inside the tail command, a shared event signalled at the
+  encoder boundary instead of a polled word, the readback buffer's storage and cache
+  mode). Class 1 by construction: nothing changes which bytes move or in what order.
 - **A9. A token of lead instead of a layer (Davor, 2026-09-08).** Draft-token
   speculation washed on the mini because the draft's tokens were not accepted often
   enough (v12: 21 / 32 / 76 % by shape). Token acceptance is the wrong metric for a
@@ -339,7 +381,7 @@ lands) hides 30 µs of compute per expert and nothing else.
     layers where the lead is long and the miss share is high (30-39, a quarter of
     the demand), and layer 0, where it is the only predictor and the miss rate is
     the highest. Belady's bound (A2) says what perfect knowledge would be worth.
-    The design, the width and the cell accounting are v19's.
+    The design, the width and the cell accounting are v20's.
   - **Q3, needs a run: a real draft's expert overlap when its token is wrong.** The
     MTP head is out of the runtime since v17 (git history has it; the sidecar bundle
     is on both boxes). Cheaper drafts: prompt lookup (an n-gram match in the context,
@@ -505,9 +547,31 @@ had a chapter of its own.
   shadow and is gone from the sum; what C6 can buy is the latency that precedes the
   read's issue, the word's 63 µs plus the plan, pin and submit's 25 µs, per miss
   layer, about 1.2 ms per token, and only if the encoded fixup lets the host issue
-  the reads the moment it sees the word. What remains on a miss layer after that is
-  the drive's transfer (A's floor) and the 155 µs wake, the other half of the same
-  round trip and the one place a faster hand-off (A5) still pays.
+  the reads the moment it sees the word. **T2.0 (2026-09-09), priced from Task 1's
+  arms:** the 63 is not C6's, since the miss list arrives with the word and nothing
+  the host does issues a read before it; C6's slice is the plan, pin and submit alone,
+  at most 0.34 ms per token (all 40 layers' sum charged to the 13.5 miss layers) and
+  about 0.2 with the all-hit layers' share removed, under the mini's drift. The 63
+  went to A8, the reader's hand-off to A5, the join's order to C7; the shadow ledger
+  (section 2) records the slice as having shrinkers and no exposer. **Davor's ruling
+  (2026-09-09): skipped as a performance task**; the agreed-cell mechanism is the
+  endpoint's structure and moves to the fold's design note (the design document's
+  Task 2 record). What remains on a miss layer is the drive's transfer (A's floor),
+  the word (A8) and the 155 µs wake (A5).
+- **C7. Issue before the join (T2.0, 2026-09-09).** The ring's join runs before the
+  plan: when a prediction for this layer is still in flight, the host waits up to
+  400 µs for it to land (`readyCells`, `prefetchJoinNanos`) before it plans, pins and
+  submits the layer's other misses. On a layer with both a joined prediction and an
+  unpredicted miss, the unpredicted read's issue is delayed by the join's wait and
+  the fixup waits for that read. The join itself is a measured win (v15: +3.9 % on
+  the 300, late to zero), so the reorder keeps it and moves it after the issue: plan
+  and submit the misses the ring does not hold, then join, then plan the adoption.
+  Unpriced: `prefetch_joined` is 1.7 per token on the 300 and the wait is uncounted,
+  so the bound is 1.7 × 400 µs, 0.7 ms per token, and the truth is the share of
+  joined layers that also carry an unpredicted miss times the mean wait; a
+  diagnostic counter (the join's wait on layers with another miss) prices it in one
+  lifetime. Class 1: the same experts compute in the same order, only when the reads
+  go out changes; no agreed-cell contract needed.
 
 ### D. The GDN chain (15.7 ms, 26 %)
 
@@ -937,6 +1001,14 @@ removing the round trip cashes them"), and the round trips are mostly gone now, 
 that null is due for a re-measure rather than a citation. Nothing in it changes a
 number the kernels compute.
 
+**Re-examined after T2.0 (2026-09-09).** The pre-issue term is at most 0.34 and
+about 0.2, not 1.2: the word's 63 is not the host's to remove (A8). K is then E2's
+0.7, the transitions' 0 to 1.8 and the slice's 0.2: 0.9 to 2.7 ms, 1.5 to 4.5 %,
+and the transitions decide it. E2 and one command per layer each stand alone; the
+fold buys only the per-layer boundaries that remain after the merge and C6's slice,
+so it is decided on Task 3's arms, and C6's mechanism enters the fold's design note
+as structure rather than as a task of its own (Davor's ruling, 2026-09-09).
+
 The steps are the avenues in order, each measurable on its own: C5 (the hits in the
 speculative command), C6 (the fixup as a speculative command, reads into agreed
 cells, the plan after), one command per layer (attention and speculative merged,
@@ -1085,6 +1157,11 @@ priced board, the one SSD mechanism chosen, B6 kept or dropped.
 **Phase 1, the fixup chain (class 1, ordered).** C5, C6, one command per layer, E2.
 Each landed with the four gates, the golden identical, the arms on the mini. About 5
 ms modelled on the 300, the transitions' share uncertain.
+
+**2026-09-09, after T2.0, Davor:** C6 skipped as a performance task (at most 0.34
+ms, under the drift). Phase 1 is C5 (landed, a measured null kept as a
+simplification), then E2, then one command per layer, then the fold decided on the
+transitions' arms; 0.9 to 2.7 ms modelled, the transitions the term that decides.
 
 **Phase 2, the SSD mechanism chosen in phase 0.** A1 or A2's product first if the
 replay pays (a slot allocation is small code), then A9's predictor or A0's width,

@@ -9,6 +9,10 @@ production lifetimes per shape, read against the previous task's arms; the rows 
 task pre-registered, moved or not, recorded in the design document's task record;
 ThreadSanitizer once at the close.
 
+Order after T2.0 (Davor's ruling, 2026-09-09): Task 4, then Task 3, then Task 5
+decided on Task 3's arms; Task 2 skipped as a performance task, its mechanism folded
+into T5.1.
+
 ## Step zero: the board priced once (no runtime code)
 
 - [x] **S0.1 The miss profile by layer** (A9 Q2): DONE 2026-09-09, pool mode (no
@@ -19,11 +23,11 @@ ThreadSanitizer once at the close.
       predicted, identity 3× position at layers 0-3; recorded in A9.
 - [x] **S0.3 The width sweep** (A0): DONE 2026-09-09, blocked beyond width eight (the
       captures hold the probe's top-8 only); coverage at eight 0.43 to 0.46 at
-      distance one, 0.34 to 0.37 at two; a wider capture goes to v19's step zero.
+      distance one, 0.34 to 0.37 at two; a wider capture goes to v20's step zero.
 - [x] **S0.4 The slot split and the policy** (A1, A2): DONE 2026-09-09 for the
       policies (seven, including Belady's bound at 2.5 to 2.8× below every online
       policy; SLRU and LRU 8 to 10 % better than aging-LFU on the longer shapes, none
-      on the 300); the per-layer slot split deferred to v19's step zero (the replay
+      on the 300); the per-layer slot split deferred to v20's step zero (the replay
       takes one slot count); recorded in A2.
 - [x] **S0.5 Experts per small dispatch and dispatches per GDN layer** (C1, D1): DONE
       2026-09-09; the hit dispatch at the roof (6.7 experts each), the fixup 1.75×;
@@ -83,6 +87,15 @@ ThreadSanitizer once at the close.
 
 ## Task 2: the fixup as a speculative command (C6)
 
+- [x] **T2.0 Price** (added 2026-09-09): DONE from Task 1's arms, no runtime code;
+      the pre-issue chain on a miss layer is 61 of the word's visibility, at most 25
+      of the host's plan, pin and submit, 26 of the reader's hand-off, then the flight
+      and the 157 wake; C6 can touch only the 25, at most 0.34 ms per token, about
+      0.2, under the drift; the record in the design doc's Task 2 section, the word to
+      A8, the hand-off to A5, the join's order to C7, the shadow ledger on the board.
+      **Davor's ruling (2026-09-09): skipped as a performance task.** T2.1 to T2.5
+      below are not scheduled; they stay as the agreed-cell mechanism's step list for
+      the fold's design note (T5.1).
 - [ ] **T2.1 Read**: the ring's cell leases and the index swap (`PreadExpertStreamer`,
       `ExpertPrefetchRing`), the plan's swap and victim path, the fixup's encode; the
       agreed-cell contract written (miss i into cell i; the fallback when cells run
@@ -107,7 +120,7 @@ ThreadSanitizer once at the close.
       layer, the encoded fixup joining it on a miss layer; the word wake verified to
       land at the classifier's encoder completion.
 - [ ] **T3.3 Gates and golden.**
-- [ ] **T3.4 Deploy and arms**: the four transition rows against Task 2's arms; the
+- [ ] **T3.4 Deploy and arms**: the four transition rows against Task 4's arms; the
       pre-registered rule applied (a null keeps the merge only if free and simpler).
 
 ## Task 4: the sampler feeds the next embed (E2)
@@ -120,7 +133,8 @@ ThreadSanitizer once at the close.
 - [ ] **T4.3 Tests**: stop strings, end of turn, max tokens, the seeded reproduction,
       the stream's token order.
 - [ ] **T4.4 Gates and golden.**
-- [ ] **T4.5 Deploy and arms**: the three boundary rows and `loop_sample_ms`.
+- [ ] **T4.5 Deploy and arms**: the three boundary rows and `loop_sample_ms`, against
+      Task 1's arms (Task 4 runs before Task 3 after T2.0).
 
 ## Task 5: the fold (K)
 

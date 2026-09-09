@@ -225,7 +225,9 @@ issue: the word's 63 µs and the plan, pin and submit, about 25 µs, per miss la
 That re-prices Task 2 from 0.9 ms to about 1.2 ms (13.6 layers of that pre-issue
 latency, if the encoded fixup lets the host issue the reads the moment it sees the
 word) and makes it the chain's one SSD-side lever; the chain's modelled total goes
-from about 5 ms to about 3.5. Task 1 itself is a simplification with nothing lost:
+from about 5 ms to about 3.5 (T2.0 corrected this the next day: the word's 63 is not
+the host's to remove and C6 is at most 0.34 ms; see Task 2). Task 1 itself is a
+simplification with nothing lost:
 one command buffer fewer per miss layer, one host path fewer, golden identical on
 both boxes. Keep or revert was Davor's ruling; the recommendation was keep, because
 it costs nothing measured, deletes a path, and Task 2 needs the speculative command
@@ -259,6 +261,37 @@ host-built fixup, fail-closed, and the counter says how often. The join (a
 prediction's read landing within 400 µs) must keep its adoption semantics: the
 classifier's miss list is authoritative for the encoded fixup, and an adopted
 landing is handled by the plan exactly as Task 1 leaves it.
+
+**T2.0, the pre-issue path priced (2026-09-09; Task 1's arms, no runtime code, no
+model run).** The design above and Task 1's re-pricing counted the word's 63 µs as
+part of the prize. It is not C6's: the miss list arrives with the word, so no
+host-side restructuring issues a read before it. The pre-issue chain on a miss layer
+from the runner line, the 300, lifetimes 1 / 2 (the 1k and the card agree to the
+tenth; 13.5 miss layers per token):
+
+| step | ms per token | µs per miss layer | C6 removes it |
+| --- | ---: | ---: | --- |
+| the word's visibility past the tail's GPU end (`path_router_wake_ms`, over 40 layers) | 2.43 / 2.45 | 61 | no |
+| the ring's join, 1.7 per token, up to 400 µs each (`readyCells`) | uncounted | unknown | no |
+| plan, pin and submit (`cache_plan_ms`, `path_pin_ms`, `path_submit_ms`, over 40 layers) | 0.34 / 0.34 | at most 25 | all but the pread's issue, about 5 |
+| the hand-off to the reader thread (`io_queue_ms`, submit to `markInFlight`) | 0.35 / 0.35 | 26 | no |
+| then the read's flight and the wake (the window, `io_fixup_wake_ms`) | 14.9, 2.1 | 1,100 and 157 | no |
+
+C6's prize is bounded above by 0.34 ms per token (all 40 layers' plan, pin and
+submit charged to the miss layers) and is about 0.2 with the all-hit layers' share
+removed: under the mini's lifetime drift, a measured null before it is built. The
+63 belongs to A8 (shrink it: untraced) or to prediction (hide it: A3, A9, H3). The
+slice has shrinkers and no exposer (the board's shadow ledger, section 2), so 0.2 is
+its ceiling. Two smalls surfaced beside it, both on the board: the hand-off's 26 µs
+(A5's family) and the join's place before the issue (C7). The three tracks of a miss
+layer, an all-hit layer and the boundary are drawn in the session's tracks page.
+**Davor's ruling (2026-09-09): Task 2 skipped as a performance task; Task 4 (E2)
+next, then Task 3 (one command per layer), the fold (Task 5) decided on Task 3's
+arms.** The agreed-cell mechanism is not dropped: the endpoint's fixup behind an
+event wait on reads into agreed cells is exactly it, so it moves into the fold's
+design note (T5.1) as structure, not as a lever. The chapter's modelled prize after
+T2.0 is E2's 0.7, the transitions' 0 to 1.8 and this slice's 0.2: 0.9 to 2.7 ms,
+with Task 3's arms deciding which.
 
 ### Task 3: one command per layer (prices E1)
 
@@ -325,7 +358,13 @@ two wasted passes).
 - One model process at a time on either box; deploy leave to the mini asked per
   session.
 - Each task pre-registers the ledger rows it expects to move; a task that moves
-  nothing is a measured null and is written down as one.
+  nothing is a measured null and is written down as one, with the slack it sat
+  behind and what would expose it.
+- "X is hidden by Y" is a statement about today's dependency graph, not about X: it
+  holds only while nothing shortens Y by more than X's slack. The board's shadow
+  ledger (the avenues document, section 2) keeps every hidden item with its cost, what
+  hides it, its slack and its exposer; a task that shortens a Y pre-registers the
+  items it would expose and measures them in its own arms.
 - Subagents run the gates and the rigs and return verbatim diagnostics; the
   reasoning stays in the session.
 
@@ -350,7 +389,8 @@ drift is Task 1's reduce, and it is pinned above.
 ## Risks
 
 - Task 3's prize may be null (v10's measurement), in which case the chapter's
-  modelled 5 ms is 3.5.
+  modelled 2.7 ms after T2.0 is 0.9 and the fold (Task 5) is not worth its design
+  note; the decision is taken on Task 3's arms.
 - Two tokens in flight (Task 5) interacts with the prompt cache's settle and the
   streaming stop; the design keeps the host's view of the token order intact and
   the risk is in the cancel path, tested with stop strings and max tokens.
