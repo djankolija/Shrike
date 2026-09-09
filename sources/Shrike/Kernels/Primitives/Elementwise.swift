@@ -209,48 +209,6 @@ final class Elementwise {
         dispatch(encoder, pipeline: residualAddPSO, threads: count)
     }
 
-    /// The kernel is bounds-checked, so an indirect ceil-grid dispatch is
-    /// bit-identical to the exact-grid `encodeResidualAdd`.
-    func encodeResidualAddIndirect(commandBuffer: MTLCommandBuffer,
-                                   hidden: MTLBuffer,
-                                   delta: MTLBuffer,
-                                   count: Int,
-                                   indirectArguments: MTLBuffer,
-                                   indirectOffset: Int) throws {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
-        encodeResidualAddIndirect(encoder: encoder, hidden: hidden, delta: delta,
-                                  count: count, indirectArguments: indirectArguments,
-                                  indirectOffset: indirectOffset)
-        encoder.endEncoding()
-    }
-
-    func encodeResidualAddIndirect(encoder: MTLComputeCommandEncoder,
-                                   hidden: MTLBuffer,
-                                   delta: MTLBuffer,
-                                   count: Int,
-                                   indirectArguments: MTLBuffer,
-                                   indirectOffset: Int) {
-        encoder.setComputePipelineState(residualAddPSO)
-        encoder.setBuffer(hidden, offset: 0, index: 0)
-        encoder.setBuffer(delta, offset: 0, index: 1)
-        var elementCount = UInt32(count)
-        encoder.setBytes(&elementCount, length: MemoryLayout<UInt32>.size, index: 2)
-        encoder.dispatchThreadgroups(
-            indirectBuffer: indirectArguments,
-            indirectBufferOffset: indirectOffset,
-            threadsPerThreadgroup: MTLSize(width: residualAddThreadgroupWidth,
-                                           height: 1, depth: 1))
-    }
-
-    static let residualAddThreadgroupWidth = 256
-
-    var residualAddThreadgroupWidth: Int {
-        min(residualAddPSO.maxTotalThreadsPerThreadgroup,
-            Self.residualAddThreadgroupWidth)
-    }
-
     private func dispatch(_ encoder: MTLComputeCommandEncoder,
                           pipeline: MTLComputePipelineState,
                           threads: Int) {

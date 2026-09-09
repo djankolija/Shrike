@@ -759,6 +759,74 @@ the one boundary after an indirect dispatch, the kind T6.0 found expensive on th
 encoder side, and the only one plausibly worth its 0.32 ms modelled. Task 6's
 remaining value is about 0.3 to 0.7 ms per token rather than 1.9; the fold's ruling
 stands on T6.0's numbers (a command boundary about 10 µs over an encoder boundary).
+Davor's ruling (2026-09-09): T6.3 is built; T6.2, T6.4, T6.5 and T6.6 are not, by the
+floor rule (each removes a boundary of T6.1's kind, floor zero, and each needs a
+reduction re-mapped or a body refactored to stay class 1); their reads are archived
+with T6.1's artefacts.
+
+**T6.3 (2026-09-09), speculative phase 2 plus its residual: pre-registration.** The
+read: the speculative phase 2 (`moe_phase2_down_reduce_spec_k8`, one threadgroup per
+output element, indirect grid, zero on a miss) and the fixup's phase 2
+(`moe_phase2_down_reduce_k8`, io-status guarded) share one epilogue, lane 0 of
+simdgroup 0 writing `y[d] = half(residual[d] + Σ partials)`, and each is followed by
+`residual_add_fp16`, an elementwise `hidden[d] = half(float(hidden[d]) + float(y[d]))`.
+The merge is the same thread finishing its element with the materialised half, the
+io-not-ready branch doing the same with `residual[d]`; the affine twin for 8-bit
+models takes the same epilogue so every path drops its residual dispatch; the
+residual tail's indirect-argument slot (three words the classifier filled) goes with
+it. Rows pre-registered: `moe_phase1_miss_fixup_phase2` (the fixup side, about 15.7
+per token, on the path, its lifetime spread about 0.02 ms in T6.1's arms, so the
+sharper instrument) and `layer_linear` plus `layer_kv` (the speculative side, 40
+walls, 26.5 counted by the slack rule, against a lifetime drift of 0.24 ms). The
+wall's grade: T, v10's 12 µs measured between dependent routed kernels, the closest
+transfer in the chapter, range 6 to 12; 42 walls, 0.25 to 0.5 ms per token modelled,
+0.4 to 0.8 % on the wall, inside the 1.7 % drift, so the verdict is an A/B by
+position. A null if the fixup role moves less than 0.05 ms per token and the A/B
+shows no consistent sign; kept either way only if non-negative, since the code is
+smaller (one dispatch and one indirect slot fewer, a wrapper removed).
+
+**T6.3 landed (2026-09-09): a measured GPU saving, a null on the wall.** The build:
+`moe_phase2_finish` in `moe.metal`, one epilogue shared by the three phase 2 kernels
+(the pool twin, the blob twin, the affine twin), the thread that owns the element
+writing `y[d]` and `hidden[d] = half(float(hidden[d]) + float(value))`, the
+io-not-ready branch passing `residual[d]`; the wrappers take `hidden:`; the runner's
+two call sites drop their residual dispatches; the residual tail's indirect slot,
+`specTailArgsOffset`, `specTailFullGrid` and `Elementwise.encodeResidualAddIndirect`
+are gone (the dispatch arguments nine words to six). The arm: the spec-versus-routed
+test compares the kernels' `hidden` against phase 2 followed by `residual_add_fp16`,
+half words equal on both twins, and checks the zero-grid miss leaves hidden untouched;
+red first (the `hidden:` argument absent), then green, no half-rounding elision. The
+four gates (1,249 tests in 173 suites in 203 s), the golden identical on both boxes
+(the mini on b9e0c7838cf01e91). The arms against T6.1's, two lifetimes per shape, the
+cold answers' tok/s: the card 16.18 / 16.16 to 16.17 / 16.16, the 300 16.89 / 17.06
+to 16.76 (slow-drive, 69) / 16.93, the 1k 16.91 / 16.87 to 16.74 / 16.75; the pair
+300 7.89 / 3.15 to 7.86 / 2.95 s; the misses per token identical; the fixup role
+1.787 / 1.784 to 1.772 / 1.784 on the card, 1.919 / 1.905 to 1.915 / 1.892 on the
+300, 1.748 / 1.757 to 1.737 / 1.734 on the 1k; the layer roles 37.16 / 37.17 to 37.05
+/ 37.09, 33.54 / 33.40 to 33.52 / 33.30, 35.28 / 35.34 to 35.25 / 35.20. The A/B on
+the 300, sixteen lifetimes as A × 2, B × 2 four times over: every B lifetime's layer
+roles (33.28 to 33.42) below every A's (33.44 to 33.73) and every B fixup role
+(1.884 to 1.897) below every A's (1.903 to 1.940), about 0.22 and 0.025 ms per token
+(M, sixteen lifetimes, fully separated); the wall by position +1.3 / −1.1 / −0.3 /
++4.4 / +0.8 / +2.8 / −0.4 / +0.7 %, five of A's eight lifetimes and two of B's in the
+slow-drive state, the clean lifetimes' means 17.00 (A, three) and 17.03 (B, six)
+tok/s: flat (M, 0 ± 1.7 %).
+
+**Reading.** The dispatch wall after the speculative phase 2 (indirect, 2,048
+threadgroups) before the tiny residual add cost about 5.5 µs of GPU time a layer (M,
+0.22 ms over 40); the same pair on the fixup path about 1.6 (M, 0.025 over about
+15.7); both under the 6 to 12 transferred from v10. The saving did not reach the wall.
+The observation: the layer-to-layer transitions grew 0.35 ms on the two clean pairs
+and 0.05 on average over the eight, a row whose own spread is 15 %; the hypothesis,
+not measured, is the slack rule's: on an all-hit layer the command's end hands over to
+the host's next layer, so a GPU finish 5 µs earlier widens that gap rather than the
+token. Kept by the pre-registered rule: class 1, non-negative, the code smaller. The
+wall by its kind, as graded now: encoder boundaries about 22 µs around indirect
+dispatches (T6.0; M) and about 10 around small kernels (T6.0b; M); dispatch boundaries
+at most 3 between small independent GEMVs (T6.1; M, an upper bound), about 5.5 after
+an indirect kernel before a tiny one (T6.3; M), about 1.6 for the same pair on the
+miss path (T6.3; M), and 12 between dependent routed kernels (v10; T, not re-measured
+on this tree).
 
 ## Method
 

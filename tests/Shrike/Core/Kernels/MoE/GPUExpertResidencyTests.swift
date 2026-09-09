@@ -15,9 +15,8 @@ import Testing
 
     private static let phase1FullGrid = MTLSize(width: 256, height: 1, depth: 1)
     private static let phase2FullGrid = MTLSize(width: 13, height: 7, depth: 1)
-    private static let tailFullGrid = MTLSize(width: 4, height: 1, depth: 1)
-    private static let missGrids: [UInt32] = [256, 1, 1, 0, 1, 1, 0, 1, 1]
-    private static let fullGrids: [UInt32] = [256, 1, 1, 13, 7, 1, 4, 1, 1]
+    private static let missGrids: [UInt32] = [256, 1, 1, 0, 1, 1]
+    private static let fullGrids: [UInt32] = [256, 1, 1, 13, 7, 1]
 
     @Test func loadingResidentAndEvictedEntriesClassifyCorrectly() throws {
         let url = try PreadExpertStreamerTests.writeSyntheticLayer()
@@ -165,8 +164,7 @@ import Testing
             speculative: MoE.SpeculativeDispatchArguments(
                 arguments: specArgsBuffer,
                 phase1Threadgroups: Self.phase1FullGrid,
-                phase2Threadgroups: Self.phase2FullGrid,
-                tailThreadgroups: Self.tailFullGrid),
+                phase2Threadgroups: Self.phase2FullGrid),
             hostReadback: readbackTag.map {
                 MoE.RouterHostReadbackArguments(
                     buffer: readbackWords!, tag: $0,
@@ -188,7 +186,7 @@ import Testing
             misses: values(missPositions, count: missN, as: UInt32.self),
             missExperts: values(missExperts, count: missN, as: UInt32.self),
             slots: values(slots, count: experts.count, as: UInt32.self),
-            specArgs: values(specArgsBuffer, count: 9, as: UInt32.self),
+            specArgs: values(specArgsBuffer, count: 6, as: UInt32.self),
             hostReadback: readbackWords.flatMap { words in
                 RouterHostReadback.decode(
                     words: words.contents().bindMemory(

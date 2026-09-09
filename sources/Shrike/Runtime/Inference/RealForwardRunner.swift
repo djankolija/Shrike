@@ -3163,17 +3163,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                routingWeights: outWeights,
                                                residual: h1Buf,
                                                y: h2Buf,
+                                               hidden: hidden,
                                                d: D,
                                                f: FmoE,
                                                topK: topK,
                                                ioStatus: ioStatus?.0,
                                                ioStatusOffset: ioStatus?.1 ?? 0)
-        // The phase-2 reduce already folded the shared branch (h1Buf as its
-        // residual); the tail is a plain residual add.
-        elementwise!.encodeResidualAdd(encoder: encoder,
-                                       hidden: hidden,
-                                       delta: h2Buf,
-                                       count: cfg.hiddenSize)
         encoder.endEncoding()
         let commitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         routedCB.commit()
@@ -5256,10 +5251,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 f: UInt32(cfg.moeIntermediateSize),
                 topK: UInt32(cfg.topKExperts)),
             phase2Threadgroups: MoE.specPhase2FullGrid(
-                d: UInt32(cfg.hiddenSize)),
-            tailThreadgroups: MoE.specTailFullGrid(
-                d: UInt32(cfg.hiddenSize),
-                threadgroupWidth: Elementwise.residualAddThreadgroupWidth))
+                d: UInt32(cfg.hiddenSize)))
     }
 
     /// The speculative pool-addressed phase-1/phase-2 (v9), committed before
@@ -5310,17 +5302,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             routingWeights: outWeights,
             residual: h1Buf,
             y: h2Buf,
+            hidden: hidden,
             d: UInt32(cfg.hiddenSize),
             f: UInt32(cfg.moeIntermediateSize),
             topK: UInt32(cfg.topKExperts),
             indirectArguments: arguments.arguments)
-        elementwise!.encodeResidualAddIndirect(
-            encoder: encoder,
-            hidden: hidden,
-            delta: h2Buf,
-            count: cfg.hiddenSize,
-            indirectArguments: arguments.arguments,
-            indirectOffset: MoE.specTailArgsOffset)
     }
 
     private struct DecodeRoutedLayerContext {

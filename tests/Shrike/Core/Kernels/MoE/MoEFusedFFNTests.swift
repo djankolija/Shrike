@@ -34,6 +34,7 @@ import ShrikeValidationSupport
                                       halves: [Float16](repeating: 0.125, count: Self.topK))!
         let residual = Fp16Buffer.make(context.device, count: Self.dimension)!
         let output = Fp16Buffer.make(context.device, count: Self.dimension)!
+        let hidden = Fp16Buffer.make(context.device, count: Self.dimension)!
         memset(residual.contents(), 0, residual.length)
         let args = kernel.makeRoutedArgumentBuffer(routedBlobs: routed, topK: 8)!
         let cb = context.queue.makeCommandBuffer()!
@@ -44,7 +45,7 @@ import ShrikeValidationSupport
         try kernel.encodeRoutedPersistentPhase2Reduce(
             commandBuffer: cb, routedArgBuffer: args, routedBlobs: routed,
             routedOffsets: blobs[0].offsets, acts: acts,
-            routingWeights: weights, residual: residual, y: output,
+            routingWeights: weights, residual: residual, y: output, hidden: hidden,
             d: 128, f: 64, topK: 8)
         cb.commit(); cb.waitUntilCompleted()
         #expect(cb.error == nil)
@@ -121,6 +122,8 @@ import ShrikeValidationSupport
                 context.device, count: Self.topK * Self.intermediate),
               let fullOutput = Fp16Buffer.make(context.device, count: Self.dimension),
               let splitOutput = Fp16Buffer.make(context.device, count: Self.dimension),
+              let fullHidden = Fp16Buffer.make(context.device, values: residual),
+              let splitHidden = Fp16Buffer.make(context.device, values: residual),
               let pool = context.device.makeBuffer(
                 length: poolSlotStride * slotCount, options: .storageModeShared),
               let resolvedSlots = context.device.makeBuffer(
@@ -168,6 +171,7 @@ import ShrikeValidationSupport
             routingWeights: routingBuffer,
             residual: residualBuffer,
             y: fullOutput,
+            hidden: fullHidden,
             d: UInt32(Self.dimension),
             f: UInt32(Self.intermediate),
             topK: UInt32(Self.topK))
@@ -179,7 +183,6 @@ import ShrikeValidationSupport
             let phase1 = MoE.specPhase1FullGrid(f: UInt32(Self.intermediate),
                                                 topK: UInt32(Self.topK))
             return [UInt32(phase1.width), UInt32(phase1.height), UInt32(phase1.depth),
-                    0, 1, 1,
                     0, 1, 1]
         }()
         missLayerGrids.withUnsafeBytes {
@@ -230,6 +233,7 @@ import ShrikeValidationSupport
             routingWeights: routingBuffer,
             residual: residualBuffer,
             y: splitOutput,
+            hidden: splitHidden,
             d: UInt32(Self.dimension),
             f: UInt32(Self.intermediate),
             topK: UInt32(Self.topK))
@@ -299,6 +303,9 @@ import ShrikeValidationSupport
                 context.device, count: Self.topK * Self.intermediate),
               let fullOutput = Fp16Buffer.make(context.device, count: Self.dimension),
               let specOutput = Fp16Buffer.make(context.device, count: Self.dimension),
+              let hiddenFull = Fp16Buffer.make(context.device, values: residual),
+              let hiddenSpec = Fp16Buffer.make(context.device, values: residual),
+              let hiddenClassic = Fp16Buffer.make(context.device, values: residual),
               let pool = context.device.makeBuffer(
                 length: poolSlotStride * slotCount, options: .storageModeShared),
               let resolvedSlots = context.device.makeBuffer(
@@ -341,6 +348,7 @@ import ShrikeValidationSupport
             routingWeights: routingBuffer,
             residual: residualBuffer,
             y: fullOutput,
+            hidden: hiddenFull,
             d: UInt32(Self.dimension),
             f: UInt32(Self.intermediate),
             topK: UInt32(Self.topK))
@@ -348,11 +356,10 @@ import ShrikeValidationSupport
         fullCommand.waitUntilCompleted()
         #expect(fullCommand.error == nil)
 
-        func writeGrids(phase1: MTLSize, phase2: MTLSize, tail: MTLSize) {
+        func writeGrids(phase1: MTLSize, phase2: MTLSize) {
             let grids: [UInt32] = [
                 UInt32(phase1.width), UInt32(phase1.height), UInt32(phase1.depth),
                 UInt32(phase2.width), UInt32(phase2.height), UInt32(phase2.depth),
-                UInt32(tail.width), UInt32(tail.height), UInt32(tail.depth),
             ]
             grids.withUnsafeBytes {
                 indirectArgs.contents().copyMemory(
@@ -383,6 +390,7 @@ import ShrikeValidationSupport
                 routingWeights: routingBuffer,
                 residual: residualBuffer,
                 y: specOutput,
+                hidden: hiddenSpec,
                 d: UInt32(Self.dimension),
                 f: UInt32(Self.intermediate),
                 topK: UInt32(Self.topK),
@@ -395,52 +403,49 @@ import ShrikeValidationSupport
         writeGrids(
             phase1: MoE.specPhase1FullGrid(f: UInt32(Self.intermediate),
                                            topK: UInt32(Self.topK)),
-            phase2: MoE.specPhase2FullGrid(d: UInt32(Self.dimension)),
-            tail: MoE.specTailFullGrid(
-                d: UInt32(Self.dimension),
-                threadgroupWidth: Elementwise.residualAddThreadgroupWidth))
+            phase2: MoE.specPhase2FullGrid(d: UInt32(Self.dimension)))
         try runSpec()
         #expect(Fp16Buffer.read(specActs, count: Self.topK * Self.intermediate)
                 == Fp16Buffer.read(fullActs, count: Self.topK * Self.intermediate))
         #expect(Fp16Buffer.read(specOutput, count: Self.dimension)
                 == Fp16Buffer.read(fullOutput, count: Self.dimension))
+        #expect(Fp16Buffer.read(hiddenSpec, count: Self.dimension)
+                == Fp16Buffer.read(hiddenFull, count: Self.dimension))
 
         let elementwise = try Elementwise(context: context)
-        guard let hiddenClassic = Fp16Buffer.make(context.device, values: residual),
-              let hiddenSpec = Fp16Buffer.make(context.device, values: residual) else {
-            Issue.record("hidden buffer allocation failed")
-            return
-        }
         let tailCommand = context.queue.makeCommandBuffer()!
         try elementwise.encodeResidualAdd(commandBuffer: tailCommand,
                                           hidden: hiddenClassic,
                                           delta: fullOutput,
                                           count: Self.dimension)
-        try elementwise.encodeResidualAddIndirect(
-            commandBuffer: tailCommand,
-            hidden: hiddenSpec,
-            delta: specOutput,
-            count: Self.dimension,
-            indirectArguments: indirectArgs,
-            indirectOffset: MoE.specTailArgsOffset)
         tailCommand.commit()
         tailCommand.waitUntilCompleted()
         #expect(tailCommand.error == nil)
         #expect(Fp16Buffer.read(hiddenSpec, count: Self.dimension)
+                == Fp16Buffer.read(hiddenClassic, count: Self.dimension),
+                "the fused residual diverged from phase 2 followed by residual_add_fp16")
+        #expect(Fp16Buffer.read(hiddenFull, count: Self.dimension)
                 == Fp16Buffer.read(hiddenClassic, count: Self.dimension))
 
         let sentinel: [Float] = (0..<Self.dimension).map { Float($0 % 7) - 3 }
+        let hiddenSentinel: [Float] = (0..<Self.dimension).map { Float($0 % 11) - 5 }
         sentinel.enumerated().forEach { index, value in
             specOutput.contents()
                 .bindMemory(to: Float16.self, capacity: Self.dimension)[index]
                 = Float16(value)
         }
+        hiddenSentinel.enumerated().forEach { index, value in
+            hiddenSpec.contents()
+                .bindMemory(to: Float16.self, capacity: Self.dimension)[index]
+                = Float16(value)
+        }
         writeGrids(phase1: MTLSize(width: 0, height: 1, depth: 1),
-                   phase2: MTLSize(width: 0, height: 1, depth: 1),
-                   tail: MTLSize(width: 0, height: 1, depth: 1))
+                   phase2: MTLSize(width: 0, height: 1, depth: 1))
         try runSpec()
         #expect(Fp16Buffer.read(specOutput, count: Self.dimension)
                 == sentinel.map { Float(Float16($0)) })
+        #expect(Fp16Buffer.read(hiddenSpec, count: Self.dimension)
+                == hiddenSentinel.map { Float(Float16($0)) })
 
         // Lever A: an absent slot makes the spec phase 1 skip that position, so
         // its activation row keeps whatever it held while the others match.
@@ -458,8 +463,7 @@ import ShrikeValidationSupport
         writeGrids(
             phase1: MoE.specPhase1FullGrid(f: UInt32(Self.intermediate),
                                            topK: UInt32(Self.topK)),
-            phase2: MTLSize(width: 0, height: 1, depth: 1),
-            tail: MTLSize(width: 0, height: 1, depth: 1))
+            phase2: MTLSize(width: 0, height: 1, depth: 1))
         try runSpec()
         let partialActs = Fp16Buffer.read(specActs, count: Self.topK * Self.intermediate)
         let referenceActs = Fp16Buffer.read(fullActs, count: Self.topK * Self.intermediate)
@@ -541,6 +545,7 @@ import ShrikeValidationSupport
               let routingBuffer = Fp16Buffer.make(context.device, values: routingWeights),
               let acts = Fp16Buffer.make(context.device, count: topK * Self.intermediate),
               let output = Fp16Buffer.make(context.device, count: Self.dimension),
+              let hidden = Fp16Buffer.make(context.device, count: Self.dimension),
               let argumentBuffer = kernel.makeRoutedArgumentBuffer(
                 routedBlobs: routedBuffers, topK: UInt32(topK)) else {
             Issue.record("buffer allocation failed")
@@ -557,7 +562,7 @@ import ShrikeValidationSupport
             commandBuffer: cb, routedArgBuffer: argumentBuffer,
             routedBlobs: routedBuffers, routedOffsets: blobs[0].offsets,
             acts: acts, routingWeights: routingBuffer,
-            residual: residualBuffer, y: output,
+            residual: residualBuffer, y: output, hidden: hidden,
             d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
             topK: UInt32(topK))
         cb.commit()
@@ -693,11 +698,8 @@ import ShrikeValidationSupport
         }
         memset(zeroResidual.contents(), 0, Self.dimension * MemoryLayout<Float16>.stride)
         let phase1 = MoE.specPhase1FullGrid(f: UInt32(Self.intermediate), topK: UInt32(Self.topK))
-        let tail = MoE.specTailFullGrid(d: UInt32(Self.dimension),
-                                        threadgroupWidth: Elementwise.residualAddThreadgroupWidth)
         let grids: [UInt32] = [UInt32(phase1.width), UInt32(phase1.height), UInt32(phase1.depth),
-                               0, 1, 1,
-                               UInt32(tail.width), UInt32(tail.height), UInt32(tail.depth)]
+                               0, 1, 1]
         grids.withUnsafeBytes {
             indirectArgs.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count)
         }
@@ -733,11 +735,8 @@ import ShrikeValidationSupport
             commandBuffer: command, routedArgBuffer: fixture.argumentBuffer,
             routedBlobs: fixture.routedBuffers, routedOffsets: fixture.offsets,
             acts: acts, routingWeights: fixture.routingBuffer, residual: fixture.zeroResidual,
-            y: delta, d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
+            y: delta, hidden: hidden, d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
             topK: UInt32(Self.topK))
-        try fixture.elementwise.encodeResidualAddIndirect(
-            commandBuffer: command, hidden: hidden, delta: delta, count: Self.dimension,
-            indirectArguments: fixture.indirectArgs, indirectOffset: MoE.specTailArgsOffset)
         command.commit()
         command.waitUntilCompleted()
         #expect(command.error == nil)
@@ -768,11 +767,8 @@ import ShrikeValidationSupport
             encoder: encoder, routedArgBuffer: fixture.argumentBuffer,
             routedBlobs: fixture.routedBuffers, routedOffsets: fixture.offsets,
             acts: acts, routingWeights: fixture.routingBuffer, residual: fixture.zeroResidual,
-            y: delta, d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
+            y: delta, hidden: hidden, d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
             topK: UInt32(Self.topK))
-        fixture.elementwise.encodeResidualAddIndirect(
-            encoder: encoder, hidden: hidden, delta: delta, count: Self.dimension,
-            indirectArguments: fixture.indirectArgs, indirectOffset: MoE.specTailArgsOffset)
         encoder.endEncoding()
         command.commit()
         command.waitUntilCompleted()

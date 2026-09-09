@@ -445,20 +445,17 @@ final class MoE {
         return buffer
     }
 
-    /// `arguments` receives three MTLDispatchThreadgroupsIndirectArguments
-    /// (phase-1 at offset 0, phase-2 at `specPhase2ArgsOffset`, residual tail
-    /// at `specTailArgsOffset`); the grids are what the classifier publishes
-    /// when every routed expert is resident.
+    /// `arguments` receives two MTLDispatchThreadgroupsIndirectArguments
+    /// (phase-1 at offset 0, phase-2 at `specPhase2ArgsOffset`); the grids are
+    /// what the classifier publishes when every routed expert is resident.
     struct SpeculativeDispatchArguments {
         let arguments: MTLBuffer
         let phase1Threadgroups: MTLSize
         let phase2Threadgroups: MTLSize
-        let tailThreadgroups: MTLSize
     }
 
-    static let specDispatchArgsLength = MemoryLayout<UInt32>.stride * 9
+    static let specDispatchArgsLength = MemoryLayout<UInt32>.stride * 6
     static let specPhase2ArgsOffset = MemoryLayout<UInt32>.stride * 3
-    static let specTailArgsOffset = MemoryLayout<UInt32>.stride * 6
 
     /// The classifier's tagged copy of the host's readback; `RouterHostReadback` gives the layout.
     struct RouterHostReadbackArguments {
@@ -542,9 +539,6 @@ final class MoE {
             UInt32(speculative.phase2Threadgroups.width),
             UInt32(speculative.phase2Threadgroups.height),
             UInt32(speculative.phase2Threadgroups.depth),
-            UInt32(speculative.tailThreadgroups.width),
-            UInt32(speculative.tailThreadgroups.height),
-            UInt32(speculative.tailThreadgroups.depth),
         ]
         encoder.setBytes(&grids, length: Self.specDispatchArgsLength, index: 11)
         encoder.setBuffer(speculative.arguments, offset: 0, index: 12)
@@ -738,6 +732,8 @@ final class MoE {
         residualOffset: Int = 0,
         y: MTLBuffer,
         yOffset: Int = 0,
+        hidden: MTLBuffer,
+        hiddenOffset: Int = 0,
         d: UInt32,
         f: UInt32,
         topK: UInt32,
@@ -756,6 +752,7 @@ final class MoE {
             routingWeights: routingWeights, routingWeightsOffset: routingWeightsOffset,
             residual: residual, residualOffset: residualOffset,
             y: y, yOffset: yOffset,
+            hidden: hidden, hiddenOffset: hiddenOffset,
             d: d, f: f, topK: topK,
             ioStatus: ioStatus, ioStatusOffset: ioStatusOffset)
         encoder.endEncoding()
@@ -774,6 +771,8 @@ final class MoE {
         residualOffset: Int = 0,
         y: MTLBuffer,
         yOffset: Int = 0,
+        hidden: MTLBuffer,
+        hiddenOffset: Int = 0,
         d: UInt32,
         f: UInt32,
         topK: UInt32,
@@ -802,6 +801,7 @@ final class MoE {
                           offset: ioStatus == nil ? 0 : ioStatusOffset,
                           index: 8)
         encoder.setBytes(&topKValue, length: MemoryLayout<UInt32>.stride, index: 9)
+        encoder.setBuffer(hidden, offset: hiddenOffset, index: 10)
         // One simdgroup per selected expert; the kernel reduces partial[0..<topK].
         encoder.dispatchThreadgroups(
             MTLSize(width: Int(d), height: 1, depth: 1),
@@ -814,11 +814,6 @@ final class MoE {
 
     static func specPhase2FullGrid(d: UInt32) -> MTLSize {
         MTLSize(width: Int(d), height: 1, depth: 1)
-    }
-
-    static func specTailFullGrid(d: UInt32, threadgroupWidth: Int) -> MTLSize {
-        MTLSize(width: (Int(d) + threadgroupWidth - 1) / threadgroupWidth,
-                height: 1, depth: 1)
     }
 
     func encodeSpecPhase1U16Load(
@@ -901,6 +896,7 @@ final class MoE {
         routingWeights: MTLBuffer,
         residual: MTLBuffer,
         y: MTLBuffer,
+        hidden: MTLBuffer,
         d: UInt32,
         f: UInt32,
         topK: UInt32,
@@ -920,6 +916,7 @@ final class MoE {
             routingWeights: routingWeights,
             residual: residual,
             y: y,
+            hidden: hidden,
             d: d, f: f, topK: topK,
             indirectArguments: indirectArguments,
             indirectOffset: indirectOffset)
@@ -936,6 +933,7 @@ final class MoE {
         routingWeights: MTLBuffer,
         residual: MTLBuffer,
         y: MTLBuffer,
+        hidden: MTLBuffer,
         d: UInt32,
         f: UInt32,
         topK: UInt32,
@@ -963,6 +961,7 @@ final class MoE {
         encoder.setBuffer(resolvedSlots, offset: 0, index: 8)
         encoder.setBytes(&topKValue, length: MemoryLayout<UInt32>.stride, index: 9)
         encoder.setBytes(&stride, length: MemoryLayout<UInt64>.stride, index: 10)
+        encoder.setBuffer(hidden, offset: 0, index: 11)
         encoder.dispatchThreadgroups(
             indirectBuffer: indirectArguments,
             indirectBufferOffset: indirectOffset,

@@ -104,12 +104,11 @@ static inline float gelu_pytorch_tanh(float x) {
     return 0.5f * x * (1.0f + tanh(inner));
 }
 
-/// Indirect threadgroup counts for the speculative phase-1/phase-2/residual
-/// command buffers, in MTLDispatchThreadgroupsIndirectArguments layout.
+/// Indirect threadgroup counts for the speculative phase-1 and phase-2
+/// dispatches, in MTLDispatchThreadgroupsIndirectArguments layout.
 struct MoESpecDispatchArgs {
     uint phase1_threadgroups[3];
     uint phase2_threadgroups[3];
-    uint tail_threadgroups[3];
 };
 
 /// Classifies the router's exact top-k result against the CPU-published cache
@@ -182,9 +181,9 @@ static inline void moe_publish_router_readback(
 /// without a CPU readback. Phase 1 always takes the caller-supplied full
 /// grid: its rows skip a missing expert by the 0xffffffff sentinel in
 /// resolved_slots, so on a miss layer it computes the hits and the host's
-/// fixup computes only the misses (v18 Task 1). Phase 2 and the tail take
-/// the full grids only when every routed expert is resident, zero-width
-/// grids otherwise.
+/// fixup computes only the misses (v18 Task 1). Phase 2, which carries the
+/// residual add since v18 T6.3, takes the full grid only when every routed
+/// expert is resident, a zero-width grid otherwise.
 kernel void moe_classify_expert_residency_spec(
     device const uint* topk_indices [[buffer(0)]],
     device const ulong* residency [[buffer(1)]],
@@ -214,8 +213,6 @@ kernel void moe_classify_expert_residency_spec(
         spec_args->phase1_threadgroups[i] = spec_full_grids.phase1_threadgroups[i];
         spec_args->phase2_threadgroups[i] = all_hit
             ? spec_full_grids.phase2_threadgroups[i] : zero_grid;
-        spec_args->tail_threadgroups[i] = all_hit
-            ? spec_full_grids.tail_threadgroups[i] : zero_grid;
     }
     moe_publish_router_readback(
         host_readback, host_readback_tag, topk_indices, topk_weights,
@@ -862,6 +859,15 @@ kernel void moe_phase1_gate_up_act_subset_u16load(
     if (lane == 0) acts[slot * moe_fc_f(F) + f] = half(moe_glu(moe_gate_up_bias(gu, base, re, f)));
 }
 
+// The phase-2 epilogue with the residual add folded in (v18 T6.3): the
+// element's owner writes y[d] and adds the same half-rounded value into
+// hidden[d], residual_add_fp16's arithmetic in its order.
+static inline void moe_phase2_finish(device half* y, device half* hidden,
+                                     uint d, half value) {
+    y[d] = value;
+    hidden[d] = half(float(hidden[d]) + float(value));
+}
+
 // Dispatched with `top_k` simdgroups (host passes 32*top_k threads); "k8" is
 // the capacity of `partial` and `RoutedBlobs`, not the simdgroup count.
 kernel void moe_phase2_down_reduce_k8(
@@ -875,6 +881,7 @@ kernel void moe_phase2_down_reduce_k8(
     constant uint& F [[buffer(7)]],
     device const uint* io_status [[buffer(8)]],
     constant uint& top_k [[buffer(9)]],
+    device half* hidden [[buffer(10)]],
     uint d [[threadgroup_position_in_grid]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
@@ -885,7 +892,7 @@ kernel void moe_phase2_down_reduce_k8(
     const uint TK = min(moe_fc_top_k(top_k), kMaxStreamedExperts);
     if (d >= DD) return;
     if (!moe_io_ready(io_status)) {
-        if (sg_idx == 0 && lane == 0) y[d] = residual[d];
+        if (sg_idx == 0 && lane == 0) moe_phase2_finish(y, hidden, d, residual[d]);
         return;
     }
 
@@ -905,7 +912,7 @@ kernel void moe_phase2_down_reduce_k8(
     if (sg_idx == 0 && lane == 0) {
         float acc = float(residual[d]);
         for (uint i = 0; i < TK; ++i) acc += partial[i];
-        y[d] = half(acc);
+        moe_phase2_finish(y, hidden, d, half(acc));
     }
 }
 
@@ -977,6 +984,7 @@ kernel void moe_phase2_down_reduce_spec_k8(
     device const uint* resolved_slots [[buffer(8)]],
     constant uint& top_k [[buffer(9)]],
     constant ulong& pool_slot_stride [[buffer(10)]],
+    device half* hidden [[buffer(11)]],
     uint d [[threadgroup_position_in_grid]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
@@ -1004,7 +1012,7 @@ kernel void moe_phase2_down_reduce_spec_k8(
     if (sg_idx == 0 && lane == 0) {
         float acc = float(residual[d]);
         for (uint i = 0; i < TK; ++i) acc += partial[i];
-        y[d] = half(acc);
+        moe_phase2_finish(y, hidden, d, half(acc));
     }
 }
 
@@ -1067,6 +1075,7 @@ kernel void moe_affine_phase2_down_reduce_k8(
     constant uint& D [[buffer(6)]], constant uint& F [[buffer(7)]],
     device const uint* io_status [[buffer(8)]],
     constant uint& top_k [[buffer(9)]],
+    device half* hidden [[buffer(10)]],
     uint d [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
@@ -1075,7 +1084,7 @@ kernel void moe_affine_phase2_down_reduce_k8(
     const uint TK = min(moe_fc_top_k(top_k), kMaxStreamedExperts);
     if (d >= DD) return;
     if (!moe_io_ready(io_status)) {
-        if (sg == 0 && lane == 0) y[d] = residual[d];
+        if (sg == 0 && lane == 0) moe_phase2_finish(y, hidden, d, residual[d]);
         return;
     }
     device const uint8_t* base = routed.blob[sg];
@@ -1090,7 +1099,7 @@ kernel void moe_affine_phase2_down_reduce_k8(
     if (sg == 0 && lane == 0) {
         float acc = float(residual[d]);
         for (uint i = 0; i < TK; ++i) acc += partial[i];
-        y[d] = half(acc);
+        moe_phase2_finish(y, hidden, d, half(acc));
     }
 }
 

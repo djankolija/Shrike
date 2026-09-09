@@ -231,16 +231,31 @@ and the fold's ruling follows it on the boundary costs Task 6 re-measures.
       ruling as class 1 and non-negative; the remaining merges re-priced at the wall's
       kind, about 0.3 to 0.7 ms for all five, T6.3 the only one after an indirect
       dispatch.
-- [ ] **T6.2 The scalar gate into that dispatch** (40; 26.5 on the path): the same
-      steps.
-- [ ] **T6.3 Speculative phase 2 plus its residual** (40; 26.5 on the path; the
-      zero-grid miss behaviour preserved): the same steps.
-- [ ] **T6.4 The top-k select plus the classifier** (40, every layer on the path):
-      the same steps.
-- [ ] **T6.5 Conv plus qk norm** (30 GDN layers, on the path): the same steps.
-- [ ] **T6.6 The input norm into the in-projection** (30; the weakest, last): the
-      same steps, or dropped if T6.5's arms say the GDN walls are not what D1
-      counted.
+- [x] **T6.2 The scalar gate into that dispatch**: NOT BUILT (Davor's ruling,
+      2026-09-09, the floor rule after T6.1): a small kernel to small kernel wall, at
+      most 3 µs, floor zero; the read (archived with T6.1's artefacts) found the int8
+      row would need its body refactored to take a local row before it could join the
+      int4 grid.
+- [x] **T6.3 Speculative phase 2 plus its residual**: DONE 2026-09-09, landed; the
+      residual add folded into the three phase 2 kernels' epilogue (`moe_phase2_finish`),
+      the residual tail's indirect slot and `encodeResidualAddIndirect` removed, the
+      zero-grid miss behaviour preserved; the arm (the spec-versus-routed test on
+      `hidden`, both twins, the zero grid) red then green; the four gates (1,249 tests
+      in 173 suites), the golden identical on both boxes (the mini on
+      b9e0c7838cf01e91); the arms and a sixteen-lifetime A/B on the 300: the GPU role
+      time down about 0.25 ms per token, every B lifetime below every A (about 5.5 µs
+      a wall on the speculative side, 1.6 on the fixup side), the wall flat (clean
+      means 17.00 to 17.03 tok/s); kept by the pre-registered rule, class 1,
+      non-negative, less code.
+- [x] **T6.4 The top-k select plus the classifier**: NOT BUILT (the same ruling): two
+      one-thread kernels, the wall at most 3 µs; the classifier also reads the paired
+      select's next-layer probe, so a merge sequences both selects before it.
+- [x] **T6.5 Conv plus qk norm**: NOT BUILT (the same ruling): small to small; every
+      head slice lies inside one conv threadgroup, but the norm's 128-thread reduction
+      would have to be re-mapped onto the conv's 256 threads in the same order.
+- [x] **T6.6 The input norm into the in-projection**: NOT BUILT (the same ruling): a
+      one-threadgroup kernel before a large one, the launch paid either way; a class-1
+      merge recomputes the 256-thread reduction in 1,544 threadgroups.
 - [ ] **T6.7 The record**: the task record in the design doc, D1 updated with what
       each wall cost, the fold re-priced for its ruling.
 
