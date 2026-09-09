@@ -220,6 +220,18 @@ final class Elementwise {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
+        encodeResidualAddIndirect(encoder: encoder, hidden: hidden, delta: delta,
+                                  count: count, indirectArguments: indirectArguments,
+                                  indirectOffset: indirectOffset)
+        encoder.endEncoding()
+    }
+
+    func encodeResidualAddIndirect(encoder: MTLComputeCommandEncoder,
+                                   hidden: MTLBuffer,
+                                   delta: MTLBuffer,
+                                   count: Int,
+                                   indirectArguments: MTLBuffer,
+                                   indirectOffset: Int) {
         encoder.setComputePipelineState(residualAddPSO)
         encoder.setBuffer(hidden, offset: 0, index: 0)
         encoder.setBuffer(delta, offset: 0, index: 1)
@@ -230,7 +242,6 @@ final class Elementwise {
             indirectBufferOffset: indirectOffset,
             threadsPerThreadgroup: MTLSize(width: residualAddThreadgroupWidth,
                                            height: 1, depth: 1))
-        encoder.endEncoding()
     }
 
     static let residualAddThreadgroupWidth = 256

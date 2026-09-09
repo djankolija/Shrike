@@ -639,6 +639,50 @@ land as modelled.
 **Order.** Task 6 runs before the fold's ruling: the fold is priced on the cost of
 a command boundary against an encoder boundary, and Task 6 re-measures both.
 
+**T6.0 (2026-09-09), the wall by its kind: landed.** The speculative command's
+seven dispatches go on one serial encoder (the shared expert's chain, phase 1,
+phase 2 and the residual, where they had four) and the fixup's three on one (where
+they had three), no kernel change: six kernel wrappers gained `encoder:` variants
+with the `commandBuffer:` overloads kept as thin wrappers, and a test runs the
+production routed pipeline on one encoder and on separate encoders and asserts the
+outputs bit-identical. The four gates (the release build with zero warnings, lint
+zero in 212 files, links clean, 1,244 tests in 171 suites in 202 s), the golden
+identical on both profiles on both boxes (the mini on 83eddc36bd722e57, the server
+stopped). The arms, two lifetimes per shape against Task 3's; the card's answer
+identical; the rows, the 300, lifetimes 1 / 2, ms per token:
+
+| row | Task 3 | T6.0 |
+| --- | ---: | ---: |
+| `layer_linear` (30 GDN layers) | 27.19 / 27.18 | 25.12 / 25.13 |
+| `layer_kv` (10 layers) | 9.12 / 9.11 | 8.45 / 8.46 |
+| `moe_phase1_miss_fixup_phase2` | 2.47 / 2.47 | 1.92 / 1.92 |
+| the layer-to-layer transitions | 1.08 / 1.15 | 1.77 / 1.52 |
+| `wait_ms` | 51.76 / 51.80 | 50.98 / 50.35 |
+| misses per token | 19.9 / 19.9 | 20.0 / 20.1 |
+| decode tok/s | 16.61 / 16.60 | 16.87 / 17.06 |
+
+The 1k 16.41 / 16.42 to 16.86 / 16.88, the card 15.66 / 15.32 to 15.80 / 15.89 (one
+slow-drive lifetime on each side), the pair 300 at 3.13 to 3.16 s warm.
+
+**Reading.** The GPU's role time fell by 3.3 ms per token: 2.07 on the GDN layers,
+0.66 on the KV layers, 0.55 on the fixup, over the 120 speculative-command
+boundaries and the 27 fixup boundaries that went, **about 22 µs an encoder
+boundary**. On the path, by the slack rule, about 2.4 of the 3.3 (the
+speculative command's share on the 13.5 miss layers sits in the read's shadow, and
+the miss window duly widened by 0.6 to 0.8); the layer-to-layer transitions grew
+by 0.4 to 0.7, unexplained and small; the wall +1.6 to +2.8 % on the 300 and +2.7
+% on the 1k, about 1.0 to 1.7 ms per token, the misses per token up 0.5 % (the
+faster pass leaves the ring's landings a little less time before the classifier).
+Kept: class 1, no kernel changed, the largest single gain of the chapter so far.
+
+**What it settles for the rest of Task 6.** The encoder boundary is the expensive
+kind, about 22 µs; the dispatch boundary inside an encoder is v10's 12, so the six
+merges' pricing at 12 µs a wall stands. One more encoder-only step is priced by the
+same number and is the cheapest thing left: the boundary command of Task 4 holds
+nine encoders (the final norm, the lm_head GEMV, the sampler's three softmax stages
+and three top-k stages, the embed), eight boundaries at 22 µs, about 0.18 ms per
+token, a T6.0b before the merges.
+
 ## Method
 
 - The four gates per commit (release build with zero warnings, `swiftlint lint

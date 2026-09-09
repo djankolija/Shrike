@@ -203,12 +203,17 @@ and the fold's ruling follows it on the boundary costs Task 6 re-measures.
 
 ## Task 6: the walls (D1)
 
-- [ ] **T6.0 Price the wall by its kind**: the speculative command's seven dispatches
-      on one encoder instead of four and the fixup's three on one instead of three,
-      no kernel change; the arms against Task 3's; the rows `layer_linear`,
-      `layer_kv`, `moe_phase1_miss_fixup_phase2` and the wall. If the encoder
-      boundary is the 25 µs kind, this lands as its own commit and the merges are
-      re-priced on the difference; if not, the merges' 12 µs pricing stands.
+- [x] **T6.0 Price the wall by its kind**: DONE 2026-09-09, landed; the speculative
+      command's seven dispatches on one encoder and the fixup's three on one, six
+      kernel wrappers with `encoder:` variants, the one-encoder pipeline test
+      bit-identical; the four gates (1,244 tests in 171 suites), the golden identical
+      on both boxes (the mini on 83eddc36bd722e57); the arms against Task 3's: the
+      GPU's role time down 3.3 ms per token over 147 encoder boundaries, **about 22
+      µs a boundary**, the wall +1.6 to +2.8 % on the 300 and the 1k, about 1.0 to
+      1.7 ms per token; the merges' 12 µs pricing stands for dispatch boundaries.
+- [ ] **T6.0b The boundary command on one encoder**: the final norm, the lm_head
+      GEMV, the sampler's six stages and the embed, nine encoders to one; about 0.18
+      ms per token at 22 µs a boundary; the same steps.
 - [ ] **T6.1 The shared gate and up GEMVs as one grid** (the cleanest; 40 walls a
       token, 26.5 on the path): the read, the merged kernel, the bitwise arm against
       the two it replaces, the gates, the golden, the arms.

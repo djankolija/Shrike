@@ -3099,14 +3099,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         d D: UInt32,
         f FmoE: UInt32
     ) throws -> (cb: MTLCommandBuffer, commitNanos: UInt64) {
-        // The phase-2 reduce already folded the shared branch (h1Buf
-        // as its residual); the tail is a plain residual add.
-        let gTail: (MTLCommandBuffer) throws -> Void = { [self] cb in
-            try elementwise!.encodeResidualAdd(commandBuffer: cb,
-                                           hidden: hidden,
-                                           delta: h2Buf,
-                                           count: cfg.hiddenSize)
-        }
         guard let routedCB = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
@@ -3123,11 +3115,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             routedBlobs: routedBufs,
             topK: topK,
             routedBufferOffsets: decodeRoutedOffsetsScratch)
+        guard let encoder = routedCB.makeComputeCommandEncoder() else {
+            throw ModelError.residentBufferWrapFailed
+        }
         if missesOnly {
             totalHitFixupLayers &+= 1
             writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
-            try moe.encodeRoutedPersistentPhase1SubsetU16Load(
-                commandBuffer: routedCB,
+            moe.encodeRoutedPersistentPhase1SubsetU16Load(
+                encoder: encoder,
                 routedArgBuffer: argBuf,
                 routedBlobs: routedBufs,
                 routedOffsets: routedOffsets,
@@ -3142,8 +3137,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 ioStatus: ioStatus?.0,
                 ioStatusOffset: ioStatus?.1 ?? 0)
         } else {
-            try moe.encodeRoutedPersistentPhase1U16Load(
-                commandBuffer: routedCB,
+            moe.encodeRoutedPersistentPhase1U16Load(
+                encoder: encoder,
                 routedArgBuffer: argBuf,
                 routedBlobs: routedBufs,
                 routedOffsets: routedOffsets,
@@ -3155,7 +3150,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 ioStatus: ioStatus?.0,
                 ioStatusOffset: ioStatus?.1 ?? 0)
         }
-        try moe.encodeRoutedPersistentPhase2Reduce(commandBuffer: routedCB,
+        moe.encodeRoutedPersistentPhase2Reduce(encoder: encoder,
                                                routedArgBuffer: argBuf,
                                                routedBlobs: routedBufs,
                                                routedOffsets: routedOffsets,
@@ -3168,7 +3163,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                topK: topK,
                                                ioStatus: ioStatus?.0,
                                                ioStatusOffset: ioStatus?.1 ?? 0)
-        try gTail(routedCB)
+        // The phase-2 reduce already folded the shared branch (h1Buf as its
+        // residual); the tail is a plain residual add.
+        elementwise!.encodeResidualAdd(encoder: encoder,
+                                       hidden: hidden,
+                                       delta: h2Buf,
+                                       count: cfg.hiddenSize)
+        encoder.endEncoding()
         let commitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         routedCB.commit()
         return (routedCB, commitNanos)
@@ -5160,31 +5161,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// the router readback and the GPU runs it while the CPU waits for the
     /// routing; encoding it after the readback left a measured 7.88 ms/token
     /// of GPU idle in the `attn_tail_router -> shared_expert` transition.
-    private func encodeSharedExpertWork(into cb: MTLCommandBuffer,
+    private func encodeSharedExpertZeroFill(into cb: MTLCommandBuffer) throws {
+        // No shared expert (gpt-oss): the phase-2 reduce still seeds from
+        // h1Buf, so pin it to zero in place of the dense MLP output.
+        guard let blit = cb.makeBlitCommandEncoder() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        blit.fill(buffer: h1Buf,
+                  range: 0..<(cfg.hiddenSize * MemoryLayout<Float16>.stride),
+                  value: 0)
+        blit.endEncoding()
+    }
+
+    private func encodeSharedExpertWork(on sharedEncoder: MTLComputeCommandEncoder,
                                         layer L: Int) throws {
         let D = UInt32(cfg.hiddenSize)
-        guard cfg.hasSharedExpert else {
-            // No shared expert (gpt-oss): the phase-2 reduce still seeds from
-            // h1Buf, so pin it to zero in place of the dense MLP output.
-            guard let blit = cb.makeBlitCommandEncoder() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            blit.fill(buffer: h1Buf,
-                      range: 0..<(cfg.hiddenSize * MemoryLayout<Float16>.stride),
-                      value: 0)
-            blit.endEncoding()
-            return
-        }
         let sharedProj = sharedExpertProjections[L]
-        // Serial encoder on purpose: a .concurrent encoder here — however
-        // barriered — segfaults the AGX driver when a later encoder on this
-        // CB encodes an indirect dispatch (macOS 26 / M4 HAL200,
-        // insertIndirectTGOptKernel null deref).
         if let fused = shared.int4FusedDecode {
-            guard let sharedEncoder = cb.makeComputeCommandEncoder() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            defer { sharedEncoder.endEncoding() }
             try fused.encodeGateUp(encoder: sharedEncoder,
                                    x: routedX,
                                    gate: sharedProj.gate,
@@ -5214,12 +5207,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                           ? sharedScalarGateBuf! : nil)
             return
         }
-        // B1c stage 1: one encoder for the whole shared-expert chain — the
-        // per-kernel encoders cost more span than the GEMVs they wrapped.
-        guard let sharedEncoder = cb.makeComputeCommandEncoder() else {
-            throw ModelError.residentBufferWrapFailed
-        }
-        defer { sharedEncoder.endEncoding() }
         try shared.encode(encoder: sharedEncoder,
                           x: routedX,
                           gate: sharedProj.gate,
@@ -5281,15 +5268,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         completionClock: CommandCompletionClock?
     ) throws {
         let pool = residency.expertPool
-        // Stage C: the shared-expert chain rides at the head of the spec CB —
-        // same main-queue commit position as the old separate sharedCB, so
-        // h1Buf ordering is unchanged, and the spec CB commits on every
-        // layer, so miss layers still produce h1Buf for the fixup reduce.
-        try encodeSharedExpertWork(into: cb, layer: L)
+        if !cfg.hasSharedExpert {
+            try encodeSharedExpertZeroFill(into: cb)
+        }
         completionClock?.track(cb)
         let offsets = try model.routedExpertOffsets(layer: L)
-        try moe.encodeSpecPhase1U16Load(
-            commandBuffer: cb,
+        // One serial encoder for the shared chain and the routed work; a
+        // .concurrent encoder segfaults the AGX driver when an indirect
+        // dispatch follows it on the command (macOS 26 / M4, v9's trap).
+        guard let encoder = cb.makeComputeCommandEncoder() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        defer { encoder.endEncoding() }
+        if cfg.hasSharedExpert {
+            try encodeSharedExpertWork(on: encoder, layer: L)
+        }
+        moe.encodeSpecPhase1U16Load(
+            encoder: encoder,
             expertPool: pool,
             poolSlotStride: residency.poolSlotStride,
             resolvedSlots: residencyResolvedSlots,
@@ -5300,8 +5295,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             f: UInt32(cfg.moeIntermediateSize),
             topK: UInt32(cfg.topKExperts),
             indirectArguments: arguments.arguments)
-        try moe.encodeSpecPhase2Reduce(
-            commandBuffer: cb,
+        moe.encodeSpecPhase2Reduce(
+            encoder: encoder,
             expertPool: pool,
             poolSlotStride: residency.poolSlotStride,
             resolvedSlots: residencyResolvedSlots,
@@ -5314,8 +5309,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             f: UInt32(cfg.moeIntermediateSize),
             topK: UInt32(cfg.topKExperts),
             indirectArguments: arguments.arguments)
-        try elementwise!.encodeResidualAddIndirect(
-            commandBuffer: cb,
+        elementwise!.encodeResidualAddIndirect(
+            encoder: encoder,
             hidden: hidden,
             delta: h2Buf,
             count: cfg.hiddenSize,

@@ -584,14 +584,41 @@ final class MoE {
         ioStatus: MTLBuffer? = nil,
         ioStatusOffset: Int = 0
     ) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encodeRoutedPersistentPhase1U16Load(
+            encoder: encoder,
+            routedArgBuffer: routedArgBuffer,
+            routedBlobs: routedBlobs,
+            routedOffsets: routedOffsets,
+            x: x, xOffset: xOffset,
+            acts: acts, actsOffset: actsOffset,
+            d: d, f: f, topK: topK,
+            ioStatus: ioStatus, ioStatusOffset: ioStatusOffset)
+        encoder.endEncoding()
+    }
+
+    func encodeRoutedPersistentPhase1U16Load(
+        encoder: MTLComputeCommandEncoder,
+        routedArgBuffer: MTLBuffer,
+        routedBlobs: [MTLBuffer],
+        routedOffsets: MoEExpertOffsets,
+        x: MTLBuffer,
+        xOffset: Int = 0,
+        acts: MTLBuffer,
+        actsOffset: Int = 0,
+        d: UInt32,
+        f: UInt32,
+        topK: UInt32,
+        ioStatus: MTLBuffer? = nil,
+        ioStatusOffset: Int = 0
+    ) {
         validate(routedBlobs: routedBlobs, topK: topK)
         precondition(d <= Self.maxStagedHiddenD)
         var dimension = d
         var intermediate = f
         var expertCount = topK
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
         encoder.setComputePipelineState(
             useRealDecodeConstants(d: d, f: f, topK: topK)
                 ? phase1U16SpecializedPSO
@@ -613,7 +640,6 @@ final class MoE {
         encoder.dispatchThreadgroups(
             MTLSize(width: (Int(topK * f) + 15) / 16, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 512, height: 1, depth: 1))
-        encoder.endEncoding()
     }
 
     func encodeRoutedPersistentPhase1SubsetU16Load(
@@ -633,15 +659,46 @@ final class MoE {
         ioStatusOffset: Int = 0
     ) throws {
         guard activeCount > 0 else { return }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encodeRoutedPersistentPhase1SubsetU16Load(
+            encoder: encoder,
+            routedArgBuffer: routedArgBuffer,
+            routedBlobs: routedBlobs,
+            routedOffsets: routedOffsets,
+            x: x, acts: acts,
+            activeSlots: activeSlots,
+            activeSlotIndices: activeSlotIndices,
+            activeCount: activeCount,
+            d: d, f: f, topK: topK,
+            ioStatus: ioStatus, ioStatusOffset: ioStatusOffset)
+        encoder.endEncoding()
+    }
+
+    func encodeRoutedPersistentPhase1SubsetU16Load(
+        encoder: MTLComputeCommandEncoder,
+        routedArgBuffer: MTLBuffer,
+        routedBlobs: [MTLBuffer],
+        routedOffsets: MoEExpertOffsets,
+        x: MTLBuffer,
+        acts: MTLBuffer,
+        activeSlots: MTLBuffer,
+        activeSlotIndices: [UInt32],
+        activeCount: UInt32,
+        d: UInt32,
+        f: UInt32,
+        topK: UInt32,
+        ioStatus: MTLBuffer? = nil,
+        ioStatusOffset: Int = 0
+    ) {
+        guard activeCount > 0 else { return }
         validate(routedBlobs: routedBlobs, topK: topK)
         precondition(activeSlotIndices.count == Int(activeCount))
         var dimension = d
         var intermediate = f
         var expertCount = topK
         var active = activeCount
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
         encoder.setComputePipelineState(
             useRealDecodeConstants(d: d, f: f, topK: topK)
                 ? phase1SubsetU16SpecializedPSO
@@ -666,7 +723,6 @@ final class MoE {
         encoder.dispatchThreadgroups(
             MTLSize(width: (Int(activeCount * f) + 15) / 16, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 512, height: 1, depth: 1))
-        encoder.endEncoding()
     }
 
     func encodeRoutedPersistentPhase2Reduce(
@@ -688,13 +744,46 @@ final class MoE {
         ioStatus: MTLBuffer? = nil,
         ioStatusOffset: Int = 0
     ) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encodeRoutedPersistentPhase2Reduce(
+            encoder: encoder,
+            routedArgBuffer: routedArgBuffer,
+            routedBlobs: routedBlobs,
+            routedOffsets: routedOffsets,
+            acts: acts, actsOffset: actsOffset,
+            routingWeights: routingWeights, routingWeightsOffset: routingWeightsOffset,
+            residual: residual, residualOffset: residualOffset,
+            y: y, yOffset: yOffset,
+            d: d, f: f, topK: topK,
+            ioStatus: ioStatus, ioStatusOffset: ioStatusOffset)
+        encoder.endEncoding()
+    }
+
+    func encodeRoutedPersistentPhase2Reduce(
+        encoder: MTLComputeCommandEncoder,
+        routedArgBuffer: MTLBuffer,
+        routedBlobs: [MTLBuffer],
+        routedOffsets: MoEExpertOffsets,
+        acts: MTLBuffer,
+        actsOffset: Int = 0,
+        routingWeights: MTLBuffer,
+        routingWeightsOffset: Int = 0,
+        residual: MTLBuffer,
+        residualOffset: Int = 0,
+        y: MTLBuffer,
+        yOffset: Int = 0,
+        d: UInt32,
+        f: UInt32,
+        topK: UInt32,
+        ioStatus: MTLBuffer? = nil,
+        ioStatusOffset: Int = 0
+    ) {
         validate(routedBlobs: routedBlobs, topK: topK)
         var dimension = d
         var intermediate = f
         var topKValue = topK
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
         encoder.setComputePipelineState(
             useRealDecodeConstants(d: d, f: f, topK: topK)
                 ? phase2ReduceK8SpecializedPSO
@@ -717,7 +806,6 @@ final class MoE {
         encoder.dispatchThreadgroups(
             MTLSize(width: Int(d), height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32 * Int(topK), height: 1, depth: 1))
-        encoder.endEncoding()
     }
 
     static func specPhase1FullGrid(f: UInt32, topK: UInt32) -> MTLSize {
@@ -747,15 +835,42 @@ final class MoE {
         indirectArguments: MTLBuffer,
         indirectOffset: Int = 0
     ) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encodeSpecPhase1U16Load(
+            encoder: encoder,
+            expertPool: expertPool,
+            poolSlotStride: poolSlotStride,
+            resolvedSlots: resolvedSlots,
+            routedOffsets: routedOffsets,
+            x: x, acts: acts,
+            d: d, f: f, topK: topK,
+            indirectArguments: indirectArguments,
+            indirectOffset: indirectOffset)
+        encoder.endEncoding()
+    }
+
+    func encodeSpecPhase1U16Load(
+        encoder: MTLComputeCommandEncoder,
+        expertPool: MTLBuffer,
+        poolSlotStride: UInt64,
+        resolvedSlots: MTLBuffer,
+        routedOffsets: MoEExpertOffsets,
+        x: MTLBuffer,
+        acts: MTLBuffer,
+        d: UInt32,
+        f: UInt32,
+        topK: UInt32,
+        indirectArguments: MTLBuffer,
+        indirectOffset: Int = 0
+    ) {
         precondition(d <= Self.maxStagedHiddenD)
         precondition((1...UInt32(Self.maxStreamedExperts)).contains(topK))
         var dimension = d
         var intermediate = f
         var expertCount = topK
         var stride = poolSlotStride
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
         encoder.setComputePipelineState(
             useRealDecodeConstants(d: d, f: f, topK: topK)
                 ? specPhase1SpecializedPSO
@@ -774,7 +889,6 @@ final class MoE {
             indirectBuffer: indirectArguments,
             indirectBufferOffset: indirectOffset,
             threadsPerThreadgroup: MTLSize(width: 512, height: 1, depth: 1))
-        encoder.endEncoding()
     }
 
     func encodeSpecPhase2Reduce(
@@ -793,14 +907,46 @@ final class MoE {
         indirectArguments: MTLBuffer,
         indirectOffset: Int = MoE.specPhase2ArgsOffset
     ) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encodeSpecPhase2Reduce(
+            encoder: encoder,
+            expertPool: expertPool,
+            poolSlotStride: poolSlotStride,
+            resolvedSlots: resolvedSlots,
+            routedOffsets: routedOffsets,
+            acts: acts,
+            routingWeights: routingWeights,
+            residual: residual,
+            y: y,
+            d: d, f: f, topK: topK,
+            indirectArguments: indirectArguments,
+            indirectOffset: indirectOffset)
+        encoder.endEncoding()
+    }
+
+    func encodeSpecPhase2Reduce(
+        encoder: MTLComputeCommandEncoder,
+        expertPool: MTLBuffer,
+        poolSlotStride: UInt64,
+        resolvedSlots: MTLBuffer,
+        routedOffsets: MoEExpertOffsets,
+        acts: MTLBuffer,
+        routingWeights: MTLBuffer,
+        residual: MTLBuffer,
+        y: MTLBuffer,
+        d: UInt32,
+        f: UInt32,
+        topK: UInt32,
+        indirectArguments: MTLBuffer,
+        indirectOffset: Int = MoE.specPhase2ArgsOffset
+    ) {
         precondition((1...UInt32(Self.maxStreamedExperts)).contains(topK))
         var dimension = d
         var intermediate = f
         var topKValue = topK
         var stride = poolSlotStride
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
         encoder.setComputePipelineState(
             useRealDecodeConstants(d: d, f: f, topK: topK)
                 ? specPhase2SpecializedPSO
@@ -821,7 +967,6 @@ final class MoE {
             indirectBuffer: indirectArguments,
             indirectBufferOffset: indirectOffset,
             threadsPerThreadgroup: MTLSize(width: 32 * Int(topK), height: 1, depth: 1))
-        encoder.endEncoding()
     }
 
     private func validate(routedBlobs: [MTLBuffer], topK: UInt32) {

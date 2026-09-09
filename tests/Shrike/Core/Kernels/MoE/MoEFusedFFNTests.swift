@@ -244,6 +244,13 @@ import ShrikeValidationSupport
             < Tolerance.fp16ChainedReduction)
     }
 
+    @Test func productionRoutedPipelineOnOneEncoderMatchesSeparateEncoders() throws {
+        let fixture = try Self.makeOneEncoderFixture()
+        let separate = try Self.runSeparateEncoders(fixture)
+        let fused = try Self.runSingleEncoder(fixture)
+        #expect(separate == fused)
+    }
+
     @Test func speculativePoolPipelineMatchesRoutedPipeline() throws {
         var rng = SeedTree(0x2D3).key("speculative-pool-moe")
         func matrix(rows: Int, columns: Int) -> [[Float]] {
@@ -611,6 +618,166 @@ import ShrikeValidationSupport
                 upWOff: upW, upSOff: upS, upBOff: upB,
                 downWOff: downW, downSOff: downS, downBOff: downB,
                 gateABOff: gateAB, upABOff: upAB, downABOff: downAB))
+    }
+
+    private struct OneEncoderFixture {
+        let context: MetalContext
+        let kernel: MoE
+        let elementwise: Elementwise
+        let routedBuffers: [MTLBuffer]
+        let argumentBuffer: MTLBuffer
+        let pool: MTLBuffer
+        let poolSlotStride: Int
+        let resolvedSlots: MTLBuffer
+        let missSlots: MTLBuffer
+        let missPositions: [UInt32]
+        let indirectArgs: MTLBuffer
+        let xBuffer: MTLBuffer
+        let routingBuffer: MTLBuffer
+        let zeroResidual: MTLBuffer
+        let residual: [Float]
+        let offsets: MoEExpertOffsets
+    }
+
+    private static func makeOneEncoderFixture() throws -> OneEncoderFixture {
+        var rng = SeedTree(0x2D3).key("production-routed-moe")
+        func matrix(rows: Int, columns: Int) -> [[Float]] {
+            (0..<rows).map { _ in (0..<columns).map { _ in rng.uniform(-0.4, 0.4) } }
+        }
+        var gates = [[[Float]]](), ups = [[[Float]]](), downs = [[[Float]]]()
+        for _ in 0..<Self.topK {
+            gates.append(matrix(rows: Self.intermediate, columns: Self.dimension))
+            ups.append(matrix(rows: Self.intermediate, columns: Self.dimension))
+            downs.append(matrix(rows: Self.dimension, columns: Self.intermediate))
+        }
+        let x = (0..<Self.dimension).map { _ in Float(Float16(rng.uniform(-0.5, 0.5))) }
+        let residual = (0..<Self.dimension).map { _ in Float(Float16(rng.uniform(-0.5, 0.5))) }
+        let routingWeights = (0..<Self.topK).map { Float(Float16(0.04 + Float($0) * 0.015)) }
+        let blobs = (0..<Self.topK).map {
+            Self.makeBlob(gate: gates[$0], up: ups[$0], down: downs[$0])
+        }
+        let context = try MetalContext()
+        let kernel = try MoE(context: context)
+        let elementwise = try Elementwise(context: context)
+        let routedBuffers = blobs.compactMap {
+            context.device.makeBuffer(bytes: $0.bytes, length: $0.bytes.count,
+                                      options: .storageModeShared)
+        }
+        try #require(routedBuffers.count == Self.topK)
+        let poolSlotStride = ((blobs.map(\.bytes.count).max()! + 63) / 64) * 64
+        let classifierMissSentinel: UInt32 = 0xffffffff
+        let slotOfPosition: [UInt32] = [5, 2, 6, 0]
+            + [UInt32](repeating: classifierMissSentinel, count: 4)
+        let missPositions: [UInt32] = [4, 5, 6, 7]
+        let xBuffer = try #require(Fp16Buffer.make(context.device, values: x))
+        let routingBuffer = try #require(Fp16Buffer.make(context.device, values: routingWeights))
+        let zeroResidual = try #require(Fp16Buffer.make(context.device, count: Self.dimension))
+        let pool = try #require(context.device.makeBuffer(
+            length: poolSlotStride * 8, options: .storageModeShared))
+        let resolvedSlots = try #require(context.device.makeBuffer(
+            bytes: slotOfPosition, length: slotOfPosition.count * MemoryLayout<UInt32>.stride,
+            options: .storageModeShared))
+        let indirectArgs = try #require(context.device.makeBuffer(
+            length: MoE.specDispatchArgsLength, options: .storageModeShared))
+        let missSlots = try #require(context.device.makeBuffer(
+            bytes: missPositions, length: missPositions.count * MemoryLayout<UInt32>.stride,
+            options: .storageModeShared))
+        let argumentBuffer = try #require(kernel.makeRoutedArgumentBuffer(
+            routedBlobs: routedBuffers, topK: UInt32(Self.topK)))
+        for position in 0..<4 {
+            blobs[position].bytes.withUnsafeBytes { bytes in
+                pool.contents()
+                    .advanced(by: Int(slotOfPosition[position]) * poolSlotStride)
+                    .copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+            }
+        }
+        memset(zeroResidual.contents(), 0, Self.dimension * MemoryLayout<Float16>.stride)
+        let phase1 = MoE.specPhase1FullGrid(f: UInt32(Self.intermediate), topK: UInt32(Self.topK))
+        let tail = MoE.specTailFullGrid(d: UInt32(Self.dimension),
+                                        threadgroupWidth: Elementwise.residualAddThreadgroupWidth)
+        let grids: [UInt32] = [UInt32(phase1.width), UInt32(phase1.height), UInt32(phase1.depth),
+                               0, 1, 1,
+                               UInt32(tail.width), UInt32(tail.height), UInt32(tail.depth)]
+        grids.withUnsafeBytes {
+            indirectArgs.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count)
+        }
+        return OneEncoderFixture(
+            context: context, kernel: kernel, elementwise: elementwise,
+            routedBuffers: routedBuffers, argumentBuffer: argumentBuffer,
+            pool: pool, poolSlotStride: poolSlotStride,
+            resolvedSlots: resolvedSlots, missSlots: missSlots, missPositions: missPositions,
+            indirectArgs: indirectArgs, xBuffer: xBuffer, routingBuffer: routingBuffer,
+            zeroResidual: zeroResidual, residual: residual, offsets: blobs[0].offsets)
+    }
+
+    private static func runSeparateEncoders(_ fixture: OneEncoderFixture) throws -> Data {
+        let acts = try #require(Fp16Buffer.make(fixture.context.device,
+                                                count: Self.topK * Self.intermediate))
+        let delta = try #require(Fp16Buffer.make(fixture.context.device, count: Self.dimension))
+        let hidden = try #require(Fp16Buffer.make(fixture.context.device, values: fixture.residual))
+        let command = fixture.context.queue.makeCommandBuffer()!
+        try fixture.kernel.encodeSpecPhase1U16Load(
+            commandBuffer: command, expertPool: fixture.pool,
+            poolSlotStride: UInt64(fixture.poolSlotStride), resolvedSlots: fixture.resolvedSlots,
+            routedOffsets: fixture.offsets, x: fixture.xBuffer, acts: acts,
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate), topK: UInt32(Self.topK),
+            indirectArguments: fixture.indirectArgs)
+        try fixture.kernel.encodeRoutedPersistentPhase1SubsetU16Load(
+            commandBuffer: command, routedArgBuffer: fixture.argumentBuffer,
+            routedBlobs: fixture.routedBuffers, routedOffsets: fixture.offsets,
+            x: fixture.xBuffer, acts: acts, activeSlots: fixture.missSlots,
+            activeSlotIndices: fixture.missPositions,
+            activeCount: UInt32(fixture.missPositions.count),
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate), topK: UInt32(Self.topK))
+        try fixture.kernel.encodeRoutedPersistentPhase2Reduce(
+            commandBuffer: command, routedArgBuffer: fixture.argumentBuffer,
+            routedBlobs: fixture.routedBuffers, routedOffsets: fixture.offsets,
+            acts: acts, routingWeights: fixture.routingBuffer, residual: fixture.zeroResidual,
+            y: delta, d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
+            topK: UInt32(Self.topK))
+        try fixture.elementwise.encodeResidualAddIndirect(
+            commandBuffer: command, hidden: hidden, delta: delta, count: Self.dimension,
+            indirectArguments: fixture.indirectArgs, indirectOffset: MoE.specTailArgsOffset)
+        command.commit()
+        command.waitUntilCompleted()
+        #expect(command.error == nil)
+        return Data(bytes: hidden.contents(), count: hidden.length)
+    }
+
+    private static func runSingleEncoder(_ fixture: OneEncoderFixture) throws -> Data {
+        let acts = try #require(Fp16Buffer.make(fixture.context.device,
+                                                count: Self.topK * Self.intermediate))
+        let delta = try #require(Fp16Buffer.make(fixture.context.device, count: Self.dimension))
+        let hidden = try #require(Fp16Buffer.make(fixture.context.device, values: fixture.residual))
+        let command = fixture.context.queue.makeCommandBuffer()!
+        let encoder = try #require(command.makeComputeCommandEncoder())
+        fixture.kernel.encodeSpecPhase1U16Load(
+            encoder: encoder, expertPool: fixture.pool,
+            poolSlotStride: UInt64(fixture.poolSlotStride), resolvedSlots: fixture.resolvedSlots,
+            routedOffsets: fixture.offsets, x: fixture.xBuffer, acts: acts,
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate), topK: UInt32(Self.topK),
+            indirectArguments: fixture.indirectArgs)
+        fixture.kernel.encodeRoutedPersistentPhase1SubsetU16Load(
+            encoder: encoder, routedArgBuffer: fixture.argumentBuffer,
+            routedBlobs: fixture.routedBuffers, routedOffsets: fixture.offsets,
+            x: fixture.xBuffer, acts: acts, activeSlots: fixture.missSlots,
+            activeSlotIndices: fixture.missPositions,
+            activeCount: UInt32(fixture.missPositions.count),
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate), topK: UInt32(Self.topK))
+        fixture.kernel.encodeRoutedPersistentPhase2Reduce(
+            encoder: encoder, routedArgBuffer: fixture.argumentBuffer,
+            routedBlobs: fixture.routedBuffers, routedOffsets: fixture.offsets,
+            acts: acts, routingWeights: fixture.routingBuffer, residual: fixture.zeroResidual,
+            y: delta, d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
+            topK: UInt32(Self.topK))
+        fixture.elementwise.encodeResidualAddIndirect(
+            encoder: encoder, hidden: hidden, delta: delta, count: Self.dimension,
+            indirectArguments: fixture.indirectArgs, indirectOffset: MoE.specTailArgsOffset)
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        #expect(command.error == nil)
+        return Data(bytes: hidden.contents(), count: hidden.length)
     }
 
     private static func makeConstantBlob(bits: Int) -> RoutedBlob {

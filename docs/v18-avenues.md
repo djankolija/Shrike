@@ -637,7 +637,13 @@ the tail alone is five or six of them. v10 landed mergers where the bits allowed
   three on one encoder each, then the six merges follow in the order of prize and
   risk, each with its bitwise arm. With the slack rule applied (a merge inside the
   speculative command counts on the 26.5 all-hit layers only), about 2.2 ms per
-  token modelled at 12 µs a wall.
+  token modelled at 12 µs a wall. **T6.0 landed (2026-09-09):** the speculative
+  command's four encoders to one and the fixup's three to one, no kernel change,
+  took 3.3 ms per token off the GPU's role time, about 22 µs an encoder boundary,
+  and +1.6 to +2.8 % off the wall on the 300 and the 1k; so the caveat was the
+  larger term, an encoder boundary costs about twice a dispatch boundary, and the
+  merges' pricing at 12 stands. The boundary command's nine encoders are the next
+  encoder-only step (T6.0b, about 0.18 ms).
 - **D2. The in-projection at the roof?** (needs a finer instrument). The role covers
   the chain; a per-kernel split needs a Metal capture or a kernel-level stats mode.
   14.2 MB per layer is 227 µs at the roof; if the GEMV runs slower than that, the
