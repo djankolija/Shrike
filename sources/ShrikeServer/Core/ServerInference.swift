@@ -445,11 +445,7 @@ private struct RunnerCounterSnapshot {
     let prefetchHookFailures: UInt64
     let pathPin: UInt64
     let pathSubmit: UInt64
-    let pathArgBuf: UInt64
-    let pathHitEncode: UInt64
     let pathFixupBuild: UInt64
-    let pathHitCommitToKernel: UInt64
-    let pathHitKernelToGPU: UInt64
     let pathFixupCommitToKernel: UInt64
     let pathRouterWake: UInt64
     let pathRouterWakeFallbacks: UInt64
@@ -498,11 +494,7 @@ private struct RunnerCounterSnapshot {
         prefetchHookFailures = runner.prefetchStatistics.hookFailures
         pathPin = runner.totalRoutedPinNanos
         pathSubmit = runner.totalRoutedSubmitNanos
-        pathArgBuf = runner.totalHitSplitArgBufNanos
-        pathHitEncode = runner.totalHitSplitEncodeNanos
         pathFixupBuild = runner.totalFixupBuildNanos
-        pathHitCommitToKernel = runner.totalHitCommitToKernelNanos
-        pathHitKernelToGPU = runner.totalHitKernelToGPUNanos
         pathFixupCommitToKernel = runner.totalFixupCommitToKernelNanos
         pathRouterWake = runner.totalRouterWakeNanos
         pathRouterWakeFallbacks = runner.totalRouterWakeFallbacks
@@ -2036,9 +2028,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "expert_load_p50_ms=%.3f expert_load_p95_ms=%.3f "
                 + "expert_load_p99_ms=%.3f io_hidden_pct=%.2f hit_fixup_layers=%llu "
                 + "router_readback_ms=%.4f cache_plan_ms=%.4f %@ "
-                + "path_pin_ms=%.4f path_submit_ms=%.4f path_argbuf_ms=%.4f "
-                + "path_hit_encode_ms=%.4f path_fixup_build_ms=%.4f "
-                + "path_hit_commit_to_kernel_ms=%.4f path_hit_kernel_to_gpu_ms=%.4f "
+                + "path_pin_ms=%.4f path_submit_ms=%.4f path_fixup_build_ms=%.4f "
                 + "path_fixup_commit_to_kernel_ms=%.4f path_router_wake_ms=%.4f "
                 + "path_router_wake_fallbacks=%llu "
                 + "io_queue_ms=%.4f "
@@ -2069,11 +2059,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             prefetchRunnerLine(snapshot: snapshot, tokens: tokens),
             ms(runner.totalRoutedPinNanos, snapshot.pathPin),
             ms(runner.totalRoutedSubmitNanos, snapshot.pathSubmit),
-            ms(runner.totalHitSplitArgBufNanos, snapshot.pathArgBuf),
-            ms(runner.totalHitSplitEncodeNanos, snapshot.pathHitEncode),
             ms(runner.totalFixupBuildNanos, snapshot.pathFixupBuild),
-            ms(runner.totalHitCommitToKernelNanos, snapshot.pathHitCommitToKernel),
-            ms(runner.totalHitKernelToGPUNanos, snapshot.pathHitKernelToGPU),
             ms(runner.totalFixupCommitToKernelNanos, snapshot.pathFixupCommitToKernel),
             ms(runner.totalRouterWakeNanos, snapshot.pathRouterWake),
             runner.totalRouterWakeFallbacks - snapshot.pathRouterWakeFallbacks,

@@ -178,9 +178,13 @@ static inline void moe_publish_router_readback(
 }
 
 /// v9 speculative dispatch: additionally publishes indirect dispatch
-/// arguments — the caller-supplied full grids when every routed expert is
-/// resident, zero-width grids otherwise — so pre-committed speculative
-/// command buffers size themselves without a CPU readback.
+/// arguments so pre-committed speculative command buffers size themselves
+/// without a CPU readback. Phase 1 always takes the caller-supplied full
+/// grid: its rows skip a missing expert by the 0xffffffff sentinel in
+/// resolved_slots, so on a miss layer it computes the hits and the host's
+/// fixup computes only the misses (v18 Task 1). Phase 2 and the tail take
+/// the full grids only when every routed expert is resident, zero-width
+/// grids otherwise.
 kernel void moe_classify_expert_residency_spec(
     device const uint* topk_indices [[buffer(0)]],
     device const ulong* residency [[buffer(1)]],
@@ -207,8 +211,7 @@ kernel void moe_classify_expert_residency_spec(
     const bool all_hit = (misses == 0u);
     for (uint i = 0; i < 3; ++i) {
         const uint zero_grid = (i == 0u) ? 0u : 1u;
-        spec_args->phase1_threadgroups[i] = all_hit
-            ? spec_full_grids.phase1_threadgroups[i] : zero_grid;
+        spec_args->phase1_threadgroups[i] = spec_full_grids.phase1_threadgroups[i];
         spec_args->phase2_threadgroups[i] = all_hit
             ? spec_full_grids.phase2_threadgroups[i] : zero_grid;
         spec_args->tail_threadgroups[i] = all_hit

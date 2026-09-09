@@ -16,7 +16,7 @@ import Testing
     private static let phase1FullGrid = MTLSize(width: 256, height: 1, depth: 1)
     private static let phase2FullGrid = MTLSize(width: 13, height: 7, depth: 1)
     private static let tailFullGrid = MTLSize(width: 4, height: 1, depth: 1)
-    private static let zeroGrids: [UInt32] = [0, 1, 1, 0, 1, 1, 0, 1, 1]
+    private static let missGrids: [UInt32] = [256, 1, 1, 0, 1, 1, 0, 1, 1]
     private static let fullGrids: [UInt32] = [256, 1, 1, 13, 7, 1, 4, 1, 1]
 
     @Test func loadingResidentAndEvictedEntriesClassifyCorrectly() throws {
@@ -77,7 +77,7 @@ import Testing
         var result = try classify([0, 1, 2, 3], streamer: streamer,
                                   moe: moe, context: context)
         #expect(result.misses == [0, 1, 2, 3])
-        #expect(result.specArgs == Self.zeroGrids)
+        #expect(result.specArgs == Self.missGrids)
 
         _ = try streamer.executeExpertCachePlan(
             try streamer.planExpertsCached(experts: [1]))
@@ -85,7 +85,7 @@ import Testing
         result = try classify([0, 1, 2, 3], streamer: streamer,
                               moe: moe, context: context)
         #expect(result.hits == [1, 3])
-        #expect(result.specArgs == Self.zeroGrids)
+        #expect(result.specArgs == Self.missGrids)
 
         result = try classify([1, 3], streamer: streamer,
                               moe: moe, context: context)

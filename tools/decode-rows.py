@@ -7,8 +7,7 @@ I/O counters (expert_hit_rate_decode, expert_misses_decode, hit_fixup_layers,
 io_ms, io_fixup_wake_ms, io_fetch_ms, io_hidden_pct), and the two decode gaps
 that hold the miss window (the miss window from moe_phase1_hit, or from
 moe_spec_routed when the speculative command computes the hits, to
-moe_phase1_miss_fixup_phase2; and the submit gap moe_spec_routed to
-moe_phase1_hit), per token. A tokens-*.json from
+moe_phase1_miss_fixup_phase2), per token. A tokens-*.json from
 decode-stream-client.py adds the streamed answer's wall per token (the mean of
 consecutive arrivals after the first chunk) as a separate line.
 """
@@ -20,7 +19,6 @@ import sys
 GAPS = {
     "window": r"gap (?:moe_phase1_hit|moe_spec_routed)->moe_phase1_miss_fixup_phase2 total_ms=\s*[\d.]+ per_token_ms=([\d.]+) count=(\d+)",
     "adopted": r"gap (?:moe_phase1_hit|moe_spec_routed)->moe_phase1_miss_fixup_phase2_adopted total_ms=\s*[\d.]+ per_token_ms=([\d.]+) count=(\d+)",
-    "submit": r"gap moe_spec_routed->moe_phase1_hit total_ms=\s*[\d.]+ per_token_ms=([\d.]+) count=(\d+)",
 }
 RUNNER = ["expert_hit_rate_decode", "expert_misses_decode", "hit_fixup_layers", "io_ms",
           "io_fixup_wake_ms", "io_fetch_ms", "io_hidden_pct", "cache_plan_ms",
@@ -95,8 +93,7 @@ for block in blocks:
           f"fetch_ms={fmt(runner['io_fetch_ms'])} hidden_pct={fmt(runner['io_hidden_pct'], 1)} "
           f"plan_ms={fmt(runner['cache_plan_ms'])} | "
           f"window_ms/tok={fmt_gap(gaps['window'], completion)} "
-          f"adopted_ms/tok={fmt_gap(gaps['adopted'], completion)} "
-          f"submit_ms/tok={fmt_gap(gaps['submit'], completion)}")
+          f"adopted_ms/tok={fmt_gap(gaps['adopted'], completion)}")
     if runner["path_pin_ms"] is not None:
         print(f"    path: router_wake={fmt(runner['path_router_wake_ms'])} "
               f"wake_fallbacks={fmt(runner['path_router_wake_fallbacks'], 0)} "

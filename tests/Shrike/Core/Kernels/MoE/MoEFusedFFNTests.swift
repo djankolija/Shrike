@@ -53,7 +53,7 @@ import ShrikeValidationSupport
         #expect(actual.allSatisfy { abs($0 - expected) < 0.01 })
     }
 
-    @Test func productionRoutedPipelineAndHitSplitMatchReference() throws {
+    @Test func productionRoutedPipelineSpecHitsAndFixupMissesMatchReference() throws {
         var rng = SeedTree(0x2D3).key("production-routed-moe")
         func matrix(rows: Int, columns: Int) -> [[Float]] {
             (0..<rows).map { _ in
@@ -105,6 +105,12 @@ import ShrikeValidationSupport
                                       length: $0.bytes.count,
                                       options: .storageModeShared)
         }
+        let poolSlotStride = ((blobs.map(\.bytes.count).max()! + 63) / 64) * 64
+        let slotCount = 8
+        let classifierMissSentinel: UInt32 = 0xffffffff
+        let slotOfPosition: [UInt32] = [5, 2, 6, 0] + [UInt32](repeating: classifierMissSentinel, count: 4)
+        let hitPositions = 0..<4
+        let missPositions: [UInt32] = [4, 5, 6, 7]
         guard routedBuffers.count == Self.topK,
               let xBuffer = Fp16Buffer.make(context.device, values: x),
               let residualBuffer = Fp16Buffer.make(context.device, values: residual),
@@ -115,13 +121,17 @@ import ShrikeValidationSupport
                 context.device, count: Self.topK * Self.intermediate),
               let fullOutput = Fp16Buffer.make(context.device, count: Self.dimension),
               let splitOutput = Fp16Buffer.make(context.device, count: Self.dimension),
-              let lowSlots = context.device.makeBuffer(
-                bytes: [UInt32](0...3),
-                length: 4 * MemoryLayout<UInt32>.stride,
+              let pool = context.device.makeBuffer(
+                length: poolSlotStride * slotCount, options: .storageModeShared),
+              let resolvedSlots = context.device.makeBuffer(
+                bytes: slotOfPosition,
+                length: slotOfPosition.count * MemoryLayout<UInt32>.stride,
                 options: .storageModeShared),
-              let highSlots = context.device.makeBuffer(
-                bytes: [UInt32](4...7),
-                length: 4 * MemoryLayout<UInt32>.stride,
+              let indirectArgs = context.device.makeBuffer(
+                length: MoE.specDispatchArgsLength, options: .storageModeShared),
+              let missSlots = context.device.makeBuffer(
+                bytes: missPositions,
+                length: missPositions.count * MemoryLayout<UInt32>.stride,
                 options: .storageModeShared),
               let argumentBuffer = kernel.makeRoutedArgumentBuffer(
                 routedBlobs: routedBuffers,
@@ -129,6 +139,14 @@ import ShrikeValidationSupport
             Issue.record("buffer allocation failed")
             return
         }
+        for position in hitPositions {
+            blobs[position].bytes.withUnsafeBytes { bytes in
+                pool.contents()
+                    .advanced(by: Int(slotOfPosition[position]) * poolSlotStride)
+                    .copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+            }
+        }
+        memset(splitActs.contents(), 0, Self.topK * Self.intermediate * MemoryLayout<Float16>.stride)
 
         let fullCommand = context.queue.makeCommandBuffer()!
         try kernel.encodeRoutedPersistentPhase1U16Load(
@@ -157,23 +175,52 @@ import ShrikeValidationSupport
         fullCommand.waitUntilCompleted()
         #expect(fullCommand.error == nil)
 
-        let splitCommand = context.queue.makeCommandBuffer()!
-        for (slots, activeSlots) in [([UInt32](0...3), lowSlots),
-                                     ([UInt32](4...7), highSlots)] {
-            try kernel.encodeRoutedPersistentPhase1SubsetU16Load(
-                commandBuffer: splitCommand,
-                routedArgBuffer: argumentBuffer,
-                routedBlobs: routedBuffers,
-                routedOffsets: blobs[0].offsets,
-                x: xBuffer,
-                acts: splitActs,
-                activeSlots: activeSlots,
-                activeSlotIndices: slots,
-                activeCount: UInt32(slots.count),
-                d: UInt32(Self.dimension),
-                f: UInt32(Self.intermediate),
-                topK: UInt32(Self.topK))
+        let missLayerGrids: [UInt32] = {
+            let phase1 = MoE.specPhase1FullGrid(f: UInt32(Self.intermediate),
+                                                topK: UInt32(Self.topK))
+            return [UInt32(phase1.width), UInt32(phase1.height), UInt32(phase1.depth),
+                    0, 1, 1,
+                    0, 1, 1]
+        }()
+        missLayerGrids.withUnsafeBytes {
+            indirectArgs.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count)
         }
+        let specCommand = context.queue.makeCommandBuffer()!
+        try kernel.encodeSpecPhase1U16Load(
+            commandBuffer: specCommand,
+            expertPool: pool,
+            poolSlotStride: UInt64(poolSlotStride),
+            resolvedSlots: resolvedSlots,
+            routedOffsets: blobs[0].offsets,
+            x: xBuffer,
+            acts: splitActs,
+            d: UInt32(Self.dimension),
+            f: UInt32(Self.intermediate),
+            topK: UInt32(Self.topK),
+            indirectArguments: indirectArgs)
+        specCommand.commit()
+        specCommand.waitUntilCompleted()
+        #expect(specCommand.error == nil)
+        let fullActValues = Fp16Buffer.read(fullActs, count: Self.topK * Self.intermediate)
+        let specActValues = Fp16Buffer.read(splitActs, count: Self.topK * Self.intermediate)
+        let hitRange = 0..<(hitPositions.count * Self.intermediate)
+        #expect(Array(specActValues[hitRange]) == Array(fullActValues[hitRange]))
+        #expect(specActValues[hitRange.upperBound...].allSatisfy { $0 == 0 })
+
+        let splitCommand = context.queue.makeCommandBuffer()!
+        try kernel.encodeRoutedPersistentPhase1SubsetU16Load(
+            commandBuffer: splitCommand,
+            routedArgBuffer: argumentBuffer,
+            routedBlobs: routedBuffers,
+            routedOffsets: blobs[0].offsets,
+            x: xBuffer,
+            acts: splitActs,
+            activeSlots: missSlots,
+            activeSlotIndices: missPositions,
+            activeCount: UInt32(missPositions.count),
+            d: UInt32(Self.dimension),
+            f: UInt32(Self.intermediate),
+            topK: UInt32(Self.topK))
         try kernel.encodeRoutedPersistentPhase2Reduce(
             commandBuffer: splitCommand,
             routedArgBuffer: argumentBuffer,

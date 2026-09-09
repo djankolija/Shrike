@@ -206,7 +206,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // pair would be overwritten before the comparison reads it.
     private let specDispatchArguments: MoE.SpeculativeDispatchArguments
     private let residencyReadback: ResidencyReadbackBuffers
-    private var moeHitActiveSlots: MTLBuffer { residencyReadback.moeHitActiveSlots } // [topK] UInt32
     private var moeMissActiveSlots: MTLBuffer { residencyReadback.moeMissActiveSlots } // [topK] UInt32
     private var residencyHitCount: MTLBuffer { residencyReadback.hitCount }
     private var residencyHitPositions: MTLBuffer { residencyReadback.hitPositions }
@@ -258,8 +257,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var decodeExpertsScratch: [Int] = []
     private var decodeHitSlotsScratch: [UInt32] = []
     private var decodeMissSlotsScratch: [UInt32] = []
-    private var decodeHitSplitRoutedBufsScratch: [MTLBuffer] = []
-    private var decodeHitSplitRoutedOffsetsScratch: [Int] = []
     private var decodeRoutedBufsScratch: [MTLBuffer] = []
     private var decodeRoutedOffsetsScratch: [Int] = []
 
@@ -825,7 +822,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     private struct ResidencyReadbackBuffers {
-        let moeHitActiveSlots: MTLBuffer
         let moeMissActiveSlots: MTLBuffer
         let hitCount: MTLBuffer
         let hitPositions: MTLBuffer
@@ -845,7 +841,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let topK = cfg.topKExperts
         let u32 = MemoryLayout<UInt32>.size
         return ResidencyReadbackBuffers(
-            moeHitActiveSlots: try buf(topK, u32, label: "decode.moeHitActiveSlots"),
             moeMissActiveSlots: try buf(topK, u32, label: "decode.moeMissActiveSlots"),
             hitCount: try buf(1, u32, label: "decode.residencyHitCount"),
             hitPositions: try buf(topK, u32, label: "decode.residencyHitPositions"),
@@ -1178,11 +1173,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalPrefetchRaceUnknown: UInt64 = 0
     public private(set) var totalRoutedPinNanos: UInt64 = 0
     public private(set) var totalRoutedSubmitNanos: UInt64 = 0
-    public private(set) var totalHitSplitArgBufNanos: UInt64 = 0
-    public private(set) var totalHitSplitEncodeNanos: UInt64 = 0
     public private(set) var totalFixupBuildNanos: UInt64 = 0
-    public private(set) var totalHitCommitToKernelNanos: UInt64 = 0
-    public private(set) var totalHitKernelToGPUNanos: UInt64 = 0
     public private(set) var totalFixupCommitToKernelNanos: UInt64 = 0
     public private(set) var totalRouterWakeNanos: UInt64 = 0
     public private(set) var totalRouterWakeFallbacks: UInt64 = 0
@@ -2942,8 +2933,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// and the S3b layer-done signal wiring.
     private func buildAndCommitMissFixupCommand(
         eventLoad: RoutedExpertLoadOperation?,
-        phase1HitCB: MTLCommandBuffer?,
-        phase1HitSplitArgBuf: MTLBuffer?,
+        missesOnly: Bool,
         phase1MissSlots: [UInt32],
         routedBufs: [MTLBuffer],
         routedOffsets: MoEExpertOffsets,
@@ -2971,14 +2961,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if let token = ioToken {
             routedCB.encodeWaitForEvent(token.event, value: token.value)
         }
-        let splitArgBuf = phase1HitCB != nil && !phase1MissSlots.isEmpty
-            ? phase1HitSplitArgBuf
-            : nil
-        let argBuf = splitArgBuf ?? moe.makeReusedRoutedArgumentBuffer(
+        let argBuf = moe.makeReusedRoutedArgumentBuffer(
             routedBlobs: routedBufs,
             topK: topK,
             routedBufferOffsets: decodeRoutedOffsetsScratch)
-        let missesOnly = phase1HitCB != nil && !phase1MissSlots.isEmpty
         if missesOnly {
             totalHitFixupLayers &+= 1
             writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
@@ -3130,9 +3116,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 var buffers = [("routed layer command buffer", pending.cb)]
                 if let specCB = pending.specCB {
                     buffers.append(("speculative routed command buffer", specCB))
-                }
-                if let phase1HitCB = pending.phase1HitCB {
-                    buffers.append(("routed phase-1 hit command buffer", phase1HitCB))
                 }
                 return buffers
             }
@@ -4893,13 +4876,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// A routed-expert command whose completion is deferred to the next layer.
     private struct PendingRoutedCommand {
         let cb: MTLCommandBuffer
-        let phase1HitCB: MTLCommandBuffer?
         let specCB: MTLCommandBuffer?
         let expertLease: RoutedExpertLease?
         let storageOperation: RoutedExpertLoadOperation?
         let overlapCompletionClock: CommandCompletionClock?
         let expectedOverlapCompletions: Int
-        let hitCommitNanos: UInt64
         let routedCommitNanos: UInt64
         let kernelRole: String
         let encodeAndCommitNanos: UInt64
@@ -4939,9 +4920,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                     deferTimings: Bool = false) throws {
         defer { pending.expertLease?.release() }
         if waitIfNeeded {
-            if let phase1HitCB = pending.phase1HitCB {
-                try waitForCompletion(phase1HitCB)
-            }
             try waitForCompletion(pending.cb)
         } else if let err = pending.cb.error {
             throw ModelError.commandBufferFailed(
@@ -4958,10 +4936,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             totalIoNanos &+= operation.storage.loadNanos
             totalMissIoNanos &+= operation.storage.loadNanos
             ioCompletedNanos = operation.storage.completedNanos
-        }
-        if let phase1HitCB = pending.phase1HitCB, let err = phase1HitCB.error {
-            throw ModelError.commandBufferFailed(
-                detail: "routed phase-1 hit command buffer: \(err)")
         }
         totalCb2Nanos &+= pending.encodeAndCommitNanos
         if deferTimings, !waitIfNeeded {
@@ -4988,16 +4962,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 expected: pending.expectedOverlapCompletions),
                ioCompletedNanos > latest {
                 totalExposedIoNanos &+= ioCompletedNanos - latest
-            }
-        }
-        if let phase1HitCB = pending.phase1HitCB {
-            recordKernelGPU(role: "moe_phase1_hit", phase1HitCB)
-            if pending.hitCommitNanos > 0, phase1HitCB.kernelStartTime > 0 {
-                let kernelStart = UInt64(phase1HitCB.kernelStartTime * 1_000_000_000)
-                let gpuStart = UInt64(max(0, phase1HitCB.gpuStartTime) * 1_000_000_000)
-                totalHitCommitToKernelNanos &+= kernelStart > pending.hitCommitNanos
-                    ? kernelStart - pending.hitCommitNanos : 0
-                totalHitKernelToGPUNanos &+= gpuStart > kernelStart ? gpuStart - kernelStart : 0
             }
         }
         recordKernelGPU(role: pending.kernelRole, pending.cb)
@@ -5208,18 +5172,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         var expertLease: RoutedExpertLease?
         var plannedLoad: RoutedExpertLoadOperation?
         var transferredExpertLease = false
-        var phase1HitCB: MTLCommandBuffer?
-        var phase1HitSplitArgBuf: MTLBuffer?
-        var phase1HitSlots: [UInt32] = []
         var phase1MissSlots: [UInt32] = []
-        var hitCommitNanos: UInt64 = 0
         var missCount = 0
         var fixupMissCount = 0
         var expectedOverlapCompletions = 0
         var eventLoad: RoutedExpertLoadOperation?
         var routedBufs: [MTLBuffer] = []
         var tCb2Start: UInt64 = 0
-        var hitSplitFixup = false
+        var missesOnlyFixup = false
     }
 
     /// Routed-expert stage of one decode layer: top-k readback, expert fetch,
@@ -5253,19 +5213,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         try planDecodeRoutedExperts(&context)
         try pinAndSubmitDecodeRoutedExperts(&context)
         defer {
-            if !context.transferredExpertLease {
-                // A thrown fetch/encode must not make a hit slot evictable
-                // while its already-committed phase-1 command is still reading.
-                if let phase1HitCB = context.phase1HitCB, let expertLease = context.expertLease {
-                    try? waitForCompletion(phase1HitCB)
-                    expertLease.release()
-                } else {
-                    context.expertLease?.release()
-                }
+            // On a throw before a hand-off the committed layer command may still
+            // be reading the leased hit slots; they must not become evictable first.
+            if !context.transferredExpertLease, let lease = context.expertLease {
+                try? waitForCompletion(context.specCB)
+                lease.release()
             }
         }
         try partitionDecodeRoutedExperts(&context)
-        try encodeDecodeHitSplit(&context)
         try await acquireDecodeRoutedIO(&context)
         if try handOffDecodeSpeculativeAllHit(&context, pending: &pendingRoutedCommand) {
             return
@@ -5379,8 +5334,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     private func partitionDecodeRoutedExperts(_ context: inout DecodeRoutedLayerContext) throws {
-        decodeHitSplitRoutedBufsScratch.removeAll(keepingCapacity: true)
-        decodeHitSplitRoutedOffsetsScratch.removeAll(keepingCapacity: true)
         decodeHitSlotsScratch.removeAll(keepingCapacity: true)
         decodeMissSlotsScratch.removeAll(keepingCapacity: true)
 
@@ -5408,79 +5361,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         // Capture the populated arrays. Capturing them before `populate` made
         // empty value-semantic snapshots and silently disabled hit/fixup.
-        context.phase1HitSlots = decodeHitSlotsScratch
         context.phase1MissSlots = decodeMissSlotsScratch
-    }
-
-    private func encodeDecodeHitSplit(_ context: inout DecodeRoutedLayerContext) throws {
-        func encodeRoutedPhase1Subset(
-            _ cb: MTLCommandBuffer,
-            argBuf: MTLBuffer,
-            routedBufs: [MTLBuffer],
-            activeSlots: MTLBuffer,
-            activeSlotIndices: [UInt32],
-            activeCount: UInt32,
-            ioStatus: MTLBuffer? = nil,
-            ioStatusOffset: Int = 0
-        ) throws {
-            try moe.encodeRoutedPersistentPhase1SubsetU16Load(
-                commandBuffer: cb,
-                routedArgBuffer: argBuf,
-                routedBlobs: routedBufs,
-                routedOffsets: context.routedOffsets,
-                x: routedX,
-                acts: moeActs,
-                activeSlots: activeSlots,
-                activeSlotIndices: activeSlotIndices,
-                activeCount: activeCount,
-                d: context.d,
-                f: context.f,
-                topK: context.topK,
-                ioStatus: ioStatus,
-                ioStatusOffset: ioStatusOffset)
-        }
-
-        let fixupHasMisses = !context.phase1MissSlots.isEmpty
-            || context.plannedFetch.map { !$0.misses.isEmpty } == true
-        var argBufStartedForEncode: UInt64 = 0
-        if let plan = context.plannedFetch,
-           plan.hits > 0,
-           !context.phase1HitSlots.isEmpty,
-           fixupHasMisses {
-            let argBufStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let plannedBlobs = try model.routedExpertBuffers(for: plan)
-            for blob in plannedBlobs {
-                decodeHitSplitRoutedBufsScratch.append(blob.buffer)
-                decodeHitSplitRoutedOffsetsScratch.append(Int(blob.offset))
-            }
-            context.phase1HitSplitArgBuf = moe.makeRoutedArgumentBuffer(
-                routedBlobs: decodeHitSplitRoutedBufsScratch,
-                topK: context.topK,
-                routedBufferOffsets: decodeHitSplitRoutedOffsetsScratch)
-            argBufStartedForEncode = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            totalHitSplitArgBufNanos &+= argBufStartedForEncode - argBufStarted
-            if let argBuf = context.phase1HitSplitArgBuf, plan.hits > 0, fixupHasMisses {
-                writeActiveSlots(context.phase1HitSlots, into: moeHitActiveSlots)
-                guard let cb = ctx.queue.makeCommandBuffer() else {
-                    throw ModelError.residentBufferWrapFailed
-                }
-                try encodeRoutedPhase1Subset(
-                    cb,
-                    argBuf: argBuf,
-                    routedBufs: decodeHitSplitRoutedBufsScratch,
-                    activeSlots: moeHitActiveSlots,
-                    activeSlotIndices: context.phase1HitSlots,
-                    activeCount: UInt32(context.phase1HitSlots.count))
-                context.phase1HitCB = cb
-            }
-        }
-
-        if let cb = context.phase1HitCB {
-            context.overlapCompletionClock?.track(cb)
-            context.hitCommitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            cb.commit()
-            totalHitSplitEncodeNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - argBufStartedForEncode
-        }
     }
 
     private func acquireDecodeRoutedIO(_ context: inout DecodeRoutedLayerContext) async throws {
@@ -5488,7 +5369,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         context.fixupMissCount = context.plannedFetch == nil
             ? context.experts.count : max(context.missCount, context.phase1MissSlots.count)
         let completionClock = context.missCount > 0 ? context.overlapCompletionClock : nil
-        context.expectedOverlapCompletions = context.phase1HitCB == nil ? 1 : 2
+        context.expectedOverlapCompletions = 1
 
         // Routed-expert pread — overlaps the shared MLP GPU work above.
         let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
@@ -5554,13 +5435,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             pendingRoutedCommand = PendingRoutedCommand(
                 cb: context.specCB,
-                phase1HitCB: nil,
                 specCB: nil,
                 expertLease: context.expertLease,
                 storageOperation: context.eventLoad,
                 overlapCompletionClock: context.eventLoad == nil ? nil : context.overlapCompletionClock,
                 expectedOverlapCompletions: context.expectedOverlapCompletions,
-                hitCommitNanos: 0,
                 routedCommitNanos: 0,
                 kernelRole: "moe_spec_routed",
                 encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - context.tCb2Start)
@@ -5575,7 +5454,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         _ context: inout DecodeRoutedLayerContext,
         pending pendingRoutedCommand: PendingRoutedCommand?
     ) throws -> (routedCB: MTLCommandBuffer, routedCommitNanos: UInt64) {
-        context.hitSplitFixup = context.phase1HitCB != nil && !context.phase1MissSlots.isEmpty
+        // The speculative command already computed the classifier's hits, so the fixup covers the misses alone.
+        context.missesOnlyFixup = context.hostReadback != nil && !context.phase1MissSlots.isEmpty
         guard pendingRoutedCommand == nil else {
             // The pipeline drains the previous layer's routed CB before
             // queuing the next, so this is a logic error, not a user
@@ -5586,8 +5466,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let fixupBuildStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let (routedCB, routedCommitNanos) = try buildAndCommitMissFixupCommand(
             eventLoad: context.eventLoad,
-            phase1HitCB: context.phase1HitCB,
-            phase1HitSplitArgBuf: context.phase1HitSplitArgBuf,
+            missesOnly: context.missesOnlyFixup,
             phase1MissSlots: context.phase1MissSlots,
             routedBufs: context.routedBufs,
             routedOffsets: context.routedOffsets,
@@ -5603,15 +5482,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     ) {
         pendingRoutedCommand = PendingRoutedCommand(
             cb: routedCB,
-            phase1HitCB: context.phase1HitCB,
             specCB: context.specCB,
             expertLease: context.expertLease,
             storageOperation: context.eventLoad,
             overlapCompletionClock: context.eventLoad == nil ? nil : context.overlapCompletionClock,
             expectedOverlapCompletions: context.expectedOverlapCompletions,
-            hitCommitNanos: context.hitCommitNanos,
             routedCommitNanos: routedCommitNanos,
-            kernelRole: !context.hitSplitFixup
+            kernelRole: !context.missesOnlyFixup
                 ? "moe_phase1_2_routed"
                 : context.missCount == 0
                     ? "moe_phase1_miss_fixup_phase2_adopted"
