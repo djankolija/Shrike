@@ -10,6 +10,19 @@ public protocol LogitProducer: AnyObject, Sendable {
     func produce(token: Int32, position: Int, into logits: MTLBuffer) async throws
 }
 
+/// A decode boundary without a host round trip: the pass ends with the head, the
+/// caller's sampler and the next embed in one command, and the caller waits for
+/// the sampled id's word instead of the command.
+public protocol BoundaryLogitProducer: LogitProducer {
+    /// Runs the pass for `position`; a nil `token` continues a pass whose embed
+    /// the previous boundary encoded from `tokenWord`.
+    func produce(token: Int32?, position: Int, into logits: MTLBuffer,
+                 tokenWord: MTLBuffer,
+                 sample: @escaping (MTLCommandBuffer) throws -> Void) async throws
+    /// The id the last boundary's sampler wrote, once the host can see it.
+    func awaitBoundaryToken() throws -> Int32
+}
+
 public protocol ContinuableLogitProducer: LogitProducer {
     var continuationPosition: Int { get }
     func prepareForContinuation(expectedPosition: Int) throws

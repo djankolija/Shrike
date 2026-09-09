@@ -673,7 +673,14 @@ serial only if nothing else the token waits for is in flight beneath it.
   sampler writes the token id to a buffer the next pass's embed reads, the host
   encodes the next pass before the sample finishes and reads the token back
   asynchronously for streaming. The stop check runs one pass late (one wasted pass
-  per answer). Worth about 1.5 % per token.
+  per answer). Worth about 1.5 % per token. **Landed as v18 Task 4 (2026-09-09),
+  with one change to the idea:** the stop check runs on the token's word (about 63
+  µs after the sample kernel) and layer 0 is committed only when there is none, so
+  nothing runs a pass late and no state needs undoing (a pass mutates the GDN state
+  in place). The three gaps became one of 0.25 to 0.27 ms; +1.4 % on the same-box
+  A/B, about 0.8 ms per token; golden identical on both boxes; the record in the
+  design document's Task 4 section. What remains of the boundary, the one gap and
+  the sampler's encode at the head's front, is the fold's.
 
 ### F. The LM head (4.6 ms, 7.5 %)
 

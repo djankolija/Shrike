@@ -125,16 +125,48 @@ into T5.1.
 
 ## Task 4: the sampler feeds the next embed (E2)
 
-- [ ] **T4.1 Read**: the produce loop (`RawCompletion.swift`), the sampler's output
-      buffer, the embed's input, the stop paths, the prompt cache's append.
-- [ ] **T4.2 Build**: the embed reads the sampler's buffer; the next pass encoded
-      before the sample completes; the token read back asynchronously; the stop check
-      one pass late with the extra pass cancelled; a client seed still reproducing.
-- [ ] **T4.3 Tests**: stop strings, end of turn, max tokens, the seeded reproduction,
-      the stream's token order.
-- [ ] **T4.4 Gates and golden.**
-- [ ] **T4.5 Deploy and arms**: the three boundary rows and `loop_sample_ms`, against
-      Task 1's arms (Task 4 runs before Task 3 after T2.0).
+- [x] **T4.1 Read**: DONE 2026-09-09; the boundary is three synchronous command
+      buffers (the head, the sample, the embed) with the token crossing by a
+      `waitUntilCompleted` and a shared-memory load and entering the embed as a
+      `setBytes` constant; the stop token is never embedded; the seed is a host
+      constant known ahead; the penalty is host-side in place. The design changes:
+      the stop check runs on the token's word (about 63 µs after the sample) and
+      layer 0 is committed only when there is no stop, instead of one pass late with
+      an extra pass to cancel (a pass mutates the GDN state in place, so cancelling
+      it would need a state undo). The statement list S1 to S7 and the rows in the
+      design doc's Task 4 section. **Davor's go on T4.2 pending.**
+- [x] **T4.2 Build**: DONE 2026-09-09 (the stop check on the word, not one pass
+      late; see T4.1); `BoundaryLogitProducer` with the two-step `produce` and
+      `awaitBoundaryToken`; the runner's `emitBoundary` (the final norm, the lm_head
+      GEMV, the caller's sampler and the word-fed embed in one command, the sentinel
+      in the word before the commit), `holdLayerZero` after the cursor advances, the
+      spin with the one-second fallback (`boundary_wake_fallbacks` on the runner
+      line), the previous boundary waited on and recorded as `head_logits` at the
+      end of the next pass; the two embed encoders' `tokenBuffer:` overloads (no
+      Metal change); the loop's path chosen once per generation with the fallbacks
+      (a penalty other than 1.0, the fused greedy head, the first token after
+      prefill sampled as before).
+- [x] **T4.3 Tests**: DONE 2026-09-09; six in `RawCompletionLoopTests+Boundary.swift`
+      on a scripted boundary producer running the real sampler (the same tokens,
+      deltas, reason, cursor and history as the synchronous path; every pass after
+      the first continued; the stop token without another pass; max tokens; a stop
+      string; the penalty fallback), three of them red with the path switched off
+      and three invariants of both paths; two encoder tests (the buffer-fed lookup
+      bit-identical to the constant-fed one, both kernels), red before the
+      overloads existed.
+- [x] **T4.4 Gates and golden**: DONE 2026-09-09; the four gates (the release build
+      zero warnings, lint zero in 212 files, links clean, 1,242 tests in 170 suites in
+      203 s); the local golden identical on both profiles.
+- [x] **T4.5 Deploy and arms**: DONE 2026-09-09; deployed (6142e12205c5d3eb), the
+      mini's golden identical on both profiles; two lifetimes per shape against Task
+      1's arms: the three boundary gaps (0.83 to 0.90 ms per token) to one of 0.25 to
+      0.27, the sample and embed roles folded into `head_logits` (+0.17 to 0.19),
+      `loop_sample_ms` now the word's wait through the head, no wake fallbacks, the
+      misses per token identical, the card's answer identical; the 300 +0.9 %, the
+      card and the 1k mixed by a slow-drive box state (`prefetch_late` above zero),
+      resolved by a same-box interleaved A/B on the 1k, four lifetimes each: Task 4
+      wins every pair, +1.4 % on the clean lifetimes, about 0.8 ms per token; the
+      task record in the design doc.
 
 ## Task 5: the fold (K)
 

@@ -449,6 +449,7 @@ private struct RunnerCounterSnapshot {
     let pathFixupCommitToKernel: UInt64
     let pathRouterWake: UInt64
     let pathRouterWakeFallbacks: UInt64
+    let boundaryWakeFallbacks: UInt64
     let ioQueue: UInt64
     let ioHostWaitsAvoided: UInt64
     let expertStreaming: ExpertStreamingStatistics
@@ -498,6 +499,7 @@ private struct RunnerCounterSnapshot {
         pathFixupCommitToKernel = runner.totalFixupCommitToKernelNanos
         pathRouterWake = runner.totalRouterWakeNanos
         pathRouterWakeFallbacks = runner.totalRouterWakeFallbacks
+        boundaryWakeFallbacks = runner.totalBoundaryWakeFallbacks
         ioQueue = runner.totalIOQueueNanos
         ioHostWaitsAvoided = runner.totalExpertIOHostWaitsAvoided
         expertStreaming = runner.expertStreamingStatistics()
@@ -2030,7 +2032,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "router_readback_ms=%.4f cache_plan_ms=%.4f %@ "
                 + "path_pin_ms=%.4f path_submit_ms=%.4f path_fixup_build_ms=%.4f "
                 + "path_fixup_commit_to_kernel_ms=%.4f path_router_wake_ms=%.4f "
-                + "path_router_wake_fallbacks=%llu "
+                + "path_router_wake_fallbacks=%llu boundary_wake_fallbacks=%llu "
                 + "io_queue_ms=%.4f "
                 + "io_load_ms=%.4f io_fetch_ms=%.4f io_fixup_wake_ms=%.4f "
                 + "io_host_waits_avoided=%llu "
@@ -2063,6 +2065,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             ms(runner.totalFixupCommitToKernelNanos, snapshot.pathFixupCommitToKernel),
             ms(runner.totalRouterWakeNanos, snapshot.pathRouterWake),
             runner.totalRouterWakeFallbacks - snapshot.pathRouterWakeFallbacks,
+            runner.totalBoundaryWakeFallbacks - snapshot.boundaryWakeFallbacks,
             ms(runner.totalIOQueueNanos, snapshot.ioQueue),
             Double(expert.totalLoadNanos) / Double(tokens) / 1_000_000,
             Double(expert.fetchNanos) / Double(tokens) / 1_000_000,

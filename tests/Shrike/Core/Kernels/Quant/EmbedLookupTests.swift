@@ -108,4 +108,50 @@ import ShrikeValidationSupport
         let rel = RelError.compute(actual: actual, reference: ref)
         #expect(rel < Tolerance.quantInt4, "rel=\(rel)")
     }
+
+    @Test func bufferFedTokenMatchesConstantFedToken() throws {
+        let (packed, scales, biases) = Self.buildTable4(seed: 0x133)
+        let ctx = try MetalContext()
+        let kernel = try EmbedLookupInt4(context: ctx)
+
+        guard let tableBuf = ctx.device.makeBuffer(
+                bytes: packed, length: packed.count,
+                options: .storageModeShared),
+              let scalesBuf = ctx.device.makeBuffer(
+                bytes: scales, length: scales.count * MemoryLayout<UInt16>.size,
+                options: .storageModeShared),
+              let biasesBuf = ctx.device.makeBuffer(
+                bytes: biases, length: biases.count * MemoryLayout<UInt16>.size,
+                options: .storageModeShared),
+              let bufferFedOut = Fp16Buffer.make(ctx.device, count: Sizes.D),
+              let constantFedOut = Fp16Buffer.make(ctx.device, count: Sizes.D) else {
+            Issue.record("alloc failed"); return
+        }
+        let token: UInt32 = 5
+        var tokenVar = token
+        guard let tokenBuf = ctx.device.makeBuffer(
+                bytes: &tokenVar, length: MemoryLayout<UInt32>.size,
+                options: .storageModeShared) else {
+            Issue.record("alloc failed"); return
+        }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        try kernel.encode(commandBuffer: cb,
+                      table: tableBuf, scales: scalesBuf, biases: biasesBuf,
+                      out: bufferFedOut,
+                      tokenBuffer: tokenBuf, d: UInt32(Sizes.D),
+                      outScale: 1.0,
+                      vocab: UInt32(Sizes.V))
+        try kernel.encode(commandBuffer: cb,
+                      table: tableBuf, scales: scalesBuf, biases: biasesBuf,
+                      out: constantFedOut,
+                      tokenId: token, d: UInt32(Sizes.D),
+                      outScale: 1.0,
+                      vocab: UInt32(Sizes.V))
+        cb.commit(); cb.waitUntilCompleted()
+
+        let bufferFedBits = Fp16Buffer.readHalf(bufferFedOut, count: Sizes.D).map(\.bitPattern)
+        let constantFedBits = Fp16Buffer.readHalf(constantFedOut, count: Sizes.D).map(\.bitPattern)
+        #expect(bufferFedBits == constantFedBits)
+    }
 }

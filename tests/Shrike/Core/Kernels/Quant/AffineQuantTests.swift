@@ -77,4 +77,37 @@ import ShrikeValidationSupport
         let actual = Fp16Buffer.read(y, count: columns)
         #expect(actual == values[1].map { Float($0) })
     }
+
+    @Test(arguments: [4, 8])
+    func bufferFedTokenMatchesConstantFedToken(bits: Int) throws {
+        let rows = 3, columns = 128
+        let (packed, _) = Self.packed(bits: bits, rows: rows, columns: columns)
+        let one = UInt16(truncatingIfNeeded: Float(1).bitPattern >> 16)
+        let scales = [UInt16](repeating: one, count: rows * columns / 64)
+        let biases = [UInt16](repeating: 0, count: scales.count)
+        let ctx = try MetalContext()
+        let kernel = try AffineQuantEmbeddingLookup(context: ctx, weightBits: bits)
+        let w = ctx.device.makeBuffer(bytes: packed, length: packed.count)!
+        let s = ctx.device.makeBuffer(bytes: scales, length: scales.count * 2)!
+        let b = ctx.device.makeBuffer(bytes: biases, length: biases.count * 2)!
+        let bufferFedOut = Fp16Buffer.make(ctx.device, count: columns)!
+        let constantFedOut = Fp16Buffer.make(ctx.device, count: columns)!
+        let token: UInt32 = 1
+        var tokenVar = token
+        let tokenBuf = ctx.device.makeBuffer(
+            bytes: &tokenVar, length: MemoryLayout<UInt32>.size,
+            options: .storageModeShared)!
+        let cb = ctx.queue.makeCommandBuffer()!
+        try kernel.encode(commandBuffer: cb, table: w, scales: s, biases: b,
+                      out: bufferFedOut, tokenBuffer: tokenBuf, d: UInt32(columns),
+                      outScale: 1, vocab: UInt32(rows))
+        try kernel.encode(commandBuffer: cb, table: w, scales: s, biases: b,
+                      out: constantFedOut, tokenId: token, d: UInt32(columns),
+                      outScale: 1, vocab: UInt32(rows))
+        cb.commit(); cb.waitUntilCompleted()
+        #expect(cb.status == .completed)
+        let bufferFedBits = Fp16Buffer.readHalf(bufferFedOut, count: columns).map(\.bitPattern)
+        let constantFedBits = Fp16Buffer.readHalf(constantFedOut, count: columns).map(\.bitPattern)
+        #expect(bufferFedBits == constantFedBits)
+    }
 }

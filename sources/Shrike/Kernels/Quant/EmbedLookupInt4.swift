@@ -9,6 +9,11 @@ import Metal
 /// `outScale` parameter fuses the optional `sqrt(hidden_size)` post-embedding
 /// scale so the per-token dequant + scale is one pass.
 final class EmbedLookupInt4 {
+    private enum TokenSource {
+        case constant(UInt32)
+        case buffer(MTLBuffer, Int)
+    }
+
     private let pso: MTLComputePipelineState
 
     init(context: MetalContext) throws {
@@ -28,6 +33,42 @@ final class EmbedLookupInt4 {
                        d: UInt32,
                        outScale: Float,
                        vocab: UInt32) throws {
+        try encodeTokenLookup(commandBuffer: commandBuffer,
+                               table: table, tableOffset: tableOffset,
+                               scales: scales, scalesOffset: scalesOffset,
+                               biases: biases, biasesOffset: biasesOffset,
+                               out: out, outOffset: outOffset,
+                               tokenSource: .constant(tokenId),
+                               d: d, outScale: outScale, vocab: vocab)
+    }
+
+    func encode(commandBuffer: MTLCommandBuffer,
+                       table:  MTLBuffer, tableOffset:  Int = 0,
+                       scales: MTLBuffer, scalesOffset: Int = 0,
+                       biases: MTLBuffer, biasesOffset: Int = 0,
+                       out:    MTLBuffer, outOffset: Int = 0,
+                       tokenBuffer: MTLBuffer, tokenOffset: Int = 0,
+                       d: UInt32,
+                       outScale: Float,
+                       vocab: UInt32) throws {
+        try encodeTokenLookup(commandBuffer: commandBuffer,
+                               table: table, tableOffset: tableOffset,
+                               scales: scales, scalesOffset: scalesOffset,
+                               biases: biases, biasesOffset: biasesOffset,
+                               out: out, outOffset: outOffset,
+                               tokenSource: .buffer(tokenBuffer, tokenOffset),
+                               d: d, outScale: outScale, vocab: vocab)
+    }
+
+    private func encodeTokenLookup(commandBuffer: MTLCommandBuffer,
+                                    table:  MTLBuffer, tableOffset:  Int,
+                                    scales: MTLBuffer, scalesOffset: Int,
+                                    biases: MTLBuffer, biasesOffset: Int,
+                                    out:    MTLBuffer, outOffset: Int,
+                                    tokenSource: TokenSource,
+                                    d: UInt32,
+                                    outScale: Float,
+                                    vocab: UInt32) throws {
         precondition(d % UInt32(Quantization.groupSize) == 0,
                      "D must be a multiple of \(Quantization.groupSize)")
         guard let enc = commandBuffer.makeComputeCommandEncoder() else {
@@ -38,11 +79,16 @@ final class EmbedLookupInt4 {
         enc.setBuffer(scales, offset: scalesOffset, index: 1)
         enc.setBuffer(biases, offset: biasesOffset, index: 2)
         enc.setBuffer(out,    offset: outOffset,    index: 3)
-        var tokenVar = tokenId
+        switch tokenSource {
+        case .constant(let tokenId):
+            var tokenVar = tokenId
+            enc.setBytes(&tokenVar, length: MemoryLayout<UInt32>.size, index: 4)
+        case .buffer(let tokenBuffer, let tokenOffset):
+            enc.setBuffer(tokenBuffer, offset: tokenOffset, index: 4)
+        }
         var dVar     = d
         var sVar     = outScale
         var vocabVar = vocab
-        enc.setBytes(&tokenVar, length: MemoryLayout<UInt32>.size, index: 4)
         enc.setBytes(&dVar,     length: MemoryLayout<UInt32>.size, index: 5)
         enc.setBytes(&sVar,     length: MemoryLayout<Float>.size,  index: 6)
         enc.setBytes(&vocabVar, length: MemoryLayout<UInt32>.size, index: 7)

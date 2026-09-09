@@ -272,6 +272,9 @@ private func runDecodeLoop(producer: any LogitProducer,
     var generated = 0
     var reason: StopReason = .maxTokens
     var uncommittedBoundaryTokenIDs: [Int32] = []
+    let boundaryProducer = producer as? any BoundaryLogitProducer
+    let useBoundary = boundaryProducer != nil && !fusedGreedy && config.repetitionPenalty == 1.0
+    var boundaryPending = false
 
     while true {
         try Task.checkCancellation()
@@ -289,6 +292,8 @@ private func runDecodeLoop(producer: any LogitProducer,
             }
         } else if fusedGreedy {
             tokenID = Int32(bitPattern: fusedRunner!.lastGreedyToken)
+        } else if boundaryPending, let boundaryProducer {
+            tokenID = try boundaryProducer.awaitBoundaryToken()
         } else {
             tokenID = try sampleOnce(scratch: scratch, context: context,
                                  history: history, config: config, position: generated,
@@ -334,7 +339,20 @@ private func runDecodeLoop(producer: any LogitProducer,
 
         history.append(tokenID)
         let tProduceStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        try await producer.produce(token: tokenID, position: position, into: scratch.logits)
+        if useBoundary, let boundaryProducer {
+            let samplePosition = generated
+            try await boundaryProducer.produce(token: boundaryPending ? nil : tokenID,
+                                               position: position, into: scratch.logits,
+                                               tokenWord: scratch.outToken) { cb in
+                try scratch.sampler.sample(commandBuffer: cb, logits: scratch.logits,
+                                           probs: scratch.probs, history: [],
+                                           config: config, position: samplePosition,
+                                           outToken: scratch.outToken)
+            }
+            boundaryPending = true
+        } else {
+            try await producer.produce(token: tokenID, position: position, into: scratch.logits)
+        }
         fusedRunner?.recordDecodeLoopPhases(
             sample: tSampled - tLoopStart,
             detok: tDetok - tSampled,

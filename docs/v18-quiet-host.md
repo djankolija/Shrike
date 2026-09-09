@@ -331,6 +331,155 @@ seed derivation per position); the prompt cache and the route trace still see ev
 token in order; a client-supplied seed still reproduces. The fused greedy head, if
 the server ever uses it (I1), writes the same buffer.
 
+**T4.1 (2026-09-09), the read.** The boundary today is three command buffers, each
+committed and waited on synchronously on the one queue: the head (`emitHead`'s
+`runSync`), the sample (its own command buffer in `sampleOnce`, `commit` then
+`waitUntilCompleted`, the token id loaded from the shared 4-byte `outToken`), the
+embed (`produceToken`'s `runSync`, the token id a `setBytes` constant to the lookup
+kernel), then layer 0's commands. Nothing is encoded ahead of the sample. The three
+gaps are, each, a completion mark (about 160 µs, the driver's), the host's work
+between (the sampler's seven encoders, or the stop checks, detokenisation and the
+stream's callback at 33 µs, or layer 0's encode) and a commit-to-kernel (25). The
+seed is `seedFor(config, position: generated)`, host-computed, a kernel constant,
+known before the head runs; the repetition penalty is host-side and in place on the
+logits between the head and the sample (the server's default is 1.0, no penalty).
+The stop token is never embedded, appended or streamed; it returns as
+`uncommittedBoundaryTokenIDs`. Layer 0 is a routed GDN layer on the served model
+(the gap row is `embed->attn_layer_linear`), so its commands can be held encoded
+like any other layer's.
+
+**What the read changes in the design.** The stop check does not need to run a pass
+late. A pass mutates the GDN layers' recurrent state in place and writes the KV row,
+so cancelling an extra pass would mean restoring state (a copy or a ping-pong per
+touched layer) and rewinding the cursor, a cost the design above did not carry. It
+is unnecessary: the token's word lands about 63 µs after the sample kernel ends,
+long before layer 0 would start, so the host checks the stop on the word and commits
+layer 0 only when there is none. The price is gap 3 at about 130 µs (the word's
+wake, the host's checks, the commit) instead of an encoder boundary; the return is
+no wasted token, no state to undo, the prompt cache's and the KV's view of the
+answer unchanged.
+
+**The statement list (T4.2).**
+
+- S1. `outToken` becomes the token's word: the host writes a sentinel
+  (`0xFFFFFFFF`, above any vocabulary) before the sample is committed, the sample
+  kernel writes the id, the host spins on it with the router wake's 1 s fallback to
+  `waitUntilCompleted`.
+- S2. The sampler's encode is handed to the runner: `produce` takes an optional
+  sample closure that the runner encodes into the head's command behind the lm_head
+  GEMV; the head and the sample are one command buffer and the runner returns after
+  the commit, without the head's wait.
+- S3. The embed reads the token from `outToken`: a device-pointer variant of the two
+  lookup kernels' Swift encoders (`EmbedLookupInt4`, `AffineQuantEmbeddingLookup`),
+  the same lookup on the same table; encoded behind the sample in the same command
+  buffer, no wait.
+- S4. Layer 0's commands are held encoded during the head (`encodeLayerCommands`
+  into the `heldNext` slot for `position + 1`, after `kv.advance()` and the
+  reserve), so that on the word only their commit is left.
+- S5. The loop's order on the word: spin; the stop-token check; detokenise and the
+  stop-string matcher; max tokens; the progress callback and the caller's stop; then
+  the held commit and the pass from layer 1 as today; then `history.append`, the
+  counters, the position. On a stop nothing is committed.
+- S6. `LogitProducer` grows the two-step shape with a default that keeps the
+  synchronous path for the scripted test producer, the CLI and the app.
+- S7. Fallbacks to today's path, no new knob: a repetition penalty other than 1.0,
+  the first token after prefill (`prefillSeed == .logitsWritten`), the fused greedy
+  head.
+- Counters: `loop_sample_ms` becomes the word's wait and the runner line says so; the
+  `sample` and `embed` kernel roles fold into `head_logits`, which grows by their
+  time (about 0.17 ms).
+
+**Rows pre-registered** (Task 1's arms, ms per token, the three shapes' two
+lifetimes): `head_logits->sample` 0.31 to 0.38 and `sample->embed` 0.28 to an
+encoder boundary each (about 0.01); `embed->attn_layer_linear` 0.23 to 0.25 to about
+0.13; `loop_sample_ms` 0.44 to 0.47 to the word's wait; the wall by about 0.65 ms per
+token, 1.1 % on the 300 (61.2 to about 60.5 ms), likely inside the lifetime drift on
+the wall and unambiguous on the rows. Misses per token unchanged.
+
+**T4.2 and T4.3 (2026-09-09), the build and the tests.** The boundary lives in
+three places. `BoundaryLogitProducer` (`LogitProducer.swift`) adds the two-step
+shape to the producer: a `produce` taking an optional token, the token word and the
+sampler's encode closure, and `awaitBoundaryToken`. The runner conforms:
+`produceToken` takes the held layer 0 on a continued pass instead of encoding an
+embed, and ends with `emitBoundary`, one command carrying the final norm, the
+lm_head GEMV, the caller's sampler and the word-fed embed, the sentinel written
+into the word before the commit; then the cursor advances and `holdLayerZero`
+encodes layer 0 for the next position into the held slot. `awaitBoundaryToken`
+spins on the word with the router wake's one-second fallback, counted as
+`boundary_wake_fallbacks` on the runner line. The previous boundary's command is
+waited on and recorded as `head_logits` at the end of the next pass, when it has
+long completed. The two embed encoders gained a `tokenBuffer:` overload binding the
+word at the kernel's constant argument, no Metal change. The loop chooses the path
+once per generation (a boundary producer, not the fused greedy head, the repetition
+penalty at 1.0), samples the first token after prefill as before, and from then on
+awaits the word, checks the stop token, detokenises, runs the stop-string matcher,
+the max-tokens check and the progress callback, and only then calls the continued
+produce with the sampler's encode at the next token's index. Tests: six in
+`RawCompletionLoopTests+Boundary.swift` on a scripted boundary producer that runs
+the real sampler on a command buffer (the same tokens, deltas, reason, cursor and
+history as the synchronous path; every pass after the first continued; the stop
+token without another pass; max tokens; a stop string; the penalty fallback), three
+of which fail with the path switched off and three of which are invariants of both
+paths; two in the encoder tests (the buffer-fed lookup bit-identical to the
+constant-fed one, both kernels). The four gates: the release build with zero
+warnings, lint zero in 212 files, links clean, 1,242 tests in 170 suites in 203 s.
+The local golden identical on both profiles (T4.4).
+
+**T4.5 (2026-09-09), the deploy and the arms.** Deployed to the mini (binary
+6142e12205c5d3eb with its six bundles), the mini's golden identical on both
+profiles with the server stopped, then the arms rig: two production lifetimes per
+shape against Task 1's arms, the turn rig's pair 300, production restored. The
+card's answer matched the archived turn on both lifetimes; misses per token
+identical (20.0 / 20.0 / 18.8); `boundary_wake_fallbacks` zero everywhere. The
+rows, the 300, lifetimes 1 / 2, ms per token:
+
+| row | Task 1 | Task 4 |
+| --- | ---: | ---: |
+| `head_logits->sample` | 0.324 / 0.312 | gone |
+| `sample->embed` | 0.277 / 0.279 | gone |
+| `embed->attn_layer_linear` | 0.230 / 0.238 | gone |
+| `head_logits->attn_layer_linear` | none | 0.259 / 0.253 |
+| the `sample` and `embed` roles | 0.166 | 0.001 (the first token after prefill) |
+| `head_logits` | 4.620 / 4.607 | 4.805 / 4.777 |
+| `loop_sample_ms` | 0.445 / 0.436 | 4.987 / 4.959 (the word's wait through the head) |
+| decode tok/s | 16.35 / 16.40 | 16.50 / 16.54 |
+
+The same on the card and the 1k: the three gaps to one of 0.25 to 0.27, the head
+up by the sample and the embed. The wall against the morning's Task 1 arms: the 300
++0.9 %, the card 15.53 / 15.24 to 15.44 / 15.38, the 1k 16.23 / 16.18 to 16.05 /
+16.04, then 16.38 / 15.97 on two more lifetimes; the pair 300 at 3.17 s warm and
+7.89 cold (Task 1's 3.26 and 7.89).
+
+**The 1k's reading, and a noise source named.** The 1k's slow lifetimes carried
+reads up 0.6 to 0.85 ms per token, the miss window up 0.8 to 1.1 and `prefetch_late`
+at 67 to 92 where every Task 1 lifetime had zero, while its lifetime 3 showed the
+boundary's gain cleanly. A same-box interleaved A/B on the 1k settled it: Task 1's
+code rebuilt (8188af4a1ebbb14b) against Task 4's, two lifetimes each, twice:
+
+| arm | tok/s | `prefetch_late` | the boundary's gaps ms/token |
+| --- | --- | --- | --- |
+| Task 1 | 16.09 / 16.15 / 16.05 / 15.72 | 0 / 0 / 0 / 74 | 0.86 / 0.85 / 0.90 / 0.85 |
+| Task 4 | 16.20 / 16.33 / 16.28 / 16.34 | 41 / 0 / 0 / 0 | 0.24 / 0.26 / 0.27 / 0.27 |
+
+Task 4 wins every pair; on the clean lifetimes 16.10 to 16.32 tok/s, +1.4 %, about
+0.8 ms per token against the 0.65 modelled. The slow state hit Task 1's own fourth
+lifetime, so it is the box's, not the change's: a lifetime with `prefetch_late`
+above zero runs its reads 4 to 6 % slow and its window a millisecond wide,
+whichever binary serves it. Two accounting notes for future readers: the kernel
+stats print the twelve largest gaps only, so a row can appear or vanish because
+other rows moved (the adopted fixup's gap surfaced this way; the adopted role's
+count is the same in both arms); and the 0.11 to 0.13 ms `->head_logits` gap now in
+the twelve is the sampler's seven encoders, moved from the old first gap to the
+head's front. Artefacts at `~/.claude/handoffs/archive/shrike-v18-t4/`.
+
+**What the task settled.** E2 is real and lands as modelled: the token boundary
+went from three conversations with the host to one word wake, about 0.6 ms per
+token on the rows and about 0.8 on the wall, golden identical on both boxes, no
+kernel changed. The stop check stayed on time and nothing runs a pass late. The
+remaining boundary cost is the one gap of 0.25 ms (the word's 63, the host's checks,
+the commit) and the sampler's encode at the head's front; both are the fold's (Task
+5) if it proceeds.
+
 ### Task 5: the fold (K)
 
 **What.** One command buffer per token, forty layers, with two tokens in flight: the
@@ -365,6 +514,10 @@ two wasted passes).
   ledger (the avenues document, section 2) keeps every hidden item with its cost, what
   hides it, its slack and its exposer; a task that shortens a Y pre-registers the
   items it would expose and measures them in its own arms.
+- A lifetime whose runner line shows `prefetch_late` above zero ran in the mini's
+  slow-drive state (reads 4 to 6 % slow, the miss window a millisecond wide,
+  either binary; Task 4's A/B): read it as noise, and settle a mixed shape with a
+  same-box interleaved A/B rather than more lifetimes of one arm.
 - Subagents run the gates and the rigs and return verbatim diagnostics; the
   reasoning stays in the session.
 
