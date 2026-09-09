@@ -114,14 +114,36 @@ into T5.1.
 
 ## Task 3: one command per layer (prices E1)
 
-- [ ] **T3.1 Read**: `encodeLayerCommands` and `commitHeldLayerCommands` (`:1885`,
-      `:1875`), the tail's fold, the word wake (`:3052`).
-- [ ] **T3.2 Build**: the attention and speculative commands as one command buffer per
-      layer, the encoded fixup joining it on a miss layer; the word wake verified to
-      land at the classifier's encoder completion.
-- [ ] **T3.3 Gates and golden.**
-- [ ] **T3.4 Deploy and arms**: the four transition rows against Task 4's arms; the
-      pre-registered rule applied (a null keeps the merge only if free and simpler).
+- [x] **T3.1 Read**: DONE 2026-09-09; the served model folds attention and tail into
+      one command already, the speculative command is the second, so the task is
+      their merge with the fixup still separate; the assumption the task rests on
+      (the host sees the classifier's word mid-command, not at the command's end)
+      was uncited in the right direction and is now measured by
+      `MidCommandVisibilityTests`: the word seen 42 to 45 µs after the command's
+      GPU start, 29 to 31 ms before its end, three runs; the statement list and the
+      rows in the design doc's Task 3 section. **Davor's go on T3.2 pending.**
+- [x] **T3.2 Build**: DONE 2026-09-09; `encodeSpeculativeRouted` encodes into a given
+      command and follows the tail in `attnCB` when the tail is folded (every layer of
+      the served model), the split-tail path keeping its separate command;
+      `HeldLayerCommands.specCB` optional with `routedCB` the carrier; the all-hit
+      pending command is the merged command with no role of its own, the miss path's
+      pending carries no separate speculative command; the merged command recorded
+      once as `layer_linear` / `layer_kv`; `decode-rows.py`'s window regex takes the
+      new names; no knob. The fixup stays a separate command (Task 2 skipped). The
+      word wake's assumption measured by the probe (T3.1), not by the build.
+- [x] **T3.3 Gates and golden**: DONE 2026-09-09; the four gates (the release build
+      zero warnings, lint zero in 212 files, links clean, 1,243 tests in 171 suites in
+      204 s, the probe among them); the golden identical on both profiles on both
+      boxes (the mini on the deployed 80654748c95eeb44 with the server stopped).
+- [x] **T3.4 Deploy and arms**: DONE 2026-09-09; deployed (80654748c95eeb44), two
+      lifetimes per shape against Task 4's: the forty tail-to-speculative boundaries
+      gone (about 1.4 ms of gaps) and the merged commands up by about 1.65 (the drain
+      now an encoder boundary inside the command), `wait_ms` flat and the wake
+      counter at zero (the word lands at the classifier inside the command); the
+      wall +0.4 to +0.8 % on the 300 and the 1k's clean lifetimes, about 0.3 to 0.5
+      ms per token, a third of the modelled 0.9; kept as simpler and non-negative;
+      the fold's remaining prize re-examined at about 0.85 ms; the record in the
+      design doc. **Davor's ruling on Task 5 pending.**
 
 ## Task 4: the sampler feeds the next embed (E2)
 

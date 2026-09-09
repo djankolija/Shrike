@@ -666,7 +666,15 @@ serial only if nothing else the token waits for is in flight beneath it.
   measured command-buffer-count and single-seam fusions as zero wall (remembered), so
   these may be the GPU's own drain-and-launch cost. Unexplored: whether one command
   buffer per layer with the MoE dispatches encoded indirectly (as in C2) removes the
-  seam rather than merging across it.
+  seam rather than merging across it. **Landed as v18 Task 3 (2026-09-09), one
+  command per layer:** the forty tail-to-speculative command boundaries are gone and
+  the merged commands grew by nearly the same amount, the drain now an encoder
+  boundary inside the command; the net is about 10 µs a layer, the wall +0.4 to
+  +0.8 % on the clean lifetimes, about 0.3 to 0.5 ms per token, a third of the model.
+  v10 was mostly right: the seam is the GPU's own drain, and a command boundary
+  costs only about 10 µs more than an encoder boundary. The forty layer-to-layer
+  boundaries that remain (1.1 ms) are the fold's, worth about 0.4 by the same
+  measurement. The record in the design document's Task 3 section.
 - **E2. The token boundary, 1.0 ms** (idea, numerics unchanged). Three gaps of 0.3 ms:
   head to sample, sample to embed, embed to layer 0. The sampler already runs on the
   GPU; the host reads the token back and encodes the next pass. Unexplored: the
@@ -1015,6 +1023,14 @@ and the transitions decide it. E2 and one command per layer each stand alone; th
 fold buys only the per-layer boundaries that remain after the merge and C6's slice,
 so it is decided on Task 3's arms, and C6's mechanism enters the fold's design note
 as structure rather than as a task of its own (Davor's ruling, 2026-09-09).
+
+**Re-examined after Tasks 4 and 3 (2026-09-09).** E2 landed at about 0.8 ms per
+token and one command per layer at about 0.3 to 0.5, with the boundary's cost
+measured at about 10 µs more than an encoder boundary's. What the fold would still
+buy: the forty layer-to-layer boundaries at that rate (about 0.4), Task 4's one
+remaining boundary gap (0.25) and C6's slice (0.2), about 0.85 ms per token, 1.4 %,
+against the agreed-cell mechanism, two commands in flight and the cancel path.
+Davor's ruling on Task 5.
 
 The steps are the avenues in order, each measurable on its own: C5 (the hits in the
 speculative command), C6 (the fixup as a speculative command, reads into agreed

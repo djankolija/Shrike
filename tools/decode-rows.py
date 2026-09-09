@@ -6,7 +6,8 @@ One row per request from a decode-rig.sh server log: the server's timing line
 I/O counters (expert_hit_rate_decode, expert_misses_decode, hit_fixup_layers,
 io_ms, io_fixup_wake_ms, io_fetch_ms, io_hidden_pct), and the two decode gaps
 that hold the miss window (the miss window from moe_phase1_hit, or from
-moe_spec_routed when the speculative command computes the hits, to
+moe_spec_routed when the speculative command computes the hits, or from
+layer_linear / layer_kv once the layer is one command, to
 moe_phase1_miss_fixup_phase2), per token. A tokens-*.json from
 decode-stream-client.py adds the streamed answer's wall per token (the mean of
 consecutive arrivals after the first chunk) as a separate line.
@@ -17,8 +18,8 @@ import statistics
 import sys
 
 GAPS = {
-    "window": r"gap (?:moe_phase1_hit|moe_spec_routed)->moe_phase1_miss_fixup_phase2 total_ms=\s*[\d.]+ per_token_ms=([\d.]+) count=(\d+)",
-    "adopted": r"gap (?:moe_phase1_hit|moe_spec_routed)->moe_phase1_miss_fixup_phase2_adopted total_ms=\s*[\d.]+ per_token_ms=([\d.]+) count=(\d+)",
+    "window": r"gap (?:moe_phase1_hit|moe_spec_routed|layer_linear|layer_kv)->moe_phase1_miss_fixup_phase2 total_ms=\s*[\d.]+ per_token_ms=([\d.]+) count=(\d+)",
+    "adopted": r"gap (?:moe_phase1_hit|moe_spec_routed|layer_linear|layer_kv)->moe_phase1_miss_fixup_phase2_adopted total_ms=\s*[\d.]+ per_token_ms=([\d.]+) count=(\d+)",
 }
 RUNNER = ["expert_hit_rate_decode", "expert_misses_decode", "hit_fixup_layers", "io_ms",
           "io_fixup_wake_ms", "io_fetch_ms", "io_hidden_pct", "cache_plan_ms",

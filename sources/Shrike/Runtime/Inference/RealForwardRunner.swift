@@ -1928,9 +1928,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         /// only the gpt-oss and plain paths keep the split, their o_proj must
         /// run after the separately committed softmax CB).
         let tailCB: MTLCommandBuffer?
-        /// The speculative routed command; the shared-expert chain rides at
-        /// its head.
-        let specCB: MTLCommandBuffer
+        /// The speculative routed command when the tail is split (it follows
+        /// the separately committed tail); nil when it rides in `attnCB` behind
+        /// the tail, one command per layer.
+        let specCB: MTLCommandBuffer?
         let overlapCompletionClock: CommandCompletionClock?
         /// The tag the classifier stamps on this layer's host readback; zero
         /// when no classifier ran (the host then reads the raw buffers).
@@ -1938,6 +1939,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         /// The CB whose completion publishes the router output.
         var routerCB: MTLCommandBuffer { tailCB ?? attnCB }
+        /// The CB carrying the speculative routed work.
+        var routedCB: MTLCommandBuffer { specCB ?? attnCB }
     }
 
     private func commitHeldLayerCommands(_ cmds: HeldLayerCommands) {
@@ -1947,7 +1950,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // Queued before the tailCB wait, not after: the GPU runs the shared
         // MLP and the whole routed layer while the CPU blocks on tailCB for
         // the routing.
-        cmds.specCB.commit()
+        cmds.specCB?.commit()
     }
 
     private func encodeLayerCommands(layer L: Int, position: Int)
@@ -2025,7 +2028,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             d: D, eps: eps)
         layerEncoder?.endEncoding()
         let overlapCompletionClock = runnerStatsEnabled ? CommandCompletionClock() : nil
-        let specCB = try encodeSpeculativeRouted(
+        var specCB: MTLCommandBuffer?
+        if tailCB != nil {
+            guard let separate = ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            specCB = separate
+        }
+        try encodeSpeculativeRouted(
+            into: specCB ?? attnCB,
             layer: L,
             residency: residencyResources,
             arguments: specDispatchArguments,
@@ -2091,8 +2102,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let isDense = L < cfg.numLeadingDenseLayers
 
             let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            // GDN/MLA/gated layers run the whole stage — input norm through
-            // router — in one CB (role "attn_layer"). gpt-oss and plain
+            // GDN/MLA/gated layers run the whole stage, input norm through
+            // router and the speculative routed work, in one CB (roles
+            // layer_linear / layer_kv). gpt-oss and plain
             // layers keep the attn/softmax/tail CB split, whose commit order
             // sequences o_proj after the softmax. Same queue either way, one
             // wait on the last CB; only the router readback forces the
@@ -2338,7 +2350,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         try await encodeDecodeRoutedMoE(
             layer: L, position: position,
             tailCB: cmds.routerCB,
-            specCB: cmds.specCB,
+            specCB: cmds.routedCB,
+            specIsSeparate: cmds.specCB != nil,
             overlapCompletionClock: cmds.overlapCompletionClock,
             pending: &pendingRoutedCommand,
             bodyStart: tBodyStart,
@@ -3219,7 +3232,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private func layerKernelRecords(_ cmds: HeldLayerCommands, layer L: Int)
         -> [(role: String, cb: MTLCommandBuffer)] {
         guard let tailCB = cmds.tailCB else {
-            return [(cfg.layerIsLinear(L) ? "attn_layer_linear" : "attn_layer_kv", cmds.attnCB)]
+            return [(cfg.layerIsLinear(L) ? "layer_linear" : "layer_kv", cmds.attnCB)]
         }
         var records = [("attn_norm_qkv", cmds.attnCB)]
         if let attentionCB = cmds.softmaxCB { records.append(("attn_softmax", attentionCB)) }
@@ -3261,6 +3274,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 var buffers = [("routed layer command buffer", pending.cb)]
                 if let specCB = pending.specCB {
                     buffers.append(("speculative routed command buffer", specCB))
+                }
+                if let layerCB = pending.layerCB {
+                    buffers.append(("layer command buffer", layerCB))
                 }
                 return buffers
             }
@@ -5022,12 +5038,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private struct PendingRoutedCommand {
         let cb: MTLCommandBuffer
         let specCB: MTLCommandBuffer?
+        /// The layer's own command when the speculative work rides in it and
+        /// the fixup is the pending command, so its error is checked too.
+        let layerCB: MTLCommandBuffer?
         let expertLease: RoutedExpertLease?
         let storageOperation: RoutedExpertLoadOperation?
         let overlapCompletionClock: CommandCompletionClock?
         let expectedOverlapCompletions: Int
         let routedCommitNanos: UInt64
-        let kernelRole: String
+        /// nil when the command is the layer's own, already recorded under the
+        /// layer's role.
+        let kernelRole: String?
         let encodeAndCommitNanos: UInt64
     }
 
@@ -5070,6 +5091,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             throw ModelError.commandBufferFailed(
                 detail: "routed layer command buffer: \(err)")
         }
+        if let layerCB = pending.layerCB {
+            if waitIfNeeded {
+                try waitForCompletion(layerCB)
+            } else if let err = layerCB.error {
+                throw ModelError.commandBufferFailed(
+                    detail: "layer command buffer: \(err)")
+            }
+        }
         var ioCompletedNanos: UInt64 = 0
         if let operation = pending.storageOperation {
             // Event-gated commands cannot complete before this operation is
@@ -5109,7 +5138,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 totalExposedIoNanos &+= ioCompletedNanos - latest
             }
         }
-        recordKernelGPU(role: pending.kernelRole, pending.cb)
+        if let role = pending.kernelRole {
+            recordKernelGPU(role: role, pending.cb)
+        }
         if pending.routedCommitNanos > 0, pending.cb.kernelStartTime > 0 {
             let kernelStart = UInt64(pending.cb.kernelStartTime * 1_000_000_000)
             totalFixupCommitToKernelNanos &+= kernelStart > pending.routedCommitNanos
@@ -5243,15 +5274,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// the tail wait so it sizes itself from the classifier's indirect
     /// arguments: full grids on an all-hit layer, zero grids otherwise.
     private func encodeSpeculativeRouted(
+        into cb: MTLCommandBuffer,
         layer L: Int,
         residency: ExpertResidencyResources,
         arguments: MoE.SpeculativeDispatchArguments,
         completionClock: CommandCompletionClock?
-    ) throws -> MTLCommandBuffer {
+    ) throws {
         let pool = residency.expertPool
-        guard let cb = ctx.queue.makeCommandBuffer() else {
-            throw ModelError.residentBufferWrapFailed
-        }
         // Stage C: the shared-expert chain rides at the head of the spec CB —
         // same main-queue commit position as the old separate sharedCB, so
         // h1Buf ordering is unchanged, and the spec CB commits on every
@@ -5292,7 +5321,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             count: cfg.hiddenSize,
             indirectArguments: arguments.arguments,
             indirectOffset: MoE.specTailArgsOffset)
-        return cb
     }
 
     private struct DecodeRoutedLayerContext {
@@ -5300,6 +5328,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let position: Int
         let tailCB: MTLCommandBuffer
         let specCB: MTLCommandBuffer
+        let specIsSeparate: Bool
         let overlapCompletionClock: CommandCompletionClock?
         let bodyStart: UInt64
         let hostReadback: RouterHostReadback?
@@ -5334,6 +5363,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         position: Int,
         tailCB: MTLCommandBuffer,
         specCB: MTLCommandBuffer,
+        specIsSeparate: Bool,
         overlapCompletionClock: CommandCompletionClock?,
         pending pendingRoutedCommand: inout PendingRoutedCommand?,
         bodyStart tBodyStart: UInt64,
@@ -5350,6 +5380,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let canUsePlannedFetch = cfg.topKExperts <= MoE.maxStreamedExperts
         var context = DecodeRoutedLayerContext(
             layer: L, position: position, tailCB: tailCB, specCB: specCB,
+            specIsSeparate: specIsSeparate,
             overlapCompletionClock: overlapCompletionClock, bodyStart: tBodyStart,
             hostReadback: hostReadback, predictedNextLayer: predictedNextLayer,
             d: D, f: FmoE, experts: experts, routedOffsets: routedOffsets,
@@ -5581,12 +5612,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             pendingRoutedCommand = PendingRoutedCommand(
                 cb: context.specCB,
                 specCB: nil,
+                layerCB: nil,
                 expertLease: context.expertLease,
                 storageOperation: context.eventLoad,
                 overlapCompletionClock: context.eventLoad == nil ? nil : context.overlapCompletionClock,
                 expectedOverlapCompletions: context.expectedOverlapCompletions,
                 routedCommitNanos: 0,
-                kernelRole: "moe_spec_routed",
+                kernelRole: context.specIsSeparate ? "moe_spec_routed" : nil,
                 encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - context.tCb2Start)
             context.transferredExpertLease = true
             totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - context.bodyStart
@@ -5627,7 +5659,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     ) {
         pendingRoutedCommand = PendingRoutedCommand(
             cb: routedCB,
-            specCB: context.specCB,
+            specCB: context.specIsSeparate ? context.specCB : nil,
+            layerCB: context.specIsSeparate ? nil : context.specCB,
             expertLease: context.expertLease,
             storageOperation: context.eventLoad,
             overlapCompletionClock: context.eventLoad == nil ? nil : context.overlapCompletionClock,

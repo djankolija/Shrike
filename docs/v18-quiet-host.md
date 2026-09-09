@@ -314,6 +314,112 @@ classifier's encoder completes, not at the command's end (v16's probe), and Task
 hidden round trip needs exactly that. Verify on the first build with
 `path_router_wake_ms`.
 
+**T3.1 (2026-09-09), the read and the probe.** On the served model every layer
+already folds its input norm, attention and tail (the router, the probe, the
+classifier writing the tagged word) into one command (`attnCB`; `tailCB` is nil on
+GDN, MLA and gated layers), and the speculative command (`specCB`: the shared
+expert, phase 1, phase 2 and the residual, all indirect from the classifier's
+arguments) is a second command committed right behind it in
+`commitHeldLayerCommands`. Task 3 is the merge of those two into one command per
+layer; the fixup stays a separate command on miss layers, host-built after the word
+with Task 2 skipped. The task rested on an assumption the risk paragraph above cites
+v16's probe for, but that probe measured the other direction (a host write seen by
+a later dispatch): that the host sees the classifier's word when its encoder
+completes rather than when the command ends. Measured now with
+`MidCommandVisibilityTests` (a sampler kernel writes the word as a command's first
+encoder, six blit encoders copying 1.5 GB follow, the host spins on the word): the
+word is seen 42 to 45 µs after the command's GPU start and 29 to 31 ms before its
+end, three runs on the M4 Pro. Mid-command visibility is immediate, tens of
+microseconds after the write, and the merge is safe on this hardware; the mini's
+first arms confirm it through `wait_ms`, flat if the word still lands at the
+classifier and about 13 ms per token higher if it waited for the command.
+
+What the merge changes in the instruments: the attention row and the speculative
+row become one command and one role, so the ledger keeps their sum and the
+context slope (the speculative work is context-free, so the merged row's slope is
+the attention's) but not the split. The prefetch race counters key on the tail
+command's GPU span, which becomes the whole layer's; they stay as diagnostics with
+that caveat. `path_router_wake_ms` measures the wake past the command's end and
+clamps to zero when the word lands inside it, so it becomes the count of wakes
+that fell past the layer.
+
+**The statement list (T3.2).**
+
+- S1. `encodeSpeculativeRouted` encodes into a given command instead of making its
+  own; when the tail is folded the speculative encoders follow the tail in
+  `attnCB`; `HeldLayerCommands.specCB` becomes optional and
+  `commitHeldLayerCommands` commits what exists. The split path (a separate tail
+  command, gpt-oss and plain attention) keeps its speculative command as today.
+- S2. The routed stage: the all-hit hand-off's pending command is the merged
+  command; the miss path's pending carries no separate speculative command;
+  `recordRoutedCommandTimings` and the diagnostics buffer list skip what is not
+  there.
+- S3. Roles: the merged command is recorded once as `layer_linear` or `layer_kv`,
+  new names so the rows' change of meaning is explicit; `decode-rows.py`'s window
+  regex takes the new names; `parse-kernel-stats.py` is generic.
+- S4. The completion clock tracks the merged command; no new knob; a null reverts
+  by git.
+- Tests: the probe stays as the assumption's guard; the merge itself is
+  structural and is covered by the golden and the arms, since the unit tests never
+  load a model.
+
+**Rows pre-registered** (Task 4's arms, ms per token): `attn_layer_linear->moe_spec_routed`
+(about 1.0) and `attn_layer_kv->moe_spec_routed` (about 0.3) gone, about 1.3 of the
+2.6; `moe_spec_routed->attn_layer_linear` (0.8 to 0.95) and `->attn_layer_kv` (0.3)
+become `layer_*->layer_*` at the same cost, a command boundary still; the merged
+role equal to the sum of the two it replaces; `wait_ms` flat; the window row
+renamed. The wall by about 0.9 ms per token if an encoder boundary costs about 10
+µs, a null if the command boundary's cost was never on the path (v10's finding
+under different conditions). The rule stands: a null keeps the merge only if free
+and simpler, and it is simpler, one command and one field fewer per layer.
+
+**T3.2 to T3.4 (2026-09-09), the build, the gates and the arms.**
+`encodeSpeculativeRouted` encodes into a given command and follows the tail in
+`attnCB` when the tail is folded, which is every layer of the served model; the
+split-tail path keeps its separate command. `HeldLayerCommands.specCB` is optional
+with `routedCB` naming the carrier; the all-hit pending command is the merged
+command and carries no role of its own (the layer's record covers it), the miss
+path's pending carries no separate speculative command; the merged command is
+recorded once as `layer_linear` or `layer_kv`; `decode-rows.py`'s window regex takes
+the new names; no knob. The four gates: the release build with zero warnings, lint
+zero in 212 files, links clean, 1,243 tests in 171 suites in 204 s with the probe
+among them. The golden identical on both profiles on both boxes (the mini on the
+deployed 80654748c95eeb44, the server stopped). The arms two lifetimes per shape
+against Task 4's, the pair 300 (3.16 to 3.26 s warm, 7.88 cold), production
+restored; the card's answer identical, the misses per token identical. The rows,
+the 300, lifetimes 1 / 2, ms per token:
+
+| row | Task 4 | Task 3 |
+| --- | ---: | ---: |
+| the four transitions, tail to speculative and back | 2.49 / 2.47 | gone |
+| the layer-to-layer transitions | none | 1.08 / 1.15 |
+| the attention roles plus the speculative role | 34.65 / 34.61 | 36.30 / 36.29 as `layer_linear` + `layer_kv` |
+| `wait_ms` | 51.73 / 51.61 | 51.76 / 51.80 |
+| `path_router_wake_ms` | 2.44 / 2.47 | 0.00 / 0.00 |
+| decode tok/s | 16.50 / 16.54 | 16.61 / 16.60 |
+
+**Reading.** The forty tail-to-speculative command boundaries are gone, about 1.4
+ms of gaps, and the merged commands grew by about 1.65: the GPU still drains
+between the tail's last kernel and the speculative work's first, now at an encoder
+boundary inside the command, and that idle sits inside the role's span. The net is
+the difference between a command boundary and an encoder boundary, about 10 µs a
+layer, not the 25 the model assumed: the printed roles and gaps sum fell 0.2 to 0.4
+ms per token on the 300 and the 1k; the wall +0.4 to +0.6 % on the 300 and +0.5 to
++0.8 % on the 1k against Task 4's clean same-day lifetimes (16.28 to 16.34 to
+16.41 / 16.42), the card mixed by a slow-drive lifetime on each side. `wait_ms`
+flat and `path_router_wake_ms` at zero: the word lands inside the command, at the
+classifier, as the probe said. Not a null and a third of the modelled 0.9; kept,
+being simpler and non-negative. The ledger's attention row now reads as the layer
+(attention, tail, speculative work and the boundary between them); its context
+slope survives, its split does not.
+
+**What it says for the fold.** The forty layer-to-layer command boundaries that
+remain, about 1.1 ms per token, would become encoder boundaries in one command
+per token, worth about 0.4 by this measurement, plus Task 4's remaining boundary
+gap (0.25) and C6's slice (0.2): about 0.85 ms per token, 1.4 %, for the
+agreed-cell mechanism, two commands in flight and the cancel path. K's
+re-examined prize; the ruling is Davor's.
+
 ### Task 4: the sampler feeds the next embed (E2)
 
 **What.** The sampler's one-element token buffer is read by the next token's embed
