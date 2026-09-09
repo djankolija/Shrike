@@ -11,7 +11,8 @@ ThreadSanitizer once at the close.
 
 Order after T2.0 (Davor's ruling, 2026-09-09): Task 4, then Task 3, then Task 5
 decided on Task 3's arms; Task 2 skipped as a performance task, its mechanism folded
-into T5.1.
+into T5.1. After Task 3 (Davor's ruling, 2026-09-09): Task 6, the walls, runs next,
+and the fold's ruling follows it on the boundary costs Task 6 re-measures.
 
 ## Step zero: the board priced once (no runtime code)
 
@@ -199,6 +200,30 @@ into T5.1.
 - [ ] **T5.4 Gates and golden.**
 - [ ] **T5.5 Deploy and arms**: the token against the v17 close on all three shapes
       and the turn rig's pair.
+
+## Task 6: the walls (D1)
+
+- [ ] **T6.0 Price the wall by its kind**: the speculative command's seven dispatches
+      on one encoder instead of four and the fixup's three on one instead of three,
+      no kernel change; the arms against Task 3's; the rows `layer_linear`,
+      `layer_kv`, `moe_phase1_miss_fixup_phase2` and the wall. If the encoder
+      boundary is the 25 µs kind, this lands as its own commit and the merges are
+      re-priced on the difference; if not, the merges' 12 µs pricing stands.
+- [ ] **T6.1 The shared gate and up GEMVs as one grid** (the cleanest; 40 walls a
+      token, 26.5 on the path): the read, the merged kernel, the bitwise arm against
+      the two it replaces, the gates, the golden, the arms.
+- [ ] **T6.2 The scalar gate into that dispatch** (40; 26.5 on the path): the same
+      steps.
+- [ ] **T6.3 Speculative phase 2 plus its residual** (40; 26.5 on the path; the
+      zero-grid miss behaviour preserved): the same steps.
+- [ ] **T6.4 The top-k select plus the classifier** (40, every layer on the path):
+      the same steps.
+- [ ] **T6.5 Conv plus qk norm** (30 GDN layers, on the path): the same steps.
+- [ ] **T6.6 The input norm into the in-projection** (30; the weakest, last): the
+      same steps, or dropped if T6.5's arms say the GDN walls are not what D1
+      counted.
+- [ ] **T6.7 The record**: the task record in the design doc, D1 updated with what
+      each wall cost, the fold re-priced for its ruling.
 
 ## Close
 

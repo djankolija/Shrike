@@ -602,6 +602,43 @@ error surfacing when a whole token is one command (a failed read's fail-closed g
 must still name its layer); the stop check's late cancel with two in flight (at most
 two wasted passes).
 
+### Task 6: the walls (D1; scheduled by Davor's ruling, 2026-09-09, after Task 3)
+
+**What.** The GPU's own boundaries. Task 3 measured the gap between two dependent
+kernels at about 25 µs inside one command: the machine drains one kernel and
+refills on the next, and Shrike's decode kernels are short enough that the drain is
+as long as the work. About 820 dispatches per token pay it (D1). The task is D1's
+six merges, each keeping every arithmetic operation and its order: the shared
+expert's gate and up GEMVs as one grid over both row sets; the scalar gate into
+that dispatch; speculative phase 2 plus its residual; the top-k select plus the
+classifier; conv plus qk norm; the input norm into the in-projection. Before any
+merge, T6.0 prices the wall by its kind, since D1's caveat is now the live question:
+the speculative command spends four encoders on seven dispatches and the fixup
+three on three, and if an encoder boundary is the 25 µs kind while a dispatch
+boundary inside one encoder is v10's 12, putting those dispatches on one encoder
+each is the cheapest move on the board and changes the merges' pricing.
+
+**Rows expected to move,** with the slack rule applied up front: a merge inside the
+speculative command counts only on the 26.5 all-hit layers per token, since on a
+miss layer that command runs in the read's shadow; a merge in the tail or the GDN
+block counts on every layer. At v10's 12 µs a wall: the gate and up GEMVs 0.32 ms
+per token, the scalar gate 0.32, phase 2 plus residual 0.32, the select plus the
+classifier 0.48, conv plus qk norm 0.36, the norm into the in-projection 0.36:
+about 2.2 ms modelled, more if T6.0 finds the encoder boundary at 25. The rows are
+`layer_linear` and `layer_kv` (the merged layer roles, down by the walls removed),
+`moe_phase1_miss_fixup_phase2` if the fixup's encoders fold, and the wall.
+
+**Constraints.** Class 1: the same arithmetic in the same order in every merge, and
+each merge carries a bitwise arm against the two kernels it replaces, not the
+golden alone, because a fused kernel can elide a half-precision rounding under fast
+math on a register-resident value (the decode chapter's T2 found exactly that). The
+misses per token unchanged. Each merge lands as its own commit with the four gates
+and the golden; the arms per merge on the mini, or per pair once the first two
+land as modelled.
+
+**Order.** Task 6 runs before the fold's ruling: the fold is priced on the cost of
+a command boundary against an encoder boundary, and Task 6 re-measures both.
+
 ## Method
 
 - The four gates per commit (release build with zero warnings, `swiftlint lint

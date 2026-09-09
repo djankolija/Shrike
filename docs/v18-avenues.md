@@ -628,7 +628,16 @@ the tail alone is five or six of them. v10 landed mergers where the bits allowed
   router GEMV into the select (cross-threadgroup), the delta step into the gated norm
   (32 threadgroups per head against a whole-head reduce), spec phase 1 into phase 2
   (phase 2 reads across all of the intermediate). These are v18's Task 3 neighbours
-  or a small chapter of their own; the doc records them here.
+  or a small chapter of their own; the doc records them here. **Scheduled as v18
+  Task 6 (Davor's ruling, 2026-09-09), after Task 3 and before the fold's ruling:**
+  Task 3 measured the boundary between two dependent kernels at about 25 µs inside
+  one command, twice the per-dispatch wall counted here, which makes the caveat
+  above the live question; T6.0 prices the encoder boundary against the dispatch
+  boundary by putting the speculative command's seven dispatches and the fixup's
+  three on one encoder each, then the six merges follow in the order of prize and
+  risk, each with its bitwise arm. With the slack rule applied (a merge inside the
+  speculative command counts on the 26.5 all-hit layers only), about 2.2 ms per
+  token modelled at 12 µs a wall.
 - **D2. The in-projection at the roof?** (needs a finer instrument). The role covers
   the chain; a per-kernel split needs a Metal capture or a kernel-level stats mode.
   14.2 MB per layer is 227 µs at the roof; if the GEMV runs slower than that, the
@@ -1030,7 +1039,8 @@ measured at about 10 µs more than an encoder boundary's. What the fold would st
 buy: the forty layer-to-layer boundaries at that rate (about 0.4), Task 4's one
 remaining boundary gap (0.25) and C6's slice (0.2), about 0.85 ms per token, 1.4 %,
 against the agreed-cell mechanism, two commands in flight and the cancel path.
-Davor's ruling on Task 5.
+Davor's ruling on Task 5, taken after Task 6 (the walls, D1) has re-measured the
+boundary costs the fold is priced on.
 
 The steps are the avenues in order, each measurable on its own: C5 (the hits in the
 speculative command), C6 (the fixup as a speculative command, reads into agreed
@@ -1185,6 +1195,10 @@ ms modelled on the 300, the transitions' share uncertain.
 ms, under the drift). Phase 1 is C5 (landed, a measured null kept as a
 simplification), then E2, then one command per layer, then the fold decided on the
 transitions' arms; 0.9 to 2.7 ms modelled, the transitions the term that decides.
+
+**2026-09-09, after Task 3, Davor:** the kernel merges (D1's six, about 2.2 ms
+modelled with the slack rule) had no phase; they are v18's Task 6, after Task 3
+and before the fold's ruling, so nothing on the board is left unowned.
 
 **Phase 2, the SSD mechanism chosen in phase 0.** A1 or A2's product first if the
 replay pays (a slot allocation is small code), then A9's predictor or A0's width,
