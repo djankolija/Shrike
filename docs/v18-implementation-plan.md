@@ -219,9 +219,18 @@ and the fold's ruling follows it on the boundary costs Task 6 re-measures.
       the arms against T6.0's: `head_logits` down 0.06 to 0.09 ms per token, about 10
       µs a boundary between small kernels (half the speculative command's 22), the
       wall inside the drift; kept as simpler and non-negative.
-- [ ] **T6.1 The shared gate and up GEMVs as one grid** (the cleanest; 40 walls a
-      token, 26.5 on the path): the read, the merged kernel, the bitwise arm against
-      the two it replaces, the gates, the golden, the arms.
+- [x] **T6.1 The shared gate and up GEMVs as one grid**: DONE 2026-09-09, a measured
+      null; the read confirmed two dispatches on the int4 fused chain, the merged
+      kernel on the fused QKV pattern with a `FusedGateUpGEMV` wrapper, the bitwise
+      arm at four shapes including the served one, the four gates (1,249 tests in 173
+      suites), the golden identical on both boxes (the mini on f7b062820ad02a7b); the
+      arms against T6.0b's flat within the drift on all three shapes, the layer roles
+      unmoved against 0.48 ms modelled, the 300 settled by an eight-lifetime
+      interleaved A/B (by position −0.5 / −1.3 / +0.2 / +1.6 %): the wall between two
+      small independent GEMVs is at most about 3 µs, not D1's 12; kept on Davor's
+      ruling as class 1 and non-negative; the remaining merges re-priced at the wall's
+      kind, about 0.3 to 0.7 ms for all five, T6.3 the only one after an indirect
+      dispatch.
 - [ ] **T6.2 The scalar gate into that dispatch** (40; 26.5 on the path): the same
       steps.
 - [ ] **T6.3 Speculative phase 2 plus its residual** (40; 26.5 on the path; the

@@ -198,6 +198,42 @@ kernel void dequant_int4_gemv_simd(
                                 rows_per_tg, tg_idx, sg_idx, lane);
 }
 
+// The shared expert's gate and up GEMVs as one grid (v18 T6.1): the same
+// input against two row sets of one shape, rows below M the gate's and the
+// rest the up's, each through dequant_int4_gemv_simd_body with its own
+// weights and output, so the result is bit-identical to the two dispatches
+// it replaces.
+kernel void dequant_int4_shared_gate_up_gemv_simd(
+    device const uint8_t* gateW      [[buffer(0)]],
+    device const bfloat*  gateScales [[buffer(1)]],
+    device const bfloat*  gateBiases [[buffer(2)]],
+    device const uint8_t* upW        [[buffer(3)]],
+    device const bfloat*  upScales   [[buffer(4)]],
+    device const bfloat*  upBiases   [[buffer(5)]],
+    device const half*    x          [[buffer(6)]],
+    device half*          gateY      [[buffer(7)]],
+    device half*          upY        [[buffer(8)]],
+    constant uint&        M          [[buffer(9)]],
+    constant uint&        N          [[buffer(10)]],
+    uint                  tg_idx     [[threadgroup_position_in_grid]],
+    uint                  sg_idx     [[simdgroup_index_in_threadgroup]],
+    uint                  lane       [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_tg = 8;
+    const uint MM = int4_fc_m(M);
+    const uint NN = int4_fc_n(N);
+    const uint global_row = tg_idx * rows_per_tg + sg_idx;
+    if (global_row >= 2u * MM) { return; }
+    const bool up = global_row >= MM;
+    dequant_int4_gemv_simd_body(up ? upW : gateW,
+                                up ? upScales : gateScales,
+                                up ? upBiases : gateBiases,
+                                x,
+                                up ? upY : gateY,
+                                MM, NN,
+                                1u, up ? global_row - MM : global_row, 0u, lane);
+}
+
 // Fused shared-expert tail (v10 T1): act = silu(gate_in)·up_in is computed
 // cooperatively into threadgroup memory once per threadgroup, then each SIMD
 // runs the down-projection row loop, then lane 0 applies the optional sigmoid

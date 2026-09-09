@@ -25,6 +25,7 @@ public final class SharedExpertInt4 {
     }
 
     private let int4: DequantInt4GEMV
+    private let gateUp: FusedGateUpGEMV
     private let geluMulPSO: MTLComputePipelineState
     // The fused down-projection kernel bakes silu into its operand read, so
     // it exists only for silu architectures; gelu falls back to the split
@@ -42,6 +43,8 @@ public final class SharedExpertInt4 {
                 decodeShapes: [(m: Int, n: Int)] = []) throws {
         self.int4 = try DequantInt4GEMV(context: context,
                                         additionalShapes: decodeShapes)
+        self.gateUp = try FusedGateUpGEMV(context: context,
+                                          additionalShapes: decodeShapes)
         self.geluMulPSO = try context.pipeline(
             siluActivation ? "silu_mul_fp16" : "gelu_mul_fp16")
         if siluActivation {
@@ -82,9 +85,9 @@ public final class SharedExpertInt4 {
 
     public var supportsFusedDecodeChain: Bool { fusedDownGated != nil }
 
-    /// The gate and up GEMVs of the fused decode chain. The caller must
-    /// order their scratch writes before `encodeFusedDown` reads them (a
-    /// serial encoder does this implicitly).
+    /// The gate and up GEMVs of the fused decode chain as one grid. The
+    /// caller must order their scratch writes before `encodeFusedDown` reads
+    /// them (a serial encoder does this implicitly).
     public func encodeGateUp(encoder: MTLComputeCommandEncoder,
                              x: MTLBuffer, xOffset: Int = 0,
                              gate: SharedExpertProjection,
@@ -100,20 +103,11 @@ public final class SharedExpertInt4 {
               scratchUpOffset >= 0, scratchUpOffset + required <= scratchUp.length else {
             throw SharedExpertError.scratchTooSmall("need \(required) bytes per intermediate buffer")
         }
-        int4.encode(encoder: encoder,
-                    weights: gate.weights, weightsOffset: gate.weightsOffset,
-                    scales: gate.scales, scalesOffset: gate.scalesOffset,
-                    biases: gate.biases, biasesOffset: gate.biasesOffset,
-                    x: x, xOffset: xOffset,
-                    y: scratchGate, yOffset: scratchGateOffset,
-                    m: gate.rows, n: gate.cols)
-        int4.encode(encoder: encoder,
-                    weights: up.weights, weightsOffset: up.weightsOffset,
-                    scales: up.scales, scalesOffset: up.scalesOffset,
-                    biases: up.biases, biasesOffset: up.biasesOffset,
-                    x: x, xOffset: xOffset,
-                    y: scratchUp, yOffset: scratchUpOffset,
-                    m: up.rows, n: up.cols)
+        gateUp.encode(encoder: encoder,
+                      gate: gate, up: up,
+                      x: x, xOffset: xOffset,
+                      gateOut: scratchGate, gateOutOffset: scratchGateOffset,
+                      upOut: scratchUp, upOutOffset: scratchUpOffset)
     }
 
     /// The fused down projection: silu(gate)·up, the down GEMV, and (when

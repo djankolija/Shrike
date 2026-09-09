@@ -704,6 +704,62 @@ half the size; kept as simpler and non-negative. The encoder boundary's cost is
 not one number: about 22 µs around the speculative command's indirect dispatches
 and about 10 around the sampler's small kernels.
 
+**T6.1 (2026-09-09), the shared gate and up GEMVs as one grid: a measured null.**
+The read first: the served model takes the int4 fused chain (ornith15's shared
+expert is int4, silu, gated), whose `encodeGateUp` issued the gate and the up as two
+`DequantInt4GEMV` dispatches of 512 rows by 2048 over the same input, D1's count
+confirmed on the tree: four dispatches in the shared chain, seven in the speculative
+command. The build: a `dequant_int4_shared_gate_up_gemv_simd` kernel on the fused
+QKV kernel's pattern, one grid over both row sets, rows below M the gate's and the
+rest the up's, each row through the shared `dequant_int4_gemv_simd_body` with its
+own weights and output, so the arithmetic and its order are the plain kernel's by
+construction; a `FusedGateUpGEMV` wrapper in `Kernels/Fusions/` with the
+constant-folded shapes; `SharedExpertInt4.encodeGateUp` dispatches it, the split
+chain and the affine and int8 paths untouched. The bitwise arm,
+`FusedGateUpGEMVTests`: the merged kernel against two plain GEMVs on the same
+inputs, half words equal, at a small shape, at 24 by 192 (the scalar remainder loop
+and one threadgroup straddling the two row sets), at a 2-byte weights offset and at
+the served 512 by 2048 through the specialized pipelines; the three fused-chain
+bitwise tests run over the new path. The four gates (the release build with zero
+warnings, lint clean, links clean, 1,249 tests in 173 suites in 209 s), the golden
+identical on both profiles on both boxes (the mini on f7b062820ad02a7b). The arms
+against T6.0b's, two lifetimes per shape, the cold answers' tok/s: the card 15.90 /
+15.92 to 16.18 / 16.16, the 300 17.12 / 17.12 to 16.89 / 17.06 (the second
+slow-drive, `prefetch_late` 11), the 1k 16.58 / 16.88 (both slow-drive, 81 and 7)
+to 16.91 / 16.87; the pair 300 7.86 / 3.14 to 7.89 / 3.15 s; the misses per token
+identical; the layer roles (`layer_linear` plus `layer_kv`, ms per token) the card
+37.29 / 37.32 to 37.16 / 37.17, the 300 33.44 / 33.43 to 33.54 / 33.40, the 1k
+35.43 / 35.33 to 35.28 / 35.34, against 0.48 modelled; `head_logits` and the fixup
+flat. Mixed across the shapes, so the 300 was settled by a same-box interleaved A/B
+(A the T6.0b tree rebuilt, B the deployed build, A × 2, B × 2, A × 2, B × 2, eight
+lifetimes, none slow-drive): A 17.13 / 17.09 / 16.91 / 16.84, B 17.05 / 16.87 /
+16.95 / 17.11, by position −0.5 / −1.3 / +0.2 / +1.6 %; the layer roles A 33.47 /
+33.54 / 33.43 / 33.67 and B 33.52 / 33.53 / 33.48 / 33.45.
+
+**Reading.** The wall flat within the drift on every shape (one arm alone drifts
+1.7 % across its eight A/B lifetimes, so the card's +1.6 % on two lifetimes is not
+evidence) and the pre-registered rows unmoved: the boundary between the gate and the
+up dispatches, two independent GEMVs of about half a megabyte each, cost at most
+about 3 µs a layer and is not resolvable against the layer roles' own lifetime drift
+(0.24 ms within one arm). D1's 12 µs a wall, v10's measurement between dependent
+routed kernels, does not price a boundary between two small independent kernels.
+The wall by its kind, extended and graded: an encoder boundary about 22 µs around
+indirect dispatches (T6.0; M, two lifetimes, one context) and about 10 around small
+kernels (T6.0b; M, the same); a dispatch boundary about 12 around the routed kernels
+(v10; T, another tree, so 4 to 12 here) and at most about 3 between two small
+independent GEMVs (T6.1; M, an upper bound from the A/B). Kept on Davor's ruling
+(2026-09-09): class 1, bit-identical, non-negative on the A/B, one dispatch fewer
+per layer on the fused QKV kernel's pattern.
+
+**What it says for the rest of Task 6.** Four of the five remaining merges join
+small kernels (the scalar gate, the select and the classifier, conv and qk norm, the
+norm into the in-projection) and are priced by T6.1's kind, at most about 0.1 ms per
+token each and at the drift floor; T6.3 (speculative phase 2 plus its residual) is
+the one boundary after an indirect dispatch, the kind T6.0 found expensive on the
+encoder side, and the only one plausibly worth its 0.32 ms modelled. Task 6's
+remaining value is about 0.3 to 0.7 ms per token rather than 1.9; the fold's ruling
+stands on T6.0's numbers (a command boundary about 10 µs over an encoder boundary).
+
 ## Method
 
 - The four gates per commit (release build with zero warnings, `swiftlint lint
@@ -728,6 +784,16 @@ and about 10 around the sampler's small kernels.
   same-box interleaved A/B rather than more lifetimes of one arm.
 - Subagents run the gates and the rigs and return verbatim diagnostics; the
   reasoning stays in the session.
+- Every cost carries a grade and a range (Davor's ruling, 2026-09-09, after T6.1):
+  **M** measured in this context, with the lifetimes and the spread; **T**
+  transferred from another context (a different kernel size, dependency or box),
+  carrying the 2 to 4× range transfers have missed by; **C** counted, a unit times a
+  count, inheriting the unit's grade with the error multiplied; **R** remembered or
+  derived from a document. A number without a spread behind it is a T. Tasks rank
+  by the floor of the range, and a floor under the rig's noise (one binary drifts
+  about 1.7 % in tok/s across clean lifetimes of one shape; the layer roles 0.3 to
+  0.6 %; the miss window 3.4 %; the host gaps 15 %, T6.1's A/B) is not built for
+  speed. Numbers are regraded when they become load-bearing, not retrofitted.
 
 ## Numerics policy
 
