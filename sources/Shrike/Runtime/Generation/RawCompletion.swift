@@ -343,8 +343,8 @@ private func runDecodeLoop(producer: any LogitProducer,
             let samplePosition = generated
             try await boundaryProducer.produce(token: boundaryPending ? nil : tokenID,
                                                position: position, into: scratch.logits,
-                                               tokenWord: scratch.outToken) { cb in
-                try scratch.sampler.sample(commandBuffer: cb, logits: scratch.logits,
+                                               tokenWord: scratch.outToken) { encoder in
+                try scratch.sampler.sample(encoder: encoder, logits: scratch.logits,
                                            probs: scratch.probs, history: [],
                                            config: config, position: samplePosition,
                                            outToken: scratch.outToken)

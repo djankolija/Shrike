@@ -148,6 +148,24 @@ final class Sampler {
                        config: GenerationConfig,
                        position: Int,
                        outToken: MTLBuffer) throws -> SamplePath {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        let path = try sample(encoder: encoder, logits: logits, probs: probs,
+                              history: history, config: config, position: position,
+                              outToken: outToken)
+        encoder.endEncoding()
+        return path
+    }
+
+    @discardableResult
+    func sample(encoder: MTLComputeCommandEncoder,
+                       logits: MTLBuffer,
+                       probs: MTLBuffer,
+                       history: [Int32],
+                       config: GenerationConfig,
+                       position: Int,
+                       outToken: MTLBuffer) throws -> SamplePath {
         let v = UInt32(vocab)
 
         let appliedPenalty = config.repetitionPenalty != 1.0 && !history.isEmpty
@@ -157,13 +175,13 @@ final class Sampler {
                                           penalty: config.repetitionPenalty)
         }
         if let softcapTiled {
-            try softcapTiled.encode(commandBuffer: commandBuffer,
-                                    logits: logits, probs: probs, v: v,
-                                    softcap: logitSoftcap)
+            softcapTiled.encode(encoder: encoder,
+                                logits: logits, probs: probs, v: v,
+                                softcap: logitSoftcap)
         } else {
-            try softcap.encode(commandBuffer: commandBuffer,
-                               logits: logits, probs: probs, v: v,
-                               softcap: logitSoftcap)
+            softcap.encode(encoder: encoder,
+                           logits: logits, probs: probs, v: v,
+                           softcap: logitSoftcap)
         }
 
         let isGreedy = config.temperature == 0
@@ -181,21 +199,21 @@ final class Sampler {
         if config.temperature > 0,
            let requestedK = config.topK,
            (1...64).contains(requestedK) {
-            try topK64Kernel.encode(commandBuffer: commandBuffer,
-                                    probs: probs,
-                                    outToken: outToken,
-                                    temperature: config.temperature,
-                                    topP: config.topP ?? 1.0,
-                                    seed: seed,
-                                    topK: UInt32(requestedK))
+            topK64Kernel.encode(encoder: encoder,
+                               probs: probs,
+                               outToken: outToken,
+                               temperature: config.temperature,
+                               topP: config.topP ?? 1.0,
+                               seed: seed,
+                               topK: UInt32(requestedK))
         } else {
-            try sampleKernel.encode(commandBuffer: commandBuffer,
-                                    probs: probs, outToken: outToken, v: v,
-                                    temperature: isGreedy ? 0.0 : config.temperature,
-                                    topK: UInt32(config.topK ?? 0),
-                                    topP: config.topP ?? 1.0,
-                                    seed: seed,
-                                    position: UInt32(position))
+            sampleKernel.encode(encoder: encoder,
+                                probs: probs, outToken: outToken, v: v,
+                                temperature: isGreedy ? 0.0 : config.temperature,
+                                topK: UInt32(config.topK ?? 0),
+                                topP: config.topP ?? 1.0,
+                                seed: seed,
+                                position: UInt32(position))
         }
 
         if appliedPenalty { return .hostPenalty }

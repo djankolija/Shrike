@@ -25,22 +25,30 @@ final class LogitSoftcapSoftmax {
                        probs: MTLBuffer,
                        v: UInt32,
                        softcap: Float = 30.0) throws {
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
-        enc.setComputePipelineState(pso)
-        enc.setBuffer(logits, offset: 0, index: 0)
-        enc.setBuffer(probs,  offset: 0, index: 1)
+        encode(encoder: encoder, logits: logits, probs: probs, v: v, softcap: softcap)
+        encoder.endEncoding()
+    }
+
+    func encode(encoder: MTLComputeCommandEncoder,
+                       logits: MTLBuffer,
+                       probs: MTLBuffer,
+                       v: UInt32,
+                       softcap: Float = 30.0) {
+        encoder.setComputePipelineState(pso)
+        encoder.setBuffer(logits, offset: 0, index: 0)
+        encoder.setBuffer(probs,  offset: 0, index: 1)
         var vVar       = v
         var softcapVar = softcap
-        enc.setBytes(&vVar,       length: MemoryLayout<UInt32>.size, index: 2)
-        enc.setBytes(&softcapVar, length: MemoryLayout<Float>.size,  index: 3)
+        encoder.setBytes(&vVar,       length: MemoryLayout<UInt32>.size, index: 2)
+        encoder.setBytes(&softcapVar, length: MemoryLayout<Float>.size,  index: 3)
 
         let threadsPerGroup = min(Int(pso.maxTotalThreadsPerThreadgroup), 256)
         let gridSize = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
         let tgSize   = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
-        enc.dispatchThreads(gridSize, threadsPerThreadgroup: tgSize)
-        enc.endEncoding()
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: tgSize)
     }
 }
 
@@ -91,49 +99,49 @@ final class LogitSoftcapSoftmaxTiled {
                 probs: MTLBuffer,
                 v: UInt32,
                 softcap: Float = 30.0) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encode(encoder: encoder, logits: logits, probs: probs, v: v, softcap: softcap)
+        encoder.endEncoding()
+    }
+
+    func encode(encoder: MTLComputeCommandEncoder,
+                logits: MTLBuffer,
+                probs: MTLBuffer,
+                v: UInt32,
+                softcap: Float = 30.0) {
         precondition(Int(v) == vocab, "vocab mismatch: built for \(vocab), got \(v)")
         var vVar = v
         var softcapVar = softcap
         var tileCount = UInt32(tiles)
         let threads = MTLSize(width: 256, height: 1, depth: 1)
 
-        guard let enc1 = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
-        enc1.setComputePipelineState(stage1PSO)
-        enc1.setBuffer(logits, offset: 0, index: 0)
-        enc1.setBuffer(tileMax, offset: 0, index: 1)
-        enc1.setBuffer(tileSum, offset: 0, index: 2)
-        enc1.setBytes(&vVar, length: MemoryLayout<UInt32>.size, index: 3)
-        enc1.setBytes(&softcapVar, length: MemoryLayout<Float>.size, index: 4)
-        enc1.dispatchThreadgroups(MTLSize(width: tiles, height: 1, depth: 1),
+        encoder.setComputePipelineState(stage1PSO)
+        encoder.setBuffer(logits, offset: 0, index: 0)
+        encoder.setBuffer(tileMax, offset: 0, index: 1)
+        encoder.setBuffer(tileSum, offset: 0, index: 2)
+        encoder.setBytes(&vVar, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&softcapVar, length: MemoryLayout<Float>.size, index: 4)
+        encoder.dispatchThreadgroups(MTLSize(width: tiles, height: 1, depth: 1),
                                   threadsPerThreadgroup: threads)
-        enc1.endEncoding()
 
-        guard let enc2 = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
-        enc2.setComputePipelineState(mergePSO)
-        enc2.setBuffer(tileMax, offset: 0, index: 0)
-        enc2.setBuffer(tileSum, offset: 0, index: 1)
-        enc2.setBuffer(pair, offset: 0, index: 2)
-        enc2.setBytes(&tileCount, length: MemoryLayout<UInt32>.size, index: 3)
-        enc2.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+        encoder.setComputePipelineState(mergePSO)
+        encoder.setBuffer(tileMax, offset: 0, index: 0)
+        encoder.setBuffer(tileSum, offset: 0, index: 1)
+        encoder.setBuffer(pair, offset: 0, index: 2)
+        encoder.setBytes(&tileCount, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
                                   threadsPerThreadgroup: threads)
-        enc2.endEncoding()
 
-        guard let enc3 = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
-        enc3.setComputePipelineState(normalizePSO)
-        enc3.setBuffer(logits, offset: 0, index: 0)
-        enc3.setBuffer(probs, offset: 0, index: 1)
-        enc3.setBuffer(pair, offset: 0, index: 2)
-        enc3.setBytes(&vVar, length: MemoryLayout<UInt32>.size, index: 3)
-        enc3.setBytes(&softcapVar, length: MemoryLayout<Float>.size, index: 4)
-        enc3.dispatchThreads(MTLSize(width: vocab, height: 1, depth: 1),
+        encoder.setComputePipelineState(normalizePSO)
+        encoder.setBuffer(logits, offset: 0, index: 0)
+        encoder.setBuffer(probs, offset: 0, index: 1)
+        encoder.setBuffer(pair, offset: 0, index: 2)
+        encoder.setBytes(&vVar, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&softcapVar, length: MemoryLayout<Float>.size, index: 4)
+        encoder.dispatchThreads(MTLSize(width: vocab, height: 1, depth: 1),
                              threadsPerThreadgroup: threads)
-        enc3.endEncoding()
     }
 }
 
@@ -165,30 +173,44 @@ final class Sample {
                        topP: Float = 1.0,
                        seed: UInt64,
                        position: UInt32 = 0) throws {
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
-        enc.setComputePipelineState(pso)
-        enc.setBuffer(probs,    offset: 0, index: 0)
-        enc.setBuffer(outToken, offset: 0, index: 1)
+        encode(encoder: encoder, probs: probs, outToken: outToken, v: v,
+               temperature: temperature, topK: topK, topP: topP,
+               seed: seed, position: position)
+        encoder.endEncoding()
+    }
+
+    func encode(encoder: MTLComputeCommandEncoder,
+                       probs: MTLBuffer,
+                       outToken: MTLBuffer,
+                       v: UInt32,
+                       temperature: Float = 1.0,
+                       topK: UInt32 = 0,
+                       topP: Float = 1.0,
+                       seed: UInt64,
+                       position: UInt32 = 0) {
+        encoder.setComputePipelineState(pso)
+        encoder.setBuffer(probs,    offset: 0, index: 0)
+        encoder.setBuffer(outToken, offset: 0, index: 1)
         var vVar    = v
         var tVar    = temperature
         var kVar    = topK
         var pVar    = topP
         var sVar    = seed
         var posVar  = position
-        enc.setBytes(&vVar, length: MemoryLayout<UInt32>.size,  index: 2)
-        enc.setBytes(&tVar, length: MemoryLayout<Float>.size,   index: 3)
-        enc.setBytes(&kVar, length: MemoryLayout<UInt32>.size,  index: 4)
-        enc.setBytes(&pVar, length: MemoryLayout<Float>.size,   index: 5)
-        enc.setBytes(&sVar, length: MemoryLayout<UInt64>.size,  index: 6)
-        enc.setBytes(&posVar, length: MemoryLayout<UInt32>.size, index: 7)
+        encoder.setBytes(&vVar, length: MemoryLayout<UInt32>.size,  index: 2)
+        encoder.setBytes(&tVar, length: MemoryLayout<Float>.size,   index: 3)
+        encoder.setBytes(&kVar, length: MemoryLayout<UInt32>.size,  index: 4)
+        encoder.setBytes(&pVar, length: MemoryLayout<Float>.size,   index: 5)
+        encoder.setBytes(&sVar, length: MemoryLayout<UInt64>.size,  index: 6)
+        encoder.setBytes(&posVar, length: MemoryLayout<UInt32>.size, index: 7)
 
         let threadsPerGroup = min(Int(pso.maxTotalThreadsPerThreadgroup), 256)
         let gridSize = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
         let tgSize   = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
-        enc.dispatchThreads(gridSize, threadsPerThreadgroup: tgSize)
-        enc.endEncoding()
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: tgSize)
     }
 }
 enum SampleTopK64Error: Error {
@@ -271,6 +293,21 @@ final class SampleTopK64 {
                        topP: Float,
                        seed: UInt64,
                        topK: UInt32 = 64) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encode(encoder: encoder, probs: probs, outToken: outToken,
+               temperature: temperature, topP: topP, seed: seed, topK: topK)
+        encoder.endEncoding()
+    }
+
+    public func encode(encoder: MTLComputeCommandEncoder,
+                       probs: MTLBuffer,
+                       outToken: MTLBuffer,
+                       temperature: Float,
+                       topP: Float,
+                       seed: UInt64,
+                       topK: UInt32 = 64) {
         // K26: the final stage reweights survivors as p^(1/temperature), so
         // temperature == 0 would produce pow(·, inf) garbage. Greedy sampling
         // must go through the fused lm_head (or the `sample` kernel's
@@ -282,52 +319,40 @@ final class SampleTopK64 {
                      "SampleTopK64 serves k in 1...64; stage 1 keeps 64 per tile, so a larger k is not recoverable from its output")
         let threads = MTLSize(width: 256, height: 1, depth: 1)
 
-        guard let enc1 = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
-        enc1.setComputePipelineState(stage1PSO)
-        enc1.setBuffer(probs, offset: 0, index: 0)
-        enc1.setBuffer(stage1Values, offset: 0, index: 1)
-        enc1.setBuffer(stage1Indices, offset: 0, index: 2)
+        encoder.setComputePipelineState(stage1PSO)
+        encoder.setBuffer(probs, offset: 0, index: 0)
+        encoder.setBuffer(stage1Values, offset: 0, index: 1)
+        encoder.setBuffer(stage1Indices, offset: 0, index: 2)
         var v = UInt32(vocab)
-        enc1.setBytes(&v, length: MemoryLayout<UInt32>.size, index: 3)
-        enc1.dispatchThreadgroups(MTLSize(width: stage1Groups, height: 1, depth: 1),
+        encoder.setBytes(&v, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.dispatchThreadgroups(MTLSize(width: stage1Groups, height: 1, depth: 1),
                                   threadsPerThreadgroup: threads)
-        enc1.endEncoding()
 
-        guard let enc2 = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
-        enc2.setComputePipelineState(reducePSO)
-        enc2.setBuffer(stage1Values, offset: 0, index: 0)
-        enc2.setBuffer(stage1Indices, offset: 0, index: 1)
-        enc2.setBuffer(stage2Values, offset: 0, index: 2)
-        enc2.setBuffer(stage2Indices, offset: 0, index: 3)
+        encoder.setComputePipelineState(reducePSO)
+        encoder.setBuffer(stage1Values, offset: 0, index: 0)
+        encoder.setBuffer(stage1Indices, offset: 0, index: 1)
+        encoder.setBuffer(stage2Values, offset: 0, index: 2)
+        encoder.setBuffer(stage2Indices, offset: 0, index: 3)
         var count = UInt32(stage1Count)
-        enc2.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 4)
-        enc2.dispatchThreadgroups(MTLSize(width: stage2Groups, height: 1, depth: 1),
+        encoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.dispatchThreadgroups(MTLSize(width: stage2Groups, height: 1, depth: 1),
                                   threadsPerThreadgroup: threads)
-        enc2.endEncoding()
 
-        guard let enc3 = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
-        enc3.setComputePipelineState(finalPSO)
-        enc3.setBuffer(stage2Values, offset: 0, index: 0)
-        enc3.setBuffer(stage2Indices, offset: 0, index: 1)
-        enc3.setBuffer(outToken, offset: 0, index: 2)
+        encoder.setComputePipelineState(finalPSO)
+        encoder.setBuffer(stage2Values, offset: 0, index: 0)
+        encoder.setBuffer(stage2Indices, offset: 0, index: 1)
+        encoder.setBuffer(outToken, offset: 0, index: 2)
         var finalCount = UInt32(stage2Count)
         var temp = temperature
         var p = topP
         var rngSeed = seed
         var k = topK
-        enc3.setBytes(&finalCount, length: MemoryLayout<UInt32>.size, index: 3)
-        enc3.setBytes(&temp, length: MemoryLayout<Float>.size, index: 4)
-        enc3.setBytes(&p, length: MemoryLayout<Float>.size, index: 5)
-        enc3.setBytes(&rngSeed, length: MemoryLayout<UInt64>.size, index: 6)
-        enc3.setBytes(&k, length: MemoryLayout<UInt32>.size, index: 7)
-        enc3.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+        encoder.setBytes(&finalCount, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&temp, length: MemoryLayout<Float>.size, index: 4)
+        encoder.setBytes(&p, length: MemoryLayout<Float>.size, index: 5)
+        encoder.setBytes(&rngSeed, length: MemoryLayout<UInt64>.size, index: 6)
+        encoder.setBytes(&k, length: MemoryLayout<UInt32>.size, index: 7)
+        encoder.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
                                   threadsPerThreadgroup: threads)
-        enc3.endEncoding()
     }
 }

@@ -683,6 +683,27 @@ nine encoders (the final norm, the lm_head GEMV, the sampler's three softmax sta
 and three top-k stages, the embed), eight boundaries at 22 µs, about 0.18 ms per
 token, a T6.0b before the merges.
 
+**T6.0b (2026-09-09), the boundary command on one encoder: landed.** The final
+norm, the lm_head GEMV, the sampler's stages and the word-fed embed encode on one
+serial encoder (the synchronous head path also takes one encoder for its two
+kernels); the sampler and the four sampling kernels and the two embed encoders gained
+`encoder:` variants with the `commandBuffer:` overloads as thin wrappers; the
+producer protocol's sample closure takes the encoder; a test runs the sampler and
+the embed on one encoder and on separate encoders at temperature 0 and at top-k 8
+with a seed and asserts the token equal and the embed output bit-identical. The
+four gates (1,245 tests in 172 suites in 203 s), the golden identical on both boxes
+(the mini on e0f8bd17dc8ecbb0). The arms against T6.0's: `head_logits` 4.82 / 4.80
+to 4.73 / 4.73 on the 300, 4.73 / 4.72 to 4.67 / 4.69 on the card, 4.76 / 4.76 to
+4.73 / 4.70 on the 1k, so 0.06 to 0.09 ms per token for eight boundaries, **about
+10 µs a boundary between the sampler's small kernels**, half the 22 measured between
+the speculative command's larger ones; the wall 16.87 / 17.06 to 17.12 / 17.12 on the
+300, 15.80 / 15.89 to 15.90 / 15.92 on the card, the 1k 16.86 / 16.88 to 16.58 /
+16.88 with a slow-drive first lifetime (`prefetch_late` 81); the pair 300 at 3.13 s
+warm. Inside the drift on the wall, the row moved as pre-registered in sign at
+half the size; kept as simpler and non-negative. The encoder boundary's cost is
+not one number: about 22 µs around the speculative command's indirect dispatches
+and about 10 around the sampler's small kernels.
+
 ## Method
 
 - The four gates per commit (release build with zero warnings, `swiftlint lint

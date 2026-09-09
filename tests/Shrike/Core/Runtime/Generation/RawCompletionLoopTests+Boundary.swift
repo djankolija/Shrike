@@ -56,14 +56,16 @@ extension RawCompletionLoopTests {
 
     func produce(token: Int32?, position: Int, into logits: MTLBuffer,
                  tokenWord: MTLBuffer,
-                 sample: (MTLCommandBuffer) throws -> Void) async throws {
+                 sample: (MTLComputeCommandEncoder) throws -> Void) async throws {
       boundaryCalls += 1
       if token == nil { continuedCalls += 1 }
       writeLogits(for: token ?? lastAwaited, into: logits)
-      guard let cb = context.queue.makeCommandBuffer() else {
+      guard let cb = context.queue.makeCommandBuffer(),
+            let encoder = cb.makeComputeCommandEncoder() else {
         throw ModelError.residentBufferWrapFailed
       }
-      try sample(cb)
+      try sample(encoder)
+      encoder.endEncoding()
       runToCompletion(cb)
       pendingToken = Int32(bitPattern: tokenWord.contents().load(as: UInt32.self))
     }

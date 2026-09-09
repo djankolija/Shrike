@@ -33,13 +33,35 @@ final class EmbedLookupInt4 {
                        d: UInt32,
                        outScale: Float,
                        vocab: UInt32) throws {
-        try encodeTokenLookup(commandBuffer: commandBuffer,
-                               table: table, tableOffset: tableOffset,
-                               scales: scales, scalesOffset: scalesOffset,
-                               biases: biases, biasesOffset: biasesOffset,
-                               out: out, outOffset: outOffset,
-                               tokenSource: .constant(tokenId),
-                               d: d, outScale: outScale, vocab: vocab)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encode(encoder: encoder,
+               table: table, tableOffset: tableOffset,
+               scales: scales, scalesOffset: scalesOffset,
+               biases: biases, biasesOffset: biasesOffset,
+               out: out, outOffset: outOffset,
+               tokenId: tokenId,
+               d: d, outScale: outScale, vocab: vocab)
+        encoder.endEncoding()
+    }
+
+    func encode(encoder: MTLComputeCommandEncoder,
+                       table:  MTLBuffer, tableOffset:  Int = 0,
+                       scales: MTLBuffer, scalesOffset: Int = 0,
+                       biases: MTLBuffer, biasesOffset: Int = 0,
+                       out:    MTLBuffer, outOffset: Int = 0,
+                       tokenId: UInt32,
+                       d: UInt32,
+                       outScale: Float,
+                       vocab: UInt32) {
+        encodeTokenLookup(encoder: encoder,
+                          table: table, tableOffset: tableOffset,
+                          scales: scales, scalesOffset: scalesOffset,
+                          biases: biases, biasesOffset: biasesOffset,
+                          out: out, outOffset: outOffset,
+                          tokenSource: .constant(tokenId),
+                          d: d, outScale: outScale, vocab: vocab)
     }
 
     func encode(commandBuffer: MTLCommandBuffer,
@@ -51,16 +73,38 @@ final class EmbedLookupInt4 {
                        d: UInt32,
                        outScale: Float,
                        vocab: UInt32) throws {
-        try encodeTokenLookup(commandBuffer: commandBuffer,
-                               table: table, tableOffset: tableOffset,
-                               scales: scales, scalesOffset: scalesOffset,
-                               biases: biases, biasesOffset: biasesOffset,
-                               out: out, outOffset: outOffset,
-                               tokenSource: .buffer(tokenBuffer, tokenOffset),
-                               d: d, outScale: outScale, vocab: vocab)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encode(encoder: encoder,
+               table: table, tableOffset: tableOffset,
+               scales: scales, scalesOffset: scalesOffset,
+               biases: biases, biasesOffset: biasesOffset,
+               out: out, outOffset: outOffset,
+               tokenBuffer: tokenBuffer, tokenOffset: tokenOffset,
+               d: d, outScale: outScale, vocab: vocab)
+        encoder.endEncoding()
     }
 
-    private func encodeTokenLookup(commandBuffer: MTLCommandBuffer,
+    func encode(encoder: MTLComputeCommandEncoder,
+                       table:  MTLBuffer, tableOffset:  Int = 0,
+                       scales: MTLBuffer, scalesOffset: Int = 0,
+                       biases: MTLBuffer, biasesOffset: Int = 0,
+                       out:    MTLBuffer, outOffset: Int = 0,
+                       tokenBuffer: MTLBuffer, tokenOffset: Int = 0,
+                       d: UInt32,
+                       outScale: Float,
+                       vocab: UInt32) {
+        encodeTokenLookup(encoder: encoder,
+                          table: table, tableOffset: tableOffset,
+                          scales: scales, scalesOffset: scalesOffset,
+                          biases: biases, biasesOffset: biasesOffset,
+                          out: out, outOffset: outOffset,
+                          tokenSource: .buffer(tokenBuffer, tokenOffset),
+                          d: d, outScale: outScale, vocab: vocab)
+    }
+
+    private func encodeTokenLookup(encoder: MTLComputeCommandEncoder,
                                     table:  MTLBuffer, tableOffset:  Int,
                                     scales: MTLBuffer, scalesOffset: Int,
                                     biases: MTLBuffer, biasesOffset: Int,
@@ -68,35 +112,31 @@ final class EmbedLookupInt4 {
                                     tokenSource: TokenSource,
                                     d: UInt32,
                                     outScale: Float,
-                                    vocab: UInt32) throws {
+                                    vocab: UInt32) {
         precondition(d % UInt32(Quantization.groupSize) == 0,
                      "D must be a multiple of \(Quantization.groupSize)")
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalError.commandEncoderFailed
-        }
-        enc.setComputePipelineState(pso)
-        enc.setBuffer(table,  offset: tableOffset,  index: 0)
-        enc.setBuffer(scales, offset: scalesOffset, index: 1)
-        enc.setBuffer(biases, offset: biasesOffset, index: 2)
-        enc.setBuffer(out,    offset: outOffset,    index: 3)
+        encoder.setComputePipelineState(pso)
+        encoder.setBuffer(table,  offset: tableOffset,  index: 0)
+        encoder.setBuffer(scales, offset: scalesOffset, index: 1)
+        encoder.setBuffer(biases, offset: biasesOffset, index: 2)
+        encoder.setBuffer(out,    offset: outOffset,    index: 3)
         switch tokenSource {
         case .constant(let tokenId):
             var tokenVar = tokenId
-            enc.setBytes(&tokenVar, length: MemoryLayout<UInt32>.size, index: 4)
+            encoder.setBytes(&tokenVar, length: MemoryLayout<UInt32>.size, index: 4)
         case .buffer(let tokenBuffer, let tokenOffset):
-            enc.setBuffer(tokenBuffer, offset: tokenOffset, index: 4)
+            encoder.setBuffer(tokenBuffer, offset: tokenOffset, index: 4)
         }
         var dVar     = d
         var sVar     = outScale
         var vocabVar = vocab
-        enc.setBytes(&dVar,     length: MemoryLayout<UInt32>.size, index: 5)
-        enc.setBytes(&sVar,     length: MemoryLayout<Float>.size,  index: 6)
-        enc.setBytes(&vocabVar, length: MemoryLayout<UInt32>.size, index: 7)
+        encoder.setBytes(&dVar,     length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&sVar,     length: MemoryLayout<Float>.size,  index: 6)
+        encoder.setBytes(&vocabVar, length: MemoryLayout<UInt32>.size, index: 7)
 
         let threadsPerGroup = min(Int(pso.maxTotalThreadsPerThreadgroup), 256)
         let gridSize = MTLSize(width: Int(d), height: 1, depth: 1)
         let tgSize   = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
-        enc.dispatchThreads(gridSize, threadsPerThreadgroup: tgSize)
-        enc.endEncoding()
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: tgSize)
     }
 }

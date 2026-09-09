@@ -18,7 +18,7 @@ public protocol BoundaryLogitProducer: LogitProducer {
     /// the previous boundary encoded from `tokenWord`.
     func produce(token: Int32?, position: Int, into logits: MTLBuffer,
                  tokenWord: MTLBuffer,
-                 sample: @escaping (MTLCommandBuffer) throws -> Void) async throws
+                 sample: @escaping (MTLComputeCommandEncoder) throws -> Void) async throws
     /// The id the last boundary's sampler wrote, once the host can see it.
     func awaitBoundaryToken() throws -> Int32
 }

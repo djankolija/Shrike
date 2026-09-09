@@ -1471,7 +1471,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     public func produce(token: Int32?, position: Int, into logits: MTLBuffer,
                         tokenWord: MTLBuffer,
-                        sample: @escaping (MTLCommandBuffer) throws -> Void) async throws {
+                        sample: @escaping (MTLComputeCommandEncoder) throws -> Void) async throws {
         try prefillChunkState.requireClean(operation: "produce")
         try await produceToken(token: token,
                                position: position,
@@ -2055,7 +2055,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                               emitHead: Bool,
                               outputMode: PrefillOutputMode,
                               boundaryWord: MTLBuffer? = nil,
-                              sample: ((MTLCommandBuffer) throws -> Void)? = nil) async throws {
+                              sample: ((MTLComputeCommandEncoder) throws -> Void)? = nil) async throws {
         let kvPosition = kv?.position ?? 0
         guard kvPosition == position else {
             throw PrefillError.prefillCursorMismatch(
@@ -2145,8 +2145,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     private func encodeDecodeEmbed(token: Int32, d D: UInt32, outScale: Float) throws {
         let embedCB = try runSync { cb in
-            try self.encodeEmbedLookup(cb, token: .constant(UInt32(bitPattern: token)),
+            guard let encoder = cb.makeComputeCommandEncoder() else {
+                throw MetalError.commandEncoderFailed
+            }
+            try self.encodeEmbedLookup(encoder, token: .constant(UInt32(bitPattern: token)),
                                        d: D, outScale: outScale)
+            encoder.endEncoding()
         }
         guard let embedCB else {
             throw ModelError.residentBufferWrapFailed
@@ -2154,35 +2158,35 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         recordKernelGPU(role: "embed", embedCB)
     }
 
-    private func encodeEmbedLookup(_ cb: MTLCommandBuffer, token: EmbedTokenSource,
+    private func encodeEmbedLookup(_ encoder: MTLComputeCommandEncoder, token: EmbedTokenSource,
                                    d D: UInt32, outScale: Float) throws {
         let emb = try model.embedding()
         let vocab = UInt32(cfg.vocabSize)
         switch (affineEmbed, token) {
         case (let affine?, .constant(let id)):
-            try affine.encode(commandBuffer: cb,
-                              table: emb.buffer, tableOffset: Int(emb.offset),
-                              scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
-                              biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
-                              out: hidden, tokenId: id, d: D, outScale: outScale, vocab: vocab)
+            affine.encode(encoder: encoder,
+                          table: emb.buffer, tableOffset: Int(emb.offset),
+                          scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
+                          biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
+                          out: hidden, tokenId: id, d: D, outScale: outScale, vocab: vocab)
         case (let affine?, .word(let word)):
-            try affine.encode(commandBuffer: cb,
-                              table: emb.buffer, tableOffset: Int(emb.offset),
-                              scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
-                              biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
-                              out: hidden, tokenBuffer: word, d: D, outScale: outScale, vocab: vocab)
+            affine.encode(encoder: encoder,
+                          table: emb.buffer, tableOffset: Int(emb.offset),
+                          scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
+                          biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
+                          out: hidden, tokenBuffer: word, d: D, outScale: outScale, vocab: vocab)
         case (nil, .constant(let id)):
-            try embedInt4.encode(commandBuffer: cb,
-                                 table: emb.buffer, tableOffset: Int(emb.offset),
-                                 scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
-                                 biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
-                                 out: hidden, tokenId: id, d: D, outScale: outScale, vocab: vocab)
+            embedInt4.encode(encoder: encoder,
+                             table: emb.buffer, tableOffset: Int(emb.offset),
+                             scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
+                             biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
+                             out: hidden, tokenId: id, d: D, outScale: outScale, vocab: vocab)
         case (nil, .word(let word)):
-            try embedInt4.encode(commandBuffer: cb,
-                                 table: emb.buffer, tableOffset: Int(emb.offset),
-                                 scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
-                                 biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
-                                 out: hidden, tokenBuffer: word, d: D, outScale: outScale, vocab: vocab)
+            embedInt4.encode(encoder: encoder,
+                             table: emb.buffer, tableOffset: Int(emb.offset),
+                             scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
+                             biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
+                             out: hidden, tokenBuffer: word, d: D, outScale: outScale, vocab: vocab)
         }
     }
 
@@ -2190,17 +2194,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// sampler's write from the previous token's.
     private func emitBoundary(into logits: MTLBuffer, d D: UInt32, rmsEps eps: Float,
                               outScale: Float, tokenWord: MTLBuffer,
-                              sample: (MTLCommandBuffer) throws -> Void) throws {
+                              sample: (MTLComputeCommandEncoder) throws -> Void) throws {
         let fNorm = try model.finalNorm()
         let lm = try model.lmHead()
-        guard let cb = ctx.queue.makeCommandBuffer() else {
+        guard let cb = ctx.queue.makeCommandBuffer(),
+              let encoder = cb.makeComputeCommandEncoder() else {
             throw ModelError.residentBufferWrapFailed
         }
         let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        try encodeFinalNorm(cb, weights: fNorm, d: D, rmsEps: eps)
-        try encodeLMHead(cb, weights: lm, into: logits, d: D)
-        try sample(cb)
-        try encodeEmbedLookup(cb, token: .word(tokenWord), d: D, outScale: outScale)
+        encodeFinalNorm(encoder, weights: fNorm, d: D, rmsEps: eps)
+        encodeLMHead(encoder, weights: lm, into: logits, d: D)
+        try sample(encoder)
+        try encodeEmbedLookup(encoder, token: .word(tokenWord), d: D, outScale: outScale)
+        encoder.endEncoding()
         tokenWord.contents().storeBytes(of: Self.boundaryTokenSentinel, as: UInt32.self)
         cb.commit()
         boundaryCommand = cb
@@ -2208,20 +2214,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
     }
 
-    private func encodeFinalNorm(_ cb: MTLCommandBuffer, weights fNorm: TensorView,
-                                 d D: UInt32, rmsEps eps: Float) throws {
-        try rms.encodeBF16W(commandBuffer: cb, x: hidden,
-                            weight: fNorm.buffer, weightOffset: Int(fNorm.offset),
-                            out: normed, d: D, eps: eps)
+    private func encodeFinalNorm(_ encoder: MTLComputeCommandEncoder, weights fNorm: TensorView,
+                                 d D: UInt32, rmsEps eps: Float) {
+        rms.encodeBF16W(encoder: encoder, x: hidden,
+                        weight: fNorm.buffer, weightOffset: Int(fNorm.offset),
+                        out: normed, d: D, eps: eps)
     }
 
-    private func encodeLMHead(_ cb: MTLCommandBuffer, weights lm: TensorView,
-                              into logits: MTLBuffer, d D: UInt32) throws {
-        try encodePrimaryGEMV(commandBuffer: cb,
-                              weights: lm.buffer, weightsOffset: Int(lm.offset),
-                              scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
-                              biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
-                              x: normed, y: logits, m: UInt32(cfg.vocabSize), n: D)
+    private func encodeLMHead(_ encoder: MTLComputeCommandEncoder, weights lm: TensorView,
+                              into logits: MTLBuffer, d D: UInt32) {
+        encodePrimaryGEMV(encoder: encoder,
+                          weights: lm.buffer, weightsOffset: Int(lm.offset),
+                          scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
+                          biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
+                          x: normed, y: logits, m: UInt32(cfg.vocabSize), n: D)
     }
 
     private func produceDenseLayer(layer L: Int, position: Int, isLinear: Bool,
@@ -2366,11 +2372,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // greedyTokenBuf; the logits path writes the complete vector.
         let fNorm = try model.finalNorm()
         let lm    = try model.lmHead()
-        let gFinalNorm: (MTLCommandBuffer) throws -> Void = { cb in
-            try self.encodeFinalNorm(cb, weights: fNorm, d: D, rmsEps: eps)
-        }
-        let gLmHead: (MTLCommandBuffer) throws -> Void = { cb in
-            try self.encodeLMHead(cb, weights: lm, into: logits, d: D)
+        let gLogitsHead: (MTLCommandBuffer) throws -> Void = { cb in
+            guard let encoder = cb.makeComputeCommandEncoder() else {
+                throw MetalError.commandEncoderFailed
+            }
+            self.encodeFinalNorm(encoder, weights: fNorm, d: D, rmsEps: eps)
+            self.encodeLMHead(encoder, weights: lm, into: logits, d: D)
+            encoder.endEncoding()
         }
         let gFusionHead: (MTLCommandBuffer) throws -> Void = { cb in
             try self.fusionHead.encodeGreedyDecode(
@@ -2394,10 +2402,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 totalHeadFusedNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
                 lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
             } else {
-                guard let headCB = try runSync({ cb in
-                    try gFinalNorm(cb)
-                    try gLmHead(cb)
-                }) else {
+                guard let headCB = try runSync(gLogitsHead) else {
                     throw ModelError.residentBufferWrapFailed
                 }
                 recordKernelGPU(role: "head_logits", headCB)

@@ -211,9 +211,14 @@ and the fold's ruling follows it on the boundary costs Task 6 re-measures.
       GPU's role time down 3.3 ms per token over 147 encoder boundaries, **about 22
       µs a boundary**, the wall +1.6 to +2.8 % on the 300 and the 1k, about 1.0 to
       1.7 ms per token; the merges' 12 µs pricing stands for dispatch boundaries.
-- [ ] **T6.0b The boundary command on one encoder**: the final norm, the lm_head
-      GEMV, the sampler's six stages and the embed, nine encoders to one; about 0.18
-      ms per token at 22 µs a boundary; the same steps.
+- [x] **T6.0b The boundary command on one encoder**: DONE 2026-09-09, landed; nine
+      encoders to one, the sampler, four sampling kernels and two embed encoders with
+      `encoder:` variants, the protocol's sample closure on the encoder, the
+      one-encoder sampler-plus-embed test bit-identical; the gates (1,245 tests in
+      172 suites), the golden identical on both boxes (the mini on e0f8bd17dc8ecbb0);
+      the arms against T6.0's: `head_logits` down 0.06 to 0.09 ms per token, about 10
+      µs a boundary between small kernels (half the speculative command's 22), the
+      wall inside the drift; kept as simpler and non-negative.
 - [ ] **T6.1 The shared gate and up GEMVs as one grid** (the cleanest; 40 walls a
       token, 26.5 on the path): the read, the merged kernel, the bitwise arm against
       the two it replaces, the gates, the golden, the arms.
