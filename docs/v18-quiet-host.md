@@ -487,7 +487,9 @@ answer unchanged.
   the held commit and the pass from layer 1 as today; then `history.append`, the
   counters, the position. On a stop nothing is committed.
 - S6. `LogitProducer` grows the two-step shape with a default that keeps the
-  synchronous path for the scripted test producer, the CLI and the app.
+  synchronous path for the scripted test producer; `RealForwardRunner` conforms, so
+  the CLI and the app take the boundary path too, except when greedy with the fused
+  head (the whole-branch review corrected the earlier wording here).
 - S7. Fallbacks to today's path, no new knob: a repetition penalty other than 1.0,
   the first token after prefill (`prefillSeed == .logitsWritten`), the fused greedy
   head.
@@ -529,7 +531,11 @@ of which fail with the path switched off and three of which are invariants of bo
 paths; two in the encoder tests (the buffer-fed lookup bit-identical to the
 constant-fed one, both kernels). The four gates: the release build with zero
 warnings, lint zero in 212 files, links clean, 1,242 tests in 170 suites in 203 s.
-The local golden identical on both profiles (T4.4).
+The local golden identical on both profiles (T4.4). A qualifier from the close's
+review: the golden runs the CLI at temperature 0, which takes the fused greedy head,
+so it does not exercise the boundary command, the word wake or the held layer 0; the
+boundary path's real-inference check in this chapter is the card's answer identity
+in every task's arms (the server never takes the fused head) and the loop tests.
 
 **T4.5 (2026-09-09), the deploy and the arms.** Deployed to the mini (binary
 6142e12205c5d3eb with its six bundles), the mini's golden identical on both
@@ -613,6 +619,20 @@ the edge of what an eight-pair A/B by position can (about 0.5 % standard error o
 mean pair). Under the grading rule the fold is not a speed task at its floor; it is a
 structural question, one command per token with two in flight against the agreed-cell
 mechanism and the cancel path, and its ruling is Davor's.
+
+**Davor's ruling (2026-09-09): deferred to v20 as structure.** From the code's side
+the fold is the right shape, one command per token with the host reduced to feeding
+reads and signalling events, and its agreed-cell mechanism is the one v20's SSD
+chapter needs for its own reasons, so it is built there, once. The condition: it is
+designed on its edges before it is built. The stop path (a committed extra pass
+mutates the GDN recurrent state in place, so a snapshot or a cancel is owed, not the
+one-pass-late check Task 4 rejected), the error surfacing per layer when a token is
+one command (a failed read's fail-closed guard must still name its layer), the
+agreed-cell contract between the host and kernels encoded before the router has run,
+and the cancel with two in flight. The architecture is the win; any speedup is a
+bonus. Its graded value today, 0.6 to 0.85 ms per token, is under the noise and grows
+in relative terms as the token gets faster (about 1.5 to 2 % of a 45 ms token after
+v19's scan rewrite). v18 closes without it.
 
 ### Task 6: the walls (D1; scheduled by Davor's ruling, 2026-09-09, after Task 3)
 
@@ -704,7 +724,9 @@ producer protocol's sample closure takes the encoder; a test runs the sampler an
 the embed on one encoder and on separate encoders at temperature 0 and at top-k 8
 with a seed and asserts the token equal and the embed output bit-identical. The
 four gates (1,245 tests in 172 suites in 203 s), the golden identical on both boxes
-(the mini on e0f8bd17dc8ecbb0). The arms against T6.0's: `head_logits` 4.82 / 4.80
+(the mini on e0f8bd17dc8ecbb0; the golden takes the fused head, so the boundary
+command's own real-inference check is the card's answer identity in the arms, as Task
+4's record says). The arms against T6.0's: `head_logits` 4.82 / 4.80
 to 4.73 / 4.73 on the 300, 4.73 / 4.72 to 4.67 / 4.69 on the card, 4.76 / 4.76 to
 4.73 / 4.70 on the 1k, so 0.06 to 0.09 ms per token for eight boundaries, **about
 10 µs a boundary between the sampler's small kernels**, half the 22 measured between
@@ -729,7 +751,7 @@ construction; a `FusedGateUpGEMV` wrapper in `Kernels/Fusions/` with the
 constant-folded shapes; `SharedExpertInt4.encodeGateUp` dispatches it, the split
 chain and the affine and int8 paths untouched. The bitwise arm,
 `FusedGateUpGEMVTests`: the merged kernel against two plain GEMVs on the same
-inputs, half words equal, at a small shape, at 24 by 192 (the scalar remainder loop
+inputs, half words equal, at a small shape, at 20 by 192 (the scalar remainder loop
 and one threadgroup straddling the two row sets), at a 2-byte weights offset and at
 the served 512 by 2048 through the specialized pipelines; the three fused-chain
 bitwise tests run over the new path. The four gates (the release build with zero
@@ -925,3 +947,114 @@ drift is Task 1's reduce, and it is pinned above.
   the risk is in the cancel path, tested with stop strings and max tokens.
 - The mini's first lifetimes after each deploy; the external build SSD dropping
   off (check the receipt before a local golden).
+
+## The chapter's close (2026-09-09)
+
+The full suite under ThreadSanitizer on the tree at the T6.7 commit, before the
+review's fixes were folded in: 1249 tests in 173 suites, zero reports, 13.7 minutes
+(824 s); and again on the final tree after the fold: 1250 tests in 173 suites, zero
+reports, 14.4 minutes (866 s), with the four gates green on that tree (the release
+build with zero warnings, lint zero in 213 files, links clean, 1250 tests in 173 suites
+in 205 s). The whole-branch review by a fresh reviewer over the eleven commits from
+`c503f7c` to that tree found it ready to merge with fixes: no Critical; three
+Important, all outside the measured paths' answers: the routed stage's lease release
+on a throw between the plan and a hand-off no longer waited for the committed command
+reading the leased slots (the wait the old hit command had; Task 1), the merged layer
+command's error went unchecked on a miss layer once the word had landed because the
+pending record carried only the fixup (Task 3), and the golden never exercises the
+boundary path because the CLI takes the fused greedy head at temperature 0 (Task 4,
+recorded above as a qualifier). Seven Minor: the straddling-threadgroup arm used a
+row count that did not straddle (T6.1, now 20 rows), a fallback in `awaitBoundaryToken`
+that could return the sentinel as a token, a dead hit-slot copy and a stale name in
+the routed stage, the T4 record's claim about the CLI's path, the loop tests all at
+temperature 0 (a seeded temperature-0.8 parity test added), and the architecture
+document's stale stage list. The runtime and test fixes were folded into their owning
+commits; the documents into the close commit.
+
+The tally on the mini, the cold answers' tok/s, two lifetimes per shape, a slow-drive
+lifetime (`prefetch_late` above zero) marked with an asterisk:
+
+| milestone | card | 300 | 1k |
+| --- | ---: | ---: | ---: |
+| the v17 close | 15.57 / 15.62 | 16.43 / 16.30 | 16.14 / 16.16 |
+| Task 1 (C5, a null) | 15.53 / 15.24 | 16.35 / 16.40 | 16.23 / 16.18 |
+| Task 4 (E2) | 15.44 / 15.38* | 16.50 / 16.54 | 16.05* / 16.04* / 16.38 / 15.96* |
+| Task 3 (E1) | 15.66 / 15.32* | 16.61 / 16.60 | 16.41 / 16.42 |
+| T6.0 (the encoder step) | 15.80* / 15.89 | 16.87* / 17.06 | 16.86* / 16.88 |
+| T6.0b | 15.89 / 15.92 | 17.12 / 17.12 | 16.58* / 16.88* |
+| T6.1 (a null, kept) | 16.18 / 16.16 | 16.89 / 17.06* | 16.91 / 16.87 |
+| T6.3 (the close) | 16.16 / 16.16* | 16.76* / 16.93 | 16.74 / 16.75 |
+
+About +3.5 to +4 % on every shape, 2.0 to 2.2 ms off a 62 ms token: the card 64.1 to
+61.9 ms per token, the 300 61.1 to 59.1 (58.4 at T6.0b), the 1k 61.9 to 59.7. Graded:
+Task 4's +1.4 % is an A/B by position (M); T6.0's +1.6 to +2.8 % is two lifetimes per
+shape at the drift's edge, never A/B'd (M, unverified at its size); Task 3's +0.4 to
++0.8 % is two lifetimes inside the drift (unresolved); Task 1, T6.0b, T6.1 and T6.3 are
+nulls on the wall, the last two by A/B. The end-to-end gain is consistent with the sum
+of the measured parts. Every answer identical and the golden byte-identical on both
+boxes at every one of the eleven commits; the misses per token unchanged to the tenth
+across the chapter.
+
+The count across the chapter, at the close against `c503f7c`:
+
+| what | at `c503f7c` | at the close |
+| --- | ---: | ---: |
+| commits on the branch | | 11 |
+| command buffers per token (counted) | about 114: two per layer, a hit command and a fixup per miss layer, three at the boundary | about 57: one per layer, a fixup per miss layer, one at the boundary |
+| encoders in the speculative work, the fixup, the boundary | 4, 3, 9 | 1, 1, 1 |
+| dispatches per token (counted, D1) | about 820 | about 724 |
+| GPU role time off the token (measured) | | about 3.7 ms: T6.0 3.3, T6.0b 0.07, T6.3 0.25, T6.1 unresolved |
+| host-side gaps off the token (measured) | | the boundary's three gaps 0.85 to one of 0.25 ms (Task 4); forty tail-to-speculative gaps, 1.4 ms (Task 3) |
+| Metal kernels | 65 | 66 (the gate and up grid) |
+| `RealForwardRunner.swift` | 5623 lines | 5664 |
+| lines under `sources/` | | +1002 −501 across 14 files |
+| lines under `tests/` | | +873 −55 across 8 files |
+| the serial suite | 1234 tests in 170 suites, 206 s | 1250 in 173, 205 s |
+| the rig's noise, one binary across clean lifetimes of one shape (measured) | assumed | tok/s 1.7 %, the layer roles 0.3 to 0.6 %, the misses 0.1 %, the miss window 3.4 %, the host gaps 15 % |
+
+What the chapter settled:
+
+- **The host is quieter.** One command per layer and one per token boundary, the host
+  spinning on words the GPU writes mid-command rather than on completion marks, layer 0
+  of the next pass encoded during the head and held for the stop check. The three
+  boundary gaps became one, the forty tail-to-speculative boundaries went, and the fold
+  that would take the last forty command boundaries is deferred to v20 as structure,
+  designed on its edges first.
+- **The wall by its kind, measured.** An encoder boundary costs about 22 µs around
+  indirect dispatches and about 10 around small kernels; a dispatch boundary at most 3
+  between two small independent GEMVs, about 5.5 after an indirect kernel before a
+  tiny one, about 1.6 for that pair on the miss path; v10's 12 between dependent routed
+  kernels stands only where it was measured. The encoder step was the prize; the
+  dispatch merges were nulls kept as class 1 and smaller.
+- **The slack rule, observed twice.** T6.0's 3.3 ms of GPU role time became 1.0 to 1.7
+  on the wall; T6.3's 0.25 became nothing; Task 1's hit command sat inside the read's
+  flight. A ledger row is serial only if nothing else the token waits for is in flight
+  beneath it, and a GPU saving inside the speculative command reaches the wall only in
+  part.
+- **Models transferred from one context missed by 2 to 4×; measurements held.** D1's
+  single 12 µs unit priced six merges at 2.2 ms and they came to 0.35 of GPU time; Task 3
+  modelled 0.9 and measured 0.3 to 0.5; Task 4 modelled about 0.6 and measured 0.8. Out
+  of that came the grading rule (the Method): every cost a grade and a range, tasks
+  ranked by the floor, a floor under the noise not built for speed, numbers regraded
+  when load-bearing, small changes batched and measured once.
+- **Class 1 held.** No kernel's arithmetic or its order changed; every fused kernel
+  carries a bitwise arm against the kernels it replaced, red first; the golden identical
+  on both boxes at every commit.
+- **Free, measured, on the target.** Every arm on the mini; the A/B by position, with the
+  slow-drive lifetimes marked and the clean means reported, is the verdict for anything
+  under 2 %; two lifetimes per shape resolve nothing under about 2 %.
+
+**Production on the mini at the close:** the close's build (8da344dbbb270908, the folded
+tree: T6.3's sources plus the review's fixes on the error paths) at the launch line,
+the golden identical on both profiles on both boxes; the arms in the table's last row
+are T6.3's build, the pair 300 at 7.86 s cold and 2.95 s warm.
+
+**What remains, and where it went:** the fold (K, Task 5) to v20 as structure, designed
+on its edges first (the stop path against the GDN state a committed pass mutates, the
+error surfacing per layer, the agreed-cell contract, the cancel with two in flight), the
+architecture the win and any speedup a bonus; the four small merges not built (the floor
+rule; their reads archived); Task 3 and T6.0 never A/B'd at their size (the scripts are
+in the T6 archive); the shadow ledger (the board's section 2) keeps every hidden item
+with its exposer; the tracks page is pre-Task-4. The chapter order after v18: v19 the
+scan rewrite (class 2, behind the variance gate, about 14 ms per token at 7k), v20 the
+SSD mechanism with the fold, v21 compression, then the class-2 block.

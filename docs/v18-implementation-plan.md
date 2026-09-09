@@ -15,7 +15,9 @@ into T5.1. After Task 3 (Davor's ruling, 2026-09-09): Task 6, the walls, runs ne
 and the fold's ruling follows it on the boundary costs Task 6 re-measures. Task 6
 closed 2026-09-09 (T6.7: T6.0, T6.0b, T6.1 and T6.3 landed, the other four merges not
 built by the floor rule); next is the fold's ruling, re-priced at 0.6 to 0.85 ms per
-token with its floor under the noise, or the chapter's close.
+token with its floor under the noise, or the chapter's close. Davor's ruling
+(2026-09-09): the fold is deferred to v20 as structure, designed on its edges first;
+v18 closes (the Close box).
 
 ## Step zero: the board priced once (no runtime code)
 
@@ -196,13 +198,16 @@ token with its floor under the noise, or the chapter's close.
 
 ## Task 5: the fold (K)
 
-- [ ] **T5.1 Design note**: the token's command layout, the two-in-flight protocol,
-      the cancel path, the error surfacing per layer; reviewed before the build.
-- [ ] **T5.2 Build**: one command per token, two in flight.
-- [ ] **T5.3 Tests**: the cancel with two in flight; a failed read naming its layer.
-- [ ] **T5.4 Gates and golden.**
-- [ ] **T5.5 Deploy and arms**: the token against the v17 close on all three shapes
-      and the turn rig's pair.
+- [x] **T5.1 to T5.5 DEFERRED to v20 (Davor's ruling, 2026-09-09, after T6.7).** The
+      fold is built in the SSD chapter as structure, sharing that chapter's agreed-cell
+      mechanism, and it is designed on its edges before anything is built: the stop
+      path when a committed extra pass mutates the GDN state in place, the error
+      surfacing per layer when a whole token is one command, the agreed-cell contract
+      between the host and kernels encoded before the router has run, the cancel with
+      two in flight. The architecture is the win; any speedup is a bonus (0.6 to 0.85
+      ms per token graded, the floor under the noise; it grows in relative terms as
+      the token gets faster). v18 closes without it; T5.1's design note is the first
+      step of the fold wherever it is picked up.
 
 ## Task 6: the walls (D1)
 
@@ -270,10 +275,25 @@ token with its floor under the noise, or the chapter's close.
 
 ## Close
 
-- [ ] ThreadSanitizer on the final tree (the suppressions file unchanged).
-- [ ] The whole-branch review by a fresh reviewer; the fold into owning commits.
-- [ ] The design document's closing block: the ledger at the close beside the v17
-      close, what the chapter settled, what remains.
-- [ ] The architecture document brought to the final tree (the decode path's
-      command structure, the routed stage's steps, the token boundary).
-- [ ] Merge to `main` on Davor's go; the branch deleted; the deploy restored.
+- [x] ThreadSanitizer on the final tree (the suppressions file unchanged): DONE
+      2026-09-09, twice; on the T6.7 tree before the review's fixes 1,249 tests in 173
+      suites with zero reports in 824 s, and on the folded final tree 1,250 tests in
+      173 suites with zero reports in 866 s.
+- [x] The whole-branch review by a fresh reviewer; the fold into owning commits: DONE
+      2026-09-09; ready to merge with fixes (no Critical; three Important: the lease
+      release on a throw, the merged command's error on a miss layer, the golden's
+      coverage of the boundary path; seven Minor); the runtime and test fixes folded
+      into Tasks 1, 3 and 4 and T6.1 and T6.3 by fixup and autosquash, the folded tree
+      byte-identical to the pre-fold one; the gates green after the fixes (1,250 tests
+      in 173 suites); the record in the design doc's close.
+- [x] The design document's closing block: DONE 2026-09-09; the tally from the v17
+      close to T6.3 on the three shapes, the count table, what the chapter settled,
+      production at the close, what remains and where it went.
+- [x] The architecture document brought to the final tree: DONE 2026-09-09; the decode
+      path's command structure (one command per layer, the speculative routed work on
+      one encoder, the token boundary), the routed stage's nine steps, the History
+      entry; 133 line references verified on the final tree, 55 corrected, links clean.
+- [x] Merge to `main` on Davor's go; the branch deleted; the deploy restored: DONE
+      2026-09-09 (Davor's go); main fast-forwarded to the branch head and pushed, the
+      branch and its pre-rebase backup deleted, the mini on the close's build
+      (8da344dbbb270908) with the golden identical.

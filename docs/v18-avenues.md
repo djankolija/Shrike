@@ -1075,6 +1075,13 @@ of an eight-pair A/B's. Under the grading rule the fold is not a speed task at i
 floor; it is a structural question (one command per token, two in flight, the agreed
 cell, the cancel path) for Davor's ruling, with the chapter's close the alternative.
 
+**Davor's ruling (2026-09-09): K is deferred to v20 as structure.** Built in the SSD
+chapter, whose agreed-cell mechanism it shares, and designed on its edges first (the
+stop path against the GDN state a committed pass mutates, the error surfacing per
+layer, the agreed-cell contract, the cancel with two in flight); the architecture is
+the win and any speedup a bonus. v18 closes with Tasks 1, 3, 4 and 6 landed and Tasks
+2 and 5 folded into v20's design.
+
 The steps are the avenues in order, each measurable on its own: C5 (the hits in the
 speculative command), C6 (the fixup as a speculative command, reads into agreed
 cells, the plan after), one command per layer (attention and speculative merged,
@@ -1241,11 +1248,18 @@ T6.2, T6.4, T6.5 and T6.6 not built by the floor rule; Task 6 closed with T6.7. 
 fold's ruling next, re-priced at 0.6 to 0.85 ms per token with its floor under the
 noise, or the chapter's close.
 
+**2026-09-09, after T6.7, Davor:** the fold (K) deferred to v20 as structure, designed
+on its edges first, the architecture the win and any speedup a bonus; v18 closes.
+
 **Phase 2, the SSD mechanism chosen in phase 0.** A1 or A2's product first if the
 replay pays (a slot allocation is small code), then A9's predictor or A0's width,
 one of them, measured against the post-phase-1 ledger.
 
-**Phase 3, the fold (K).** One command per token, two in flight.
+**Phase 3, the fold (K), folded into phase 2 (Davor's ruling, 2026-09-09).** One
+command per token, two in flight, built in the SSD chapter as structure on its shared
+agreed-cell mechanism, designed on its edges first (the stop path, the error surfacing
+per layer, the agreed-cell contract, the cancel with two in flight); the architecture
+the win, any speedup a bonus.
 
 **Phase 4, H2 scoped to the experts and the head (class 1).** The format, the
 repack, the decoders in the kernels that stay. Independent of phases 1 to 3 and
