@@ -93,24 +93,34 @@ S0.5, S0.5b); the table's design and the replay's mode stay on record.
       pool basis zero to three misses by shape; the rows per shape in the design
       document's Task 1 record; the driver and tables at
       `~/.claude/handoffs/archive/shrike-v20-t1/`.
-- [ ] **T1.2 Per-layer slots**: the arena, the residency table and index, the
-      classifier's arguments, the streamer's per-layer pool and the prefill tile
-      scheduler's fitting taking a per-layer count; a fixed table of forty counts
-      at the same total as today's uniform 128, the uniform table the default so a
-      bare launch is unchanged; the allocation carried as a configuration the mini's
-      launch sets (a `SHRIKE_*` variable or a file beside the model, decided at T1.2
-      and stated in the record).
-- [ ] **T1.3 SLRU**: the segmented policy beside aging-LFU in the streamer, selected
-      by configuration, the protected share from S0.4; its own commit and arm.
-- [ ] **T1.4 Tests**: the per-layer counts through the arena and the residency index
-      (no slot of one layer aliases another's), the fitting per layer, the SLRU
-      promotion and demotion against the replay's model, the runner tests' toy
-      shape unchanged.
-- [ ] **T1.5 The gates, the golden, the deploy.**
-- [ ] **T1.6 The arms** against the S0.5 lifetimes, two lifetimes per shape,
-      interleaved with the previous build if the box drifts; misses per token and
-      io the rows, the token and tok/s the verdict; the record in the design
-      document with the pre-registered rows, moved or not.
+- [x] **T1.2 Per-layer slots.** DONE 2026-09-17 (`bc3e25c`): the streaming mode's
+      optional per-layer table, the model's construction with prefix-sum cell ranges
+      and the arena from their sum, a wrong-length table refused at load, the two
+      prefill sites per layer, `SHRIKE_EXPERT_SLOT_TABLE` (a comma list or a JSON
+      path, refused unless the count, the floor of 8, the dense zeros and the
+      budget's total hold), the uniform table the default; the server passes it.
+- [x] **T1.3 SLRU.** DONE 2026-09-17 (`f0e056c`): `ExpertEvictionPolicy` as the
+      mode's third value, the streamer's SLRU on the replay's rule, `SHRIKE_EXPERT_POLICY`
+      (aging-lfu | slru | slru:<share>), the known names fifteen; the server and the
+      CLI pass both variables so the golden covers the configured pool; the load
+      description names the configuration.
+- [x] **T1.4 Tests.** DONE 2026-09-17: the table parser's accept and refuse cases and
+      the file form, the policy parser and the capacity rule, the toy model under a
+      table placing layer 1's cells after layer 0's three and refusing a wrong-length
+      table, SLRU against aging-LFU on the sequence A B C A B D E, the description's
+      two forms; 1,268 tests in 175 suites.
+- [x] **T1.5 The gates, the golden, the deploy.** DONE 2026-09-17: the four gates on
+      every commit; the golden identical on all four profiles on the dev box bare and
+      configured (the reference table scaled to the CLI's 64 slots plus SLRU) and on
+      the mini; deployed.
+- [x] **T1.6 The arms.** DONE 2026-09-17: three arms per shape interleaved, two
+      lifetimes each, the configuration confirmed in every arm's server log; the
+      split alone +4.4 to +5.3 % tok/s on the four shapes (misses 19 to 20 down to 14
+      to 17 per token, io 13.5 to 15.1 down to 10.9 to 12.9 ms), with SLRU +4.4 to
+      +7.8 %; the pre-registered rows met or beaten on every shape; the record in
+      the design document's Task 1 section; the arms archived at
+      `~/.claude/handoffs/archive/shrike-v20-t1/arms/`. Both ship as the mini's
+      launch configuration.
 
 ## Task 2: folded into Task 1 (Davor's ruling, 2026-09-17)
 

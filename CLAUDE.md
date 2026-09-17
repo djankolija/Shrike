@@ -115,6 +115,22 @@ There is **no launchd service** — the server is launched manually
 usually serving one model on port 8081. Turbo (a separate project) serves on
 8080; never touch it.
 
+**Since v20 Task 1 (2026-09-17) the production launch carries two variables**, the
+pool's per-layer slot allocation and its eviction policy (measured +4.4 to +7.8 % tok/s
+on the four shapes, the record in `docs/v20-ssd-mechanism.md`):
+
+```bash
+SHRIKE_EXPERT_SLOT_TABLE=240,204,195,166,152,136,135,129,136,118,130,134,123,114,109,107,106,104,105,103,115,106,112,113,109,109,103,109,109,113,108,107,125,125,129,127,132,128,141,154 \
+SHRIKE_EXPERT_POLICY=slru \
+nohup ./bin/ShrikeServer --model ./models/ornith15.gturbo --model-id ornith15 --port 8081 --max-context 32768 --ram-budget 8G --thinking off > /tmp/shrike-server.log 2>&1 &
+```
+
+The table is ornith15's (blend 0.3 of its production miss profile, forty counts
+totalling the budget's 5,120); a bare launch without the variables runs the uniform
+128 and aging-LFU, which is what the rig's `base` arm measures. A table that does not
+match the model's layers or the budget's total is refused at launch, loudly. The
+server's load line names what it runs (`expert_slots=103..240 policy=slru:0.5`).
+
 Configuration is `SHRIKE_*` env vars only. A resurrected old command or script
 carrying `NVMAI_*` or `TURBO_FIELDFARE_*` names fails **silently** — nothing
 reads those vars, the built-in defaults are taken, and tuned configuration

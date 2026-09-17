@@ -635,6 +635,68 @@ the 7k nothing, graded T. The answers expected identical (class 1): which expert
 compute never changes. The misses per token may move beyond the expectation on
 the mini's drift days; interleaved lifetimes are the reading.
 
+**T1.2 and T1.3, what was built (2026-09-17, `bc3e25c` and `f0e056c`).** The
+streaming mode carries an optional per-layer slot table and the eviction policy
+beside the uniform count; the model's lazy streamer construction takes each
+routed layer's count with prefix-sum cell ranges and sizes the arena from their
+sum, the ring's cells after it as before; the residency table is expert-indexed
+and the kernels address arena cells, so nothing on the GPU side changed. The
+runner's two prefill sites ask per layer. `SHRIKE_EXPERT_SLOT_TABLE` (a comma
+list or a JSON path) is refused unless the count matches the model's layers,
+every routed layer has at least 8, every leading dense layer has 0 and the total
+equals the budget's, so the memory is unchanged and a malformed table never
+silently falls back; `SHRIKE_EXPERT_POLICY` is `aging-lfu`, `slru` or
+`slru:<share>`. The known names are fifteen. The streamer's SLRU is the replay's
+rule (a probation hit promotes; past the capacity the protected slot used longest
+ago drops to probation as its most recent; every placement lands probation; the
+victim order empty, probation, protected, oldest). The server and the CLI honour
+both variables, so the golden covers the configured pool: identical on all four
+profiles bare and configured on the dev box, and on the mini. The load
+description names the configuration (`expert_slots=103..240 policy=slru:0.5`),
+and every arm's server log carries it.
+
+**T1.6 The arms (measured on the mini at `f0e056c`'s server, 2026-09-17, three
+arms per shape interleaved, two production lifetimes each, the first request of
+each; the answers identical in length across the arms on every shape).**
+
+| shape | arm | misses per token | io ms | the token ms | tok/s | tok/s against base |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| the card | base | 20.0 | 14.7 | 57.7 to 57.8 | 17.3 | |
+| | the split | 16.5 | 12.6 | 55.1 to 55.4 | 18.0 to 18.1 | +4.4 % |
+| | the split with SLRU | 15.8 | 12.1 | 54.8 to 55.4 | 18.1 to 18.2 | +4.8 % |
+| the 300 | base | 19.5 | 14.5 to 15.1 | 57.0 to 58.8 | 17.0 to 17.5 | |
+| | the split | 16.7 | 12.8 | 55.1 to 55.6 | 18.0 to 18.2 | +4.6 % |
+| | the split with SLRU | 16.7 | 12.8 | 55.3 to 55.6 | 18.0 to 18.1 | +4.4 % |
+| the 1k | base | 19.0 | 14.2 to 14.9 | 57.4 to 59.2 | 16.9 to 17.4 | |
+| | the split | 17.0 | 12.9 | 55.6 to 56.1 | 17.8 to 18.0 | +4.4 % |
+| | the split with SLRU | 15.2 | 11.6 | 54.1 | 18.5 | +7.8 % |
+| the 7k | base | 18.1 | 13.5 | 58.4 to 59.0 | 16.9 to 17.1 | |
+| | the split | 14.1 to 14.2 | 10.9 to 11.0 | 55.6 to 55.9 | 17.9 to 18.0 | +5.3 % |
+| | the split with SLRU | 14.3 | 10.9 to 11.0 | 56.0 to 56.3 | 17.8 to 17.9 | +4.5 % |
+
+Against the pre-registration: the misses per token after the split landed inside
+the expected range on every shape (the card 16.5 for 16.2 to 16.6, the 300 16.7
+for 16.6 to 17.1, the 1k 17.0 for 17.0 to 17.5, the 7k 14.1 for 14.3 to 15.0, a
+touch better); the token beat the expected range on three shapes and met it on
+the 7k, the split alone saving 2.4 to 3.0 ms per token where 1.3 to 3.1 was
+modelled, the 1k's saved misses worth more than the 0.65 each the model gave
+them. SLRU on top is the pre-registered shape: 1.8 ms more on the 1k, 0.2 on the
+card, nothing on the 300, 0.4 less on the 7k, the last within the rig's noise;
+across the four shapes it adds 0.5 ms on average and 1.8 where it matters.
+**Reading:** the split is real and free, the first lever on this surface since
+v16 that moved the token on every shape, +4.4 to +5.3 % alone and +4.4 to
++7.8 % with SLRU; the misses per token fell from 19 to 20 to 14 to 17, the io
+from 13.5 to 15.1 ms to 10.9 to 12.9. The class-1 gate held throughout.
+
+**The decision on SLRU and the launch.** Both ship as the mini's production
+configuration: the reference table and `slru`, the built-in defaults staying
+uniform and aging-LFU so a bare launch is unchanged and another model is not
+handed this model's table. The mini's launch line carries the two variables (the
+project instructions record it); the table lives in this document and in the
+archive as `t11-slots-blend0.3.json`. A follow-up for a later chapter, not this
+one: the table shipped beside the model rather than in the launch, and an
+allocation derived at load from a profile the model carries.
+
 ### Task 2: the policy and the split (class 1; only on S0.4's number)
 
 The predicted-future eviction and the per-layer slot count, each its own commit and
