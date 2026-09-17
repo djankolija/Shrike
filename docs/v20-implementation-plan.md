@@ -157,22 +157,24 @@ SLRU is T1.3; the predicted-future eviction was null at a legitimate horizon
       within 0.4 ms, no overflow, the answers identical), the record in the design
       document; the scripts, logs and rows at
       `~/.claude/handoffs/archive/shrike-v20-t31/`.
-- [ ] **T3.2 One command per token**: the forty layers' commands and the boundary's
-      as encoders of one command, encoded a layer per word during the previous
-      token, committed on the boundary word after the stop check (the stop path
-      unchanged); the drain invariant, one routine on every abnormal exit (the
-      remaining values published failed, no reads, the pending plan dropped, the
-      wait, the throw naming the layer) and a ten-second deadline on the word wakes'
-      fallbacks; the status words recycled by token; `ModelError.expertReadFailed
-      (layer:errno:)`; the command from a descriptor with `encoderExecutionStatus`,
-      every encoder labelled by layer and stage, the drain reporting the encoder
-      that did not complete, the option's cost read on the same-box A/B and moved
-      behind `SHRIKE_RUNNER_STATS` only if it shows; the per-layer GPU rows retired
-      and the word clock's per-token array read by `tools/decode-rows.py` as the
-      layer rows; tests (a throw injected at layer k of a committed token completes
-      the command, names layer k, hangs nothing and the next request runs; an
-      injected read failure names its layer; the labels); gates and golden; deploy;
-      the arms expected flat.
+- [x] **T3.2 One command per token.** DONE 2026-09-17 (`1a61928`): `TokenCommand`
+      with the descriptor's `encoderExecutionStatus` always on (measured free on
+      the mini's four shapes through a variable that lived for the arms only; the
+      known names stay fifteen), the layers and the boundary as its encoders,
+      encoded a layer per word during the previous token and committed on the
+      boundary word after the stop check; the drain invariant in full with
+      `awaitCompletion`'s ten-second deadline behind the word and boundary wakes;
+      `describeCommandBufferError` naming the faulted encoder; `DecodeWordClock`
+      in place of the per-layer GPU rows, read by `tools/decode-rows.py`; the
+      deferred records, the race split and `path_router_wake_ms` retired; tests
+      (the faulted encoder, the deadline, the word clock, the toy runner's failed
+      read at layer 1 naming its layer and the runner reusable); 1,280 tests in
+      175 suites; the four gates; the golden identical bare and configured on both
+      boxes at the final tree; deployed; the arms flat within the drift and 0.2
+      to 0.6 ms faster on most rows, the misses and the answers identical, the
+      boundary gap measured directly at 0.26 to 0.34 ms per token; the record in
+      the design document; the scripts, logs and rows at
+      `~/.claude/handoffs/archive/shrike-v20-t32/`.
 - [ ] **T3.3 Committed ahead (Shape B)**: the GDN state and conv tail of every linear
       layer double-buffered by token parity, the kernels taking `state_in` and
       `state_out`, prefill writing the parity the decode continues from, the

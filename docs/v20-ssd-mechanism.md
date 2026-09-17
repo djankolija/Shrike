@@ -1191,6 +1191,114 @@ neither term was measured on its own). The host's on-path rows: `path_submit_ms`
 wake. The structure is in place for T3.2: every routed layer is one command
 holding its fixup, the host feeds reads and the batch publishes the value.
 
+**T3.2 One command per token (2026-09-17, `1a61928`; the arms measured on the
+mini at that tree, graded M, the verdict against T3.1's arms at `782f477`).**
+
+*What was built.* The token is one command: `TokenCommand` holds the command
+buffer, made from a `MTLCommandBufferDescriptor` with `encoderExecutionStatus`
+(always on; the arms below priced it through a variable that existed for their
+lifetimes only and is not shipped, so the known names stay fifteen), and the
+routed layers' `TokenLayer` records (the readback tag, the agreed value). `encodeLayers` encodes a token's layers in order as
+encoders of that command, a dense layer's chain or a routed layer's input norm,
+attention and tail with the classifier (one serial encoder on GDN and gated
+layers, labelled `layer L attention`), the speculative work (`layer L routed`),
+the wait on the layer's value and the agreed fixup (`layer L fixup`); the gpt-oss
+and plain attention paths, which kept a separate softmax command, encode their
+softmax on the same command in order. `produceToken` takes the held command for a
+continued pass (or makes one and encodes the embed and every layer for a fresh
+token), encodes the boundary as its last encoders (the final norm, the head, the
+caller's sampler writing the token word, the next embed from it; `encodeHead` for
+the synchronous head), commits it, and only then waits for the previous token's
+command (complete once its boundary word landed) and records it under the `token`
+role. The host's loop over the routed layers: the next token's layers encoded a
+layer per word into the next command (`kv.reserve` a position ahead), the word
+awaited (`waitForWord`, the classifier's tag), the previous layer finished, the
+layer serviced as T3.1 left it; after the last word the next token's remaining
+layers are encoded, the cursor advances and the next command becomes the held
+one, to be committed by the next produce after the loop's stop check. The stop
+path is unchanged: nothing runs past the stop. The drain invariant in full: every
+abnormal exit of the token's loop abandons the pending plan, publishes every
+remaining armed value as failed, waits for the running command with
+`awaitCompletion`'s ten-second deadline, and unwinds; `awaitCompletion` is also
+the fallback of the word wake and the boundary wake after their first second, so
+a wait nothing will publish ends as `commandBufferFailed` naming the layer or the
+boundary rather than a hang, and the drain on the throw path then releases the
+GPU. A failed command is described by `describeCommandBufferError`: the encoders
+that faulted by label and the affected count from `MTLCommandBufferEncoderInfo`
+when the option is on, the plain error otherwise. Retired: the per-layer command
+buffers and their records (`HeldLayerCommands`, the deferred GPU records, the
+router-wake record and `path_router_wake_ms`, `runSync` on decode, the separate
+embed command), and the prefetch race split with its seven rows (its instrument
+was the tail command's GPU window, which is the token's now); the kernel stats'
+per-layer roles collapse to one `token` row per token and the transitions to the
+token boundary's gap. In their place `DecodeWordClock`: the first routed layer's
+wall from the commit, each later layer's from the previous word, the boundary's
+from the last word to the token word, printed under the kernel stats as `Shrike
+word_clock tokens=N first_ms=… layer_ms=… boundary_ms=…` and read by
+`tools/decode-rows.py` as the layer rows' sum, the slowest layer and the boundary.
+Tests: the faulted encoder named and the affected counted from a synthetic error,
+a wait on a command that never completes ending at its deadline naming the layer,
+the word clock's accounting, and on the toy runner a failed expert read at layer
+1 naming its layer, hanging nothing and leaving the runner reusable after a
+reset; the gpt-oss and Qwen toy runners' existing decode and prefill tests on the
+one-command path; the prefetch race split's tests gone with it; 1,280 tests in
+175 suites. The four gates; the golden identical on all four profiles bare and
+configured on both boxes.
+
+*The arms* (measured on the mini at the T3.2 tree, three arms per shape
+interleaved, two production lifetimes each, the first request of each: the bare
+launch, the production configuration, and the production configuration with the
+per-encoder error status off; the answers identical in length across the arms
+and to T3.1's on every shape, 226 / 369 / 300 / 353):
+
+| shape | arm | misses per token | io ms | overflow per token | cells leased peak | the token ms | tok/s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| the card | bare | 19.9 | 14.3 | 0.00 | 8 | 57.3 to 58.3 | 17.2 to 17.4 |
+| | configured | 15.7 | 11.6 to 12.3 | 0.00 | 6 | 54.4 to 55.8 | 17.9 to 18.4 |
+| | configured, no error status | 15.7 | 11.6 | 0.00 | 6 | 54.3 to 55.2 | 18.1 to 18.4 |
+| the 300 | bare | 19.3 | 14.0 | 0.00 | 8 | 56.4 to 57.2 | 17.5 to 17.7 |
+| | configured | 16.5 | 12.2 to 12.8 | 0.00 | 7 | 54.7 to 55.6 | 18.0 to 18.3 |
+| | configured, no error status | 16.5 | 12.2 to 12.8 | 0.00 | 7 | 55.4 to 56.0 | 17.9 to 18.1 |
+| the 1k | bare | 18.9 | 13.6 | 0.00 | 8 | 56.6 to 56.7 | 17.6 |
+| | configured | 15.0 | 11.1 | 0.00 | 7 | 53.6 to 54.5 | 18.4 to 18.6 |
+| | configured, no error status | 15.0 | 11.1 | 0.00 | 7 | 53.6 to 54.3 | 18.4 to 18.6 |
+| the 7k | bare | 18.0 | 13.0 | 0.00 | 8 | 58.3 to 58.6 | 17.1 to 17.2 |
+| | configured | 14.2 | 10.5 to 10.8 | 0.00 | 8 | 55.9 to 56.1 | 17.8 to 17.9 |
+| | configured, no error status | 14.2 | 10.5 | 0.00 | 8 | 55.5 | 18.0 |
+
+Against T3.1's arms at the same configuration (T3.1 / T3.2, the token ms): the
+card 54.9 to 55.6 / 54.4 to 55.8, the 300 55.6 to 55.8 / 54.7 to 55.6, the 1k
+54.2 to 54.8 / 53.6 to 54.5, the 7k 55.9 / 55.9 to 56.1; the bare arm 57.7 to
+58.7 / 57.3 to 58.3, 56.8 to 57.0 / 56.4 to 57.2, 57.0 to 57.8 / 56.6 to 56.7,
+58.7 to 59.3 / 58.3 to 58.6. The misses per token, the io and the leased peak
+identical to T3.1's on every row.
+
+*The instruments, the same lifetimes.* The kernel stats' one `token` row spans
+53.2 to 58.0 ms of GPU time per token, within half a millisecond of the token
+itself on every arm: the GPU is busy through the token and idle only at its
+boundary. The boundary is now measured directly, as the gap between consecutive
+`token` commands: 0.26 to 0.34 ms per token on every arm and shape (M), the
+number v18 Task 4 read as 0.25 and the whole of Shape B's prize in T3.3. The
+word clock: the first routed layer's word 0.70 to 0.77 ms after the commit, the
+thirty-nine later layers 47.5 to 52.1 ms between them (layer 1 the slowest at
+2.4 ms, the middle layers 1.1), and the boundary 5.5 to 5.8 ms from the last word
+to the token word, which is layer 39's fixup, the head's vocabulary GEMV, the
+sampler and the embed; the three sum to the token within 0.3 ms.
+
+**Reading.** Flat within the drift, leaning faster by what the forty command
+boundaries were priced at: the token 0.2 to 0.6 ms below T3.1's on most rows in
+both arms (T6.7's 0.2 to 0.4 ms, C, from about 10 µs a boundary) and level on
+the rest, the misses, the io and the answers unchanged, no overflow. The
+per-encoder error status costs nothing the arms can see: the two configured
+arms sit inside each other's spread on every shape, with the sign changing from
+shape to shape, so the option stays on and its knob is not shipped (the known
+names stay fifteen; the arm's variable existed for these lifetimes only). The
+structure the fold needs is complete: the token is one command, the host feeds
+reads and publishes values, every value has a drain, a failed command names its
+encoder, a failed read names its layer, and the boundary gap is a row the
+kernel stats print. T3.3 moves the commit ahead of the stop check and takes
+that row.
+
 ### Task 4, held: the attention row's fixed part (B3, B4)
 
 Only on S0.6's number and Davor's ruling.
