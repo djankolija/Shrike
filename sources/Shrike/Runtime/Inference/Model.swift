@@ -17,12 +17,35 @@ public struct ModelLoadStats: Sendable {
     }
 }
 
+/// The pool's eviction: aging-LFU (v17's winner) or segmented LRU with a
+/// protected share of the slots (v20 T1.3).
+public enum ExpertEvictionPolicy: Sendable, Equatable {
+    case agingLFU
+    case slru(protectedShare: Double)
+
+    public func protectedCapacity(slots: Int) -> Int {
+        switch self {
+        case .agingLFU:
+            return 0
+        case .slru(let share):
+            return max(1, Int((share * Double(slots)).rounded()))
+        }
+    }
+
+    public var label: String {
+        switch self {
+        case .agingLFU: return "aging-lfu"
+        case .slru(let share): return "slru:\(share)"
+        }
+    }
+}
+
 /// Bounded routed-expert cache configuration.
 public enum ExpertStreamingMode: Sendable {
     /// Read each expert into one of `slotCount` cache slots per layer, or into
     /// the layer's own count from `perLayer` (one entry per layer, zero for a
-    /// dense layer, the total the budget's).
-    case pread(slotCount: Int, perLayer: [Int]? = nil)
+    /// dense layer, the total the budget's), evicting by `policy`.
+    case pread(slotCount: Int, perLayer: [Int]? = nil, policy: ExpertEvictionPolicy = .agingLFU)
 }
 
 /// Loaded `.gturbo/` model. Resident weights live behind one mmap'd
@@ -420,10 +443,12 @@ public struct Model {
             expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset))
         let uniformSlotCount: Int
         let perLayerSlots: [Int]?
+        let evictionPolicy: ExpertEvictionPolicy
         switch streamingMode {
-        case .pread(let configuredSlotCount, let table):
+        case .pread(let configuredSlotCount, let table, let policy):
             uniformSlotCount = configuredSlotCount
             perLayerSlots = table
+            evictionPolicy = policy
         }
         if let perLayerSlots, perLayerSlots.count != packedExpertsLayout.layers.count {
             throw ModelError.internalInconsistency(
@@ -453,7 +478,8 @@ public struct Model {
             slotCount: slotCount,
             eventCoordinator: expertIOEventCoordinator,
             arena: streamersBox.arena,
-            cellRange: cellBase..<(cellBase + slotCount))
+            cellRange: cellBase..<(cellBase + slotCount),
+            policy: evictionPolicy)
     }
 
     /// Test hook: how many layer files have been opened so far.
@@ -545,7 +571,7 @@ extension Model {
             device: device,
             fileDescriptor: weightsFD)
 
-        if case .pread(_, let table?) = streamingMode, table.count != layout.numLayers {
+        if case .pread(_, let table?, _) = streamingMode, table.count != layout.numLayers {
             throw ModelError.internalInconsistency(
                 detail: "expert slot table has \(table.count) entries for \(layout.numLayers) layers")
         }

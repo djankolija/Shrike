@@ -50,6 +50,34 @@ import Metal
         #expect(model.openLayerFileCount() == 0)
     }
 
+    @Test func expertCacheDescriptionNamesTheTableAndThePolicy() {
+        #expect(RealForwardRunner.expertCacheDescription(.pread(slotCount: 128))
+            == "expert_slots=uniform:128 policy=aging-lfu")
+        #expect(RealForwardRunner.expertCacheDescription(
+            .pread(slotCount: 128, perLayer: [0, 240, 103, 169], policy: .slru(protectedShare: 0.5)))
+            == "expert_slots=103..240 policy=slru:0.5")
+    }
+
+    @Test func slruEvictsProbationBeforeProtectedWhereAgingLFUKeepsTheCounts() async throws {
+        let dir = try ModelLoaderTests.writeToySynthetic()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let sequence = [0, 1, 2, 0, 1, 3, 4]
+        let slru = try Model.load(directoryURL: dir, device: device, expecting: .qwenToy(),
+                                  streamingMode: .pread(slotCount: 3,
+                                                        policy: .slru(protectedShare: 0.34)))
+        for expert in sequence {
+            _ = try await slru.fetchRoutedExperts(layer: 1, experts: [expert])
+        }
+        #expect(Set(try slru.routedExpertResidentIDs(layer: 1)) == [1, 3, 4])
+        let lfu = try Model.load(directoryURL: dir, device: device, expecting: .qwenToy(),
+                                 streamingMode: .pread(slotCount: 3))
+        for expert in sequence {
+            _ = try await lfu.fetchRoutedExperts(layer: 1, experts: [expert])
+        }
+        #expect(Set(try lfu.routedExpertResidentIDs(layer: 1)) == [0, 1, 4])
+    }
+
     @Test func perLayerSlotTablePlacesEachLayersCellsAfterThePreviousLayers() async throws {
         let dir = try ModelLoaderTests.writeToySynthetic()
         defer { try? FileManager.default.removeItem(at: dir) }

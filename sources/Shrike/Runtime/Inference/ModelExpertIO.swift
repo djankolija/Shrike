@@ -165,12 +165,12 @@ extension Model {
     /// The streaming mode's uniform slot count; a layer's own count, which a
     /// per-layer table can make different, is `routedExpertCacheSlotCount(layer:)`.
     public func routedExpertCacheSlotCount() -> Int? {
-        guard case .pread(let slotCount, _) = streamingMode else { return nil }
+        guard case .pread(let slotCount, _, _) = streamingMode else { return nil }
         return slotCount
     }
 
     public func routedExpertCacheSlotCount(layer: Int) -> Int? {
-        guard case .pread(let slotCount, let perLayer) = streamingMode else { return nil }
+        guard case .pread(let slotCount, let perLayer, _) = streamingMode else { return nil }
         guard let perLayer, layer < perLayer.count else { return slotCount }
         return perLayer[layer]
     }

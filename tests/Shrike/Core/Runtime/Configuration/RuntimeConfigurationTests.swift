@@ -98,11 +98,28 @@ import Testing
         }
     }
 
-    @Test func theSurvivingFourteenPass() throws {
+    @Test func theSurvivingFifteenPass() throws {
         let names = RuntimeConfiguration.knownEnvironmentNames
-        #expect(names.count == 14)
+        #expect(names.count == 15)
         try RuntimeConfiguration.refuseUnknownEnvironment(
             Dictionary(uniqueKeysWithValues: names.map { ($0, "1") }))
+    }
+
+    @Test func expertPolicyParsesAndRefuses() throws {
+        #expect(try RuntimeConfiguration.environmentExpertPolicy([:]) == .agingLFU)
+        #expect(try RuntimeConfiguration.environmentExpertPolicy(["SHRIKE_EXPERT_POLICY": "aging-lfu"]) == .agingLFU)
+        #expect(try RuntimeConfiguration.environmentExpertPolicy(["SHRIKE_EXPERT_POLICY": "slru"])
+            == .slru(protectedShare: 0.5))
+        #expect(try RuntimeConfiguration.environmentExpertPolicy(["SHRIKE_EXPERT_POLICY": "SLRU:0.6"])
+            == .slru(protectedShare: 0.6))
+        for bad in ["lru", "slru:1", "slru:0", "slru:x", "slru:"] {
+            #expect(throws: RuntimeConfigurationError.self) {
+                _ = try RuntimeConfiguration.environmentExpertPolicy(["SHRIKE_EXPERT_POLICY": bad])
+            }
+        }
+        #expect(ExpertEvictionPolicy.slru(protectedShare: 0.34).protectedCapacity(slots: 3) == 1)
+        #expect(ExpertEvictionPolicy.slru(protectedShare: 0.5).protectedCapacity(slots: 128) == 64)
+        #expect(ExpertEvictionPolicy.agingLFU.protectedCapacity(slots: 128) == 0)
     }
 
     @Test func expertSlotTableParsesAndRefuses() throws {

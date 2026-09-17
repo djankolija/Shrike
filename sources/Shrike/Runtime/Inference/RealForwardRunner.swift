@@ -152,18 +152,35 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public var prefillDescription: String {
         Self.prefillDescription(routerBits: prefillRouter.weightBits,
                                 poolResidencyUnavailableReason: poolResidencyUnavailableReason,
-                                prefetchTrace: prefetchTraceFD >= 0)
+                                prefetchTrace: prefetchTraceFD >= 0,
+                                expertCache: Self.expertCacheDescription(model.streamingMode))
+    }
+
+    static func expertCacheDescription(_ mode: ExpertStreamingMode) -> String {
+        switch mode {
+        case .pread(let slotCount, let perLayer, let policy):
+            let routed = perLayer?.filter { $0 > 0 }
+            let slots = routed.flatMap { counts -> String? in
+                guard let low = counts.min(), let high = counts.max() else { return nil }
+                return "\(low)..\(high)"
+            } ?? "uniform:\(slotCount)"
+            return "expert_slots=\(slots) policy=\(policy.label)"
+        }
     }
 
     static func prefillDescription(routerBits: Int,
                                    poolResidencyUnavailableReason: String?,
-                                   prefetchTrace: Bool) -> String {
+                                   prefetchTrace: Bool,
+                                   expertCache: String? = nil) -> String {
         var description = "prefill_router_bits=\(routerBits)"
         if let poolResidencyUnavailableReason {
             description += " prefill_pool_residency=unavailable reason=\(poolResidencyUnavailableReason)"
         }
         if prefetchTrace {
             description += " prefetch_trace=on"
+        }
+        if let expertCache {
+            description += " \(expertCache)"
         }
         return description
     }

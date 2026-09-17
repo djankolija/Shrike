@@ -248,7 +248,12 @@ private func buildRuntime(args: Args,
         directoryURL: modelURL,
         device: context.device,
         expecting: expectedArch,
-        streamingMode: .pread(slotCount: loadRuntime.expertCacheSlots),
+        streamingMode: .pread(
+            slotCount: loadRuntime.expertCacheSlots,
+            perLayer: try RuntimeConfiguration.environmentExpertSlotTable(
+                layers: expectedArch.numLayers, uniformSlots: loadRuntime.expertCacheSlots,
+                leadingDenseLayers: expectedArch.numLeadingDenseLayers),
+            policy: try RuntimeConfiguration.environmentExpertPolicy()),
         integrityPolicy: .resolved(directoryURL: modelURL))
     let prefillChunkTokens: Int
     switch args.prefillChunk {

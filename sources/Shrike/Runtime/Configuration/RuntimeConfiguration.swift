@@ -37,11 +37,14 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
     case invalidPrefetch(String)
     case unknownEnvironment([String])
     case invalidExpertSlotTable(String)
+    case invalidExpertPolicy(String)
 
     public var description: String {
         switch self {
         case .invalidExpertSlotTable(let detail):
             return "SHRIKE_EXPERT_SLOT_TABLE refused: \(detail)"
+        case .invalidExpertPolicy(let detail):
+            return "SHRIKE_EXPERT_POLICY refused: \(detail); allowed: aging-lfu, slru, slru:<share in (0, 1)>"
         case .invalidExpertCacheSlots(let value):
             return "unsupported expert-cache slot count \(value); allowed: \(RuntimeConfiguration.allowedExpertCacheSlots)"
         case .invalidPrefillChunkTokens(let value):
@@ -228,6 +231,24 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         return counts
     }
 
+    /// The pool's eviction policy from `SHRIKE_EXPERT_POLICY`: `aging-lfu`
+    /// (the default when unset), `slru` at a protected share of 0.5, or
+    /// `slru:<share>`; anything else is refused.
+    public static func environmentExpertPolicy(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> ExpertEvictionPolicy {
+        guard let raw = environment["SHRIKE_EXPERT_POLICY"]?.lowercased(), !raw.isEmpty else {
+            return .agingLFU
+        }
+        if raw == "aging-lfu" { return .agingLFU }
+        if raw == "slru" { return .slru(protectedShare: 0.5) }
+        if raw.hasPrefix("slru:"),
+           let share = Double(raw.dropFirst("slru:".count)), share > 0, share < 1 {
+            return .slru(protectedShare: share)
+        }
+        throw RuntimeConfigurationError.invalidExpertPolicy(raw)
+    }
+
     public static let minimumExpertSlotsPerLayer = 8
 
     static func validateExpertSlotTable(_ counts: [Int], layers: Int, uniformSlots: Int,
@@ -261,7 +282,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         "SHRIKE_STRIP_CLI_PROMPT", "SHRIKE_STRIP_TAGS", "SHRIKE_CONCISE_MODE",
         "SHRIKE_TOKENIZER_DIR", "SHRIKE_MODEL", "SHRIKE_PREFILL_ANE",
         "SHRIKE_RUNNER_STATS", "SHRIKE_KERNEL_STATS", "SHRIKE_ROUTE_TRACE",
-        "SHRIKE_PREFETCH_TRACE", "SHRIKE_EXPERT_SLOT_TABLE",
+        "SHRIKE_PREFETCH_TRACE", "SHRIKE_EXPERT_SLOT_TABLE", "SHRIKE_EXPERT_POLICY",
     ]
 
     /// Fails the launch by name on any `SHRIKE_*` variable this build does not read.

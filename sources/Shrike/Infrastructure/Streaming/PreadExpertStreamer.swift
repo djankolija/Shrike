@@ -230,18 +230,26 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private var statisticsLatencyHistogram = [UInt64](repeating: 0, count: 17)
     private var statisticsPeakLoadingSlots = 0
     private let cacheLock = NSLock()
+    private let policy: ExpertEvictionPolicy
+    private var slotProtected: [Bool]
+    private var protectedCount = 0
+    private let protectedCapacity: Int
 
     public init(layout: StreamLayout,
                 device: MTLDevice,
                 slotCount: Int,
                 eventCoordinator: ExpertIOEventCoordinator? = nil,
                 arena: ExpertCellArena? = nil,
-                cellRange: Range<Int>? = nil) throws {
+                cellRange: Range<Int>? = nil,
+                policy: ExpertEvictionPolicy = .agingLFU) throws {
         precondition(slotCount > 0, "slotCount must be positive")
         self.layout = layout
         self.reservedSlots = Array(repeating: false, count: slotCount)
         self.victimSlotsScratch = Array(repeating: -1, count: slotCount)
         self.slotCount = slotCount
+        self.policy = policy
+        self.slotProtected = Array(repeating: false, count: slotCount)
+        self.protectedCapacity = policy.protectedCapacity(slots: slotCount)
         self.eventCoordinator = eventCoordinator
         let pageSize = Int(getpagesize())
 
@@ -447,6 +455,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         for slot in assignedSlots where slot >= 0 {
             slotLastUse[slot] = clock
         }
+        if case .slru = policy {
+            for slot in assignedSlots where slot >= 0 && !slotProtected[slot] {
+                promoteToProtected(slot, clock: clock)
+            }
+        }
         var misses: [Int] = []
         var landedExperts: [Int] = []
         var adoptedIndices: [Int] = []
@@ -459,6 +472,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             let previousExpert = slotExpert[slot]
             assignedSlots[index] = slot
             reservedSlots[slot] = true
+            demoteIfProtected(slot)
             let cell = cellIndexUnlocked(slot)
             arena.bumpCellGeneration(cell)
             if previousExpert >= 0 {
@@ -668,11 +682,36 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         return missCount <= eligibleCount
     }
 
+    /// The replay's SLRULayerPool rule, so production is the model that priced it.
+    private func promoteToProtected(_ slot: Int, clock: Int) {
+        slotProtected[slot] = true
+        protectedCount += 1
+        guard protectedCount > protectedCapacity else { return }
+        var oldest = -1
+        for candidate in 0..<slotCount where slotProtected[candidate] && candidate != slot {
+            if oldest < 0 || slotLastUse[candidate] < slotLastUse[oldest] { oldest = candidate }
+        }
+        guard oldest >= 0 else { return }
+        slotProtected[oldest] = false
+        protectedCount -= 1
+        slotLastUse[oldest] = clock
+    }
+
+    private func demoteIfProtected(_ slot: Int) {
+        guard slotProtected[slot] else { return }
+        slotProtected[slot] = false
+        protectedCount -= 1
+    }
+
     private func shouldEvictSlot(_ lhs: Int, before rhs: Int) -> Bool {
         let lhsExpert = slotExpert[lhs]
         let rhsExpert = slotExpert[rhs]
         if lhsExpert < 0 || rhsExpert < 0 {
             return lhsExpert < rhsExpert
+        }
+        if case .slru = policy {
+            if slotProtected[lhs] != slotProtected[rhs] { return !slotProtected[lhs] }
+            return slotLastUse[lhs] < slotLastUse[rhs]
         }
         let lhsCount = lhsExpert < expertUseCount.count ? expertUseCount[lhsExpert] : 0
         let rhsCount = rhsExpert < expertUseCount.count ? expertUseCount[rhsExpert] : 0
