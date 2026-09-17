@@ -9,6 +9,7 @@ final class BenchRunner {
     private let context: MetalContext
     private let rows: SyntheticRows
     private let ladder: LadderKernel
+    private let stream: StreamKernel
     private let production: Attention
     private let productionPlain: Attention
     private var productionOut: [Int: [Float]] = [:]
@@ -21,6 +22,7 @@ final class BenchRunner {
         self.rows = try SyntheticRows(context: context, maxSeq: maxSeq, seed: args.seed)
         self.ladder = try LadderKernel(device: context.device, numQHeads: rows.numQHeads,
                                        headDim: rows.headDim)
+        self.stream = try StreamKernel(device: context.device, scratch: ladder)
         self.production = try Attention(context: context, partialLoopVariant: .kvShared)
         self.productionPlain = try Attention(context: context, partialLoopVariant: .kvShared,
                                              specializesKVShared: false)
@@ -80,6 +82,17 @@ final class BenchRunner {
                                                        headDim: rows.headDim)
                     maxDiff = String(format: "%.3e", Timing.maxAbsDifference(combined, reference))
                 }
+            }
+        case .stream(let sw):
+            seconds = try Timing.medianGPUSeconds(context: context, warmup: args.warmup,
+                                                  repeats: args.repeats) { cb in
+                try stream.encode(commandBuffer: cb, rows: rows, seqLen: seqLen, switches: sw)
+            }
+            hash = String(format: "%016llx", partialsHash())
+            if let reference = productionOut[seqLen], !sw.noLoad {
+                let combined = ladder.combineOnCPU(numQHeads: rows.numQHeads,
+                                                   headDim: rows.headDim)
+                maxDiff = String(format: "%.3e", Timing.maxAbsDifference(combined, reference))
             }
         }
         let bytes = Double(seqLen * rows.bytesPerPosition)

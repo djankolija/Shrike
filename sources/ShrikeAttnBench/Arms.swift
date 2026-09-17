@@ -41,6 +41,7 @@ struct LadderSwitches: Hashable {
 enum ArmKind {
     case production(specialized: Bool)
     case ladder(LadderSwitches)
+    case stream(StreamSwitches)
 }
 
 struct Arm {
@@ -69,11 +70,16 @@ struct Arm {
         ("o1", "the V accumulate as fma(o, alpha, p * v); o2: fma(p, v, o * alpha); o3: p * v + o * alpha"),
         ("d1", "the denominator as fma(d, alpha, p)"),
         ("safemath", "the kernel compiled with contraction and reassociation off"),
+        ("stream2 / stream4 / stream8", "the streaming scan with 2, 4 or 8 heads per simdgroup"),
+        ("noload", "with stream: the loads replaced by arithmetic, the ALU-bound twin"),
+        ("u2", "with stream: two positions per iteration, their chains overlapped"),
+        ("lazy", "with stream: the rescale only when the running max moves"),
     ]
 
     static func parse(_ name: String) throws -> Arm {
         if name == "prod" { return Arm(name: name, kind: .production(specialized: true)) }
         if name == "prodplain" { return Arm(name: name, kind: .production(specialized: false)) }
+        if name.hasPrefix("stream") { return try parseStream(name) }
         var sw = LadderSwitches()
         for token in name.split(separator: "+").map(String.init) {
             switch token {
@@ -100,5 +106,22 @@ struct Arm {
         }
         try sw.validate()
         return Arm(name: name, kind: .ladder(sw))
+    }
+
+    private static func parseStream(_ name: String) throws -> Arm {
+        var sw = StreamSwitches()
+        for token in name.split(separator: "+").map(String.init) {
+            switch token {
+            case "stream2": sw.headsPerSimdgroup = 2
+            case "stream4": sw.headsPerSimdgroup = 4
+            case "stream8": sw.headsPerSimdgroup = 8
+            case "noload": sw.noLoad = true
+            case "u2": sw.unroll2 = true
+            case "lazy": sw.lazy = true
+            default: throw BenchError.usage("unknown stream switch \(token) in \(name)")
+            }
+        }
+        try sw.validate()
+        return Arm(name: name, kind: .stream(sw))
     }
 }

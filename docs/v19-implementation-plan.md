@@ -50,19 +50,20 @@ no-load twin; the close.
       accumulate as `fma(o, alpha, p * v)` reproduce the shipped kernel's partials
       bit for bit at 613 µs against 1,653 (2.70×); the denominator stays as written.
       Task 2 is class 1.
-- [ ] **S0.4 The streaming prototype on the mini.** Approach A as a bench kernel,
-      the sweep over heads per simdgroup (1, 2, 4, 8), positions per simdgroup per
-      iteration (1, 2) and one or both KV heads per threadgroup, at 1k, 4k and 8k
-      positions; each configuration against the shipped arm and the pure-load floor;
-      the no-load twin of the best configuration (the loads replaced by constants) to
-      say whether it is ALU-bound. The outputs checked against the shipped kernel's
-      partials at a tolerance (a wrong tile shows as a delta orders above rounding).
-      The table and the chosen configuration in the design document.
-- [ ] **S0.5 The record and the ruling.** The design document's step-zero record
-      complete (the ladder, the sweep, the repair priced from arms 2 and 4, the
-      rewrite priced from the prototype, both graded); production restored on the
-      mini and verified golden-identical; Davor's ruling recorded here: the repair
-      first then the rewrite, the rewrite alone, or neither.
+- [x] **S0.4 The streaming prototype on the mini.** DONE 2026-09-17 (Davor's go,
+      "be thorough"), after Task 2: `Metal/stream.metal`, the sweep over heads per
+      simdgroup (2, 4, 8; 8 spills), the no-load twins, then the levers (the lazy
+      rescale, two positions per iteration) interleaved with the fix's form; the
+      full-row variant dropped on the ladder's evidence. Four heads per simdgroup is
+      1.7× the fix's form on the kernel (M, interleaved), correct to one fp16 ulp;
+      the levers a loss and a null; the chain under register-limited occupancy is
+      what binds. Transferred: about 2 ms per token at 7k (3.4 %, T). The record in
+      the design document's step-zero section.
+- [x] **S0.5 The record and the ruling.** DONE 2026-09-17: the step-zero record
+      complete (the ladder, the repair built as Task 2, the prototype priced at
+      about 2 ms per token at 7k). Davor's ruling: build it ("small things, bit by
+      bit, they accumulate"); Task 1 the instrument first, then Task 3 the rewrite
+      under the class-2 gate.
 
 ## Task 1: the instrument (class 1; beside step zero)
 
@@ -75,23 +76,25 @@ no-load twin; the close.
       (`ShrikeValidation/Support/Fixtures/ScriptedLogitProducer.swift`) asserts the
       fed ids are the list's, in order, whatever the scripted logits say.
 - [ ] **T1.2 The logits dump.** `GenerationConfig` gains `logitsSink:
-      LogitsSink?`, a protocol with `func record(position: Int, logits:
-      UnsafeBufferPointer<Float>)`; the loop calls it after each position's logits
-      are on the host (a synchronous read-back of the logits buffer in this mode
-      only); a file sink writes raw fp32 rows to `<file>` and a JSON sidecar
-      `<file>.json` (vocabulary size, position count, the tokens fed, the build's
-      commit). A test with the scripted producer asserts the rows written equal the
-      logits scripted.
+      (any LogitsSink)?`, a protocol with `record(position:logits:)` over the fp16
+      logits buffer and `chose(position:token:)` for the id the loop took; the loop
+      calls them once per position on the synchronous logits path (the boundary
+      producer is bypassed whenever a sink or forced tokens are set, and a fused
+      greedy head is refused); a file sink in the CLI writes raw fp16 rows to
+      `<file>` and a JSON sidecar `<file>.json` (vocab, positions, chosen, forced,
+      the binary's hash). A test with the scripted producer asserts the rows
+      recorded equal the logits scripted and the ids equal the tokens chosen.
 - [ ] **T1.3 The CLI flags.** `Args.swift`: `--force-tokens <file>` (one id per
       line), `--dump-logits <file>`, `--logits-head`; `Run.swift:218` and `:247`
       pass `forceLogitsHead: !config.isPureGreedy || logitsHead || forcedTokens != nil`.
       The usage block updated; a parser test per flag.
-- [ ] **T1.4 The comparison.** `tools/logit-compare.py <old> <new>`: per position
-      the KL divergence old to new in fp64, max |Δ logit|, both argmaxes, the old
-      build's top-2 margin; the band three times the run's max |Δ|; every flip
-      listed with its margin and the verdict variance or defect; a summary line.
-      Its own test: old against old reports zero everywhere (run on a real dump at
-      T1.6 and kept as a `--self-test` mode over a synthetic pair).
+- [ ] **T1.4 The comparison.** `tools/logit-compare.py <old> <new>` (pure Python,
+      no numpy on either box): per position the KL divergence old to new in fp64,
+      max |Δ logit|, both argmaxes, the old build's top-2 margin; the band three
+      times the run's max |Δ|; every flip listed with its margin and the verdict
+      variance or defect; a summary line; exit 1 on a defect. `--self-test` over a
+      synthetic pair with one variance flip and one defect; old against old on a
+      real dump at T1.6.
 - [ ] **T1.5 The logits-head golden.** `tools/golden-baseline.sh`: a `HEAD=logits`
       mode adding `--logits-head` to the CLI line and a `-lh` suffix to the profile
       name; the two profiles captured on both boxes on the current tree

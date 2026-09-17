@@ -350,6 +350,68 @@ slower than the same arm early in the other order (the first ladder's pair did n
 show this), so each arm's clean number above is its earlier position, and the
 repair's rig arms are the verdict, not the bench.
 
+**S0.4 (2026-09-17, after Task 2; the mini, Shrike stopped): the streaming prototype.**
+`sources/ShrikeAttnBench/Metal/stream.metal`, Approach A as designed: a threadgroup
+per KV head and chunk, its eight simdgroups as `S_HPT` position streams by
+`8 / S_HPT` head sets, each stream a contiguous run of the chunk, each lane loading
+its contiguous eight bytes of the half-row into registers and dequantizing in fp32
+as production does, the dots and one `simd_sum` per head, the softmax per head,
+V the same way into register accumulators; no threadgroup memory and no barrier;
+`64 / S_HPT` chunks dispatched so the partials stay 64 per query head and the
+combine is untouched. Correct: every variant meets production's fp16 output to one
+ulp, and the three head counts hash identical (the same 64 position runs in the same
+order). The sweep at 8k, µs, the two orders:
+
+| arm | µs | ns per KB |
+| --- | ---: | ---: |
+| prod (the fix's pipeline) | 618 / 702 | 71 / 81 |
+| sloops+o1 (the fix's form) | 541 / 613 | 62 / 70 |
+| stream2 | 433 / 383 | 50 / 44 |
+| stream4 | 438 / 317 | 50 / 36 |
+| stream8 | 2,337 / 2,340 | 268 | 
+| stream2+noload, stream4+noload | 260 / 260, 268 / 238 | 30, 27 to 31 |
+| loadonly | 151 / 139 | 17 / 16 |
+
+Eight heads per simdgroup spills, as the register count said (128 floats of Q and
+output per lane before the loop's own). Two and four are close; four reads each row
+half as often.
+
+**S0.4b (the same day): the levers, interleaved.** The fix's own arm drifted from
+541 to 958 µs inside this run (1.77×, the box's second such episode today), so each
+variant is read only against the fix's form run immediately before it:
+
+| variant / the fix's form | 8k | 4k |
+| --- | ---: | ---: |
+| stream4 | 0.59 | 0.57 |
+| stream4+lazy (the rescale only when the max moves) | 0.88 | 0.74 |
+| stream4+u2 (two positions per iteration) | 0.54 | 0.68 |
+| stream4+u2+lazy | 0.67 | 0.67 |
+| stream2+lazy, stream2+u2+lazy | 0.78, 1.01 | 0.78, 0.79 |
+| stream4+u2+lazy+noload | 0.69 | 0.55 |
+| loadonly | 0.21 | 0.18 |
+
+The reading. The structure is worth **1.7× on the kernel over the fix's form (M,
+interleaved)**. The lazy rescale is a loss on both boxes: the uniform branch and
+the eight-wide multiply under it cost more than the exp they skip. The unroll is a
+null inside the drift. The no-load twins sit at 240 to 270 µs against a load floor
+of 140 to 150, so what binds now is the per-position chain (the dequant, the dots,
+the reductions, the exps, the rescale) under a register-limited occupancy, about a
+hundred registers a lane at four heads; the reference runs the same chain behind
+ten times the simdgroups, which our register budget cannot buy. The arithmetic
+levers left (the affine dot that folds the dequant into one scale per head, a
+shared butterfly reduction across the four heads) are class-2 and worth 5 to 10 %
+each (C), none structural.
+
+Transferred to the runner (T, the bench's 1.7× on the fix's measured slope): 0.72
+to about 0.42 ms per 1,000; at 7k the scan 5.2 to 3.0 ms, **about 2 ms per token,
+3.4 %**, above the rig's 1.7 % noise; the card about 0.6 ms, the 1k 0.3, the 300
+nothing. The reference's rate stays 1.5 to 2× away.
+
+**The drift, for the record.** Twice today (S0.3b and S0.4b) the mini slowed 1.77×
+in the middle of a bench run and stayed slow; four other runs held steady. The cause
+was not found in the box's process list; the interleaved pairing is the method that
+survives it, and the rig's two-lifetime arms read against each other the same way.
+
 **What step zero changes.** The constraint is named and it is neither occupancy nor
 latency nor the layout: it is the loop form. Approach B is no longer a guess about
 staging; it is the static trip count with the explicit fused form, worth 2.70× on
@@ -412,16 +474,22 @@ and v21, and closes the golden's coverage gap the v18 review found on the way.
   with the same inputs, so the comparison measures the kernels, not the trajectory.
 - **A logits dump** (`--dump-logits <file>`, a `LogitsSink` on
   `GenerationConfig` that the loop calls once per position): every position's full
-  fp32 logits (248,320 floats, about 1 MB) read back after the head's command
-  completes and appended as raw rows, with a JSON sidecar carrying the vocabulary size, the
-  position count, the tokens fed and the build's commit. Both golden prompts, the
-  96 and the 128 positions, come to a few hundred megabytes per build.
-- **The comparison** (`tools/logit-compare.py old new`): per position the KL
-  divergence old to new in fp64, the maximum |Δ logit|, the argmax of each and the
-  old build's top-2 margin; the band is three times the run's maximum |Δ|; a flip
-  whose margin sits inside the band is variance, a flip at a wider margin is a
-  defect, and the script says which. Old against old must report zero everywhere:
-  that is the instrument's own test, and it is run first.
+  logits as the head writes them and the sampler reads them, fp16 (248,320 values,
+  about 500 KB), appended as raw rows once they are on the host, with a JSON
+  sidecar carrying the vocabulary size, the position count, the tokens chosen, the
+  tokens forced and the binary's hash. Both golden prompts, the 96 and the 128
+  positions, come to about 110 MB per build.
+- **The comparison** (`tools/logit-compare.py old new`, pure Python since neither
+  box has numpy, about a minute per pair): per position the KL divergence old to
+  new in fp64, the maximum |Δ logit|, the argmax of each and the old build's top-2
+  margin; the band is three times the **median** over positions of the maximum
+  |Δ| (the board wrote the run's maximum; the script's self-test showed that one
+  bad position then widens the band and hides every flip, so the median sets the
+  band and a position whose maximum |Δ| is ten times the median is a defect on
+  its own); a flip whose margin sits inside the band is variance, a flip at a
+  wider margin is a defect, and the script says which and exits non-zero on a
+  defect. Old against old must report zero everywhere: that is the instrument's
+  own test, and it is run first.
 - **`--logits-head`** in the CLI: the runtime already takes the flag
   (`RuntimeConfiguration.swift:178`, `forceLogitsHead`); the CLI passes it only when
   the sampler is not pure greedy (`Run.swift:218`), the server always
