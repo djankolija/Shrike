@@ -575,15 +575,65 @@ budget in S0.2 and S0.5 does not allow a batch.
 
 ## Tasks
 
-### Task 1: the predictor (class 1)
+### Task 1: the pool's allocation (class 1; the shape ruled at S0.7)
 
-What step zero supports, in this order of preference: the token-id table with its
-batch on the ring's landing path at the layers and width S0.2 names; the wider
-probe at the width S0.5 names; the draft for layer 0 if S0.3 earns it; the table
-seeded from the prefill if S0.5 earns it. The pre-registration names the rows: the
-misses per token by layer group, the reads per token, the cells held, the io ms and
-the token on four shapes, graded T with a range from the replay's numbers; the
-answers expected identical (class 1).
+The split with SLRU as its policy. The predictor this task was to carry is not
+built (S0.2, S0.3, S0.5, S0.5b); its design and the replay's table mode stay on
+record above.
+
+**T1.1 The pre-registration (2026-09-17; measured by replay, the arms graded T).**
+The production miss profile, the misses each layer paid with the ring in place,
+summed over every plan row of the four S0.5 captures (51,160 rows), per layer 0
+to 39: 2373 1795 1651 1206 978 730 715 625 723 447 639 690 522 377 308 280 254
+229 236 214 393 265 349 370 301 298 215 307 312 369 284 277 554 551 623 588 673
+603 807 1009. Eleven to one between layer 0 and the quietest layer, sharper than
+the pool-basis profile S0.4 used (six to one), because the ring serves the middle
+layers better than the ends. The allocation is a blend between uniform and
+proportional to that profile at the same total of 5,120, each layer at least 32;
+the blend is relative to the profile's peakedness, so the production profile
+wants a milder one than S0.4's pool profile did. Candidates re-priced by replay
+over the probe at its in-flight budget of one on the four captures (the current
+tree) and on the three v14 captures (an older build), misses saved per position
+and the modelled ms:
+
+| blend | min / max slots | card | the 300 | the 1k | the 7k | mean (current tree) | mean (v14) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.2 | 111 / 204 | 2.91 | 2.51 | 1.69 | 3.20 | 2.58 (1.84 ms) | 2.42 (1.74) |
+| 0.25 | 107 / 219 | 3.34 | 2.80 | 1.96 | 3.59 | 2.92 (2.11) | 2.72 (1.97) |
+| **0.3** | 103 / 240 | 3.56 | 2.84 | 2.03 | 3.86 | **3.08 (2.24)** | 2.91 (2.12) |
+| 0.35 | 99 / 261 | 3.62 | 2.77 | 1.93 | 3.98 | 3.07 (2.24) | 2.91 (2.12) |
+| 0.5 | 87 / 316 | 3.10 | 1.79 | 0.92 | 3.56 | 2.34 (1.54) | 2.19 (1.46) |
+| S0.4b's table | 94 / 210 | 3.53 | 2.95 | 1.87 | 3.89 | 3.06 (2.19) | 2.95 (2.15) |
+
+**The reference allocation is blend 0.3**, per layer 0 to 39: 240 204 195 166
+152 136 135 129 136 118 130 134 123 114 109 107 106 104 105 103 115 106 112 113
+109 109 103 109 109 113 108 107 125 125 129 127 132 128 141 154. The choice is
+not delicate: 0.25 to 0.35 and S0.4b's table sit within a tenth of a miss of it;
+0.5 over-corrects the middle layers on the 1k.
+
+SLRU on the pool basis (the SLRU pool models no fills), decode misses per
+position, aging-LFU against SLRU at 0.5: the card 29.9 to 28.2, the 300 29.4 to
+29.0, the 1k 28.0 to 24.9, the 7k 27.0 to 27.0; with the split beside it the card
+26.2, the 300 28.4, the 1k 24.7, the 7k 24.0. SLRU's gain is shape-dependent, up
+to three misses on the 1k and nothing on the 7k, and it adds to the split's on
+three of four shapes.
+
+**The rows pre-registered for T1.6's arms** (two production lifetimes per shape
+against the S0.5 lifetimes at the same build family; the misses per token and the
+io the rows, the token and tok/s the verdict; T, the range from half to all of
+the modelled saving since a saved further miss overlaps in latency):
+
+| shape | misses per token, before | after the split (expected) | modelled ms | the token ms, before | after (expected) | tok/s after (expected) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| the card | 19.8 | 16.2 to 16.6 | 2.6 | 58.7 | 56.1 to 57.4 | 17.4 to 17.8 |
+| the 300 | 19.5 | 16.6 to 17.1 | 2.1 | 57.9 | 55.8 to 56.9 | 17.6 to 17.9 |
+| the 1k | 19.0 | 17.0 to 17.5 | 1.3 | 57.5 | 56.2 to 56.9 | 17.6 to 17.8 |
+| the 7k | 18.1 | 14.3 to 15.0 | 3.1 | 58.6 | 55.5 to 57.1 | 17.5 to 18.0 |
+
+SLRU on top (T1.3): zero to three misses per token by shape, the 1k the most,
+the 7k nothing, graded T. The answers expected identical (class 1): which experts
+compute never changes. The misses per token may move beyond the expectation on
+the mini's drift days; interleaved lifetimes are the reading.
 
 ### Task 2: the policy and the split (class 1; only on S0.4's number)
 

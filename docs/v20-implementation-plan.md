@@ -84,12 +84,15 @@ The split with SLRU as its policy. The predictor, the batch, the wider probe and
 the draft that this task carried before the ruling are not built (S0.2, S0.3,
 S0.5, S0.5b); the table's design and the replay's mode stay on record.
 
-- [ ] **T1.1 The pre-registration**: the allocation derived from a production miss
-      profile (the capture's plan rows, the misses per layer with the ring in place,
-      the four shapes pooled), at blends 0.35 / 0.5 / 0.65 and the same total,
-      re-priced by replay on the v14 captures with the probe and on the v19 traces;
-      SLRU beside it and with it; the rows per shape (misses per token, miss layers,
-      io, the token, tok/s) graded T with a range; the answers expected identical.
+- [x] **T1.1 The pre-registration.** DONE 2026-09-17: the production miss profile
+      from the four S0.5 captures' plan rows (51,160), eleven to one between layer 0
+      and the quietest layer; blends 0.2 to 0.5 and S0.4b's table re-priced by
+      replay over the probe on the current tree's captures and the v14 captures;
+      blend 0.3 the reference (103 to 240 slots, 3.08 misses per position saved on
+      the current tree, 2.24 ms modelled; 0.25 to 0.35 within a tenth); SLRU on the
+      pool basis zero to three misses by shape; the rows per shape in the design
+      document's Task 1 record; the driver and tables at
+      `~/.claude/handoffs/archive/shrike-v20-t1/`.
 - [ ] **T1.2 Per-layer slots**: the arena, the residency table and index, the
       classifier's arguments, the streamer's per-layer pool and the prefill tile
       scheduler's fitting taking a per-layer count; a fixed table of forty counts
