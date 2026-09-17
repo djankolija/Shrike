@@ -637,6 +637,139 @@ void attention_decode_partial_shared(
     }
 }
 
+// v19 Task 3: the streaming scan (docs/v19-scan-rewrite.md). Rows go from
+// device to registers, no threadgroup memory and no barrier in the loop; a
+// threadgroup owns one KV head and one chunk, its eight simdgroups are
+// kAttnStreamCount position streams by (qPerKV / kAttnStreamHeads) head sets,
+// and each stream writes its own partial, so NC / kAttnStreamCount chunks are
+// dispatched and the combine reads NC partials as before. Served shape only
+// (the gate is in Attention.swift); class 2: the per-lane chain is contiguous,
+// not lane-strided, and a chunk's positions enter the softmax in four streams.
+constant constexpr uint kAttnStreamHeads = 4;
+constant constexpr uint kAttnStreamCount = 4;
+
+static inline void attn_stream_dequant8(uint2 w, float s, float b, thread float* dst) {
+    const uchar4 lo = as_type<uchar4>(w.x);
+    const uchar4 hi = as_type<uchar4>(w.y);
+    dst[0] = float(uint(lo.x)) * s + b;
+    dst[1] = float(uint(lo.y)) * s + b;
+    dst[2] = float(uint(lo.z)) * s + b;
+    dst[3] = float(uint(lo.w)) * s + b;
+    dst[4] = float(uint(hi.x)) * s + b;
+    dst[5] = float(uint(hi.y)) * s + b;
+    dst[6] = float(uint(hi.z)) * s + b;
+    dst[7] = float(uint(hi.w)) * s + b;
+}
+
+[[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
+void attention_decode_partial_stream(
+    device const half*  Q             [[buffer(0)]],
+    device const uchar* K             [[buffer(1)]],
+    device const uchar* V             [[buffer(2)]],
+    device       float* m_out         [[buffer(3)]],
+    device       float* d_out         [[buffer(4)]],
+    device       float* o_out         [[buffer(5)]],
+    constant     uint&  head_dim      [[buffer(6)]],
+    constant     uint&  num_q_heads   [[buffer(7)]],
+    constant     uint&  num_kv_heads  [[buffer(8)]],
+    constant     uint&  seq_len       [[buffer(9)]],
+    constant     uint&  kv_start      [[buffer(10)]],
+    constant     uint&  chunk_len     [[buffer(11)]],
+    constant     uint&  num_chunks    [[buffer(12)]],
+    constant     float& scale         [[buffer(13)]],
+    constant     uint&  kv_bits       [[buffer(14)]],
+    constant     uint&  kv_stride     [[buffer(15)]],
+    constant     uint&  kv_value_bytes [[buffer(16)]],
+    constant     uint&  kv_group_size [[buffer(17)]],
+    uint tg_id           [[threadgroup_position_in_grid]],
+    uint simd_lane_id    [[thread_index_in_simdgroup]],
+    uint simd_group_id   [[simdgroup_index_in_threadgroup]]
+) {
+    const uint HD = attn_fc_head_dim(head_dim);
+    const uint NQ = attn_fc_num_q_heads(num_q_heads);
+    const uint NKV = attn_fc_num_kv_heads(num_kv_heads);
+    const uint NC = attn_fc_num_chunks(num_chunks);
+    const uint kvStride = attn_fc_kv_stride(kv_stride);
+    const uint kvValueBytes = attn_fc_kv_value_bytes(kv_value_bytes);
+    const uint kvGroupSize = attn_fc_kv_group_size(kv_group_size);
+    const uint qPerKV = NQ / NKV;
+    const uint headSets = qPerKV / kAttnStreamHeads;
+    const uint dispatched = NC / kAttnStreamCount;
+    const uint groups = (NKV * HD + kvGroupSize - 1u) / kvGroupSize;
+    const uint perLane = HD / 32u;
+
+    const uint kv_head = tg_id / dispatched;
+    const uint chunk = tg_id % dispatched;
+    const uint head_set = simd_group_id % headSets;
+    const uint stream = simd_group_id / headSets;
+    const uint p_start = kv_start + chunk * chunk_len;
+    const uint p_end = min(p_start + chunk_len, seq_len);
+    const uint span = (p_end > p_start) ? (p_end - p_start) : 0u;
+    const uint run = (span + kAttnStreamCount - 1u) / kAttnStreamCount;
+    const uint s_start = p_start + stream * run;
+    const uint s_end = min(s_start + run, p_end);
+    const uint offset = kv_head * HD + perLane * simd_lane_id;
+    const uint group = offset / kvGroupSize;
+    const uint q_head0 = kv_head * qPerKV + head_set * kAttnStreamHeads;
+
+    constexpr uint kPerLane = (kAttnSharedMaxHeadDim + 31u) / 32u;
+    float q[kAttnStreamHeads][kPerLane];
+    float o[kAttnStreamHeads][kPerLane];
+    float m[kAttnStreamHeads];
+    float d[kAttnStreamHeads];
+    for (uint h = 0; h < kAttnStreamHeads; ++h) {
+        device const half* qrow = Q + (q_head0 + h) * HD + perLane * simd_lane_id;
+        for (uint e = 0; e < kPerLane; ++e) {
+            q[h][e] = (e < perLane) ? float(qrow[e]) : 0.0f;
+            o[h][e] = 0.0f;
+        }
+        m[h] = -INFINITY;
+        d[h] = 0.0f;
+    }
+
+    for (uint pos = s_start; pos < s_end; ++pos) {
+        device const uchar* krow = K + pos * kvStride;
+        device const uchar* vrow = V + pos * kvStride;
+        device const half* kscales = reinterpret_cast<device const half*>(krow + kvValueBytes);
+        device const half* vscales = reinterpret_cast<device const half*>(vrow + kvValueBytes);
+        const uint2 wk = *reinterpret_cast<device const uint2*>(krow + offset);
+        const uint2 wv = *reinterpret_cast<device const uint2*>(vrow + offset);
+        float k[kPerLane];
+        attn_stream_dequant8(wk, float(kscales[group]), float(kscales[groups + group]), k);
+        float p[kAttnStreamHeads];
+        float alpha[kAttnStreamHeads];
+        for (uint h = 0; h < kAttnStreamHeads; ++h) {
+            float partial = 0.0f;
+            for (uint e = 0; e < kPerLane; ++e) {
+                if (e < perLane) { partial = fma(q[h][e], k[e], partial); }
+            }
+            const float s = simd_sum(partial) * attn_fc_scale(scale);
+            const float m_new = max(m[h], s);
+            alpha[h] = attn_softmax_exp(m[h] - m_new);
+            p[h] = attn_softmax_exp(s - m_new);
+            d[h] = d[h] * alpha[h] + p[h];
+            m[h] = m_new;
+        }
+        float v[kPerLane];
+        attn_stream_dequant8(wv, float(vscales[group]), float(vscales[groups + group]), v);
+        for (uint h = 0; h < kAttnStreamHeads; ++h) {
+            for (uint e = 0; e < kPerLane; ++e) {
+                if (e < perLane) { o[h][e] = fma(o[h][e], alpha[h], p[h] * v[e]); }
+            }
+        }
+    }
+
+    const uint out_chunk = chunk * kAttnStreamCount + stream;
+    for (uint h = 0; h < kAttnStreamHeads; ++h) {
+        const uint base = (q_head0 + h) * NC + out_chunk;
+        if (simd_lane_id == 0) { m_out[base] = m[h]; d_out[base] = d[h]; }
+        device float* o_row = o_out + base * HD + perLane * simd_lane_id;
+        for (uint e = 0; e < kPerLane; ++e) {
+            if (e < perLane) { o_row[e] = o[h][e]; }
+        }
+    }
+}
+
 [[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
 void attention_decode_gqa_swa_partial(
     device const half*  Q             [[buffer(0)]],

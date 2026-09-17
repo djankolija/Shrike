@@ -624,6 +624,103 @@ half. The instrument: every flip inside three times the median |Δ|, no position
 above ten times it. The misses and the other rows flat. The answers not expected
 identical.
 
+**The record, the dev box's half (2026-09-17).** The kernel
+`attention_decode_partial_stream` beside the shared one, on the V4.1 function
+constants; the wrapper's fourth loop variant, `.stream`, gated to the served
+shape on int8 rows (head dim 256, eight query heads per KV head, group 64) with
+its own specialized pipeline cached per shape key and the shared kernel as the
+fallback for every other shape; sixteen chunks per KV head dispatched, sixty-four
+partials per query head written at any length (an empty stream writes −∞, 0, 0),
+the combine untouched; the runner constructs the wrapper with `.stream`.
+
+- **The kernel arm** (`AttentionStreamTests`, nine tests): against the CPU
+  reference on int8 rows at 3, 17, 96, 500 and 1,100 positions, relative error
+  under 0.02 everywhere; against the shared kernel on the same rows, the maximum
+  |Δ| on the fp16 output 6e-8 at 17 positions, 1.2e-7 at 500, 3.8e-6 at 1,100
+  (relative 1.4e-4), a thousandfold inside the pre-registered 1e-2; the stream
+  pipeline engages for the served shape, is cached, and is not what fp16 rows
+  or another shape get.
+- **The bench** (M4 Pro, iteration signal): the production pipeline on the
+  streaming variant 160 to 182 µs at 8k against the shared variant's 245 and the
+  prototype's 137 plus the combine, so the runner's path is the prototype's.
+- **The golden on the new build:** the short profile identical on both heads,
+  the long profile a mismatch on both from its twelfth token, the diff kept
+  (`~/.claude/handoffs/archive/shrike-v19-t3/golden-*-new-local.log`).
+- **The instrument, old (d440004) against new, the golden prompts forced with
+  the old build's own tokens:**
+
+  | prompt | positions | mean KL | max KL (at) | median max |Δ| | band | flips | defects |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | short | 96 | 7.4e-4 | 1.8e-2 (40) | 0.26 | 0.79 | 0 | 0 |
+  | long | 128 | 4.4e-4 | 1.6e-2 (12) | 0.42 | 1.27 | 2 | 0 |
+
+  The long prompt's flips are at positions 12 and 20 with margins of 0.031 and
+  0.047 logits, genuine near-ties, and the free-run answer diverges at the first
+  of them into the same plan in a different order ("I need to: 1. Count the
+  entries…" for "First, let me count the entries…"), the board's "correct all
+  along" for "right all along". The logit differences are far above the kernel's
+  own 4e-6: a rounding-level change in one layer's attention output moves the
+  hidden state enough to change a routed expert's choice downstream at some
+  positions, which is where a median |Δ| of a few tenths comes from while the
+  distributions barely move (a hypothesis for the magnitude, not measured here;
+  what is measured is that no position stands out from the run's own spread and
+  the KL stays at a thousandth).
+
+**The record, the mini's half (2026-09-17).** The four gates on the tree (1,257
+tests in 174 suites in 204 s, zero warnings, lint and links clean); a clean release
+build deployed with the server down. **The golden on the new build: identical on
+all four profiles on the mini.** The M1's rounding does not land on the near-ties
+the M4 Pro's did, so on the target the rewrite reproduces both golden answers
+exactly on both heads. The instrument, the old build (Task 1's, `ad98a5c5e51c6277`
+CLI) against the new, the golden prompts forced with the old build's own tokens on
+the mini:
+
+| prompt | positions | mean KL | max KL (at) | median max |Δ| | band | flips | defects |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| short | 96 | 5.6e-4 | 1.2e-2 (40) | 0.24 | 0.72 | 0 | 0 |
+| long | 128 | 1.8e-4 | 3.9e-3 (76) | 0.27 | 0.80 | 0 | 0 |
+
+No flip on either prompt on the target; the spreads the same shape as the dev
+box's. The gate's first two instruments pass on both boxes; the read is Davor's,
+on the dev box's long-profile divergence (the mini's answers are unchanged).
+
+**The arms** (the mini, `3042665f2fb11370`, two production lifetimes per shape
+against Task 2's; the answers differ in length on every shape since the rig's
+prompts hit near-ties the golden prompts do not on this box, so the per-token rows
+are the comparison and the misses follow the tokens):
+
+| shape | `layer_kv` Task 2 | Task 3 | expected | the token Task 2 | Task 3 | tok/s Task 2 | Task 3 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| the 300 | 7.67 | 7.43 to 7.44 | 7.6 | 57.7 to 57.9 | 57.4 to 58.5 | 17.3 | 17.1 to 17.4 |
+| the 1k | 8.26 | 7.75 to 7.78 | 7.9 | 57.2 to 58.2 | 57.4 to 57.5 | 17.2 to 17.5 | 17.4 |
+| the card | 8.96 to 9.02 | 8.10 to 8.12 | 8.2 | 59.0 to 59.4 | 57.8 to 58.7 | 16.9 | 17.0 to 17.3 |
+| the 7k | 12.82 to 12.84 | 10.24 to 10.25 | 10.7 | 61.6 to 61.8 | 58.5 to 58.8 | 16.2 | 17.0 to 17.1 |
+
+The slope **0.72 to 0.39 ms per 1,000 (M)**, the pre-registered 0.4 to 0.5; every
+`layer_kv` row past its expectation; the 7k token 3.1 ms faster (5 %), the card
+about 1 ms, the 1k and the 300 inside the noise; `layer_linear`, the fixup, the
+head and the miss window flat. Over the chapter the 7k token went from 73.0 to
+58.6 ms (13.7 to 17.05 tok/s, +25 %), `layer_kv` from 24.4 to 10.25, the slope
+from 2.23 to 0.39, a 5.7× on the scan; the reference's 0.2 to 0.3 per 1,000 is
+now 1.3 to 2× away rather than ten.
+
+**The read and the acceptance (2026-09-17).** Davor read the dev box's long
+answer old against new (the only one that changed on either box): the same plan
+in a different order, the same shelves, the same script; his ruling, variance.
+The dev box's two long profiles re-captured on the rewrite (fused and logits
+head, the same 423 bytes on both heads), the short profiles and all four of the
+mini's untouched since identical; `--check` identical on all four on both boxes.
+The bitwise golden is the gate again from here. His two questions on the way,
+answered in the chapter's record for the next reader: a second served shape is a
+second specialization of the same kernel by function constants (the load width
+from the head dimension, the heads per simdgroup from the register budget, a
+table in the wrapper), not a copy; and "correct" between the two kernels is not
+defined at the level they differ, since both carry the rows' int8 quantization
+identically and differ only in fp32 summation order, a part in ten million that
+the fp16 output rounds away everywhere but at a few elements. What decides a
+near-tied token is chaos, not correctness; the golden is a change detector, not
+an oracle.
+
 - **The kernel**, `attention_decode_partial_stream`, beside the shipped one in
   `attention.metal`, on the V4.1 function constants (bits, stride, value bytes,
   group size folded), the same buffers and the same partial contract. The shape gate as today's (`Attention.swift:50-60`);

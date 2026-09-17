@@ -12,6 +12,7 @@ final class BenchRunner {
     private let stream: StreamKernel
     private let production: Attention
     private let productionPlain: Attention
+    private let productionStream: Attention
     private var productionOut: [Int: [Float]] = [:]
 
     init(args: BenchArgs) throws {
@@ -26,6 +27,7 @@ final class BenchRunner {
         self.production = try Attention(context: context, partialLoopVariant: .kvShared)
         self.productionPlain = try Attention(context: context, partialLoopVariant: .kvShared,
                                              specializesKVShared: false)
+        self.productionStream = try Attention(context: context, partialLoopVariant: .stream)
     }
 
     func run() throws {
@@ -54,8 +56,13 @@ final class BenchRunner {
         var hash = "-"
         var maxDiff = "-"
         switch arm.kind {
-        case .production(let specialized):
-            let attention = specialized ? production : productionPlain
+        case .production, .productionStream:
+            let attention: Attention
+            if case .production(let specialized) = arm.kind {
+                attention = specialized ? production : productionPlain
+            } else {
+                attention = productionStream
+            }
             seconds = try Timing.medianGPUSeconds(context: context, warmup: args.warmup,
                                                   repeats: args.repeats) { cb in
                 try encodeProduction(attention, cb, seqLen: seqLen)

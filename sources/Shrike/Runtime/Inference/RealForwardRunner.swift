@@ -630,7 +630,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      maxHeadDim: max(cfg.headDim, cfg.fullHeadDim),
                                      supportsSinks: cfg.hasAttentionSinks,
                                      supportsMLA: cfg.hasMLALayers,
-                                     partialLoopVariant: .kvShared),
+                                     partialLoopVariant: .stream),
             kvQuantizer: runtimeConfiguration.kvCachePrecision.isQuantized
                 ? try KVCacheQuantizer(context: context) : nil,
             shared: try SharedExpertRuntime(

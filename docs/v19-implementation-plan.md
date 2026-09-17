@@ -131,38 +131,57 @@ no-load twin; the close.
 
 ## Task 3: the streaming scan (class 2)
 
-- [ ] **T3.1 The pre-registration.** S0.4's chosen configuration, the expected rows
-      (the design document's table re-graded on S0.4's measured rate) and the band
-      the kernel arm will accept, in the design document before the kernel lands.
-- [ ] **T3.2 The kernel.** `attention_decode_partial_stream` beside the shipped one
-      in `attention.metal`, on the V4.1 function constants, the same buffers and the
-      same partial contract; the threadgroup's simdgroups merged once at the chunk's
-      end; `Attention.swift`: the variant selected by the shape gate
-      (`:50-60`), the chunk budget kept at 64 unless S0.4 chose otherwise, the
-      combine untouched.
-- [ ] **T3.3 The kernel arm.** `AttentionTests` and `KVCacheQuantizedAttentionTests`
-      extended to the new kernel: against the CPU reference at 1e-2 and the
-      quantized cache at 0.02 at the small, the straddling and the served shapes at
-      int8, int4 and fp16 rows; a new-against-shipped arm at the served shape
-      recording max |Δ| against the pre-registered band; the PSO engagement test.
-      Red first with the variant absent.
-- [ ] **T3.4 The gates and the deploy.** The four gates; the golden NOT expected
-      identical (recorded as the class-2 exception, with the diff kept); deploy to
-      the mini.
-- [ ] **T3.5 The instrument.** Both golden prompts forced through the shipped build
-      and the new build on both boxes (`--force-tokens` with the golden's tokens,
-      `--dump-logits`), `tools/logit-compare.py` on each pair; the tables in the
-      design document's Task 3 record; every flip inside the band, or the kernel is
-      fixed before anything else runs.
-- [ ] **T3.6 The read.** The four golden profiles free-run on the new build on both
-      boxes, the answers in the record, read by Davor for route and language; the
-      ruling recorded here.
-- [ ] **T3.7 The golden re-captured** on both boxes (four profiles), once, after the
-      read; the commit carries the new baselines and the design document's note of
-      the class-2 acceptance.
-- [ ] **T3.8 The arms.** Four shapes, two lifetimes each, against S0.1's ledger; a
-      same-box interleaved A/B on the 7k if the wall's move is inside the drift; the
-      pre-registered rows moved or not in the record; the commit.
+- [x] **T3.1 The pre-registration.** DONE 2026-09-17: the rows from the bench's
+      1.7× and the kernel arm's band, in the design document's Task 3 section
+      before the kernel landed (committed with Task 1, d440004, so the order is
+      in the history).
+- [x] **T3.2 The kernel.** DONE 2026-09-17: `attention_decode_partial_stream` in
+      `attention.metal` on the V4.1 function constants, the same buffers and
+      partial contract, four heads per simdgroup by four streams, each stream
+      writing its own partial (no merge: sixteen chunks dispatched, sixty-four
+      partials per head, the combine untouched); `Attention.swift`: the `.stream`
+      variant, `streamApplicable` (the served shape on int8 rows), its cached
+      specialized pipeline, the geometry; the runner on `.stream`.
+- [x] **T3.3 The kernel arm.** DONE 2026-09-17: `AttentionStreamTests` (nine tests):
+      the reference at 0.02 on int8 rows at 3, 17, 96, 500 and 1,100 positions; the
+      stream against the shared kernel, max |Δ| 6e-8 to 3.8e-6 on the fp16 output;
+      the pipeline gate (served shape only, cached, fp16 rows and other shapes fall
+      back). The int4 and fp16 rows keep the shared kernel by the gate, so their
+      existing arms are the coverage.
+- [x] **T3.4 The gates and the deploy.** DONE 2026-09-17: the four gates (1,257
+      tests in 174 suites, zero warnings); the golden on the dev box identical on
+      the short profile on both heads and a mismatch on the long profile from its
+      twelfth token (the diff kept in the t3 archive); on the mini identical on
+      all four profiles; a clean release build deployed (`t3-mini-new.sh`).
+- [x] **T3.5 The instrument.** DONE 2026-09-17: both golden prompts forced with the
+      old build's own tokens through old and new on both boxes; the dev box two
+      near-tie flips (margins 0.031 and 0.047) inside the band on the long prompt,
+      none on the short; the mini none on either; no defect anywhere; the tables in
+      the design document's Task 3 record; dumps and logs in
+      `~/.claude/handoffs/archive/shrike-v19-t3/`.
+- [x] **T3.6 The read.** DONE 2026-09-17: the four profiles free-run on both boxes;
+      only the dev box's long profile differs (from token 12: "I need to: 1. Count
+      the number of entries…" for "First, let me count the entries…", the same plan
+      in a different order, the same shelves listed after). Davor's ruling:
+      variance ("Agreed"); the kernel accepted.
+- [x] **T3.7 The golden re-captured.** DONE 2026-09-17: only the dev box's two long
+      profiles changed and were re-captured (423 bytes, the same on both heads); the
+      mini's four and the dev box's short profiles identical, untouched; `--check`
+      identical on all four on both boxes.
+- [x] **T3.8 The arms.** DONE 2026-09-17 against Task 2's ledger (the chapter's
+      current baseline): `layer_kv` 12.8 to 10.25 on the 7k, 9.0 to 8.1 on the card,
+      the slope 0.72 to 0.39 ms per 1,000, the 7k token 61.7 to 58.6 ms (17.05
+      tok/s), the other rows flat, every pre-registered row met; the 7k's move is
+      five times the drift, no A/B needed; the record in the design document;
+      production on the mini at `3042665f2fb11370`; the commit.
+- [ ] **T3.9 The hardening (Davor's ruling, 2026-09-17: worth doing without a gain).**
+      A thrown load error in the runner when the served model's shape or KV precision
+      is not the streaming kernel's, in place of the silent fallback (the wrapper's
+      fallback stays for the tests and the bench); the head-dim-256 assumption
+      stated at the eight-byte load; the v11 simdgroup variant retired
+      (`attention_decode_partial_sg`, `.simdgroup`, its tests); an fp64 reference arm
+      reporting both kernels' error against the exact value. The four gates, the
+      golden identical on both boxes (class 1), the commit.
 
 ## Task 4, held: the matrix-unit tile (B6)
 

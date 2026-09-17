@@ -40,6 +40,7 @@ struct LadderSwitches: Hashable {
 
 enum ArmKind {
     case production(specialized: Bool)
+    case productionStream
     case ladder(LadderSwitches)
     case stream(StreamSwitches)
 }
@@ -56,6 +57,7 @@ struct Arm {
     static let switchHelp: [(String, String)] = [
         ("prod", "the production pipeline through the library's wrapper (partial and combine)"),
         ("prodplain", "the production pipeline without the V4.1 function-constant specialization"),
+        ("prodstream", "the production pipeline on the streaming variant (v19 Task 3, the runner's path)"),
         ("copy", "the ladder kernel with every switch at its default (the shipped kernel)"),
         ("qregs", "Q in per-lane registers, the 8 KB threadgroup copy gone"),
         ("block8", "eight positions per staging block instead of four"),
@@ -79,6 +81,7 @@ struct Arm {
     static func parse(_ name: String) throws -> Arm {
         if name == "prod" { return Arm(name: name, kind: .production(specialized: true)) }
         if name == "prodplain" { return Arm(name: name, kind: .production(specialized: false)) }
+        if name == "prodstream" { return Arm(name: name, kind: .productionStream) }
         if name.hasPrefix("stream") { return try parseStream(name) }
         var sw = LadderSwitches()
         for token in name.split(separator: "+").map(String.init) {
