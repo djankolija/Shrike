@@ -725,9 +725,14 @@ an oracle.
 rewrite left worse was the surface, and four small pieces trim it:
 
 - **A load-time refusal.** The runner throws `ModelError.unsupportedArchitecture`
-  when a Qwen-family model's head dimension, heads per KV head or KV precision are
-  not the streaming scan's (`Attention.streamServes`), naming both shapes in the
-  message, instead of serving it slower on the shared kernel without a word.
+  when a Qwen-family model's head dimension or heads per KV head are not the
+  streaming scan's (`Attention.streamServesShape`), naming both shapes in the
+  message, instead of serving it slower on the shared kernel without a word. The
+  KV precision is the user's choice, not the model's shape: `--kv-bits 4` or `16`
+  on the served model (the CLI, the server and the Mac app's picker all offer them)
+  runs the v11 shared kernel with one line at load saying so. The close's review
+  caught the first cut refusing that axis too, which would have failed every load
+  of a Mac app that remembered a 16-bit choice.
   `RuntimeConfiguration.attentionFallbackAllowed` (off in production) lets the
   runner tests load their toy shape; the wrapper's own fallback stays, for the
   tests and the bench. A test loads the toy model under the production
@@ -789,6 +794,135 @@ rewrite left worse was the surface, and four small pieces trim it:
 Built only if S0.4's no-load twin puts Approach A at the ALU wall short of the
 roof. Its numerics gate is Task 3's, with the wider band the half-precision inputs
 imply, recorded before the arm runs.
+
+## The chapter's close (2026-09-17)
+
+**The tally, the mini, two production lifetimes per shape, from S0.1's ledger at the
+v18 close's build to Task 3's:**
+
+| shape | `layer_kv` ms per token | the token ms | tok/s | the move |
+| --- | ---: | ---: | ---: | ---: |
+| the 300 | 8.4 to 7.4 | 58.5 to 57.9 | 17.1 to 17.3 | +1 %, inside the noise |
+| the 1k | 10.3 to 7.8 | 58.9 to 57.5 | 17.0 to 17.4 | +2.5 % |
+| the card (2k) | 12.3 to 8.1 | 62.2 to 58.2 | 16.1 to 17.2 | +6.5 % |
+| the 7k | 24.4 to 10.25 | 73.0 to 58.6 | 13.7 to 17.05 | +25 % |
+
+The attention row's slope with context **2.23 to 0.39 ms per 1,000 context tokens per
+decoded token (M)**, a 5.7× on the scan, in two steps: the loop form (Task 2, class 1,
+2.23 to 0.72, bit for bit) and the streaming structure (Task 3, class 2, 0.72 to 0.39).
+Every other row of the token flat: `layer_linear` 24.7 to 25.2, the fixup 1.65 to 1.9,
+the head 4.7, the misses per token and the miss window within their spreads. The
+answers changed only where two tokens sat within a few hundredths of a logit, none on
+the mini's golden prompts and two positions on the dev box's long one, read as
+variance.
+
+**The count:** seven commits (`e07c8b4` to `be72708`); 33 source, test and tool files
+changed, 2,140 insertions and 233 deletions outside the docs and baselines; one
+kernel function added (`attention_decode_partial_stream`) and one retired
+(`attention_decode_partial_sg`), the tree's count unchanged; tests 1,250 to 1,258 in
+174 suites; no environment knob added (`attentionFallbackAllowed` is a configuration
+field the tests set, never an env name); one executable target added
+(`ShrikeAttnBench`); two CLI flags for the instrument and one for the head path; two
+golden profiles per box added (the logits head); one rig shape added (the 7k).
+
+**What the chapter settled.**
+
+- The shipped scan was bound by its loop form. Every memory-side hypothesis the
+  board carried from v11 (line utilisation, the chunk wall, the barrier cadence,
+  occupancy, latency hiding) measured null or slower on the mini; a lane-strided
+  loop with a slot counter the compiler could not bound was the whole 3×. The
+  ladder found it in one afternoon because the bench could run on the target.
+- The reference's structure transfers to int8 rows, at four heads per simdgroup, for
+  a further 1.85×; what binds now is the per-position arithmetic chain under a
+  register-limited occupancy, which the reference hides behind ten times the
+  simdgroups our register budget cannot buy. The lazy rescale and the unroll do not
+  help; the arithmetic levers left are worth 5 to 10 % each.
+- The class-2 gate works as ruled, once refined: the instrument's band from the
+  median (the board's run-maximum band hid every flip behind one bad position), an
+  outlier rule beside it, the fp64 arm to say what "correct" means between two
+  kernels (a part in ten million each, indistinguishable), and the read as the last
+  word. The golden is a change detector; the instrument is the oracle for defects;
+  neither decides a near-tie.
+- A public struct's layout change wants a clean build before a crash is believed:
+  SwiftPM left a dependent module's objects stale and the test helper segfaulted
+  with no Shrike frame on the stack.
+- The mini drifts. Twice in one day an unchanged kernel slowed 1.77× mid-run and
+  stayed slow; interleaved pairs are the only bench readings that survive it, and
+  the rig's two-lifetime arms already read that way.
+
+**What remains, and where it went.** The reference's rate (0.2 to 0.3 per 1,000) is
+1.3 to 2× away on the scan: the arithmetic levers (the affine dot folding the
+dequant, a shared butterfly reduction across the four heads), class 2, about 2 ms at
+7k together (C), on the board for a later chapter behind larger prizes. The
+context-independent part of the attention row (7.4 ms at the 300: the projections,
+the quantize, the combine, the walls and the layer's speculative work) is the row's
+floor now and belongs to the walls and the fold. The register cliff and the double
+row read are recorded risks of the design, not defects. The mini's drift is
+unexplained. The next chapter is v20, the SSD mechanism with the fold as structure,
+per the order ruled at v18's close.
+
+**The close's gates.** The four gates on the final tree (the hardening's run: 1,258
+tests in 213 s, zero warnings, lint and links clean); the golden identical on all
+four profiles on both boxes at the re-captured baselines; the architecture document
+brought to the tree with its references re-anchored. ThreadSanitizer on the whole
+suite at the final tree: 1,258 tests passed in 833 s, zero reports (the suppressions
+file untouched).
+
+**The whole-branch review** (`main..perf/v19-scan-rewrite`, seven commits, the
+code-review skill at high: ten finder angles, twelve verifiers, a gap sweep; fifteen
+findings, fourteen confirmed and one plausible; the streaming kernel itself, the
+shared kernel's loop rewrite and the instrument's host reads verified clean). Every
+finding was taken; the dispositions, folded into their owning commits by fixup and
+autosquash:
+
+1. The refusal fired on the KV-precision axis too, which the CLI, the server and
+   the Mac app's picker still offer and the app remembers. Fixed: the refusal is
+   the model's shape only; a precision other than int8 runs the shared kernel
+   with a notice at load. The README says so. (T3.9)
+2. The comparison let a NaN or an infinity through as no verdict. Fixed: a
+   non-finite KL or difference is a defect; the median and the summary skip
+   non-finite values. The self-test now plants one. (Task 1)
+3. The pipeline-engagement test compared against the unspecialized shared
+   pipeline, which the fallback also differs from, so the streaming kernel could
+   be unreachable with the suite green. Fixed: the wrapper records which partial
+   it chose (`lastSplitChoice`) and every stream test asserts it; a run on fp16
+   rows asserts the fallback. (Task 3)
+4. A truncated dump was compared over fewer positions than its sidecar claimed.
+   Fixed: the file's length must equal vocab by positions by two bytes or the run
+   is refused; a short read raises. (Task 1)
+5. The sidecar was written only on the success path, so a cancel or a throw lost
+   the dump's metadata. Fixed: `finish()` is idempotent and runs in a `defer`.
+   (Task 1)
+6. The forced-token budget was clamped silently and an empty file loaded the
+   model before failing. Fixed: the CLI refuses a list longer than the budget with
+   the two numbers and refuses an empty file before the load; the comparison warns
+   when a dump's positions differ from its forced count. (Task 1)
+7. `--band-factor` could not be used. Fixed: argparse. (Task 1)
+8. The golden's `--check` alone ran only the fused profiles, so the documented gate
+   did not cover the logits head. Fixed: the head is a profile (`short-lh`,
+   `long-lh`), the default set is all four, the `HEAD` variable gone. (Task 1)
+9. The sink's row write raised an uncatchable exception on a full disk. Fixed: the
+   throwing write, the first error stored and rethrown from `finish()`. (Task 1)
+10. The loop's second exit for an exhausted forced list gave a library caller one
+    extra decode step. Fixed: the clamp once at the top of `runRawCompletion`, the
+    max-tokens exit the only one, the CLI's clamp removed. (Task 1)
+11. The provenance hash covered the executable but not the Metal sources the
+    kernels compile from at run time (plausible). Fixed: the hash folds every
+    `.metal` file beside the executable. (Task 1)
+12. CRLF forced-token files read as one line. Fixed: split on newlines. (Task 1)
+13. The re-captured dev-box baselines named the commit before the build that
+    produced them. Fixed: the headers corrected, and the script marks a dirty
+    tree from here on. (Task 3)
+14. The wrapper evaluated its shape gate twice per encode and sized the geometry
+    for one kernel before overwriting it for the other. Fixed: one
+    `sharedPartialChoice` decides for both the geometry and the pipeline; a test
+    reads the shipped Metal source and ties the stream constants to the wrapper's.
+    (T3.9)
+15. Two copies of the specialized-pipeline helper, three of the int8-row fixture,
+    two CPU combines. Fixed: one helper with one cache keyed by kernel name and
+    shape; `Int8KVRows` in the validation support module for the bench and the
+    tests; `AttentionRef.combinePartials` for the bench, the tests' double-precision
+    combine kept as the exact-value arm. (T3.9, step zero)
 
 ## Method
 

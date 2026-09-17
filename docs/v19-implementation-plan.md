@@ -175,13 +175,17 @@ no-load twin; the close.
       five times the drift, no A/B needed; the record in the design document;
       production on the mini at `3042665f2fb11370`; the commit.
 - [x] **T3.9 The hardening (Davor's ruling, 2026-09-17: worth doing without a gain).**
-      DONE 2026-09-17: the runner's load-time refusal (`Attention.streamServes`,
-      `RuntimeConfiguration.attentionFallbackAllowed` off in production, the toy
-      shape's test expecting the throw); the head-dim-256 assumption stated at the
-      eight-byte load; `attention_decode_partial_sg`, `.simdgroup` and its two tests
-      retired; the fp64 arm: both kernels at 7 to 9e-8 relative against the exact
-      value, indistinguishable. The four gates; the golden identical on the dev box
-      (the mini's with the close's deploy, since the served path is unchanged).
+      DONE 2026-09-17: the runner's load-time refusal on the model's shape
+      (`Attention.streamServesShape`, `RuntimeConfiguration.attentionFallbackAllowed`
+      off in production, the toy shape's test expecting the throw); a KV precision
+      other than int8 (`--kv-bits 4|16`, the Mac app's picker) keeps working on the
+      shared kernel with a notice at load, since it is the user's choice rather than
+      the model's shape (the review's finding; the front ends and the README offer
+      it); the head-dim-256 assumption stated at the eight-byte load;
+      `attention_decode_partial_sg`, `.simdgroup` and its two tests retired; the
+      fp64 arm: both kernels at 7 to 9e-8 relative against the exact value,
+      indistinguishable. The four gates; the golden identical on the dev box (the
+      mini's with the close's deploy, since the served path is unchanged).
 
 ## Task 4, held: the matrix-unit tile (B6)
 
@@ -191,13 +195,24 @@ no-load twin; the close.
 
 ## Close
 
-- [ ] ThreadSanitizer once on the whole suite
-      (`env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test --no-parallel --sanitize=thread`).
-- [ ] The whole-branch review; fixes folded into their owning commits.
-- [ ] `docs/architecture.md`: an attention section (the decode scan, the KV row
-      format, the two-pass contract) at the final tree, references verified.
-- [ ] The design document's closing block: the tally from S0.1's ledger to the last
-      task on four shapes, what the chapter settled, what remains and where it went.
-- [ ] Production on the mini at the close's build, the golden (re-captured) identical
-      on both boxes.
+- [x] ThreadSanitizer once on the whole suite: DONE 2026-09-17 at `be72708`, 1,258
+      tests passed in 833 s, zero reports, the suppressions file untouched
+      (`~/.claude/handoffs/archive/shrike-v19-t3/close-tsan.log`).
+- [x] The whole-branch review: DONE 2026-09-17, fifteen findings, all taken and
+      recorded in the design document's close; the fixes folded into their owning
+      commits by fixup and autosquash.
+- [x] `docs/architecture.md`: DONE 2026-09-17: the attention-scan section (the two-pass
+      contract, the KV row format, the streaming kernel and its gate, the runner's
+      refusal, the chapter's numbers), the instruments (the four golden profiles, the
+      instrument, the bench, the 7k shape), the v19 history entry, the intro brought
+      to v19; the references on the files v19 touched re-anchored by symbol (39 moved
+      in the first pass, 11 in the second, the AGX trap's by hand), every move
+      printed beside its new source line.
+- [x] The design document's closing block: DONE 2026-09-17, the tally from S0.1's
+      ledger to Task 3 on four shapes, the count, what the chapter settled, what
+      remains and where it went, the close's gates, the review's dispositions.
+- [x] Production on the mini at the close's build: DONE 2026-09-17, a clean release
+      build of `2dec184` deployed (`d0a9e3f4e2d5a5ff`), the golden identical on all
+      four profiles on both boxes, the server relaunched on the production line and
+      answering.
 - [ ] The merge to `main` on Davor's go.
