@@ -139,32 +139,24 @@ SLRU is T1.3; the predicted-future eviction was null at a legitimate horizon
       the overflow as the on-the-spot eviction; the word clock in place of the
       per-layer GPU rows; the per-encoder error option on and measured on the first
       T3.2 build; the order T3.1, T3.2, T3.3.**
-- [ ] **T3.1 The agreed cells** (v18's T2.1 to T2.5 as written, amended in the
-      fixup's addressing and in the fallback): the read of the ring's leases and the
-      index swap, the plan's swap and victim path, the fixup's encode and the
-      speculative kernels' addressing; the build: a timeline value and status word
-      per routed layer reserved at the layer's encode, a host-written `agreed_cells`
-      array per layer, the fixup encoded with the layer as the pool-addressed phase
-      1 over the classifier's miss list and phase 2 over the eight behind the event
-      wait, `MoESpecDispatchArgs` grown to four grids, the host's on-word path (the
-      readback, a landed cell leased, an in-flight one joined within 400 µs, a free
-      ring cell claimed, the overflow's victim chosen on the path for that miss
-      alone and counted as `agreed_overflow`, the batch into the demand lane with
-      the layer's value, an empty batch publishing at once, the next layer's
-      prediction), the previous layer's plan at the wake (the counters and the SLRU
-      promotions, the swap by index, the freed cells back to the ring, the trace
-      rows, the cross-check that every leased cell's expert is in the route), the
-      last layer's plan at the token's end on every exit, the decode plan's pins
-      dropped; `agreed_overflow` and `cells_leased_peak` on the runner line and in
-      `tools/decode-rows.py`; tests (the contract on the toy model with a forced
-      miss set at zero, one and k misses bit for bit against the host-built fixup,
-      the overflow's victim path with the same output and the counter, the deferred
-      plan's ordering under the cache lock and the one-store publish, the lock
-      order, the pre-reserved values published in order and an all-hit layer's at
-      the word); the four gates; the golden on both boxes; deploy; the arms against
-      Task 1's (the token flat within the drift, misses per token within 0.3,
-      `agreed_overflow` under 0.1 per token, the plan's and the fixup build's time
-      off the path); the record.
+- [x] **T3.1 The agreed cells.** DONE 2026-09-17 (`782f477`): the fixup encoded
+      with the layer behind the event wait as the speculative kernels over the
+      host's per-layer cell row, `MoESpecDispatchArgs` at four grids, the
+      speculative pair gaining the status word and the fallback cells; a timeline
+      value per routed layer reserved at the encode; the host on the word (the
+      readback, the landed predictions leased, every miss's cell from a landing,
+      the ring's `claimDemand` or `reserveOverflowSlot` counted as
+      `agreed_overflow`, the batch with the layer's value, the next prediction);
+      the plan at the next wake with the misses counted as the reads; the drain in
+      its T3.1 form; the coordinator's status words recycled; the host-built fixup,
+      `DecodeExpertPartition`, the pending routed command, the completion clock and
+      seven dead rows retired, `agreed_overflow` and `cells_leased_peak` added,
+      `tools/decode-rows.py` following; tests, 1,275 in 174 suites; the four
+      gates; the golden identical bare and configured on both boxes; deployed; the
+      arms flat against Task 1's on all four shapes (misses within 0.2, the token
+      within 0.4 ms, no overflow, the answers identical), the record in the design
+      document; the scripts, logs and rows at
+      `~/.claude/handoffs/archive/shrike-v20-t31/`.
 - [ ] **T3.2 One command per token**: the forty layers' commands and the boundary's
       as encoders of one command, encoded a layer per word during the previous
       token, committed on the boundary word after the stop check (the stop path

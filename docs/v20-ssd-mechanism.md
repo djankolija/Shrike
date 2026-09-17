@@ -1095,6 +1095,102 @@ parity buffers, the rewind by one, the suppressed rows and the two-turn
 continuation gate are T3.3's build; T3.2 lands one command per token committed on
 the word, the stop path unchanged, and T3.3 moves the commit ahead.
 
+**T3.1 The agreed cells (2026-09-17, `782f477`; the arms measured on the mini at
+that tree, graded M, the verdict against Task 1's arms at `f0e056c`).**
+
+*What was built.* No new kernel. `MoESpecDispatchArgs` carries four grids: the
+classifier writes the agreed fixup's phase 1 and phase 2 grids full only when an
+expert missed, beside the speculative pair. The speculative phase 1 gained the
+batch's status word and the speculative phase 2 the status word and a fallback
+cell array, so the same two kernels serve both dispatches: the speculative one
+binds an always-ready word and the classifier's array twice, the fixup binds the
+layer's value's word and the host's row (the generic pipelines now carry the
+event-gate constant the specialized ones already had). Each routed layer's held
+command carries a timeline value reserved at its encode; the fixup is encoded
+behind `encodeWaitForEvent` after the speculative work, phase 1 over the layer's
+row of `agreedCells` with the sentinel at the hits, phase 2 resolving a sentinel
+through that row. At the word the host reads the route, leases the landed
+predictions (the 400 µs join kept, a prediction issued between the join and the
+claim joined once more), gives every miss its cell (a landing's, a free ring cell
+claimed as a landing through the ring's `claimDemand` and the streamer's
+`claimLanding`, or, when the ring has none, a pool victim from
+`reserveOverflowSlot`, counted as `agreed_overflow`), writes the row, submits the
+batch through `beginAgreedReads` on the demand lane with the layer's value (an
+empty batch publishing at once), attaches the ring's demand cells and issues the
+next layer's prediction; the pins are gone from the decode path. At the next wake
+the previous layer's command and batch are checked (a failed read is
+`ModelError.expertReadFailed(layer:detail:)`), the io rows taken, then the plan
+runs off the path: `planRoutedExperts` with the predictions and the demand cells
+as its leased landings and the misses counted as the reads issued, the swap by
+index, the freed cells back to the ring, the trace rows; the last layer's plan
+runs at the token's end on every exit. The fold's invariant lands in its T3.1
+form: the values reserved for encoded layers stay armed until a batch or the word
+takes them, and a pass's throw path and the boundary state's discard publish
+every armed one as failed, returning the ring's leases and the overflow slots on
+the way out. The coordinator's status words are one ring of 4,096 recycled by
+value (T3.2's item, taken here since every routed layer now reserves one).
+Retired with the host-built fixup: its argument-buffer path on decode,
+`DecodeExpertPartition`, the pending routed command and its deferred record, the
+completion clock, and the rows `cb2_ms`, `io_hidden_pct`, `io_fixup_wake_ms`,
+`path_pin_ms`, `path_fixup_build_ms`, `path_fixup_commit_to_kernel_ms` and
+`io_host_waits_avoided` (the app's `cb2 / token` row with them); added
+`agreed_overflow` and `cells_leased_peak`; `cache_plan_ms` is now the deferred
+plan's time. The kernel stats lose the `moe_phase1_miss_fixup_phase2` roles and
+the window's gap rows: the layer rows `layer_linear` and `layer_kv` now hold the
+fixup's wait inside the command, and `tools/decode-rows.py` reads the gaps n/a.
+Tests: the agreed fixup against the host-built fixup bit for bit at four misses
+and the skip on a failed status word, the classifier's four grids, the ring's
+demand claims outside the prediction budget, the failed slot's reuse and a
+prediction in flight never doubled, the streamer's overflow victim, the agreed
+reads into a ring cell and a pool cell publishing the token, the empty batch, the
+failed batch dropping and emptying and still publishing, the counted misses, the
+coordinator's recycled words; 1,275 tests in 174 suites. The four gates; the
+golden identical on all four profiles bare and configured on both boxes.
+
+*The arms* (two production lifetimes per shape, bare and the production
+configuration interleaved, the first request of each; the answers identical in
+length across the arms and to Task 1's on every shape, 226 / 369 / 300 / 353):
+
+| shape | arm | misses per token | io ms | overflow per token | cells leased peak | the token ms | tok/s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| the card | bare | 19.9 | 14.3 | 0.00 | 8 | 57.7 to 58.7 | 17.0 to 17.3 |
+| | configured | 15.7 | 11.7 to 12.1 | 0.00 | 6 | 54.9 to 55.6 | 18.0 to 18.2 |
+| the 300 | bare | 19.3 | 14.0 | 0.00 | 8 | 56.8 to 57.0 | 17.5 to 17.6 |
+| | configured | 16.6 | 12.3 to 12.6 | 0.00 | 7 | 55.6 to 55.8 | 17.9 to 18.0 |
+| the 1k | bare | 18.9 | 13.6 to 13.7 | 0.00 | 8 | 57.0 to 57.8 | 17.3 to 17.5 |
+| | configured | 15.0 | 11.1 | 0.00 | 7 | 54.2 to 54.8 | 18.2 to 18.4 |
+| the 7k | bare | 18.0 | 13.1 | 0.00 | 8 | 58.7 to 59.3 | 16.9 to 17.1 |
+| | configured | 14.2 | 10.6 | 0.00 | 8 | 55.9 | 17.9 |
+
+Against Task 1's arms at the same configuration (Task 1 / T3.1): the card
+15.8 / 15.7 misses per token, 12.1 / 11.7 to 12.1 ms of io, the token 54.8 to
+55.4 / 54.9 to 55.6; the 300 16.7 / 16.6, 12.8 / 12.3 to 12.6, 55.3 to 55.6 /
+55.6 to 55.8; the 1k 15.2 / 15.0, 11.6 / 11.1, 54.1 / 54.2 to 54.8; the 7k 14.3 /
+14.2, 10.9 to 11.0 / 10.6, 56.0 to 56.3 / 55.9. The bare arm the same way: the
+card 20.0 / 19.9 and 57.7 to 57.8 / 57.7 to 58.7, the 300 19.5 / 19.3 and 57.0 to
+58.8 / 56.8 to 57.0, the 1k 19.0 / 18.9 and 57.4 to 59.2 / 57.0 to 57.8, the 7k
+18.1 / 18.0 and 58.4 to 59.0 / 58.7 to 59.3. The ring's counters per token
+(Task 1 / T3.1, the configured arm): issued 19.3 / 19.6 on the card, 20.1 / 20.6,
+19.1 / 19.8 and 18.4 / 18.6 on the 300, the 1k and the 7k; adopted within 0.2;
+refused 12.6 / 12.3, 14.0 / 13.5, 13.2 / 12.5 and 11.4 / 11.2; landed before the
+classifier 3.4 / 5.2, 3.4 / 4.9, 2.8 / 4.5 and 5.2 / 6.2, with the joins at the
+plan down by as much (2.9 / 1.5, 3.6 / 2.2, 2.7 / 1.4, 1.5 / 0.9).
+
+**Reading.** Flat, as pre-registered: the token moved 0.3 to 0.4 ms at most on
+any shape, in both directions, under the rig's drift; the misses per token
+within 0.2 of Task 1's on every shape (the bar was 0.3); no lifetime overflowed
+(the bar was 0.1 per token), the ring's leased peak 6 to 8 of its nine cells;
+the answers identical. The io is 0.3 to 0.5 ms per token lower on every arm and
+the predictions land before the classifier 1.2 to 1.7 more often per token with
+as many fewer joined at the plan: with the plan out of the word's way the demand
+batch reaches the drive a few tens of microseconds earlier on a miss layer, and
+the ring's reclaim at the claim frees a cell a layer earlier, so the same
+predictions arrive a little earlier relative to the next classifier (a reading;
+neither term was measured on its own). The host's on-path rows: `path_submit_ms`
+0.14 per token, `cache_plan_ms` 0.14 to 0.21 per token now spent at the next
+wake. The structure is in place for T3.2: every routed layer is one command
+holding its fixup, the host feeds reads and the batch publishes the value.
+
 ### Task 4, held: the attention row's fixed part (B3, B4)
 
 Only on S0.6's number and Davor's ruling.
