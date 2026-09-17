@@ -76,6 +76,10 @@ final class ExpertPrefetchRing: @unchecked Sendable {
     private let drop: Drop
     private var stats = ExpertPrefetchStatistics()
 
+    var leasedCount: Int {
+        lock.withLock { slots.count(where: { $0.leased }) }
+    }
+
     var statistics: ExpertPrefetchStatistics {
         lock.withLock { stats }
     }

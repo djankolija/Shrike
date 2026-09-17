@@ -54,6 +54,19 @@ import Metal
         #expect(kv.capacity(layer: L) == 262_144)
     }
 
+    @Test func needsGrowthSaysWhetherReserveWouldReplaceABuffer() throws {
+        guard let kv = try Self.make(maxContext: 262_144) else { return }
+        guard let L = Self.fullLayer(kv) else { return }
+        let start = kv.capacity(layer: L)
+        #expect(!kv.needsGrowth(tokens: start))
+        #expect(kv.needsGrowth(tokens: start + 1))
+        try kv.reserve(tokens: start + 1)
+        #expect(!kv.needsGrowth(tokens: start + 1))
+        #expect(!kv.needsGrowth(tokens: start * 2))
+        #expect(kv.needsGrowth(tokens: start * 2 + 1))
+        #expect(!kv.needsGrowth(tokens: 999_999) || kv.capacity(layer: L) < 262_144)
+    }
+
     @Test func reserveBelowCurrentCapacityIsANoOp() throws {
         guard let kv = try Self.make(maxContext: 262_144) else { return }
         guard let L = Self.fullLayer(kv) else { return }

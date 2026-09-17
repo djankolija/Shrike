@@ -160,6 +160,7 @@ public func run(args: Args,
                 return result
             }
         }
+        loaded.runner.settle()
         return RunResult(exitCode: 0)
     } catch is CancellationError {
         stdout.write(Data("\n".utf8))

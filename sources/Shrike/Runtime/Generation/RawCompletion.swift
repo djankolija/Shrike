@@ -285,6 +285,9 @@ private func runDecodeLoop(producer: any LogitProducer,
     let useBoundary = boundaryProducer != nil && !fusedGreedy
         && config.repetitionPenalty == 1.0 && !instrumented
     var boundaryPending = false
+    defer {
+        if boundaryPending, let boundaryProducer { boundaryProducer.releasePassAhead() }
+    }
 
     while true {
         try Task.checkCancellation()
@@ -360,14 +363,19 @@ private func runDecodeLoop(producer: any LogitProducer,
         fusedRunner?.recordRouteTraceToken(position: position, id: tokenID)
         let tProduceStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         if useBoundary, let boundaryProducer {
+            // The sampler's position is its seed's index, this pass's
+            // `generated` and one more for the pass committed ahead.
             let samplePosition = generated
+            let passPosition = position
             try await boundaryProducer.produce(token: boundaryPending ? nil : tokenID,
                                                position: position, into: scratch.logits,
-                                               tokenWord: scratch.outToken) { encoder in
+                                               last: generated + 1 >= config.maxNewTokens) {
+                encoder, boundaryPosition, word in
                 try scratch.sampler.sample(encoder: encoder, logits: scratch.logits,
                                            probs: scratch.probs, history: [],
-                                           config: config, position: samplePosition,
-                                           outToken: scratch.outToken)
+                                           config: config,
+                                           position: samplePosition + (boundaryPosition - passPosition),
+                                           outToken: word)
             }
             boundaryPending = true
         } else {

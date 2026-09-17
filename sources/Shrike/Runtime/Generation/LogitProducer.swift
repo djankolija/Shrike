@@ -12,15 +12,26 @@ public protocol LogitProducer: AnyObject, Sendable {
 
 /// A decode boundary without a host round trip: the pass ends with the head, the
 /// caller's sampler and the next embed in one command, and the caller waits for
-/// the sampled id's word instead of the command.
+/// the sampled id's word instead of the command. The pass after this one is
+/// committed behind it before its token is known (v20 T3.3), so a stop the
+/// caller sees at the word is one pass late: the producer drains that pass at
+/// its next entry point, and the caller passes `last` when no pass after this
+/// one is wanted.
 public protocol BoundaryLogitProducer: LogitProducer {
-    /// Runs the pass for `position`; a nil `token` continues a pass whose embed
-    /// the previous boundary encoded from `tokenWord`.
-    func produce(token: Int32?, position: Int, into logits: MTLBuffer,
-                 tokenWord: MTLBuffer,
-                 sample: @escaping (MTLComputeCommandEncoder) throws -> Void) async throws
+    /// Runs the pass for `position`; a nil `token` continues the pass the
+    /// previous call committed ahead. `sample` encodes the caller's sampler at
+    /// a boundary, given the position of the pass it ends and the word its
+    /// token goes into: this pass's when the pass is fresh, and the next
+    /// pass's at the end of every pass unless `last`.
+    func produce(token: Int32?, position: Int, into logits: MTLBuffer, last: Bool,
+                 sample: @escaping (MTLComputeCommandEncoder, Int, MTLBuffer) throws -> Void)
+        async throws
     /// The id the last boundary's sampler wrote, once the host can see it.
     func awaitBoundaryToken() throws -> Int32
+    /// The caller wants no more passes: everything the pass committed ahead
+    /// waits on is published, so it runs through on its own while the caller
+    /// finishes; the producer's next entry point waits it out.
+    func releasePassAhead()
 }
 
 /// The class-2 gate's instrument (docs/v19-scan-rewrite.md, Task 1).

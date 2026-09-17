@@ -198,6 +198,19 @@ public final class KVCacheManager {
     /// ordinary conversation without a single grow. Capacity doubles from here.
     public static let initialCapacityTokens = 8_192
 
+    /// Whether `reserve(tokens:)` would replace a layer's buffers. A caller
+    /// with a command in flight asks first: growth copies only the rows below
+    /// the cursor, so a row that command is still writing would be lost.
+    public func needsGrowth(tokens: Int) -> Bool {
+        let needed = min(max(tokens, 1), maxContext)
+        for layer in 0..<kinds.count {
+            guard kinds[layer] != .linear else { continue }
+            if fp16RingEnabled && kinds[layer] == .swa { continue }
+            if capacityTokens[layer] < needed { return true }
+        }
+        return false
+    }
+
     /// Grows linear layers so every one can hold `tokens`, copying what is
     /// already stored.
     ///

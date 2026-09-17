@@ -235,12 +235,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // Qwen 3.6 decode scratch (nil on architectures that never use it).
     private var qPackedScratch: MTLBuffer? { decodeScratch.qPackedScratch } // [2 * N_HEADS * head_dim] packed [q ; gate]
     private var attnGateScratch: MTLBuffer? { decodeScratch.attnGateScratch } // [N_HEADS * head_dim]
-    /// The committed token's command, recorded at the next produce.
+    /// The token whose boundary word the host reads next, recorded at the
+    /// next produce.
     private var runningToken: TokenCommand?
     /// The next token's command, its layers encoded a layer per word during
-    /// the running one, committed on the boundary word after the stop check.
+    /// the running one and, on the boundary path, committed behind it after
+    /// the running token's last word (v20 T3.3): a stop then finds it
+    /// running as the extra pass, which the next entry point drains.
     private var heldToken: TokenCommand?
-    private var boundaryTokenWord: MTLBuffer?
+    /// The two boundary words by token parity: a token's sampler writes its
+    /// own, so the pass committed ahead never overwrites a word the host has
+    /// yet to read.
+    private var boundaryWords: [MTLBuffer] { decodeScratch.boundaryWords }
+    private var lastBoundaryWakeNanos: UInt64 = 0
+    /// The parity of the GDN state at the cursor; a pass reads it and writes
+    /// the other, and the cursor's advance flips it.
+    private var gdnStateParity = 0
     private var wordClock: DecodeWordClock
     private let gdnScratch: GDNScratchBuffers?
     private var gdnQKVRaw: MTLBuffer? { gdnScratch?.qkvRaw }        // [qkvDim] raw in_proj_qkv output
@@ -730,6 +740,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let prefetchPredictionWeights: MTLBuffer
         let moeActs: MTLBuffer
         let greedyTokenBuf: MTLBuffer
+        let boundaryWords: [MTLBuffer]
         let qPackedScratch: MTLBuffer?
         let attnGateScratch: MTLBuffer?
         let sharedScalarGateBuf: MTLBuffer?
@@ -782,6 +793,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                              label: "decode.moeActs"),
             greedyTokenBuf: try buf(1, MemoryLayout<UInt32>.size,
                                     label: "decode.greedyToken"),
+            boundaryWords: try (0..<2).map {
+                try buf(1, MemoryLayout<UInt32>.size, label: "decode.boundaryWord\($0)")
+            },
             // Qwen 3.6 decode scratch — allocated once here, never in the hot path.
             qPackedScratch: cfg.attnOutputGate
                 ? try buf(2 * maxQ, label: "decode.qPackedScratch") : nil,
@@ -984,9 +998,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     public func reset() {
+        discardBoundaryState()
         kv?.reset()
         gdnState?.reset()
+        gdnStateParity = 0
         resetTransientState()
+    }
+
+    /// Publishes and waits out the pass committed ahead of a stop (v20 T3.3).
+    /// Every entry point that submits GPU work does this itself, so a caller
+    /// needs it only before exiting the process or measuring the state.
+    public func settle() {
         discardBoundaryState()
     }
 
@@ -1023,6 +1045,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             throw PrefillError.prefillCursorMismatch(
                 "this runner's state cannot follow the cursor back to \(position)")
         }
+        discardBoundaryState()
         try kv.rewind(to: position)
         resetTransientState()
     }
@@ -1049,7 +1072,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         var payload = Data()
         payload.reserveCapacity(payloadBytes)
         try kv.appendSnapshotPayload(to: &payload, segmentLengths: kvLengths)
-        try gdnState?.appendSnapshotPayload(to: &payload, segmentLengths: gdnLengths)
+        try gdnState?.appendSnapshotPayload(to: &payload, segmentLengths: gdnLengths,
+                                            parity: gdnStateParity)
         guard payload.count == payloadBytes else {
             throw InferenceStateSnapshotError.invalidPayloadSize(
                 expected: payloadBytes,
@@ -1065,6 +1089,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     public func restoreInferenceState(_ snapshot: InferenceStateSnapshot) throws {
+        discardBoundaryState()
         do {
             let descriptor = snapshot.descriptor
             guard descriptor.version == InferenceStateSnapshotDescriptor.currentVersion else {
@@ -1091,7 +1116,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     try gdnState.restoreSnapshot(
                         segmentLengths: descriptor.gdnSegmentLengths,
                         bytes: bytes,
-                        offset: &offset)
+                        offset: &offset,
+                        parity: gdnStateParity)
                 } else if !descriptor.gdnSegmentLengths.isEmpty {
                     throw InferenceStateSnapshotError.invalidLayout
                 }
@@ -1144,6 +1170,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public var prefetchStatistics: ExpertPrefetchStatistics { predictivePrefetch.statistics }
     public private(set) var totalBoundaryWakeFallbacks: UInt64 = 0
     public private(set) var totalIOQueueNanos: UInt64 = 0
+    /// The passes committed ahead of a stop and drained, and the wall the
+    /// drains took: the price of the commit ahead, once per answer (v20 T3.3).
+    public private(set) var totalDrainedPasses: UInt64 = 0
+    public private(set) var totalDrainNanos: UInt64 = 0
+    /// Drained commands that faulted or outlived the deadline, with the last
+    /// such error's description.
+    public private(set) var totalDrainFailures: UInt64 = 0
+    public private(set) var lastDrainFailure: String?
     public private(set) var lastGreedyToken: UInt32 = 0
     public var usesFusedGreedyHead: Bool { useFusedGreedyHead }
 
@@ -1558,16 +1592,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                outputMode: .greedyIfAvailable)
     }
 
-    public func produce(token: Int32?, position: Int, into logits: MTLBuffer,
-                        tokenWord: MTLBuffer,
-                        sample: @escaping (MTLComputeCommandEncoder) throws -> Void) async throws {
+    public func produce(token: Int32?, position: Int, into logits: MTLBuffer, last: Bool,
+                        sample: @escaping (MTLComputeCommandEncoder, Int, MTLBuffer) throws -> Void)
+        async throws {
         try prefillChunkState.requireClean(operation: "produce")
         try await produceToken(token: token,
                                position: position,
                                into: logits,
                                emitHead: true,
                                outputMode: .logits,
-                               boundaryWord: tokenWord,
+                               last: last,
                                sample: sample)
     }
 
@@ -1575,7 +1609,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// embed and completion; after a second the token's command is waited on
     /// with the deadline, so a wait the drain missed ends loudly.
     public func awaitBoundaryToken() throws -> Int32 {
-        guard let token = runningToken, let word = boundaryTokenWord else {
+        guard let token = runningToken, let word = token.word else {
             throw ModelError.internalInconsistency(
                 detail: "no boundary command is pending a token")
         }
@@ -1584,8 +1618,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         while clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline {
             let value = word.contents().load(as: UInt32.self)
             if value != Self.boundaryTokenSentinel {
-                wordClock.boundary(at: clock_gettime_nsec_np(CLOCK_UPTIME_RAW))
-                return Int32(bitPattern: value)
+                return Int32(bitPattern: recordBoundaryWake(value))
             }
             spins &+= 1
             if spins % 256 == 0, token.cb.status == .error {
@@ -1601,22 +1634,76 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             throw ModelError.internalInconsistency(
                 detail: "the token's command completed without writing its token word")
         }
-        wordClock.boundary(at: clock_gettime_nsec_np(CLOCK_UPTIME_RAW))
-        return Int32(bitPattern: value)
+        return Int32(bitPattern: recordBoundaryWake(value))
+    }
+
+    private func recordBoundaryWake(_ value: UInt32) -> UInt32 {
+        let woke = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        lastBoundaryWakeNanos = woke
+        wordClock.boundary(at: woke)
+        return value
     }
 
     static let boundaryTokenSentinel: UInt32 = 0xFFFF_FFFF
     static let commandDeadlineNanos: UInt64 = 10_000_000_000
 
+    /// The release at the stop (v20 T3.3): the pass committed ahead runs
+    /// through with its fixups skipped, during the caller's finish and the
+    /// client's turnaround, so the wait at the next entry point finds it done.
+    public func releasePassAhead() {
+        drainArmedAgreedTokens()
+    }
+
+    /// The drain (v20 T3.3): every value the held and running commands still
+    /// wait on published as failed, so the pass committed ahead of a stop
+    /// runs through with its fixups skipped, then both waited out. The held
+    /// command's wait is what the extra pass costs the next request, counted
+    /// once per answer.
     private func discardBoundaryState() {
-        heldToken = nil
-        boundaryTokenWord = nil
         drainArmedAgreedTokens()
         if let running = runningToken {
             runningToken = nil
-            try? Self.awaitCompletion(of: running.cb, deadlineNanos: Self.commandDeadlineNanos,
-                                      naming: "the previous token")
+            awaitDrained(running.cb, naming: "the previous token")
         }
+        if let held = heldToken {
+            heldToken = nil
+            if held.committed {
+                let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                awaitDrained(held.cb, naming: "the drained pass")
+                totalDrainNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started
+                totalDrainedPasses &+= 1
+            }
+        }
+    }
+
+    /// A drained command's fault or deadline has no caller to throw to; it is
+    /// counted and kept for the runner line rather than lost.
+    private func awaitDrained(_ cb: MTLCommandBuffer, naming what: String) {
+        do {
+            try Self.awaitCompletion(of: cb, deadlineNanos: Self.commandDeadlineNanos, naming: what)
+        } catch {
+            totalDrainFailures &+= 1
+            lastDrainFailure = String(describing: error)
+        }
+    }
+
+    /// Whether a pass is committed ahead of the cursor, running as the extra
+    /// pass a stop would drain.
+    var isPassCommittedAhead: Bool { heldToken?.committed == true }
+
+    var armedAgreedTokenCount: Int { armedAgreedTokens.count }
+
+    var leasedRingCellCount: Int { predictivePrefetch.leasedCount }
+
+    /// A continued pass with no command ahead runs fresh from the token the
+    /// previous boundary's sampler wrote: the KV had to grow for it, which
+    /// cannot happen under a running command, so nothing was committed ahead.
+    private func continuedTokenFromTheWord(position: Int) -> Int32? {
+        guard heldToken == nil, let running = runningToken, running.position + 1 == position,
+              let word = running.word else { return nil }
+        let value = word.contents().load(as: UInt32.self)
+        guard value != Self.boundaryTokenSentinel else { return nil }
+        return Int32(bitPattern: value)
     }
 
     private func takeHeldToken(position: Int) throws -> TokenCommand {
@@ -1645,6 +1732,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                into logits: MTLBuffer,
                                onProgress: (Int) -> Void) async throws -> PrefillResult {
         try prefillChunkState.requireClean(operation: "prefillChunked")
+        discardBoundaryState()
         guard config.mode == .chunked else {
             throw PrefillError.chunkedUnsupported(
                 "prefillChunked requires PrefillRuntimeConfig.mode == .chunked")
@@ -2029,30 +2117,35 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     /// One token's command (v20 T3.2): every layer and the boundary as
     /// encoders of one command buffer, the routed layers listed in order for
-    /// the host's word loop.
+    /// the host's word loop; the GDN parity its layers read (they write the
+    /// other) and, on the boundary path, the word its sampler writes.
     private final class TokenCommand {
         let position: Int
         let cb: MTLCommandBuffer
+        let stateParity: Int
         var layers: [TokenLayer] = []
         var encodedLayers = 0
+        var word: MTLBuffer?
+        var committed = false
 
-        init(position: Int, cb: MTLCommandBuffer) {
+        init(position: Int, cb: MTLCommandBuffer, stateParity: Int) {
             self.position = position
             self.cb = cb
+            self.stateParity = stateParity
         }
     }
 
     /// The token's command asks Metal for its encoders' execution status, so
     /// a fault names the encoder; the option measured free on the mini's four
     /// shapes (v20 T3.2's arms), so it is always on.
-    private func makeTokenCommand(position: Int) throws -> TokenCommand {
+    private func makeTokenCommand(position: Int, stateParity: Int) throws -> TokenCommand {
         let descriptor = MTLCommandBufferDescriptor()
         descriptor.errorOptions = .encoderExecutionStatus
         guard let cb = ctx.queue.makeCommandBuffer(descriptor: descriptor) else {
             throw ModelError.residentBufferWrapFailed
         }
         cb.label = "token \(position)"
-        return TokenCommand(position: position, cb: cb)
+        return TokenCommand(position: position, cb: cb, stateParity: stateParity)
     }
 
     /// Encodes the layers not yet encoded, up to `last` inclusive.
@@ -2063,10 +2156,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let L = token.encodedLayers
             if L < cfg.numLeadingDenseLayers {
                 try encodeDenseLayer(into: token.cb, layer: L, position: token.position,
-                                     isLinear: cfg.layerIsLinear(L), d: D, rmsEps: eps)
+                                     isLinear: cfg.layerIsLinear(L), d: D, rmsEps: eps,
+                                     stateParity: token.stateParity)
             } else {
                 token.layers.append(
-                    try encodeRoutedLayer(into: token.cb, layer: L, position: token.position))
+                    try encodeRoutedLayer(into: token.cb, layer: L, position: token.position,
+                                          stateParity: token.stateParity))
             }
             token.encodedLayers += 1
         }
@@ -2077,7 +2172,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// GDN and gated layers), the speculative routed work, the wait on the
     /// layer's value and the agreed fixup.
     private func encodeRoutedLayer(into cb: MTLCommandBuffer, layer L: Int,
-                                   position: Int) throws -> TokenLayer {
+                                   position: Int, stateParity: Int) throws -> TokenLayer {
         let D = UInt32(cfg.hiddenSize)
         let eps: Float = cfg.rmsNormEps
         let isLinear = cfg.layerIsLinear(L)
@@ -2120,7 +2215,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         try encodeDecodeAttention(cb: cb, layerEncoder: layerEncoder,
                                   layer: L, position: position,
-                                  isLinear: isLinear, rmsEps: eps)
+                                  isLinear: isLinear, rmsEps: eps,
+                                  stateParity: stateParity)
         routerReadbackTag = RouterHostReadback.nextTag(after: routerReadbackTag)
         let readbackTag = routerReadbackTag
         try encodeDecodeTailStage(
@@ -2145,17 +2241,30 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return TokenLayer(layer: L, readbackTag: readbackTag, agreedToken: agreedToken)
     }
 
-    /// One decode step (v20 T3.2): the token's command, every layer and the
-    /// boundary as its encoders, committed once; the host then feeds each
-    /// routed layer's reads at its word and encodes the next token a layer per
-    /// word, to be committed on the boundary word after the stop check.
+    /// The caller's sampler and the logits its head writes, encoded at this
+    /// pass's boundary when the pass is fresh and at the next pass's at the
+    /// end of every pass unless the caller said the pass was its last.
+    private struct BoundaryCall {
+        let logits: MTLBuffer
+        let sample: (MTLComputeCommandEncoder, Int, MTLBuffer) throws -> Void
+    }
+
+    /// One decode step (v20 T3.2, committed ahead at T3.3): the token's
+    /// command, every layer and the boundary as its encoders, committed once;
+    /// the host then feeds each routed layer's reads at its word and encodes
+    /// the next token a layer per word, and after the last word encodes that
+    /// token's boundary and commits it, so the GPU flows from this token's
+    /// embed into the next token's layer 0. A stop the caller sees at this
+    /// token's word finds the next token running; the next entry point
+    /// drains it.
     private func produceToken(token: Int32?,
                               position: Int,
                               into logits: MTLBuffer,
                               emitHead: Bool,
                               outputMode: PrefillOutputMode,
-                              boundaryWord: MTLBuffer? = nil,
-                              sample: ((MTLComputeCommandEncoder) throws -> Void)? = nil) async throws {
+                              last: Bool = true,
+                              sample: ((MTLComputeCommandEncoder, Int, MTLBuffer) throws -> Void)? = nil)
+        async throws {
         let kvPosition = kv?.position ?? 0
         guard kvPosition == position else {
             throw PrefillError.prefillCursorMismatch(
@@ -2166,7 +2275,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // last model still resident. No-op when ANE prefill is off or empty.
         anePrefill?.releaseModels()
         dumpPendingProbeRankings()
-        try kv?.reserve(tokens: position + 1)
         guard position < maxContext else {
             throw PrefillError.prefillCursorMismatch(
                 "produce position \(position) exceeds maxContext \(maxContext)")
@@ -2176,39 +2284,39 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let embedOutScale = cfg.embeddingScaledBySqrtHidden
             ? Float(cfg.hiddenSize).squareRoot()
             : 1.0
+        let boundary = sample.map { BoundaryCall(logits: logits, sample: $0) }
         let current: TokenCommand
-        if let token {
+        if let token = token ?? continuedTokenFromTheWord(position: position) {
             discardBoundaryState()
-            current = try makeTokenCommand(position: position)
+            try kv?.reserve(tokens: position + 1)
+            current = try makeTokenCommand(position: position, stateParity: gdnStateParity)
             try encodeEmbed(into: current.cb, token: token, d: D, outScale: embedOutScale)
         } else {
             current = try takeHeldToken(position: position)
         }
         try encodeLayers(into: current, upTo: cfg.numLayers - 1)
-        let boundaryPath = boundaryWord != nil && sample != nil
         var fusedHead = false
-        if let boundaryWord, let sample {
-            try encodeBoundary(into: current.cb, logits: logits, d: D, rmsEps: eps,
-                               outScale: embedOutScale, tokenWord: boundaryWord, sample: sample)
+        if current.committed {
+            wordClock.beginToken(at: lastBoundaryWakeNanos)
         } else {
-            fusedHead = try encodeHead(into: current.cb, emitHead, logits: logits,
-                                       outputMode: outputMode, d: D, rmsEps: eps)
+            if let boundary {
+                try encodeBoundary(into: current, boundary, d: D, rmsEps: eps, outScale: embedOutScale)
+            } else {
+                fusedHead = try encodeHead(into: current.cb, emitHead, logits: logits,
+                                           outputMode: outputMode, d: D, rmsEps: eps)
+            }
+            wordClock.beginToken(at: commitToken(current))
         }
         let previous = runningToken
-        if let boundaryWord {
-            boundaryWord.contents().storeBytes(of: Self.boundaryTokenSentinel, as: UInt32.self)
-            boundaryTokenWord = boundaryWord
-        }
-        let committed = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        current.cb.commit()
         runningToken = current
-        wordClock.beginToken(at: committed)
         var pending: PendingAgreedLayer?
         var next: TokenCommand?
         do {
             try finishToken(previous)
-            if boundaryPath, position + 1 < maxContext, cfg.numLayers > 0 {
-                next = try makeTokenCommand(position: position + 1)
+            let growthAhead = kv?.needsGrowth(tokens: position + 2) ?? false
+            if boundary != nil, !last, !growthAhead, position + 1 < maxContext, cfg.numLayers > 0 {
+                next = try makeTokenCommand(position: position + 1,
+                                            stateParity: gdnStateParity ^ 1)
                 try kv?.reserve(tokens: position + 2)
             }
             for tokenLayer in current.layers {
@@ -2238,7 +2346,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 try finishPendingAgreedLayer(last)
                 pending = nil
             }
-            if let next { try encodeLayers(into: next, upTo: cfg.numLayers - 1) }
+            if let next, let boundary {
+                try encodeLayers(into: next, upTo: cfg.numLayers - 1)
+                try encodeBoundary(into: next, boundary, d: D, rmsEps: eps, outScale: embedOutScale)
+                _ = commitToken(next)
+            }
         } catch {
             // The fold's invariant: a committed command waits on nothing the
             // host will not publish, so the pass drains before it unwinds.
@@ -2252,7 +2364,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         if prefetchTraceFD >= 0 { pendingProbeDumpPosition = position }
         kv?.advance()
-        if boundaryPath {
+        gdnStateParity ^= 1
+        if boundary != nil {
             heldToken = next
         } else {
             try Self.awaitCompletion(of: current.cb, deadlineNanos: Self.commandDeadlineNanos,
@@ -2262,6 +2375,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             wordClock.endToken()
             if fusedHead { lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self) }
         }
+    }
+
+    /// The sentinel goes into the token's word before the commit so the host
+    /// can tell its sampler's write from the word's previous holder's.
+    private func commitToken(_ token: TokenCommand) -> UInt64 {
+        if let word = token.word {
+            word.contents().storeBytes(of: Self.boundaryTokenSentinel, as: UInt32.self)
+        }
+        let committed = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        token.cb.commit()
+        token.committed = true
+        return committed
     }
 
     private enum EmbedTokenSource {
@@ -2312,25 +2437,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
-    /// The sentinel goes into the word before the commit so the host can tell the
-    /// sampler's write from the previous token's.
     /// The boundary as the token's last encoders: the final norm, the head,
-    /// the caller's sampler writing the token word, the next embed from it.
-    private func encodeBoundary(into cb: MTLCommandBuffer, logits: MTLBuffer,
-                                d D: UInt32, rmsEps eps: Float, outScale: Float,
-                                tokenWord: MTLBuffer,
-                                sample: (MTLComputeCommandEncoder) throws -> Void) throws {
+    /// the caller's sampler writing the token's word (the one of its parity,
+    /// so the pass committed ahead never overwrites a word the host has yet
+    /// to read), the next embed from it.
+    private func encodeBoundary(into token: TokenCommand, _ boundary: BoundaryCall,
+                                d D: UInt32, rmsEps eps: Float, outScale: Float) throws {
+        let word = boundaryWords[token.position & 1]
+        token.word = word
         let fNorm = try model.finalNorm()
         let lm = try model.lmHead()
-        guard let encoder = cb.makeComputeCommandEncoder() else {
+        guard let encoder = token.cb.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
         encoder.label = "boundary"
         let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         encodeFinalNorm(encoder, weights: fNorm, d: D, rmsEps: eps)
-        encodeLMHead(encoder, weights: lm, into: logits, d: D)
-        try sample(encoder)
-        try encodeEmbedLookup(encoder, token: .word(tokenWord), d: D, outScale: outScale)
+        encodeLMHead(encoder, weights: lm, into: boundary.logits, d: D)
+        try boundary.sample(encoder, token.position, word)
+        try encodeEmbedLookup(encoder, token: .word(word), d: D, outScale: outScale)
         encoder.endEncoding()
         totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
     }
@@ -2352,7 +2477,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     private func encodeDenseLayer(into cb: MTLCommandBuffer, layer L: Int, position: Int,
-                                  isLinear: Bool, d D: UInt32, rmsEps eps: Float) throws {
+                                  isLinear: Bool, d D: UInt32, rmsEps eps: Float,
+                                  stateParity: Int) throws {
         let inNorm = try model.inputNorm(layer: L)
         let postAttn = try model.postAttnNorm(layer: L)
         try rms.encodeBF16W(commandBuffer: cb,
@@ -2362,7 +2488,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         d: D, eps: eps)
         try encodeDecodeAttention(cb: cb, layerEncoder: nil,
                                   layer: L, position: position,
-                                  isLinear: isLinear, rmsEps: eps)
+                                  isLinear: isLinear, rmsEps: eps,
+                                  stateParity: stateParity)
         try elementwise!.encodeResidualAdd(commandBuffer: cb,
                                        hidden: hidden,
                                        delta: oOut,
@@ -2429,10 +2556,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     /// Gated-DeltaNet linear attention (layer mask 2), one decode step.
-    /// Reads `normed`, updates the layer's recurrent state + conv tail in
-    /// place, and leaves the attention-branch output in `oOut`.
+    /// Reads `normed` and the layer's recurrent state + conv tail at
+    /// `stateParity`, writes their other parity, and leaves the
+    /// attention-branch output in `oOut`.
     private func encodeLinearAttentionDecode(encoder: MTLComputeCommandEncoder,
-                                             layer L: Int) throws {
+                                             layer L: Int, stateParity: Int) throws {
         guard let gdn, let gdnState, let gdnQKVRaw, let gdnConvOut,
               let gdnZ, let gdnA, let gdnB, let gdnY, let gdnOut else {
             throw ModelError.internalInconsistency(
@@ -2477,7 +2605,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         gdn.encodeConvDecode(encoder: encoder,
-                             tail: gdnState.convTailBuffer(layer: L),
+                             tail: gdnState.convTailBuffer(layer: L, parity: stateParity),
+                             tailOut: gdnState.convTailBuffer(layer: L, parity: stateParity ^ 1),
                              qkv: gdnQKVRaw,
                              convWeight: convW.buffer,
                              convWeightOffset: Int(convW.offset),
@@ -2489,7 +2618,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                   bProj: gdnB,
                                   aLog: aLog.buffer, aLogOffset: Int(aLog.offset),
                                   dtBias: dtBias.buffer, dtBiasOffset: Int(dtBias.offset),
-                                  state: gdnState.stateBuffer(layer: L),
+                                  state: gdnState.stateBuffer(layer: L, parity: stateParity),
+                                  stateOut: gdnState.stateBuffer(layer: L, parity: stateParity ^ 1),
                                   y: gdnY)
         gdn.encodeGatedNorm(encoder: encoder,
                             y: gdnY,
@@ -2570,7 +2700,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// low-rank scratch — separate encoders, so hazard tracking serializes the
     /// reuse), then conv → qk norm → per-channel delta → sigmoid-gated norm →
     /// o_proj.
-    private func encodeKDADecode(_ cb: MTLCommandBuffer, layer L: Int) throws {
+    private func encodeKDADecode(_ cb: MTLCommandBuffer, layer L: Int,
+                                 stateParity: Int) throws {
         guard let gdn, let gdnState, let gdnQKVRaw, let gdnConvOut,
               let gdnZ, let gdnA, let gdnB, let gdnY, let gdnOut,
               let gdnLowRank else {
@@ -2610,7 +2741,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                           m: UInt32(la.valueDim), n: low)
 
         try gdn.encodeConvDecode(commandBuffer: cb,
-                             tail: gdnState.convTailBuffer(layer: L),
+                             tail: gdnState.convTailBuffer(layer: L, parity: stateParity),
+                             tailOut: gdnState.convTailBuffer(layer: L, parity: stateParity ^ 1),
                              qkv: gdnQKVRaw,
                              convWeight: convW.buffer,
                              convWeightOffset: Int(convW.offset),
@@ -2622,7 +2754,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                   bProj: gdnB,
                                   aLog: aLog.buffer, aLogOffset: Int(aLog.offset),
                                   dtBias: dtBias.buffer, dtBiasOffset: Int(dtBias.offset),
-                                  state: gdnState.stateBuffer(layer: L),
+                                  state: gdnState.stateBuffer(layer: L, parity: stateParity),
+                                  stateOut: gdnState.stateBuffer(layer: L, parity: stateParity ^ 1),
                                   y: gdnY)
         try gdn.encodeGatedNorm(commandBuffer: cb,
                             y: gdnY,
@@ -3479,7 +3612,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                   bProj: scratch.gdnB,
                                                   aLog: aLog, aLogOffset: aLogOffset,
                                                   dtBias: dtBias, dtBiasOffset: dtBiasOffset,
-                                                  state: gdnState.stateBuffer(layer: L),
+                                                  state: gdnState.stateBuffer(layer: L, parity: gdnStateParity),
                                                   y: scratch.gdnY,
                                                   rows: t, factors: factors)
         } else {
@@ -3489,7 +3622,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                            bProj: scratch.gdnB,
                                            aLog: aLog, aLogOffset: aLogOffset,
                                            dtBias: dtBias, dtBiasOffset: dtBiasOffset,
-                                           state: gdnState.stateBuffer(layer: L),
+                                           state: gdnState.stateBuffer(layer: L, parity: gdnStateParity),
                                            y: scratch.gdnY,
                                            rows: t)
         }
@@ -3575,7 +3708,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                              xStrideElements: D,
                              yStrideElements: la.numVHeads)
         let convW = linConv
-        let tail = gdnState.convTailBuffer(layer: L)
+        let tail = gdnState.convTailBuffer(layer: L, parity: gdnStateParity)
         try gdn.encodeConvPrefill(commandBuffer: cb,
                               tail: tail,
                               qkvRows: scratch.q,
@@ -4745,21 +4878,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         layer L: Int,
         position: Int,
         isLinear: Bool,
-        rmsEps eps: Float
+        rmsEps eps: Float,
+        stateParity: Int
     ) throws {
         let seqLen = UInt32(position + 1)
         if isLinear, cfg.linearAttentionPerChannelDecay {
             // Kimi KDA keeps its own CB-internal encoders (the low-rank
             // scratch is reused across its projection chains).
-            try encodeKDADecode(cb, layer: L)
+            try encodeKDADecode(cb, layer: L, stateParity: stateParity)
         } else if isLinear {
             // Gated-DeltaNet linear attention: no KV slots, no RoPE — a
-            // fixed-size recurrent state updated in place.
+            // fixed-size recurrent state read at one parity, written at the other.
             guard let layerEncoder else {
                 throw ModelError.internalInconsistency(
                     detail: "GDN decode layer \(L) without a layer encoder")
             }
-            try encodeLinearAttentionDecode(encoder: layerEncoder, layer: L)
+            try encodeLinearAttentionDecode(encoder: layerEncoder, layer: L,
+                                            stateParity: stateParity)
         } else if cfg.layerIsMLA(L) {
             // Kimi MLA: absorbed MQA over one fused [latent | k_pe] FP16
             // row per token, NoPE.

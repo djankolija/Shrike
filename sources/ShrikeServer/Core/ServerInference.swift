@@ -593,6 +593,13 @@ public actor ServerModelSession: ServerInferenceBackend {
     private var promptCache: ServerPromptCache
     private let promptStateStore: ServerPromptStateStore?
     private var activePromptCacheEntryID: UUID?
+    /// The drain counters as the last runner line reported them: a pass
+    /// committed ahead of a stop is waited out at the next GPU submission,
+    /// usually the settle's re-prefill after the completion, so its wall lands
+    /// between two requests' snapshots and is charged to the next line.
+    private var reportedDrainedPasses: UInt64 = 0
+    private var reportedDrainNanos: UInt64 = 0
+    private var reportedDrainFailures: UInt64 = 0
     /// A settle prefilling between requests, and the sequence it is prefilling
     /// toward. Nothing else may touch the runner or the scratch while this is
     /// set, so every request arbitrates it — join or abort — before it starts.
@@ -1965,6 +1972,11 @@ public actor ServerModelSession: ServerInferenceBackend {
         snapshot: RunnerCounterSnapshot,
         expertAtDecodeStart: ExpertStreamingStatistics?
     ) {
+        defer {
+            reportedDrainedPasses = runner.totalDrainedPasses
+            reportedDrainNanos = runner.totalDrainNanos
+            reportedDrainFailures = runner.totalDrainFailures
+        }
         let tokens = max(1, result.newTokens)
         let ms: (UInt64, UInt64) -> Double = { delta, base in
             Double(delta > base ? delta - base : 0) / Double(tokens) / 1_000_000
@@ -1996,6 +2008,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "router_readback_ms=%.4f cache_plan_ms=%.4f %@ "
                 + "path_submit_ms=%.4f "
                 + "path_router_wake_fallbacks=%llu boundary_wake_fallbacks=%llu "
+                + "drained_passes=%llu drain_ms=%.3f drain_failures=%llu "
                 + "io_queue_ms=%.4f "
                 + "io_load_ms=%.4f io_fetch_ms=%.4f "
                 + "expert_slots_loading=%d expert_slots_pinned=%d "
@@ -2025,6 +2038,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             ms(runner.totalRoutedSubmitNanos, snapshot.pathSubmit),
             runner.totalRouterWakeFallbacks - snapshot.pathRouterWakeFallbacks,
             runner.totalBoundaryWakeFallbacks - snapshot.boundaryWakeFallbacks,
+            runner.totalDrainedPasses - reportedDrainedPasses,
+            Double(runner.totalDrainNanos - reportedDrainNanos) / 1_000_000,
+            runner.totalDrainFailures - reportedDrainFailures,
             ms(runner.totalIOQueueNanos, snapshot.ioQueue),
             Double(expert.totalLoadNanos) / Double(tokens) / 1_000_000,
             Double(expert.fetchNanos) / Double(tokens) / 1_000_000,

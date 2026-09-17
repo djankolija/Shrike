@@ -15,16 +15,21 @@ extension RawCompletionLoopTests {
     private var calls = 0
     private var pendingToken: Int32?
     private var lastAwaited: Int32 = 0
+    private let word: MTLBuffer
     private(set) var syncCalls = 0
     private(set) var boundaryCalls = 0
     private(set) var continuedCalls = 0
     private(set) var awaited: [Int32] = []
+    private(set) var lastFlags: [Bool] = []
+    private(set) var releases = 0
 
     init(vocabSize: Int, context: MetalContext,
          step: @escaping @Sendable (Int32, Int) -> ScriptedLogitProducer.Step) {
       self.vocabSize = vocabSize
       self.context = context
       self.step = step
+      self.word = context.device.makeBuffer(length: MemoryLayout<UInt32>.size,
+                                            options: .storageModeShared)!
     }
 
     func reset() {
@@ -34,6 +39,8 @@ extension RawCompletionLoopTests {
       boundaryCalls = 0
       continuedCalls = 0
       awaited = []
+      lastFlags = []
+      releases = 0
     }
 
     private func writeLogits(for token: Int32, into logits: MTLBuffer) {
@@ -54,20 +61,20 @@ extension RawCompletionLoopTests {
       writeLogits(for: token, into: logits)
     }
 
-    func produce(token: Int32?, position: Int, into logits: MTLBuffer,
-                 tokenWord: MTLBuffer,
-                 sample: (MTLComputeCommandEncoder) throws -> Void) async throws {
+    func produce(token: Int32?, position: Int, into logits: MTLBuffer, last: Bool,
+                 sample: (MTLComputeCommandEncoder, Int, MTLBuffer) throws -> Void) async throws {
       boundaryCalls += 1
+      lastFlags.append(last)
       if token == nil { continuedCalls += 1 }
       writeLogits(for: token ?? lastAwaited, into: logits)
       guard let cb = context.queue.makeCommandBuffer(),
             let encoder = cb.makeComputeCommandEncoder() else {
         throw ModelError.residentBufferWrapFailed
       }
-      try sample(encoder)
+      try sample(encoder, position, word)
       encoder.endEncoding()
       runToCompletion(cb)
-      pendingToken = Int32(bitPattern: tokenWord.contents().load(as: UInt32.self))
+      pendingToken = Int32(bitPattern: word.contents().load(as: UInt32.self))
     }
 
     private func runToCompletion(_ cb: MTLCommandBuffer) {
@@ -81,6 +88,10 @@ extension RawCompletionLoopTests {
       lastAwaited = token
       awaited.append(token)
       return token
+    }
+
+    func releasePassAhead() {
+      releases += 1
     }
   }
 
@@ -166,6 +177,7 @@ extension RawCompletionLoopTests {
     #expect(result.newTokens == 2)
     #expect(collected.tokens.map(\.1) == [idA])
     #expect(producer.boundaryCalls == 1)
+    #expect(producer.releases == 1)
     #expect(result.kvBackedTokenIDs.last == idA)
   }
 
@@ -179,6 +191,18 @@ extension RawCompletionLoopTests {
     #expect(result.newTokens == 5)
     #expect(collected.tokens.map(\.0) == [0, 1, 2, 3, 4])
     #expect(producer.boundaryCalls == 4)
+    #expect(producer.lastFlags == [false, false, false, true])
+  }
+
+  @Test func boundaryPathNamesOnlyThePassBeforeMaxTokensAsTheLast() async throws {
+    let tok = try await GFTokenizer.load(from: ChatMLTemplateTests.fixtureFolder())
+    let idA = tok.encode("a", addBOS: false).first!
+    let idB = tok.encode("b", addBOS: false).first!
+    let (_, result, producer, _) = try await runBoundaryLoop(
+      seq: [idA, idB], end: tok.eosID,
+      config: GenerationConfig(maxNewTokens: 50, temperature: 0))
+    #expect(result.reason == .eos)
+    #expect(producer.lastFlags == [false, false])
   }
 
   @Test func boundaryPathStopsOnAStopString() async throws {
@@ -190,6 +214,20 @@ extension RawCompletionLoopTests {
       config: GenerationConfig(maxNewTokens: 50, temperature: 0, stopStrings: [textA]))
     #expect(result.reason == .stopString)
     #expect(producer.boundaryCalls == 0)
+    #expect(producer.releases == 0)
+  }
+
+  @Test func boundaryPathReleasesThePassAheadOnAStopString() async throws {
+    let tok = try await GFTokenizer.load(from: ChatMLTemplateTests.fixtureFolder())
+    let idA = tok.encode("a", addBOS: false).first!
+    let idB = tok.encode("b", addBOS: false).first!
+    let textB = tok.decode([idB], skipSpecialTokens: true)
+    let (_, result, producer, _) = try await runBoundaryLoop(
+      seq: [idA, idB], end: tok.eosID,
+      config: GenerationConfig(maxNewTokens: 50, temperature: 0, stopStrings: [textB]))
+    #expect(result.reason == .stopString)
+    #expect(producer.boundaryCalls == 1)
+    #expect(producer.releases == 1)
   }
 
   @Test func boundaryPathFallsBackWhenARepetitionPenaltyIsSet() async throws {

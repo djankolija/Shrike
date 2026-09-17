@@ -4,7 +4,9 @@
 One row per request from a decode-rig.sh server log: the server's timing line
 (prefill_s, decode_s, decode_tok_s, completion), the runner's decode pool and
 I/O counters (expert_hit_rate_decode, expert_misses_decode, hit_fixup_layers,
-io_ms, io_fetch_ms, cache_plan_ms, agreed_overflow, cells_leased_peak), and
+io_ms, io_fetch_ms, cache_plan_ms, agreed_overflow, cells_leased_peak, and since
+v20 T3.3 the passes committed ahead of a stop and drained with their wall,
+drained_passes and drain_ms, charged to the request whose entry drained them), and
 the two decode gaps that held the miss window in logs before v20 T3.1 (from
 moe_phase1_hit, moe_spec_routed or layer_linear / layer_kv to
 moe_phase1_miss_fixup_phase2; since T3.1 the fixup rides in the layer's
@@ -26,7 +28,8 @@ RUNNER = ["expert_hit_rate_decode", "expert_misses_decode", "hit_fixup_layers", 
           "prefetch_begin_ms", "prefetch_issued", "prefetch_adopted", "prefetch_reclaimed",
           "prefetch_deferred", "prefetch_overlapped", "prefetch_late", "prefetch_refused", "prefetch_failed",
           "prefetch_joined", "prefetch_landed_hits", "prefetch_hook_failed",
-          "router_readback_ms", "path_submit_ms", "path_router_wake_fallbacks"]
+          "router_readback_ms", "path_submit_ms", "path_router_wake_fallbacks",
+          "drained_passes", "drain_ms", "drain_failures"]
 
 
 def grab(pattern, text, cast=float):
@@ -93,7 +96,9 @@ for block in blocks:
     if runner["path_submit_ms"] is not None:
         print(f"    path: wake_fallbacks={fmt(runner['path_router_wake_fallbacks'], 0)} "
               f"readback={fmt(runner['router_readback_ms'])} plan={fmt(runner['cache_plan_ms'])} "
-              f"submit={fmt(runner['path_submit_ms'])} (ms per token)")
+              f"submit={fmt(runner['path_submit_ms'])} (ms per token) "
+              f"drained_passes={fmt(runner['drained_passes'], 0)} drain_ms={fmt(runner['drain_ms'])} "
+              f"drain_failures={fmt(runner['drain_failures'], 0)}")
     clock = re.search(r"word_clock tokens=(\d+) first_ms=([\d.]+) layer_ms=([\d.,]+) boundary_ms=([\d.]+)", text)
     if clock:
         layers = [float(v) for v in clock.group(3).split(",")]

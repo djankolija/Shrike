@@ -2,10 +2,11 @@ import Foundation
 
 /// The per-layer clock of a token under one command per token (v20 T3.2), in
 /// place of the per-layer GPU rows the fold retires: a layer's wall is the gap
-/// between consecutive words, the first routed layer's from the commit, the
-/// boundary's from the last word to the token word. The word lands about 45 µs
-/// after its classifier (v18's mid-command visibility probe), so the clock is
-/// good to that.
+/// between consecutive words, the first routed layer's from the commit or,
+/// for a token committed ahead (v20 T3.3), from the previous token's word,
+/// the boundary's from the last word to the token word. The word lands about
+/// 45 µs after its classifier (v18's mid-command visibility probe), so the
+/// clock is good to that.
 struct DecodeWordClock {
     private(set) var tokens = 0
     private(set) var firstNanos: UInt64 = 0

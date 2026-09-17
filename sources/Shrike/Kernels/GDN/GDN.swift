@@ -8,8 +8,9 @@ import Metal
 ///
 /// Buffer layouts follow the projection outputs directly:
 ///  - `mixed_qkv` / `conv_out` rows: `[q: Hk*Dk][k: Hk*Dk][v: Hv*Dv]`
-///  - recurrent state: FP32 `[Hv, Dv, Dk]` (owned by `GDNStateManager`)
-///  - conv tail: FP16 `[convKernel - 1, convDim]`
+///  - recurrent state: FP32 `[Hv, Dv, Dk]` (owned by `GDNStateManager`, two
+///    parities on decode: a step reads one and writes the other)
+///  - conv tail: FP16 `[convKernel - 1, convDim]` (the same two parities)
 final class GDN {
     // K18: threadgroup size for gdn_qk_norm / gdn_gated_norm. Passed to the
     // kernels as function constant 95 AND used for the dispatch below, so the
@@ -184,17 +185,18 @@ final class GDN {
             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
     }
 
-    /// Decode: conv over [tail | current row] with SiLU, shifting the tail in
-    /// place. `convWeight` is the BF16 `[convDim, kernel]` tensor view region.
+    /// Decode: conv over [tail | current row] with SiLU, the shifted tail
+    /// written to `tailOut` (the same buffer shifts it in place). `convWeight`
+    /// is the BF16 `[convDim, kernel]` tensor view region.
     func encodeConvDecode(commandBuffer: MTLCommandBuffer,
-                          tail: MTLBuffer,
+                          tail: MTLBuffer, tailOut: MTLBuffer,
                           qkv: MTLBuffer, qkvOffset: Int = 0,
                           convWeight: MTLBuffer, convWeightOffset: Int,
                           out: MTLBuffer, outOffset: Int = 0) throws {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
-        encodeConvDecode(encoder: encoder, tail: tail,
+        encodeConvDecode(encoder: encoder, tail: tail, tailOut: tailOut,
                          qkv: qkv, qkvOffset: qkvOffset,
                          convWeight: convWeight, convWeightOffset: convWeightOffset,
                          out: out, outOffset: outOffset)
@@ -202,7 +204,7 @@ final class GDN {
     }
 
     func encodeConvDecode(encoder: MTLComputeCommandEncoder,
-                          tail: MTLBuffer,
+                          tail: MTLBuffer, tailOut: MTLBuffer,
                           qkv: MTLBuffer, qkvOffset: Int = 0,
                           convWeight: MTLBuffer, convWeightOffset: Int,
                           out: MTLBuffer, outOffset: Int = 0) {
@@ -215,6 +217,7 @@ final class GDN {
         var taps = UInt32(config.convKernelSize)
         encoder.setBytes(&channels, length: MemoryLayout<UInt32>.size, index: 4)
         encoder.setBytes(&taps, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBuffer(tailOut, offset: 0, index: 6)
         dispatch1D(encoder, pipeline: convDecodePSO, threads: config.qkvDim)
     }
 
@@ -298,17 +301,18 @@ final class GDN {
                                            height: 1, depth: 1))
     }
 
-    /// Decode: one gated delta rule step. `state` is FP32 [Hv, Dv, Dk],
-    /// updated in place; `y` receives [Hv * Dv] FP16. With `perChannelDecay`,
-    /// `aProj` holds [Hv * Dk] halfs and `aLog`/`dtBias` are FP32
-    /// ([Hv] / [Hv * Dk]) instead of BF16 [Hv].
+    /// Decode: one gated delta rule step. `state` is FP32 [Hv, Dv, Dk]
+    /// entering the step and `stateOut` the same shape leaving it (the same
+    /// buffer updates in place); `y` receives [Hv * Dv] FP16. With
+    /// `perChannelDecay`, `aProj` holds [Hv * Dk] halfs and `aLog`/`dtBias`
+    /// are FP32 ([Hv] / [Hv * Dk]) instead of BF16 [Hv].
     func encodeDeltaStepDecode(commandBuffer: MTLCommandBuffer,
                                convOut: MTLBuffer, convOutOffset: Int = 0,
                                aProj: MTLBuffer, aProjOffset: Int = 0,
                                bProj: MTLBuffer, bProjOffset: Int = 0,
                                aLog: MTLBuffer, aLogOffset: Int,
                                dtBias: MTLBuffer, dtBiasOffset: Int,
-                               state: MTLBuffer,
+                               state: MTLBuffer, stateOut: MTLBuffer,
                                y: MTLBuffer, yOffset: Int = 0) throws {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
@@ -319,7 +323,7 @@ final class GDN {
                               bProj: bProj, bProjOffset: bProjOffset,
                               aLog: aLog, aLogOffset: aLogOffset,
                               dtBias: dtBias, dtBiasOffset: dtBiasOffset,
-                              state: state, y: y, yOffset: yOffset)
+                              state: state, stateOut: stateOut, y: y, yOffset: yOffset)
         encoder.endEncoding()
     }
 
@@ -329,7 +333,7 @@ final class GDN {
                                bProj: MTLBuffer, bProjOffset: Int = 0,
                                aLog: MTLBuffer, aLogOffset: Int,
                                dtBias: MTLBuffer, dtBiasOffset: Int,
-                               state: MTLBuffer,
+                               state: MTLBuffer, stateOut: MTLBuffer,
                                y: MTLBuffer, yOffset: Int = 0) {
         encoder.setComputePipelineState(deltaDecodePSO)
         encoder.setBuffer(convOut, offset: convOutOffset, index: 0)
@@ -340,6 +344,7 @@ final class GDN {
         encoder.setBuffer(state, offset: 0, index: 5)
         encoder.setBuffer(y, offset: yOffset, index: 6)
         setHeadDims(encoder, startingAt: 7)
+        encoder.setBuffer(stateOut, offset: 0, index: 11)
         encoder.dispatchThreadgroups(
             MTLSize(width: config.numVHeads,
                     height: config.valueHeadDim / 4,

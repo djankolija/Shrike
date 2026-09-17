@@ -242,16 +242,19 @@ kernel void gdn_in_proj_gemv_simd(
 
 // ----------------------------------------------------------------------------
 // Causal depthwise conv, decode. One thread per channel. The tail buffer holds
-// the previous K-1 pre-activation rows and is shifted in place (each thread
-// owns its channel column exclusively).
+// the previous K-1 pre-activation rows; the shifted tail goes to `tail_out`,
+// the other parity of a double-buffered tail (v20 T3.3) or the same buffer
+// (each thread owns its channel column exclusively, and the shift reads a row
+// before it writes it).
 // ----------------------------------------------------------------------------
 kernel void gdn_conv_mix_decode(
-    device half*        tail     [[buffer(0)]],   // [K-1, C] shifted in place
+    device const half*  tail     [[buffer(0)]],   // [K-1, C] entering the step
     device const half*  qkv      [[buffer(1)]],   // [C] current raw row
     device const bfloat* conv_w  [[buffer(2)]],   // [C, K]
     device half*        out      [[buffer(3)]],   // [C] silu(conv)
     constant uint&      channels [[buffer(4)]],
     constant uint&      taps     [[buffer(5)]],
+    device half*        tail_out [[buffer(6)]],   // [K-1, C] leaving the step
     uint tid [[thread_position_in_grid]]
 ) {
     const uint C = channels;
@@ -266,10 +269,10 @@ kernel void gdn_conv_mix_decode(
     out[tid] = half(gdn_silu(acc));
 
     for (uint j = 0; j + 1u < history; ++j) {
-        tail[j * C + tid] = tail[(j + 1u) * C + tid];
+        tail_out[j * C + tid] = tail[(j + 1u) * C + tid];
     }
     if (history > 0u) {
-        tail[(history - 1u) * C + tid] = qkv[tid];
+        tail_out[(history - 1u) * C + tid] = qkv[tid];
     }
 }
 
@@ -433,6 +436,9 @@ kernel void gdn_qk_norm(
 // `perChannelG` is a literal at each kernel entry, so the untaken branch
 // folds at compile time.
 // ----------------------------------------------------------------------------
+// The state is read from `state` and written to `state_out`: the other parity
+// of a double-buffered state (v20 T3.3) or the same buffer, the arithmetic
+// the same either way (every element is read before its row is written).
 template <typename DecayT>
 static inline void gdn_delta_step_decode_body(
     device const half*   conv_out,
@@ -440,8 +446,9 @@ static inline void gdn_delta_step_decode_body(
     device const half*   b_proj,
     device const DecayT* A_log,
     device const DecayT* dt_bias,
-    device float*        state,
+    device const float*  state,
     device half*         y,
+    device float*        state_out,
     uint Hk, uint Hv, uint Dk, uint Dv,
     bool perChannelG,
     uint2 tg, uint2 tpos
@@ -464,7 +471,8 @@ static inline void gdn_delta_step_decode_body(
     const float beta = 1.0f / (1.0f + exp(-float(b_proj[h])));
 
     const uint nPerLane = Dk / 32u;
-    device float* srow = state + (uint(h) * Dv + dv) * Dk;
+    device const float* srow = state + (uint(h) * Dv + dv) * Dk;
+    device float* srow_out = state_out + (uint(h) * Dv + dv) * Dk;
 
     float s[8];
     float kv = 0.0f;
@@ -486,7 +494,7 @@ static inline void gdn_delta_step_decode_body(
         const uint idx = lane * nPerLane + i;
         s[i] = fma(float(k[idx]), delta, s[i]);
         out = fma(s[i], float(q[idx]), out);
-        srow[idx] = s[i];
+        srow_out[idx] = s[i];
     }
     out = simd_sum(out);
     if (lane == 0) y[h * Dv + dv] = half(out);
@@ -498,18 +506,19 @@ kernel void gdn_delta_step_decode(
     device const half*   b_proj   [[buffer(2)]],   // [Hv]
     device const bfloat* A_log    [[buffer(3)]],   // [Hv]
     device const bfloat* dt_bias  [[buffer(4)]],   // [Hv]
-    device float*        state    [[buffer(5)]],   // [Hv, Dv, Dk]
+    device const float*  state    [[buffer(5)]],   // [Hv, Dv, Dk] entering
     device half*         y        [[buffer(6)]],   // [Hv * Dv]
     constant uint&       kHeads   [[buffer(7)]],
     constant uint&       vHeads   [[buffer(8)]],
     constant uint&       keyDim   [[buffer(9)]],
     constant uint&       valueDim [[buffer(10)]],
+    device float*        state_out [[buffer(11)]], // [Hv, Dv, Dk] leaving
     uint2 tg [[threadgroup_position_in_grid]],
     uint2 tpos [[thread_position_in_threadgroup]]
 ) {
     gdn_delta_step_decode_body<bfloat>(conv_out, a_proj, b_proj, A_log, dt_bias,
-                                       state, y, kHeads, vHeads, keyDim,
-                                       valueDim, false, tg, tpos);
+                                       state, y, state_out, kHeads, vHeads,
+                                       keyDim, valueDim, false, tg, tpos);
 }
 
 kernel void gdn_delta_step_decode_vec(
@@ -518,18 +527,19 @@ kernel void gdn_delta_step_decode_vec(
     device const half*   b_proj   [[buffer(2)]],   // [Hv]
     device const float*  A_log    [[buffer(3)]],   // [Hv]
     device const float*  dt_bias  [[buffer(4)]],   // [Hv * Dk]
-    device float*        state    [[buffer(5)]],   // [Hv, Dv, Dk]
+    device const float*  state    [[buffer(5)]],   // [Hv, Dv, Dk] entering
     device half*         y        [[buffer(6)]],   // [Hv * Dv]
     constant uint&       kHeads   [[buffer(7)]],
     constant uint&       vHeads   [[buffer(8)]],
     constant uint&       keyDim   [[buffer(9)]],
     constant uint&       valueDim [[buffer(10)]],
+    device float*        state_out [[buffer(11)]], // [Hv, Dv, Dk] leaving
     uint2 tg [[threadgroup_position_in_grid]],
     uint2 tpos [[thread_position_in_threadgroup]]
 ) {
     gdn_delta_step_decode_body<float>(conv_out, a_proj, b_proj, A_log, dt_bias,
-                                      state, y, kHeads, vHeads, keyDim,
-                                      valueDim, true, tg, tpos);
+                                      state, y, state_out, kHeads, vHeads,
+                                      keyDim, valueDim, true, tg, tpos);
 }
 
 // Prefill: identical math with the token loop inside the kernel. q/k/v/a/b

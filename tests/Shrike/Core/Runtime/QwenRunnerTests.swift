@@ -324,9 +324,9 @@ import ShrikeValidationSupport
                 == (la.convKernelSize - 1) * la.qkvDim * 2)
 
         // Dirty the recurrent state and the KV cursor, then reset both.
-        let state = gdnState.stateBuffer(layer: 0)
+        let state = gdnState.stateBuffer(layer: 0, parity: 1)
         state.contents().assumingMemoryBound(to: Float.self)[0] = 42
-        let tail = gdnState.convTailBuffer(layer: 2)
+        let tail = gdnState.convTailBuffer(layer: 2, parity: 0)
         tail.contents().assumingMemoryBound(to: UInt16.self)[0] = 0x3C00
         kv.advance(by: 4)
         #expect(kv.position == 4)

@@ -122,11 +122,14 @@ import ShrikeValidationSupport
     private static func gpuDecodeStep(ctx: MetalContext, gdn: GDN,
                                       fixture: Fixture, row: Int,
                                       tail: MTLBuffer, state: MTLBuffer,
+                                      tailOut: MTLBuffer? = nil, stateOut: MTLBuffer? = nil,
                                       convW: MTLBuffer, aLog: MTLBuffer,
                                       dtBias: MTLBuffer, normW: MTLBuffer,
                                       convOut: MTLBuffer, yBuf: MTLBuffer,
                                       outBuf: MTLBuffer) throws -> [Float] {
         let cfg = gdn.config
+        let tailOut = tailOut ?? tail
+        let stateOut = stateOut ?? state
         guard let qkv = Fp16Buffer.make(ctx.device, halves: fixture.qkvRows[row].map { Float16($0) }),
               let aProj = Fp16Buffer.make(ctx.device, halves: fixture.aRows[row].map { Float16($0) }),
               let bProj = Fp16Buffer.make(ctx.device, halves: fixture.bRows[row].map { Float16($0) }),
@@ -135,7 +138,7 @@ import ShrikeValidationSupport
             throw MetalError.noDevice
         }
         guard let cb = ctx.queue.makeCommandBuffer() else { throw MetalError.noQueue }
-        try gdn.encodeConvDecode(commandBuffer: cb, tail: tail, qkv: qkv,
+        try gdn.encodeConvDecode(commandBuffer: cb, tail: tail, tailOut: tailOut, qkv: qkv,
                              convWeight: convW, convWeightOffset: 0,
                              out: convOut)
         try gdn.encodeQKNorm(commandBuffer: cb, convOut: convOut)
@@ -143,7 +146,7 @@ import ShrikeValidationSupport
                                   aProj: aProj, bProj: bProj,
                                   aLog: aLog, aLogOffset: 0,
                                   dtBias: dtBias, dtBiasOffset: 0,
-                                  state: state, y: yBuf)
+                                  state: state, stateOut: stateOut, y: yBuf)
         try gdn.encodeGatedNorm(commandBuffer: cb, y: yBuf, z: zBuf,
                             weight: normW, weightOffset: 0, out: outBuf)
         cb.commit()
@@ -202,6 +205,60 @@ import ShrikeValidationSupport
             maxStateErr = max(maxStateErr, abs(statePtr[i] - reference.state[i]))
         }
         #expect(maxStateErr <= 5e-2, "state divergence \(maxStateErr)")
+    }
+
+    @Test func decodeStepIntoTheOtherParityMatchesInPlaceAndLeavesTheInputUntouched() throws {
+        let cfg = Self.cfg
+        let rows = 4
+        let fixture = Fixture(rows: rows, seed: 0x7A11)
+        let ctx = try MetalContext()
+        let gdn = try GDN(context: ctx, config: cfg)
+
+        let tailBytes = (cfg.convKernelSize - 1) * cfg.qkvDim * 2
+        let stateCount = cfg.numVHeads * cfg.valueHeadDim * cfg.keyHeadDim
+        guard let tailInPlace = ctx.device.makeBuffer(length: tailBytes, options: .storageModeShared),
+              let stateInPlace = ctx.device.makeBuffer(length: stateCount * 4, options: .storageModeShared),
+              let tailA = ctx.device.makeBuffer(length: tailBytes, options: .storageModeShared),
+              let tailB = ctx.device.makeBuffer(length: tailBytes, options: .storageModeShared),
+              let stateA = ctx.device.makeBuffer(length: stateCount * 4, options: .storageModeShared),
+              let stateB = ctx.device.makeBuffer(length: stateCount * 4, options: .storageModeShared),
+              let convW = Self.makeBF16Buffer(ctx.device, values: fixture.convW),
+              let aLog = Self.makeBF16Buffer(ctx.device, values: fixture.aLog),
+              let dtBias = Self.makeBF16Buffer(ctx.device, values: fixture.dtBias),
+              let normW = Self.makeBF16Buffer(ctx.device, values: fixture.normW),
+              let convOut = Fp16Buffer.make(ctx.device, count: cfg.qkvDim),
+              let yBuf = Fp16Buffer.make(ctx.device, count: cfg.valueDim),
+              let outBuf = Fp16Buffer.make(ctx.device, count: cfg.valueDim) else {
+            Issue.record("Failed to allocate buffers"); return
+        }
+        for buffer in [tailInPlace, tailA, tailB] { memset(buffer.contents(), 0, tailBytes) }
+        for buffer in [stateInPlace, stateA, stateB] { memset(buffer.contents(), 0, stateCount * 4) }
+        func bytes(_ buffer: MTLBuffer) -> [UInt8] {
+            Array(UnsafeRawBufferPointer(start: buffer.contents(), count: buffer.length))
+        }
+
+        let tails = [tailA, tailB]
+        let states = [stateA, stateB]
+        for row in 0..<rows {
+            let inPlace = try Self.gpuDecodeStep(
+                ctx: ctx, gdn: gdn, fixture: fixture, row: row,
+                tail: tailInPlace, state: stateInPlace, convW: convW, aLog: aLog,
+                dtBias: dtBias, normW: normW, convOut: convOut, yBuf: yBuf, outBuf: outBuf)
+            let parity = row & 1
+            let tailBefore = bytes(tails[parity])
+            let stateBefore = bytes(states[parity])
+            let acrossParities = try Self.gpuDecodeStep(
+                ctx: ctx, gdn: gdn, fixture: fixture, row: row,
+                tail: tails[parity], state: states[parity],
+                tailOut: tails[parity ^ 1], stateOut: states[parity ^ 1],
+                convW: convW, aLog: aLog, dtBias: dtBias, normW: normW,
+                convOut: convOut, yBuf: yBuf, outBuf: outBuf)
+            #expect(acrossParities == inPlace, "row \(row)")
+            #expect(bytes(tails[parity]) == tailBefore, "row \(row): the tail read was written")
+            #expect(bytes(states[parity]) == stateBefore, "row \(row): the state read was written")
+            #expect(bytes(tails[parity ^ 1]) == bytes(tailInPlace), "row \(row)")
+            #expect(bytes(states[parity ^ 1]) == bytes(stateInPlace), "row \(row)")
+        }
     }
 
     @Test func prefillChunkMatchesSequentialDecode() throws {
