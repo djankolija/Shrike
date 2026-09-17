@@ -434,16 +434,8 @@ private struct RunnerCounterSnapshot {
     let prefetchFailed: UInt64
     let prefetchJoined: UInt64
     let prefetchLandedHits: UInt64
-    let prefetchBeforeClassify: UInt64
-    let prefetchDuringTail: UInt64
-    let prefetchDuringLastFifty: UInt64
-    let prefetchDuringFiftyToOneFifty: UInt64
-    let prefetchDuringEarlier: UInt64
-    let prefetchAfterClassify: UInt64
-    let prefetchRaceUnknown: UInt64
     let prefetchHookFailures: UInt64
     let pathSubmit: UInt64
-    let pathRouterWake: UInt64
     let pathRouterWakeFallbacks: UInt64
     let boundaryWakeFallbacks: UInt64
     let ioQueue: UInt64
@@ -479,16 +471,8 @@ private struct RunnerCounterSnapshot {
         prefetchFailed = runner.prefetchStatistics.failed
         prefetchJoined = runner.prefetchStatistics.joined
         prefetchLandedHits = runner.totalPrefetchLandedHits
-        prefetchBeforeClassify = runner.totalPrefetchBeforeClassify
-        prefetchDuringTail = runner.totalPrefetchDuringTail
-        prefetchDuringLastFifty = runner.totalPrefetchDuringLastFifty
-        prefetchDuringFiftyToOneFifty = runner.totalPrefetchDuringFiftyToOneFifty
-        prefetchDuringEarlier = runner.totalPrefetchDuringEarlier
-        prefetchAfterClassify = runner.totalPrefetchAfterClassify
-        prefetchRaceUnknown = runner.totalPrefetchRaceUnknown
         prefetchHookFailures = runner.prefetchStatistics.hookFailures
         pathSubmit = runner.totalRoutedSubmitNanos
-        pathRouterWake = runner.totalRouterWakeNanos
         pathRouterWakeFallbacks = runner.totalRouterWakeFallbacks
         boundaryWakeFallbacks = runner.totalBoundaryWakeFallbacks
         ioQueue = runner.totalIOQueueNanos
@@ -1961,11 +1945,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             format: "prefetch_begin_ms=%.4f prefetch_issued=%llu prefetch_adopted=%llu "
                 + "prefetch_reclaimed=%llu prefetch_deferred=%llu prefetch_overlapped=%llu "
                 + "prefetch_late=%llu prefetch_refused=%llu prefetch_failed=%llu prefetch_joined=%llu "
-                + "prefetch_landed_hits=%llu prefetch_before_classify=%llu "
-                + "prefetch_during_tail=%llu prefetch_during_lt50us=%llu "
-                + "prefetch_during_50_150us=%llu prefetch_during_gt150us=%llu "
-                + "prefetch_after_classify=%llu prefetch_race_unknown=%llu "
-                + "prefetch_hook_failed=%llu",
+                + "prefetch_landed_hits=%llu prefetch_hook_failed=%llu",
             beginMs,
             stats.issued - snapshot.prefetchIssued,
             stats.adopted - snapshot.prefetchAdopted,
@@ -1977,13 +1957,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             stats.failed - snapshot.prefetchFailed,
             stats.joined - snapshot.prefetchJoined,
             runner.totalPrefetchLandedHits - snapshot.prefetchLandedHits,
-            runner.totalPrefetchBeforeClassify - snapshot.prefetchBeforeClassify,
-            runner.totalPrefetchDuringTail - snapshot.prefetchDuringTail,
-            runner.totalPrefetchDuringLastFifty - snapshot.prefetchDuringLastFifty,
-            runner.totalPrefetchDuringFiftyToOneFifty - snapshot.prefetchDuringFiftyToOneFifty,
-            runner.totalPrefetchDuringEarlier - snapshot.prefetchDuringEarlier,
-            runner.totalPrefetchAfterClassify - snapshot.prefetchAfterClassify,
-            runner.totalPrefetchRaceUnknown - snapshot.prefetchRaceUnknown,
             stats.hookFailures - snapshot.prefetchHookFailures)
     }
 
@@ -2021,7 +1994,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "expert_load_p99_ms=%.3f hit_fixup_layers=%llu "
                 + "agreed_overflow=%llu cells_leased_peak=%llu "
                 + "router_readback_ms=%.4f cache_plan_ms=%.4f %@ "
-                + "path_submit_ms=%.4f path_router_wake_ms=%.4f "
+                + "path_submit_ms=%.4f "
                 + "path_router_wake_fallbacks=%llu boundary_wake_fallbacks=%llu "
                 + "io_queue_ms=%.4f "
                 + "io_load_ms=%.4f io_fetch_ms=%.4f "
@@ -2050,7 +2023,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             ms(runner.totalCachePlanNanos, snapshot.cachePlan),
             prefetchRunnerLine(snapshot: snapshot, tokens: tokens),
             ms(runner.totalRoutedSubmitNanos, snapshot.pathSubmit),
-            ms(runner.totalRouterWakeNanos, snapshot.pathRouterWake),
             runner.totalRouterWakeFallbacks - snapshot.pathRouterWakeFallbacks,
             runner.totalBoundaryWakeFallbacks - snapshot.boundaryWakeFallbacks,
             ms(runner.totalIOQueueNanos, snapshot.ioQueue),
@@ -2082,6 +2054,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             totalGPU,
             result.decodeSeconds > 0
                 ? totalGPU / (result.decodeSeconds * 1000) * 100 : 0))
+        if let wordClock = runner.wordClockLine() {
+            writeDiagnosticLine("Shrike \(wordClock)")
+        }
         for gap in runner.kernelGPUGaps().prefix(12) {
             writeDiagnosticLine(String(
                 format: "Shrike gap %@ total_ms=%.1f per_token_ms=%.3f count=%d "

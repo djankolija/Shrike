@@ -25,12 +25,8 @@ RUNNER = ["expert_hit_rate_decode", "expert_misses_decode", "hit_fixup_layers", 
           "io_fetch_ms", "cache_plan_ms", "agreed_overflow", "cells_leased_peak",
           "prefetch_begin_ms", "prefetch_issued", "prefetch_adopted", "prefetch_reclaimed",
           "prefetch_deferred", "prefetch_overlapped", "prefetch_late", "prefetch_refused", "prefetch_failed",
-          "prefetch_joined", "prefetch_landed_hits", "prefetch_before_classify",
-          "prefetch_during_tail", "prefetch_during_lt50us", "prefetch_during_50_150us",
-          "prefetch_during_gt150us", "prefetch_after_classify", "prefetch_race_unknown",
-          "prefetch_hook_failed",
-          "router_readback_ms", "path_submit_ms", "path_router_wake_ms",
-          "path_router_wake_fallbacks"]
+          "prefetch_joined", "prefetch_landed_hits", "prefetch_hook_failed",
+          "router_readback_ms", "path_submit_ms", "path_router_wake_fallbacks"]
 
 
 def grab(pattern, text, cast=float):
@@ -95,10 +91,16 @@ for block in blocks:
           f"window_ms/tok={fmt_gap(gaps['window'], completion)} "
           f"adopted_ms/tok={fmt_gap(gaps['adopted'], completion)}")
     if runner["path_submit_ms"] is not None:
-        print(f"    path: router_wake={fmt(runner['path_router_wake_ms'])} "
-              f"wake_fallbacks={fmt(runner['path_router_wake_fallbacks'], 0)} "
+        print(f"    path: wake_fallbacks={fmt(runner['path_router_wake_fallbacks'], 0)} "
               f"readback={fmt(runner['router_readback_ms'])} plan={fmt(runner['cache_plan_ms'])} "
               f"submit={fmt(runner['path_submit_ms'])} (ms per token)")
+    clock = re.search(r"word_clock tokens=(\d+) first_ms=([\d.]+) layer_ms=([\d.,]+) boundary_ms=([\d.]+)", text)
+    if clock:
+        layers = [float(v) for v in clock.group(3).split(",")]
+        slowest = max(range(len(layers)), key=lambda i: layers[i])
+        print(f"    word clock: first={float(clock.group(2)):.3f} layers_sum={sum(layers):.3f} "
+              f"slowest=L{slowest}({layers[slowest]:.3f}) boundary={float(clock.group(4)):.3f} "
+              f"(ms per token over {clock.group(1)} tokens)")
     if runner["prefetch_issued"] is not None:
         print(f"    prefetch: begin_ms={fmt(runner['prefetch_begin_ms'])} "
               f"issued={fmt(runner['prefetch_issued'], 0)} adopted={fmt(runner['prefetch_adopted'], 0)} "
@@ -108,13 +110,6 @@ for block in blocks:
               f"deferred={fmt(runner['prefetch_deferred'], 0)} "
               f"overlapped={fmt(runner['prefetch_overlapped'], 0)} "
               f"landed_hits={fmt(runner['prefetch_landed_hits'], 0)} "
-              f"before_classify={fmt(runner['prefetch_before_classify'], 0)} "
-              f"during_tail={fmt(runner['prefetch_during_tail'], 0)} "
-              f"(lt50us={fmt(runner['prefetch_during_lt50us'], 0)} "
-              f"50_150us={fmt(runner['prefetch_during_50_150us'], 0)} "
-              f"gt150us={fmt(runner['prefetch_during_gt150us'], 0)}) "
-              f"after_classify={fmt(runner['prefetch_after_classify'], 0)} "
-              f"race_unknown={fmt(runner['prefetch_race_unknown'], 0)} "
               f"hook_failed={fmt(runner['prefetch_hook_failed'], 0)}")
 
 for path in token_paths:

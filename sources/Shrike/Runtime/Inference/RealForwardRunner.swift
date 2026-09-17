@@ -235,9 +235,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // Qwen 3.6 decode scratch (nil on architectures that never use it).
     private var qPackedScratch: MTLBuffer? { decodeScratch.qPackedScratch } // [2 * N_HEADS * head_dim] packed [q ; gate]
     private var attnGateScratch: MTLBuffer? { decodeScratch.attnGateScratch } // [N_HEADS * head_dim]
-    private var boundaryCommand: MTLCommandBuffer?
+    /// The committed token's command, recorded at the next produce.
+    private var runningToken: TokenCommand?
+    /// The next token's command, its layers encoded a layer per word during
+    /// the running one, committed on the boundary word after the stop check.
+    private var heldToken: TokenCommand?
     private var boundaryTokenWord: MTLBuffer?
-    private var heldLayerZero: HeldLayerCommands?
+    private var wordClock: DecodeWordClock
     private let gdnScratch: GDNScratchBuffers?
     private var gdnQKVRaw: MTLBuffer? { gdnScratch?.qkvRaw }        // [qkvDim] raw in_proj_qkv output
     private var gdnConvOut: MTLBuffer? { gdnScratch?.convOut }      // [qkvDim] conv + SiLU output
@@ -321,7 +325,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let useFusedGreedyHead: Bool
     private var routerReadbackTag: UInt32 = 0
     /// Bookkeeping that needs a command's GPU stamps, which the word wake reads before they exist.
-    private var deferredGPURecords: [DeferredGPURecord] = []
+
     private let predictivePrefetch: ExpertPrefetchRing
     private let anePrefill: ANEPrefillAttention?
     public init(model: Model, context: MetalContext, maxContext: Int,
@@ -393,6 +397,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             cfg: cfg, device: context.device)
         self.residencyReadback = try Self.makeResidencyReadbackBuffers(
             cfg: cfg, device: context.device)
+        self.wordClock = DecodeWordClock(layers: cfg.numLayers)
         self.gdnScratch = try Self.makeGDNScratchBuffers(
             cfg: cfg, device: context.device)
         self.mlaScratch = try Self.makeMLAScratchBuffers(
@@ -449,74 +454,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 "trace path \(path) cannot be opened: \(String(cString: strerror(errno)))")
         }
         return descriptor
-    }
-
-    struct PrefetchRaceSplit: Equatable {
-        var before: UInt64 = 0
-        var during: UInt64 = 0
-        var duringLastFifty: UInt64 = 0
-        var duringFiftyToOneFifty: UInt64 = 0
-        var duringEarlier: UInt64 = 0
-        var after: UInt64 = 0
-        var unknown: UInt64 = 0
-    }
-
-    /// The classifier is the tail command's last kernel, so a read completed before
-    /// the command's GPU start surely beat it and one completed after its end surely lost.
-    static func prefetchRaceSplit(completions: [Int: UInt64], landed: [Int],
-                                  gpuStartNanos: UInt64, gpuEndNanos: UInt64) -> PrefetchRaceSplit {
-        var split = PrefetchRaceSplit()
-        let known = gpuStartNanos > 0 && gpuEndNanos > 0
-        for expert in landed {
-            guard let completed = completions[expert], known else {
-                split.unknown &+= 1
-                continue
-            }
-            if completed < gpuStartNanos {
-                split.before &+= 1
-            } else if completed < gpuEndNanos {
-                split.during &+= 1
-                let margin = gpuEndNanos - completed
-                if margin < 50_000 {
-                    split.duringLastFifty &+= 1
-                } else if margin < 150_000 {
-                    split.duringFiftyToOneFifty &+= 1
-                } else {
-                    split.duringEarlier &+= 1
-                }
-            } else {
-                split.after &+= 1
-            }
-        }
-        return split
-    }
-
-    /// The word wake reaches the plan before the tail command reports its GPU
-    /// times, so a race it cannot settle waits with the deferred records.
-    private func recordPrefetchRace(landed: [Int], layer L: Int, tailCB: MTLCommandBuffer) {
-        guard !landed.isEmpty else { return }
-        let completions = predictivePrefetch.completionNanos(layer: L, experts: Set(landed))
-        if tailCB.status == .completed {
-            countPrefetchRace(completions: completions, landed: landed, tailCB: tailCB)
-        } else {
-            deferredGPURecords.append(
-                .prefetchRace(completions: completions, landed: landed, tailCB: tailCB))
-        }
-    }
-
-    private func countPrefetchRace(completions: [Int: UInt64], landed: [Int],
-                                   tailCB: MTLCommandBuffer) {
-        let split = Self.prefetchRaceSplit(
-            completions: completions, landed: landed,
-            gpuStartNanos: UInt64(max(0, tailCB.gpuStartTime) * 1_000_000_000),
-            gpuEndNanos: UInt64(max(0, tailCB.gpuEndTime) * 1_000_000_000))
-        totalPrefetchBeforeClassify &+= split.before
-        totalPrefetchDuringTail &+= split.during
-        totalPrefetchDuringLastFifty &+= split.duringLastFifty
-        totalPrefetchDuringFiftyToOneFifty &+= split.duringFiftyToOneFifty
-        totalPrefetchDuringEarlier &+= split.duringEarlier
-        totalPrefetchAfterClassify &+= split.after
-        totalPrefetchRaceUnknown &+= split.unknown
     }
 
     /// A refused speculative read is counted, never thrown into the decode.
@@ -1202,15 +1139,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public var totalPrefetchBeginNanos: UInt64 { predictivePrefetch.statistics.beginNanos }
     /// Landed predictions the classifier counted resident: the landing's prize.
     public private(set) var totalPrefetchLandedHits: UInt64 = 0
-    public private(set) var totalPrefetchBeforeClassify: UInt64 = 0
-    public private(set) var totalPrefetchDuringTail: UInt64 = 0
-    public private(set) var totalPrefetchDuringLastFifty: UInt64 = 0
-    public private(set) var totalPrefetchDuringFiftyToOneFifty: UInt64 = 0
-    public private(set) var totalPrefetchDuringEarlier: UInt64 = 0
-    public private(set) var totalPrefetchAfterClassify: UInt64 = 0
-    public private(set) var totalPrefetchRaceUnknown: UInt64 = 0
     public private(set) var totalRoutedSubmitNanos: UInt64 = 0
-    public private(set) var totalRouterWakeNanos: UInt64 = 0
     public private(set) var totalRouterWakeFallbacks: UInt64 = 0
     public var prefetchStatistics: ExpertPrefetchStatistics { predictivePrefetch.statistics }
     public private(set) var totalBoundaryWakeFallbacks: UInt64 = 0
@@ -1280,7 +1209,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     public func resetKernelGPUTimings() {
         kernelGPUTimings.removeAll(keepingCapacity: true)
-        deferredGPURecords.removeAll()
+        wordClock = DecodeWordClock(layers: cfg.numLayers)
+    }
+
+    /// The per-layer clock of the token under one command (v20 T3.2), for the
+    /// kernel stats; nil before a token ran.
+    public func wordClockLine() -> String? {
+        wordClock.tokens > 0 ? wordClock.line() : nil
     }
 
     func recordKernelGPU(role: String, _ cb: MTLCommandBuffer) {
@@ -1636,10 +1571,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                sample: sample)
     }
 
-    /// The router wake's pattern: after a second the completion wait takes over
-    /// so a failed command surfaces instead of wedging the core.
+    /// The token word's wake: the sampler writes it before the command's
+    /// embed and completion; after a second the token's command is waited on
+    /// with the deadline, so a wait the drain missed ends loudly.
     public func awaitBoundaryToken() throws -> Int32 {
-        guard let cb = boundaryCommand, let word = boundaryTokenWord else {
+        guard let token = runningToken, let word = boundaryTokenWord else {
             throw ModelError.internalInconsistency(
                 detail: "no boundary command is pending a token")
         }
@@ -1647,51 +1583,59 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         var spins = 0
         while clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline {
             let value = word.contents().load(as: UInt32.self)
-            if value != Self.boundaryTokenSentinel { return Int32(bitPattern: value) }
+            if value != Self.boundaryTokenSentinel {
+                wordClock.boundary(at: clock_gettime_nsec_np(CLOCK_UPTIME_RAW))
+                return Int32(bitPattern: value)
+            }
             spins &+= 1
-            if spins % 256 == 0, cb.status == .error {
-                throw ModelError.commandBufferFailed(detail: String(describing: cb.error))
+            if spins % 256 == 0, token.cb.status == .error {
+                throw ModelError.commandBufferFailed(
+                    detail: "the boundary: \(Self.describeCommandBufferError(token.cb.error))")
             }
         }
         totalBoundaryWakeFallbacks &+= 1
-        try waitForCompletion(cb)
+        try Self.awaitCompletion(of: token.cb, deadlineNanos: Self.commandDeadlineNanos,
+                                 naming: "the boundary word")
         let value = word.contents().load(as: UInt32.self)
         guard value != Self.boundaryTokenSentinel else {
             throw ModelError.internalInconsistency(
-                detail: "the boundary command completed without writing its token word")
+                detail: "the token's command completed without writing its token word")
         }
+        wordClock.boundary(at: clock_gettime_nsec_np(CLOCK_UPTIME_RAW))
         return Int32(bitPattern: value)
     }
 
     static let boundaryTokenSentinel: UInt32 = 0xFFFF_FFFF
+    static let commandDeadlineNanos: UInt64 = 10_000_000_000
 
     private func discardBoundaryState() {
-        heldLayerZero = nil
-        boundaryCommand = nil
+        heldToken = nil
         boundaryTokenWord = nil
         drainArmedAgreedTokens()
-    }
-
-    private func takeHeldLayerZero() throws -> HeldLayerCommands? {
-        guard boundaryCommand != nil else {
-            throw ModelError.internalInconsistency(
-                detail: "a continued pass needs the previous boundary's command")
+        if let running = runningToken {
+            runningToken = nil
+            try? Self.awaitCompletion(of: running.cb, deadlineNanos: Self.commandDeadlineNanos,
+                                      naming: "the previous token")
         }
-        defer { heldLayerZero = nil }
-        return heldLayerZero
     }
 
-    private func finishPreviousBoundary() throws {
-        guard let cb = boundaryCommand else { return }
-        boundaryCommand = nil
-        try waitForCompletion(cb)
-        recordKernelGPU(role: "head_logits", cb)
+    private func takeHeldToken(position: Int) throws -> TokenCommand {
+        guard let held = heldToken, held.position == position else {
+            throw ModelError.internalInconsistency(
+                detail: "a continued pass at \(position) needs the command the previous boundary encoded ahead")
+        }
+        heldToken = nil
+        return held
     }
 
-    private func holdLayerZero(for next: Int) throws {
-        guard next < maxContext, cfg.numLayers > 0, cfg.numLeadingDenseLayers == 0 else { return }
-        try kv?.reserve(tokens: next + 1)
-        heldLayerZero = try encodeLayerCommands(layer: 0, position: next)
+    /// The previous token's command, complete once its boundary word landed
+    /// and the next token is committed behind it: its error surfaced, its GPU
+    /// span recorded under the `token` role.
+    private func finishToken(_ token: TokenCommand?) throws {
+        guard let token else { return }
+        try Self.awaitCompletion(of: token.cb, deadlineNanos: Self.commandDeadlineNanos,
+                                 naming: "token \(token.position)")
+        recordKernelGPU(role: "token", token.cb)
     }
 
     public func prefillChunked(tokens: ArraySlice<Int32>,
@@ -2075,43 +2019,65 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// One routed decode layer's command buffers, encoded but not committed.
     /// The next layer is encoded while the GPU runs the current one, so the
     /// post-readback critical path is commits only.
-    private struct HeldLayerCommands {
+    /// A routed layer inside the token's command: the tag its classifier
+    /// stamps on the host readback and the value its fixup waits on.
+    private struct TokenLayer {
         let layer: Int
-        let attnCB: MTLCommandBuffer
-        let softmaxCB: MTLCommandBuffer?
-        /// nil when the tail stage is folded into `attnCB` (one CB per layer;
-        /// only the gpt-oss and plain paths keep the split, their o_proj must
-        /// run after the separately committed softmax CB).
-        let tailCB: MTLCommandBuffer?
-        /// The speculative routed command when the tail is split (it follows
-        /// the separately committed tail); nil when it rides in `attnCB` behind
-        /// the tail, one command per layer.
-        let specCB: MTLCommandBuffer?
-        /// The tag the classifier stamps on this layer's host readback; zero
-        /// when no classifier ran (the host then reads the raw buffers).
         let readbackTag: UInt32
-        /// The timeline value the layer's fixup waits on, reserved at the
-        /// encode and published by the word's batch (v20 T3.1).
         let agreedToken: ExpertIOCompletionToken
-
-        /// The CB whose completion publishes the router output.
-        var routerCB: MTLCommandBuffer { tailCB ?? attnCB }
-        /// The CB carrying the speculative routed work.
-        var routedCB: MTLCommandBuffer { specCB ?? attnCB }
     }
 
-    private func commitHeldLayerCommands(_ cmds: HeldLayerCommands) {
-        cmds.attnCB.commit()
-        cmds.softmaxCB?.commit()
-        cmds.tailCB?.commit()
-        // Queued before the tailCB wait, not after: the GPU runs the shared
-        // MLP and the whole routed layer while the CPU blocks on tailCB for
-        // the routing.
-        cmds.specCB?.commit()
+    /// One token's command (v20 T3.2): every layer and the boundary as
+    /// encoders of one command buffer, the routed layers listed in order for
+    /// the host's word loop.
+    private final class TokenCommand {
+        let position: Int
+        let cb: MTLCommandBuffer
+        var layers: [TokenLayer] = []
+        var encodedLayers = 0
+
+        init(position: Int, cb: MTLCommandBuffer) {
+            self.position = position
+            self.cb = cb
+        }
     }
 
-    private func encodeLayerCommands(layer L: Int, position: Int)
-        throws -> HeldLayerCommands {
+    /// The token's command asks Metal for its encoders' execution status, so
+    /// a fault names the encoder; the option measured free on the mini's four
+    /// shapes (v20 T3.2's arms), so it is always on.
+    private func makeTokenCommand(position: Int) throws -> TokenCommand {
+        let descriptor = MTLCommandBufferDescriptor()
+        descriptor.errorOptions = .encoderExecutionStatus
+        guard let cb = ctx.queue.makeCommandBuffer(descriptor: descriptor) else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        cb.label = "token \(position)"
+        return TokenCommand(position: position, cb: cb)
+    }
+
+    /// Encodes the layers not yet encoded, up to `last` inclusive.
+    private func encodeLayers(into token: TokenCommand, upTo last: Int) throws {
+        let D = UInt32(cfg.hiddenSize)
+        let eps: Float = cfg.rmsNormEps
+        while token.encodedLayers <= last {
+            let L = token.encodedLayers
+            if L < cfg.numLeadingDenseLayers {
+                try encodeDenseLayer(into: token.cb, layer: L, position: token.position,
+                                     isLinear: cfg.layerIsLinear(L), d: D, rmsEps: eps)
+            } else {
+                token.layers.append(
+                    try encodeRoutedLayer(into: token.cb, layer: L, position: token.position))
+            }
+            token.encodedLayers += 1
+        }
+    }
+
+    /// One routed layer as encoders of the token's command: the input norm,
+    /// the attention and the tail with the classifier (one serial encoder on
+    /// GDN and gated layers), the speculative routed work, the wait on the
+    /// layer's value and the agreed fixup.
+    private func encodeRoutedLayer(into cb: MTLCommandBuffer, layer L: Int,
+                                   position: Int) throws -> TokenLayer {
         let D = UInt32(cfg.hiddenSize)
         let eps: Float = cfg.rmsNormEps
         let isLinear = cfg.layerIsLinear(L)
@@ -2127,31 +2093,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let residencyResources = try model.routedExpertResidency(layer: L)
         let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
             (onesPerExpertScale!, 0)
-        guard let attnCB = ctx.queue.makeCommandBuffer() else {
-            throw ModelError.residentBufferWrapFailed
-        }
-        // GDN, MLA, and gated attention encode everything through o_proj on
-        // attnCB, so the tail stage folds into the same CB — one submission
-        // and one boundary per layer. gpt-oss and the plain path keep a
-        // separate tail CB: their o_proj must run after the softmax CB,
-        // which commits between the two.
-        var tailCB: MTLCommandBuffer?
-        if !(isLinear || cfg.layerIsMLA(L) || cfg.attnOutputGate) {
-            guard let split = ctx.queue.makeCommandBuffer() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            tailCB = split
-        }
-        // GDN and gated layers run input norm → attention → tail on one
+        // GDN and gated layers run input norm, attention and the tail on one
         // serial encoder: on the M1 an encoder boundary costs more span than
-        // the small dispatches around it. KDA and MLA keep their CB-internal
-        // encoders, so their span cannot share one.
+        // the small dispatches around it. KDA and MLA keep their own encoders.
         var layerEncoder: MTLComputeCommandEncoder?
         if (isLinear && !cfg.linearAttentionPerChannelDecay)
             || (!isLinear && !cfg.layerIsMLA(L) && cfg.attnOutputGate) {
-            guard let enc = attnCB.makeComputeCommandEncoder() else {
+            guard let enc = cb.makeComputeCommandEncoder() else {
                 throw MetalError.commandEncoderFailed
             }
+            enc.label = "layer \(L) attention"
             layerEncoder = enc
         }
         if let layerEncoder {
@@ -2161,22 +2112,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             out: normed,
                             d: D, eps: eps)
         } else {
-            try rms.encodeBF16W(commandBuffer: attnCB,
+            try rms.encodeBF16W(commandBuffer: cb,
                             x: hidden,
                             weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
                             out: normed,
                             d: D, eps: eps)
         }
-        var softmaxCB: MTLCommandBuffer?
-        try encodeDecodeAttention(attnCB: attnCB, tailCB: tailCB ?? attnCB,
-                                  softmaxCB: &softmaxCB,
-                                  layerEncoder: layerEncoder,
+        try encodeDecodeAttention(cb: cb, layerEncoder: layerEncoder,
                                   layer: L, position: position,
                                   isLinear: isLinear, rmsEps: eps)
         routerReadbackTag = RouterHostReadback.nextTag(after: routerReadbackTag)
         let readbackTag = routerReadbackTag
         try encodeDecodeTailStage(
-            tailCB: tailCB ?? attnCB, layerEncoder: layerEncoder,
+            tailCB: cb, layerEncoder: layerEncoder,
             layer: L, routerW: routerW,
             nextRouterW: nextRouterW, postAttn: postAttn,
             perExpertScale: perExpertScale,
@@ -2184,29 +2132,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             speculative: specDispatchArguments,
             d: D, eps: eps, probeBank: position & 1)
         layerEncoder?.endEncoding()
-        var specCB: MTLCommandBuffer?
-        if tailCB != nil {
-            guard let separate = ctx.queue.makeCommandBuffer() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            specCB = separate
-        }
         try encodeSpeculativeRouted(
-            into: specCB ?? attnCB,
+            into: cb,
             layer: L,
             residency: residencyResources,
             arguments: specDispatchArguments)
         let agreedToken = try model.reserveExpertIOCompletionToken()
         armedAgreedTokens.append(agreedToken)
-        try encodeAgreedFixup(into: specCB ?? attnCB, layer: L,
+        try encodeAgreedFixup(into: cb, layer: L,
                               residency: residencyResources,
                               arguments: specDispatchArguments, token: agreedToken)
-        return HeldLayerCommands(
-            layer: L, attnCB: attnCB, softmaxCB: softmaxCB, tailCB: tailCB,
-            specCB: specCB, readbackTag: readbackTag, agreedToken: agreedToken)
+        return TokenLayer(layer: L, readbackTag: readbackTag, agreedToken: agreedToken)
     }
 
-    /// The orchestrator for one decode step, in the same shape as executePrefillChunk: embed, the per-layer dispatch, the head.
+    /// One decode step (v20 T3.2): the token's command, every layer and the
+    /// boundary as its encoders, committed once; the host then feeds each
+    /// routed layer's reads at its word and encodes the next token a layer per
+    /// word, to be committed on the boundary word after the stop check.
     private func produceToken(token: Int32?,
                               position: Int,
                               into logits: MTLBuffer,
@@ -2234,63 +2176,91 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let embedOutScale = cfg.embeddingScaledBySqrtHidden
             ? Float(cfg.hiddenSize).squareRoot()
             : 1.0
-        var pendingAgreedLayer: PendingAgreedLayer?
-        var heldNext: HeldLayerCommands?
+        let current: TokenCommand
         if let token {
             discardBoundaryState()
-            try encodeDecodeEmbed(token: token, d: D, outScale: embedOutScale)
+            current = try makeTokenCommand(position: position)
+            try encodeEmbed(into: current.cb, token: token, d: D, outScale: embedOutScale)
         } else {
-            heldNext = try takeHeldLayerZero()
+            current = try takeHeldToken(position: position)
         }
-
-        // Records a previous token left behind when it threw belong to that token.
-        deferredGPURecords.removeAll()
+        try encodeLayers(into: current, upTo: cfg.numLayers - 1)
+        let boundaryPath = boundaryWord != nil && sample != nil
+        var fusedHead = false
+        if let boundaryWord, let sample {
+            try encodeBoundary(into: current.cb, logits: logits, d: D, rmsEps: eps,
+                               outScale: embedOutScale, tokenWord: boundaryWord, sample: sample)
+        } else {
+            fusedHead = try encodeHead(into: current.cb, emitHead, logits: logits,
+                                       outputMode: outputMode, d: D, rmsEps: eps)
+        }
+        let previous = runningToken
+        if let boundaryWord {
+            boundaryWord.contents().storeBytes(of: Self.boundaryTokenSentinel, as: UInt32.self)
+            boundaryTokenWord = boundaryWord
+        }
+        let committed = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        current.cb.commit()
+        runningToken = current
+        wordClock.beginToken(at: committed)
+        var pending: PendingAgreedLayer?
+        var next: TokenCommand?
         do {
-            for L in 0..<cfg.numLayers {
+            try finishToken(previous)
+            if boundaryPath, position + 1 < maxContext, cfg.numLayers > 0 {
+                next = try makeTokenCommand(position: position + 1)
+                try kv?.reserve(tokens: position + 2)
+            }
+            for tokenLayer in current.layers {
+                let L = tokenLayer.layer
                 let tBodyStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-                let isLinear = cfg.layerIsLinear(L)
-                let isDense = L < cfg.numLeadingDenseLayers
-
-                let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-                // GDN/MLA/gated layers run the whole stage, input norm through
-                // router and the speculative routed work, in one CB (roles
-                // layer_linear / layer_kv). gpt-oss and plain
-                // layers keep the attn/softmax/tail CB split, whose commit order
-                // sequences o_proj after the softmax. Same queue either way, one
-                // wait on the last CB; only the router readback forces the
-                // barrier.
-                if isDense {
-                    try produceDenseLayer(layer: L, position: position, isLinear: isLinear,
-                                          d: D, rmsEps: eps,
-                                          cb1Start: tCb1Start, bodyStart: tBodyStart)
-                    continue
+                if let next { try encodeLayers(into: next, upTo: L) }
+                let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                totalCb1Nanos &+= tWait - tBodyStart
+                try waitForWord(tokenLayer, of: current)
+                let woke = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                totalWaitNanos &+= woke - tWait
+                wordClock.word(layer: L, at: woke)
+                if let previous = pending {
+                    try finishPendingAgreedLayer(previous)
+                    pending = nil
                 }
-                try produceRoutedLayer(layer: L, position: position,
-                                       heldNext: &heldNext, pending: &pendingAgreedLayer,
-                                       cb1Start: tCb1Start, bodyStart: tBodyStart)
+                let readback = try decodeRouterHostReadback(tag: tokenLayer.readbackTag)
+                let predictedNextLayer: [Int] = L + 1 < cfg.numLayers
+                    ? readback.predictedIDs.map { min(Int($0), cfg.numExperts - 1) }
+                    : []
+                pending = try serviceAgreedLayer(
+                    layer: L, position: position, cb: current.cb, token: tokenLayer.agreedToken,
+                    readback: readback, predictedNextLayer: predictedNextLayer,
+                    bodyStart: tBodyStart)
             }
-            if let pending = pendingAgreedLayer {
-                try finishPendingAgreedLayer(pending, waitIfNeeded: true)
-                pendingAgreedLayer = nil
+            if let last = pending {
+                try finishPendingAgreedLayer(last)
+                pending = nil
             }
-            try drainDeferredGPURecords(waitIfNeeded: true)
+            if let next { try encodeLayers(into: next, upTo: cfg.numLayers - 1) }
         } catch {
-            if let pending = pendingAgreedLayer { abandonPendingAgreedLayer(pending) }
+            // The fold's invariant: a committed command waits on nothing the
+            // host will not publish, so the pass drains before it unwinds.
+            if let pending { abandonPendingAgreedLayer(pending) }
             drainArmedAgreedTokens()
+            try? Self.awaitCompletion(of: current.cb, deadlineNanos: Self.commandDeadlineNanos,
+                                      naming: "the drained token")
+            runningToken = nil
+            heldToken = nil
             throw error
         }
-        try finishPreviousBoundary()
-
         if prefetchTraceFD >= 0 { pendingProbeDumpPosition = position }
-        if let boundaryWord, let sample {
-            try emitBoundary(into: logits, d: D, rmsEps: eps, outScale: embedOutScale,
-                             tokenWord: boundaryWord, sample: sample)
-            kv?.advance()
-            try holdLayerZero(for: position + 1)
+        kv?.advance()
+        if boundaryPath {
+            heldToken = next
         } else {
-            try self.emitHead(emitHead, into: logits, outputMode: outputMode,
-                              d: D, rmsEps: eps)
-            kv?.advance()
+            try Self.awaitCompletion(of: current.cb, deadlineNanos: Self.commandDeadlineNanos,
+                                     naming: "token \(position)")
+            recordKernelGPU(role: "token", current.cb)
+            runningToken = nil
+            wordClock.endToken()
+            if fusedHead { lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self) }
         }
     }
 
@@ -2299,19 +2269,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         case word(MTLBuffer)
     }
 
-    private func encodeDecodeEmbed(token: Int32, d D: UInt32, outScale: Float) throws {
-        let embedCB = try runSync { cb in
-            guard let encoder = cb.makeComputeCommandEncoder() else {
-                throw MetalError.commandEncoderFailed
-            }
-            try self.encodeEmbedLookup(encoder, token: .constant(UInt32(bitPattern: token)),
-                                       d: D, outScale: outScale)
-            encoder.endEncoding()
+    private func encodeEmbed(into cb: MTLCommandBuffer, token: Int32,
+                             d D: UInt32, outScale: Float) throws {
+        guard let encoder = cb.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
         }
-        guard let embedCB else {
-            throw ModelError.residentBufferWrapFailed
-        }
-        recordKernelGPU(role: "embed", embedCB)
+        encoder.label = "embed"
+        try encodeEmbedLookup(encoder, token: .constant(UInt32(bitPattern: token)),
+                              d: D, outScale: outScale)
+        encoder.endEncoding()
     }
 
     private func encodeEmbedLookup(_ encoder: MTLComputeCommandEncoder, token: EmbedTokenSource,
@@ -2348,25 +2314,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     /// The sentinel goes into the word before the commit so the host can tell the
     /// sampler's write from the previous token's.
-    private func emitBoundary(into logits: MTLBuffer, d D: UInt32, rmsEps eps: Float,
-                              outScale: Float, tokenWord: MTLBuffer,
-                              sample: (MTLComputeCommandEncoder) throws -> Void) throws {
+    /// The boundary as the token's last encoders: the final norm, the head,
+    /// the caller's sampler writing the token word, the next embed from it.
+    private func encodeBoundary(into cb: MTLCommandBuffer, logits: MTLBuffer,
+                                d D: UInt32, rmsEps eps: Float, outScale: Float,
+                                tokenWord: MTLBuffer,
+                                sample: (MTLComputeCommandEncoder) throws -> Void) throws {
         let fNorm = try model.finalNorm()
         let lm = try model.lmHead()
-        guard let cb = ctx.queue.makeCommandBuffer(),
-              let encoder = cb.makeComputeCommandEncoder() else {
-            throw ModelError.residentBufferWrapFailed
+        guard let encoder = cb.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
         }
+        encoder.label = "boundary"
         let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         encodeFinalNorm(encoder, weights: fNorm, d: D, rmsEps: eps)
         encodeLMHead(encoder, weights: lm, into: logits, d: D)
         try sample(encoder)
         try encodeEmbedLookup(encoder, token: .word(tokenWord), d: D, outScale: outScale)
         encoder.endEncoding()
-        tokenWord.contents().storeBytes(of: Self.boundaryTokenSentinel, as: UInt32.self)
-        cb.commit()
-        boundaryCommand = cb
-        boundaryTokenWord = tokenWord
         totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
     }
 
@@ -2386,32 +2351,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                           x: normed, y: logits, m: UInt32(cfg.vocabSize), n: D)
     }
 
-    private func produceDenseLayer(layer L: Int, position: Int, isLinear: Bool,
-                                   d D: UInt32, rmsEps eps: Float,
-                                   cb1Start tCb1Start: UInt64,
-                                   bodyStart tBodyStart: UInt64) throws {
+    private func encodeDenseLayer(into cb: MTLCommandBuffer, layer L: Int, position: Int,
+                                  isLinear: Bool, d D: UInt32, rmsEps eps: Float) throws {
         let inNorm = try model.inputNorm(layer: L)
         let postAttn = try model.postAttnNorm(layer: L)
-        guard let attnCB = ctx.queue.makeCommandBuffer(),
-              let tailCB = ctx.queue.makeCommandBuffer() else {
-            throw ModelError.residentBufferWrapFailed
-        }
-        try rms.encodeBF16W(commandBuffer: attnCB,
+        try rms.encodeBF16W(commandBuffer: cb,
                         x: hidden,
                         weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
                         out: normed,
                         d: D, eps: eps)
-        var softmaxCB: MTLCommandBuffer?
-        try encodeDecodeAttention(attnCB: attnCB, tailCB: tailCB,
-                                  softmaxCB: &softmaxCB,
-                                  layerEncoder: nil,
+        try encodeDecodeAttention(cb: cb, layerEncoder: nil,
                                   layer: L, position: position,
                                   isLinear: isLinear, rmsEps: eps)
-        try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
+        try elementwise!.encodeResidualAdd(commandBuffer: cb,
                                        hidden: hidden,
                                        delta: oOut,
                                        count: cfg.hiddenSize)
-        try rms.encodeBF16W(commandBuffer: tailCB,
+        try rms.encodeBF16W(commandBuffer: cb,
                         x: hidden,
                         weight: postAttn.buffer,
                         weightOffset: Int(postAttn.offset),
@@ -2421,7 +2377,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // routed experts — the shared-expert kernels run the layer's
         // own SwiGLU and the residual folds here.
         let dense = sharedExpertProjections[L]
-        try shared.encode(commandBuffer: tailCB,
+        try shared.encode(commandBuffer: cb,
                           x: routedX,
                           gate: dense.gate,
                           up: dense.up,
@@ -2430,119 +2386,46 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                           scratchGate: denseScratchGate,
                           scratchUp: denseScratchUp,
                           scratchAct: denseScratchAct)
-        try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
+        try elementwise!.encodeResidualAdd(commandBuffer: cb,
                                        hidden: hidden,
                                        delta: h1Buf,
                                        count: cfg.hiddenSize)
-        attnCB.commit()
-        if let attentionCB = softmaxCB {
-            attentionCB.commit()
-        }
-        tailCB.commit()
-        try waitForRouterCompletion(tailCB)
-        recordKernelGPU(role: "attn_norm_qkv", attnCB)
-        if let attentionCB = softmaxCB {
-            recordKernelGPU(role: "attn_softmax", attentionCB)
-        }
-        recordKernelGPU(role: "attn_tail_router", tailCB)
-        totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start
-        totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
     }
 
-    private func produceRoutedLayer(layer L: Int, position: Int,
-                                    heldNext: inout HeldLayerCommands?,
-                                    pending: inout PendingAgreedLayer?,
-                                    cb1Start tCb1Start: UInt64,
-                                    bodyStart tBodyStart: UInt64) throws {
-        let cmds: HeldLayerCommands
-        if let held = heldNext, held.layer == L {
-            cmds = held
-            heldNext = nil
-        } else {
-            heldNext = nil
-            cmds = try encodeLayerCommands(layer: L, position: position)
-        }
-        commitHeldLayerCommands(cmds)
-        if L + 1 < cfg.numLayers,
-           L + 1 >= cfg.numLeadingDenseLayers {
-            heldNext = try encodeLayerCommands(layer: L + 1, position: position)
-        }
-        let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        let wordWake = cmds.readbackTag != 0
-        if wordWake {
-            try waitForRouterReadback(cmds)
-        } else {
-            try waitForRouterCompletion(cmds.routerCB)
-        }
-        let woke = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        recordRouterWake(cmds.routerCB, wokeAt: woke, deferred: wordWake)
-        for (role, cb) in layerKernelRecords(cmds, layer: L) {
-            recordKernelGPU(role: role, cb, deferred: wordWake)
-        }
-        let waitNanos = woke - tWait
-        totalWaitNanos &+= waitNanos
-        if let previous = pending {
-            try finishPendingAgreedLayer(previous, waitIfNeeded: false)
-            pending = nil
-        }
-        if wordWake { try drainDeferredGPURecords(waitIfNeeded: false) }
-        totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
-        guard let hostReadback = try decodeRouterHostReadback(for: cmds) else {
-            throw ModelError.internalInconsistency(
-                detail: "layer \(L) ran without its residency classifier")
-        }
-        let predictedNextLayer: [Int] = L + 1 < cfg.numLayers
-            ? hostReadback.predictedIDs.map { min(Int($0), cfg.numExperts - 1) }
-            : []
-        pending = try serviceAgreedLayer(
-            layer: L, position: position, cmds: cmds, readback: hostReadback,
-            predictedNextLayer: predictedNextLayer, bodyStart: tBodyStart)
-    }
-
-    private func emitHead(_ wanted: Bool, into logits: MTLBuffer,
-                          outputMode: PrefillOutputMode,
-                          d D: UInt32, rmsEps eps: Float) throws {
-        // The fused head skips the vocab buffer and leaves a greedy token in
-        // greedyTokenBuf; the logits path writes the complete vector.
+    /// The synchronous head as the token's last encoders: the fused greedy
+    /// head into `greedyTokenBuf`, or the final norm and lm_head into the
+    /// logits; the caller waits for the command. Returns whether the fused
+    /// head was encoded.
+    private func encodeHead(into cb: MTLCommandBuffer, _ wanted: Bool, logits: MTLBuffer,
+                            outputMode: PrefillOutputMode,
+                            d D: UInt32, rmsEps eps: Float) throws -> Bool {
+        guard wanted else { return false }
         let fNorm = try model.finalNorm()
         let lm    = try model.lmHead()
-        let gLogitsHead: (MTLCommandBuffer) throws -> Void = { cb in
-            guard let encoder = cb.makeComputeCommandEncoder() else {
-                throw MetalError.commandEncoderFailed
-            }
-            self.encodeFinalNorm(encoder, weights: fNorm, d: D, rmsEps: eps)
-            self.encodeLMHead(encoder, weights: lm, into: logits, d: D)
-            encoder.endEncoding()
-        }
-        let gFusionHead: (MTLCommandBuffer) throws -> Void = { cb in
-            try self.fusionHead.encodeGreedyDecode(
+        let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        if useFusedGreedyHead && outputMode == .greedyIfAvailable {
+            try fusionHead.encodeGreedyDecode(
                 commandBuffer: cb,
-                hidden: self.hidden,
+                hidden: hidden,
                 normWeight: fNorm.buffer, normOffset: Int(fNorm.offset),
                 weights: lm.buffer, weightsOffset: Int(lm.offset),
                 scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
                 biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
-                outToken: self.greedyTokenBuf,
-                d: D, vocab: UInt32(self.cfg.vocabSize),
+                outToken: greedyTokenBuf,
+                d: D, vocab: UInt32(cfg.vocabSize),
                 rmsEps: eps)
+            totalHeadFusedNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
+            return true
         }
-        if wanted {
-            let useFusedHeadForThisToken = useFusedGreedyHead && outputMode == .greedyIfAvailable
-            let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            if useFusedHeadForThisToken {
-                if let headCB = try runSync(gFusionHead) {
-                    recordKernelGPU(role: "head_fused", headCB)
-                }
-                totalHeadFusedNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
-                lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
-            } else {
-                guard let headCB = try runSync(gLogitsHead) else {
-                    throw ModelError.residentBufferWrapFailed
-                }
-                recordKernelGPU(role: "head_logits", headCB)
-                totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
-            }
+        guard let encoder = cb.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
         }
+        encoder.label = "head"
+        encodeFinalNorm(encoder, weights: fNorm, d: D, rmsEps: eps)
+        encodeLMHead(encoder, weights: lm, into: logits, d: D)
+        encoder.endEncoding()
+        totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
+        return false
     }
 
     /// Gated-DeltaNet linear attention (layer mask 2), one decode step.
@@ -3050,11 +2933,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// gpt-oss decode attention: biased QKV + YaRN via
     /// `encodeGptOssQKVProjection`, sinks in the softmax, full or
     /// sliding-window dispatch by the layer mask, biased o_proj. Mirrors the
-    /// non-gated branch's command-buffer split: QKV + RoPE on `attnCB`, the
-    /// softmax on its own buffer via `softmaxCB`, o_proj on `tailCB`.
+    /// non-gated branch as encoders of the token's command: QKV + RoPE, the
+    /// softmax, o_proj, in that order.
     private func encodeGptOssAttentionDecode(attnCB: MTLCommandBuffer,
                                              tailCB: MTLCommandBuffer,
-                                             softmaxCB: inout MTLCommandBuffer?,
                                              layer L: Int,
                                              position: Int,
                                              seqLen: UInt32) throws {
@@ -3090,10 +2972,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         let keyView = kv.keyView(layer: L, validTokenCount: Int(seqLen))
         let valueView = kv.valueView(layer: L, validTokenCount: Int(seqLen))
-        guard let attentionCB = ctx.queue.makeCommandBuffer() else {
-            throw ModelError.residentBufferWrapFailed
-        }
-        softmaxCB = attentionCB
+        let attentionCB = attnCB
         if cfg.layerIsFull(L) {
             try attention.encodeFull(commandBuffer: attentionCB,
                                      q: qScratch,
@@ -3213,17 +3092,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
-    private func runSync(_ body: (MTLCommandBuffer) throws -> Void) throws -> MTLCommandBuffer? {
-        guard let cb = ctx.queue.makeCommandBuffer() else { return nil }
-        try body(cb)
-        cb.commit()
-        cb.waitUntilCompleted()
-        if let err = cb.error {
-            throw ModelError.commandBufferFailed(detail: String(describing: err))
-        }
-        return cb
-    }
-
     private nonisolated func waitForCompletion(_ cb: MTLCommandBuffer) throws {
         cb.waitUntilCompleted()
         if let err = cb.error {
@@ -3231,137 +3099,111 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
-    /// Polls instead of parking the thread, trading a busy core for the
-    /// scheduler-wake latency on the per-layer router wait (v10 T5's spin).
-    /// Falls back to blocking after ~1s so a stalled CB cannot wedge a core.
-    private nonisolated func waitForRouterCompletion(_ cb: MTLCommandBuffer) throws {
-        let deadline = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 1_000_000_000
-        while clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline {
-            let status = cb.status
-            if status == .completed { return }
-            if status == .error {
-                throw ModelError.commandBufferFailed(
-                    detail: String(describing: cb.error))
-            }
-        }
-        try waitForCompletion(cb)
-    }
-
-    /// The word wake (v14 lever B): poll the classifier's tagged copy, which lands
-    /// before the driver marks the command complete; after ~1s fall back to
-    /// the status wait so a stalled or failed command surfaces there.
-    private func waitForRouterReadback(_ cmds: HeldLayerCommands) throws {
+    /// The word wake (v14 lever B): the classifier's tagged copy lands before
+    /// the driver marks anything. The token's command cannot complete before
+    /// the host has serviced every later layer, so past the first second the
+    /// wait keeps polling the word, gently, up to the deadline; a wait
+    /// nothing will publish then ends loudly, naming the layer.
+    private func waitForWord(_ layer: TokenLayer, of token: TokenCommand) throws {
         let words = routerHostReadback.contents().bindMemory(
             to: UInt32.self,
             capacity: RouterHostReadback.wordCount(topK: cfg.topKExperts))
-        let deadline = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 1_000_000_000
+        let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let spinUntil = started + 1_000_000_000
+        let deadline = started + Self.commandDeadlineNanos
         var spins = 0
-        while clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline {
+        var fallenBack = false
+        while true {
             if RouterHostReadback.isComplete(words: words, topK: cfg.topKExperts,
-                                             tag: cmds.readbackTag) {
+                                             tag: layer.readbackTag) {
                 return
             }
             spins &+= 1
-            if spins % 256 == 0, cmds.routerCB.status == .error {
-                throw ModelError.commandBufferFailed(
-                    detail: String(describing: cmds.routerCB.error))
+            if spins % 256 == 0 {
+                switch token.cb.status {
+                case .error:
+                    throw ModelError.commandBufferFailed(
+                        detail: "layer \(layer.layer): \(Self.describeCommandBufferError(token.cb.error))")
+                case .completed:
+                    throw ModelError.internalInconsistency(
+                        detail: "layer \(layer.layer)'s command completed without its word")
+                default:
+                    break
+                }
+            }
+            let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            if now >= spinUntil {
+                if !fallenBack {
+                    fallenBack = true
+                    totalRouterWakeFallbacks &+= 1
+                }
+                guard now < deadline else {
+                    throw ModelError.commandBufferFailed(
+                        detail: "layer \(layer.layer)'s word: not written within "
+                            + "\(Self.commandDeadlineNanos / 1_000_000) ms")
+                }
+                usleep(100)
             }
         }
-        totalRouterWakeFallbacks &+= 1
-        try waitForCompletion(cmds.routerCB)
     }
 
-    private func decodeRouterHostReadback(for cmds: HeldLayerCommands) throws
-        -> RouterHostReadback? {
-        guard cmds.readbackTag != 0 else { return nil }
+    /// A bounded completion wait: the status polled until the command
+    /// completes or errs, or `deadlineNanos` pass, which throws naming what
+    /// was waited on rather than hanging on a wait nothing will publish.
+    static func awaitCompletion(of cb: MTLCommandBuffer, deadlineNanos: UInt64,
+                                naming what: String) throws {
+        let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let deadline = started + deadlineNanos
+        while true {
+            switch cb.status {
+            case .completed:
+                return
+            case .error:
+                throw ModelError.commandBufferFailed(
+                    detail: "\(what): \(describeCommandBufferError(cb.error))")
+            default:
+                break
+            }
+            let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            guard now < deadline else {
+                throw ModelError.commandBufferFailed(
+                    detail: "\(what): the command did not complete within "
+                        + "\(deadlineNanos / 1_000_000) ms")
+            }
+            if now - started > 2_000_000 { usleep(100) }
+        }
+    }
+
+    /// A command's error with the encoder that faulted named, when the
+    /// command was made with `encoderExecutionStatus` (v20 T3.2).
+    static func describeCommandBufferError(_ error: (any Error)?) -> String {
+        guard let error else { return "no error recorded" }
+        let nsError = error as NSError
+        guard let infos = nsError.userInfo[MTLCommandBufferEncoderInfoErrorKey]
+                as? [any MTLCommandBufferEncoderInfo], !infos.isEmpty else {
+            return String(describing: error)
+        }
+        let faulted = infos.enumerated()
+            .filter { $0.element.errorState == .faulted }
+            .map { $0.element.label.isEmpty ? "encoder #\($0.offset)" : $0.element.label }
+        let affected = infos.filter { $0.errorState == .affected }.count
+        return "\(String(describing: error)); faulted: "
+            + "\(faulted.isEmpty ? "none reported" : faulted.joined(separator: ", ")); "
+            + "affected encoders: \(affected)"
+    }
+
+    private func decodeRouterHostReadback(tag: UInt32) throws -> RouterHostReadback {
         let words = routerHostReadback.contents().bindMemory(
             to: UInt32.self,
             capacity: RouterHostReadback.wordCount(topK: cfg.topKExperts))
         guard let readback = RouterHostReadback.decode(
-            words: words, topK: cfg.topKExperts, tag: cmds.readbackTag)
+            words: words, topK: cfg.topKExperts, tag: tag)
         else {
             throw ModelError.internalInconsistency(
                 detail: "router host readback carries a stale tag after the router's wake")
         }
         return readback
     }
-
-    private func layerKernelRecords(_ cmds: HeldLayerCommands, layer L: Int)
-        -> [(role: String, cb: MTLCommandBuffer)] {
-        guard let tailCB = cmds.tailCB else {
-            return [(cfg.layerIsLinear(L) ? "layer_linear" : "layer_kv", cmds.attnCB)]
-        }
-        var records = [("attn_norm_qkv", cmds.attnCB)]
-        if let attentionCB = cmds.softmaxCB { records.append(("attn_softmax", attentionCB)) }
-        records.append(("attn_tail_router", tailCB))
-        return records
-    }
-
-    private func recordKernelGPU(role: String, _ cb: MTLCommandBuffer, deferred: Bool) {
-        guard deferred else { return recordKernelGPU(role: role, cb) }
-        guard kernelGPUTimingsEnabled else { return }
-        deferredGPURecords.append(.kernel(role: role, cb: cb))
-    }
-
-    private func recordRouterWake(_ cb: MTLCommandBuffer, wokeAt woke: UInt64, deferred: Bool) {
-        if deferred {
-            deferredGPURecords.append(.routerWake(cb: cb, wokeAt: woke))
-            return
-        }
-        guard cb.gpuEndTime > 0 else { return }
-        let gpuEnd = UInt64(cb.gpuEndTime * 1_000_000_000)
-        totalRouterWakeNanos &+= woke > gpuEnd ? woke - gpuEnd : 0
-    }
-
-    private enum DeferredGPURecord {
-        case kernel(role: String, cb: MTLCommandBuffer)
-        case routerWake(cb: MTLCommandBuffer, wokeAt: UInt64)
-        case prefetchRace(completions: [Int: UInt64], landed: [Int], tailCB: MTLCommandBuffer)
-
-        var commandBuffers: [(label: String, cb: MTLCommandBuffer)] {
-            switch self {
-            case .kernel(let role, let cb):
-                return [(role, cb)]
-            case .routerWake(let cb, _):
-                return [("router command buffer", cb)]
-            case .prefetchRace(_, _, let tailCB):
-                return [("attn_tail_router", tailCB)]
-            }
-        }
-    }
-
-    /// Applies the records whose commands the driver has marked complete; a
-    /// failed command throws here with its name, since under the word wake the
-    /// immediate error checks ran before the mark existed.
-    private func drainDeferredGPURecords(waitIfNeeded: Bool) throws {
-        guard !deferredGPURecords.isEmpty else { return }
-        var kept: [DeferredGPURecord] = []
-        defer { deferredGPURecords = kept }
-        for record in deferredGPURecords {
-            for (label, cb) in record.commandBuffers where cb.status == .error {
-                throw ModelError.commandBufferFailed(
-                    detail: "\(label): \(String(describing: cb.error))")
-            }
-            let ready = record.commandBuffers.allSatisfy { $0.cb.status == .completed }
-            guard ready || waitIfNeeded else {
-                kept.append(record)
-                continue
-            }
-            if !ready {
-                for (_, cb) in record.commandBuffers { try waitForCompletion(cb) }
-            }
-            switch record {
-            case .kernel(let role, let cb):
-                recordKernelGPU(role: role, cb)
-            case .routerWake(let cb, let woke):
-                recordRouterWake(cb, wokeAt: woke, deferred: false)
-            case .prefetchRace(let completions, let landed, let tailCB):
-                countPrefetchRace(completions: completions, landed: landed, tailCB: tailCB)
-            }
-        }
-        deferredGPURecords = kept
-    }
-
 
     // MARK: - Chunked prefill helpers
 
@@ -4898,9 +4740,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Attention stage of one decode layer: the gated-DeltaNet branch or the
     /// softmax branch, both writing into `oOut` for the residual add.
     private func encodeDecodeAttention(
-        attnCB: MTLCommandBuffer,
-        tailCB: MTLCommandBuffer,
-        softmaxCB: inout MTLCommandBuffer?,
+        cb: MTLCommandBuffer,
         layerEncoder: MTLComputeCommandEncoder?,
         layer L: Int,
         position: Int,
@@ -4911,7 +4751,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if isLinear, cfg.linearAttentionPerChannelDecay {
             // Kimi KDA keeps its own CB-internal encoders (the low-rank
             // scratch is reused across its projection chains).
-            try encodeKDADecode(attnCB, layer: L)
+            try encodeKDADecode(cb, layer: L)
         } else if isLinear {
             // Gated-DeltaNet linear attention: no KV slots, no RoPE — a
             // fixed-size recurrent state updated in place.
@@ -4923,7 +4763,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         } else if cfg.layerIsMLA(L) {
             // Kimi MLA: absorbed MQA over one fused [latent | k_pe] FP16
             // row per token, NoPE.
-            try encodeMLAAttentionDecode(attnCB, layer: L,
+            try encodeMLAAttentionDecode(cb, layer: L,
                                          position: position, seqLen: seqLen)
         } else if cfg.attnOutputGate {
             // Qwen full attention: packed [query ; gate] q_proj, real
@@ -4938,12 +4778,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         } else if cfg.hasAttentionBiases {
             // gpt-oss attention: biased q/k/v/o, no QK norms, no output
             // gate, arch YaRN RoPE, sinks, full/SWA by the layer mask.
-            try encodeGptOssAttentionDecode(attnCB: attnCB, tailCB: tailCB,
-                                            softmaxCB: &softmaxCB, layer: L,
+            try encodeGptOssAttentionDecode(attnCB: cb, tailCB: cb, layer: L,
                                             position: position, seqLen: seqLen)
         } else {
-            try encodePlainAttentionDecode(attnCB: attnCB, tailCB: tailCB,
-                                           softmaxCB: &softmaxCB, layer: L,
+            try encodePlainAttentionDecode(attnCB: cb, tailCB: cb, layer: L,
                                            position: position, seqLen: seqLen,
                                            rmsEps: eps)
         }
@@ -4953,13 +4791,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // and routed phase 1 (routedX doubles as moeX).
     }
 
-    /// Plain (non-gated, unbiased) full/SWA attention, one decode step:
-    /// fused QKV + rope/norm epilogue on `attnCB`, the softmax pass on its
-    /// own CB, o_proj on `tailCB`.
+    /// Plain (non-gated, unbiased) full/SWA attention, one decode step, as
+    /// encoders of the token's command: fused QKV + rope/norm epilogue, the
+    /// softmax pass, o_proj.
     private func encodePlainAttentionDecode(
         attnCB: MTLCommandBuffer,
         tailCB: MTLCommandBuffer,
-        softmaxCB: inout MTLCommandBuffer?,
         layer L: Int,
         position: Int,
         seqLen: UInt32,
@@ -5036,10 +4873,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             let keyView = kv.keyView(layer: L, validTokenCount: Int(seqLen))
             let valueView = kv.valueView(layer: L, validTokenCount: Int(seqLen))
-            guard let attentionCB = ctx.queue.makeCommandBuffer() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            softmaxCB = attentionCB
+            let attentionCB = attnCB
             if isFull {
                 try attention.encodeFull(commandBuffer: attentionCB,
                                      q: qScratch,
@@ -5100,6 +4934,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard let encoder = cb.makeComputeCommandEncoder() else {
             throw ModelError.residentBufferWrapFailed
         }
+        encoder.label = "layer \(L) fixup"
         defer { encoder.endEncoding() }
         let offsets = try model.routedExpertOffsets(layer: L)
         let cellsOffset = agreedCellsOffset(layer: L)
@@ -5183,15 +5018,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let predictedNextLayer: [Int]
     }
 
-    private func serviceAgreedLayer(layer L: Int, position: Int, cmds: HeldLayerCommands,
+    private func serviceAgreedLayer(layer L: Int, position: Int, cb: MTLCommandBuffer,
+                                    token: ExpertIOCompletionToken,
                                     readback: RouterHostReadback, predictedNextLayer: [Int],
                                     bodyStart: UInt64) throws -> PendingAgreedLayer {
         let experts = readDecodeRouterReadback(layer: L, position: position,
                                                hostReadback: readback)
         var context = AgreedLayerContext(
-            layer: L, position: position, cb: cmds.routedCB, bodyStart: bodyStart,
+            layer: L, position: position, cb: cb, bodyStart: bodyStart,
             readback: readback, predictedNextLayer: predictedNextLayer,
-            experts: experts, token: cmds.agreedToken)
+            experts: experts, token: token)
         do {
             try joinAgreedLandings(&context)
             try agreeCells(&context)
@@ -5327,13 +5163,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     /// The previous layer at this wake: its command's error, its batch's
     /// (a failed read names the layer), the io rows, then the plan.
-    private func finishPendingAgreedLayer(_ pending: PendingAgreedLayer,
-                                          waitIfNeeded: Bool) throws {
-        if waitIfNeeded {
-            try waitForCompletion(pending.cb)
-        } else if let err = pending.cb.error {
+    private func finishPendingAgreedLayer(_ pending: PendingAgreedLayer) throws {
+        if let err = pending.cb.error {
             throw ModelError.commandBufferFailed(
-                detail: "layer \(pending.layer) command buffer: \(err)")
+                detail: "layer \(pending.layer): \(Self.describeCommandBufferError(err))")
         }
         do {
             try pending.operation.wait()
@@ -5381,8 +5214,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         totalPrefetchLandedHits &+= UInt64(
             pending.leasedPredictions.filter { !pending.missExperts.contains($0) }.count)
-        recordPrefetchRace(landed: pending.leasedPredictions, layer: pending.layer,
-                           tailCB: pending.cb)
         predictivePrefetch.consume(layer: pending.layer, experts: leased,
                                    freedCells: plan.freedCells)
         recordPrefetchTrace(layer: pending.layer, position: pending.position,
@@ -5510,6 +5341,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard let encoder = cb.makeComputeCommandEncoder() else {
             throw ModelError.residentBufferWrapFailed
         }
+        encoder.label = "layer \(L) routed"
         defer { encoder.endEncoding() }
         if cfg.hasSharedExpert {
             try encodeSharedExpertWork(on: encoder, layer: L)

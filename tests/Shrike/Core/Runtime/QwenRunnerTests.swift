@@ -145,6 +145,39 @@ import ShrikeValidationSupport
         #expect(runner.lastGreedyToken == first)
     }
 
+    @Test func aFailedExpertReadNamesItsLayerAndLeavesTheRunnerReusable() async throws {
+        let dir = try QwenToySynthetic.write(weightBits: 4)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ctx = try MetalContext()
+        let model = try Model.load(directoryURL: dir, device: ctx.device, expecting: .qwenToy())
+        let runner = try RealForwardRunner(
+            model: model, context: ctx, maxContext: 64,
+            runtimeConfiguration: RuntimeConfiguration(attentionFallbackAllowed: true))
+        let logits = try makeLogits(ctx, vocab: 1024)
+        let layerOne = dir.appendingPathComponent("packed_experts/layer_01.bin")
+        let bytes = try Data(contentsOf: layerOne)
+        try model.ensureLayerOpened(1)
+        #expect(truncate(layerOne.path, 0) == 0)
+
+        var named: Int?
+        do {
+            try await runner.produce(token: 1, position: 0, into: logits)
+        } catch ModelError.expertReadFailed(let layer, _) {
+            named = layer
+        }
+        #expect(named == 1)
+
+        let handle = try FileHandle(forWritingTo: layerOne)
+        try handle.write(contentsOf: bytes)
+        try handle.close()
+        runner.reset()
+        try await runner.produce(token: 1, position: 0, into: logits)
+        let first = runner.lastGreedyToken
+        try await runner.produce(token: Int32(first), position: 1, into: logits)
+        #expect(runner.continuationPosition == 2)
+        #expect(Fp16Buffer.read(logits, count: 1024).allSatisfy { $0.isFinite })
+    }
+
     /// Chunked prefill smoke: one chunk through the qwen prefill path
     /// (batched GDN projections + conv tail carry, packed q_proj split,
     /// sub-dim RoPE, no V norm, affine router scales, residual-add tail),
