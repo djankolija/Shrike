@@ -928,11 +928,14 @@ drift is Task 1's reduce, and it is pinned above.
 
 ## Out of scope, and where it went
 
-- **The SSD mechanism** (A0's width, A9's lead, A1/A2's split and policy): v19,
-  chosen by step zero's pricing.
-- **Lossless compression** (H2): v20, scoped to the expert kernels and the head.
-- **The class-2 block** (B6, J1, J2, G1): v21, with the forced-token instrument,
-  behind the variance gate, one golden re-capture.
+- **The SSD mechanism** (A0's width, A9's lead, A1/A2's split and policy): v20,
+  with the fold (the order ruled at the close, 2026-09-09; an earlier draft here
+  said v19).
+- **Lossless compression** (H2): v21, scoped to the expert kernels and the head.
+- **The class-2 block** (B6, J1, J2, G1): the scan rewrite (B6, J2) is v19 by the
+  close's ruling, behind the variance gate with the forced-token instrument built
+  there ([v19-scan-rewrite.md](v19-scan-rewrite.md)); the rest after v21, one
+  golden re-capture each.
 - **Speculation revisited** (H1) and **the draft in the spin-wait** (H3): after v21.
 - **The fused greedy head in the server** (I1): only if a client sends temperature
   zero; not scheduled.
