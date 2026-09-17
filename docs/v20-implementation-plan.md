@@ -57,16 +57,16 @@ Task 3 last, its design note before its build; Task 4 only by ruling; the close.
       0.76 / 0.84 at widths 8 / 12 / 16 / 24 / 32 at precision 0.15 down to 0.04 and
       reads 30 to 340 per token, closed at distance one on a bandwidth-bound window;
       the prompt-seeded table closed; the record.
-- [ ] **S0.5b The ranking at distance two and three** (Davor's ruling 2026-09-17: the
-      width is not closed while lead could make the low teens free; **a model run on
-      the mini**): the routers two and three layers ahead evaluated on this layer's
-      state on the diagnostic path, their rankings dumped beside the pair's
-      (`probe_ranking_d2`, `probe_ranking_d3`), the coverage tool joining at
-      `--distance`; golden identical on both boxes; one lifetime per shape, four
-      shapes; the bar pre-registered in the design document: width twelve at
-      distance two recalls more of the remaining misses than width eight at
-      distance one today (0.32) at a precision of at least 0.13, else the width
-      closes with a number; the record.
+- [x] **S0.5b The ranking at distance two and three.** DONE 2026-09-17 (Davor's
+      ruling that the width is not closed while lead could make the low teens free):
+      the routers two and three layers ahead on the diagnostic path
+      (`MoE.encodeRouterScores`, `probe_ranking_d2`/`_d3`, the coverage tool's
+      `--distance`), golden identical on both boxes, one lifetime per shape at
+      `3060034`, zero stale rows; the bar half cleared: width twelve at distance two
+      recalls 0.40 to 0.45 of the remaining misses (bar 0.32) at precision 0.08 to
+      0.09 (bar 0.13), ranks nine to twelve at 0.076; two more useful reads per token
+      for 37 more reads; the width closed for the chapter with the number, distance
+      two at width eight noted for a later chapter; the record.
 - [ ] **S0.6 The attention row's fixed part.** READ 2026-09-17, no run: the kernel
       stats cannot split a held command and the GPU counters sample per encoder, so
       the arm needs an instrument that does not exist; the record recommends no

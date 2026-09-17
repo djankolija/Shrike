@@ -463,7 +463,41 @@ twelve at distance two must recall more of the remaining misses than width eight
 does at distance one today (0.32) at a precision no worse than ranks nine to
 twelve show at distance one (0.13). Cleared, the prize is the recall times the
 remaining twenty misses per token at 0.65 to 1.15 ms each, potentially larger than
-the split; not cleared, the width closes with a number. Result: (pending).
+the split; not cleared, the width closes with a number.
+
+**Result (measured on the mini, 2026-09-17, one lifetime per shape at `3060034`,
+9,282 / 14,586 / 11,895 / 13,962 ranking rows, none stale).** Per-miss recall,
+precision and full-layer coverage of the remaining misses, the four shapes' range,
+with the offline scheme's non-resident reads per token:
+
+| distance, width | recall | precision | coverage | reads |
+| --- | ---: | ---: | ---: | ---: |
+| one, 8 (today's ring) | 0.29 to 0.33 | 0.14 to 0.16 | 0.20 to 0.21 | 28 to 31 |
+| one, 12 | 0.54 to 0.57 | 0.13 to 0.14 | 0.47 | 59 to 62 |
+| two, 8 | 0.26 to 0.31 | 0.11 to 0.12 | 0.20 to 0.22 | 30 to 35 |
+| two, 12 | 0.40 to 0.45 | 0.08 to 0.09 | 0.35 to 0.37 | 63 to 70 |
+| two, 16 | 0.51 to 0.55 | 0.06 to 0.07 | 0.45 to 0.47 | 107 to 113 |
+| two, 32 | 0.73 to 0.75 | 0.03 | 0.69 to 0.70 | 336 to 348 |
+| three, 8 | 0.22 to 0.28 | 0.08 to 0.10 | 0.18 to 0.20 | 32 to 37 |
+| three, 12 | 0.35 to 0.39 | 0.06 to 0.07 | 0.30 to 0.31 | 66 to 73 |
+| three, 32 | 0.65 to 0.66 | 0.03 | 0.59 to 0.62 | 334 to 343 |
+
+**The bar is half cleared.** Recall clears it: width twelve at distance two names
+0.40 to 0.45 of the remaining misses against 0.32 for today's ring, 8 to 9
+useful reads per token against 6. Precision fails it: 0.08 to 0.09 against 0.13,
+and ranks nine to twelve alone at 0.076, worse than at distance one, since the
+state drifts and the tail of the ranking drifts more. What the numbers say in the
+drive's terms: distance two at width twelve buys about two more useful reads per
+token (1.4 to 2.5 ms) for about 37 more reads per token, 19 ms of drive time,
+which the GPU-busy stretches could hold in volume only if the reader kept every
+one of them out of the windows and off the demand reads' path, and the mini's
+drift days would eat the margin. **The width closes for this chapter with a
+number.** One shape the table leaves open for a later chapter: distance two at
+width eight recalls nearly what distance one does (0.26 to 0.31 against 0.29 to
+0.33) with twice the lead, which would move some of the ring's 4.1 late landings
+per token to hits; its precision is lower (0.11 against 0.15), its form is v15's
+two-distance queue, measured null then, and its ceiling is about a millisecond.
+The instrument stays.
 
 **S0.6 The attention row's fixed part (read, 2026-09-17; no run).** The arm as
 written cannot be run on the current tree: since v18's one command per layer the
@@ -488,7 +522,7 @@ ranked by the modelled floor over production's probe:
 | the split (A1) | 1.8 to 2.6 ms, 3 to 4.5 % | 0 | 0 | the lever |
 | SLRU (A2) | up to 0.65 ms on the longer shapes, 0 on the 300 | 0 | 0 | cheap, small |
 | the table (A9) | 0.24 ms at layer 0, 0.7 at every layer | +0.4 to +4.2 | 1 to 25 | small, under the arms' resolution |
-| the width (A0) | none at distance one | +32 to +320 | | closed on this drive |
+| the width (A0) | none at distance one; at distance two 1.4 to 2.5 ms for 19 ms of drive time | +37 at width twelve | | closed by S0.5b's number |
 | the draft (Q3), knowledge in the policy (A2's variant), seeding | null | | | closed |
 
 The lead lever is priced small because the pool already holds the neighbour's
