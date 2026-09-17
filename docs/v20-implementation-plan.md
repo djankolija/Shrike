@@ -67,51 +67,52 @@ Task 3 last, its design note before its build; Task 4 only by ruling; the close.
       0.09 (bar 0.13), ranks nine to twelve at 0.076; two more useful reads per token
       for 37 more reads; the width closed for the chapter with the number, distance
       two at width eight noted for a later chapter; the record.
-- [ ] **S0.6 The attention row's fixed part.** READ 2026-09-17, no run: the kernel
+- [x] **S0.6 The attention row's fixed part.** READ 2026-09-17, no run: the kernel
       stats cannot split a held command and the GPU counters sample per encoder, so
-      the arm needs an instrument that does not exist; the record recommends no
-      diagnostic in this chapter and B3/B4 to a chapter of their own. Ticked on
-      Davor's ruling.
-- [ ] **S0.7 The record and the ruling.** The record and the recommendation written
-      2026-09-17 (the design document's step-zero record): Task 1 the pool's
-      allocation (the split with SLRU as its policy), Task 2 folded in, the table not
-      built, Task 3 as planned, Task 4 to its own chapter, the read budget untouched.
-      Davor's ruling pending.
+      the arm needs an instrument that does not exist; B3 and B4 to a chapter of
+      their own by Davor's ruling (S0.7).
+- [x] **S0.7 The record and the ruling.** DONE 2026-09-17: the record and the
+      recommendation in the design document's step-zero record; **Davor's ruling:
+      proceed with what the data says**: Task 1 the pool's allocation (the split with
+      SLRU as its policy), Task 2 folded in, the table not built, Task 3 as planned,
+      Task 4 to its own chapter, the width closed by S0.5b's number, the read budget
+      untouched.
 
-## Task 1: the predictor (class 1; the shape from S0.7)
+## Task 1: the pool's allocation (class 1; the shape ruled at S0.7)
 
-- [ ] **T1.1 The pre-registration**: the rows per shape (misses per token by layer
-      group, reads per token, cells held, io, the token) graded T with a range from
-      the replay; the answers expected identical.
-- [ ] **T1.2 The table**: per layer, keyed by token id, the source S0.2 named; filled
-      from every decoded token's route as the classifier reports it; seeded from the
-      prefill if S0.5 earned it; its memory bounded and stated.
-- [ ] **T1.3 The batch**: at the token boundary, after the sampled id's readback, the
-      table's predictions for the served layers issued into ring cells on the ring's
-      landing path; the in-flight budget for the batch; the cells held until the
-      layer's classifier has run or the reclaim needs them; a counter for each of
-      issued, landed before the classifier, late, wrong, refused.
-- [ ] **T1.4 The wider probe** (only if S0.5 earned it): the readback widened on a
-      diagnostic-free path or the probe's list lengthened where it is issued, at the
-      width named; the same counters.
-- [ ] **T1.5 The draft for layer 0** (only if S0.3 earned it): prompt lookup over the
-      request's ids on the host at the token boundary, its proposal through the
-      table for layer 0 a pass ahead; its hit rate counted.
-- [ ] **T1.6 Tests**: the table's fill and lookup; the batch's issue and its cell
-      accounting; the counters; the draft's match; the runner tests' toy shape
-      unchanged.
-- [ ] **T1.7 The gates, the golden, the deploy.**
-- [ ] **T1.8 The arms** against S0.5's ledger, two lifetimes per shape, interleaved
-      with the previous build if the box drifts; the record in the design document
-      with the pre-registered rows, moved or not.
+The split with SLRU as its policy. The predictor, the batch, the wider probe and
+the draft that this task carried before the ruling are not built (S0.2, S0.3,
+S0.5, S0.5b); the table's design and the replay's mode stay on record.
 
-## Task 2: the policy and the split (class 1; only on S0.4's number)
+- [ ] **T1.1 The pre-registration**: the allocation derived from a production miss
+      profile (the capture's plan rows, the misses per layer with the ring in place,
+      the four shapes pooled), at blends 0.35 / 0.5 / 0.65 and the same total,
+      re-priced by replay on the v14 captures with the probe and on the v19 traces;
+      SLRU beside it and with it; the rows per shape (misses per token, miss layers,
+      io, the token, tok/s) graded T with a range; the answers expected identical.
+- [ ] **T1.2 Per-layer slots**: the arena, the residency table and index, the
+      classifier's arguments, the streamer's per-layer pool and the prefill tile
+      scheduler's fitting taking a per-layer count; a fixed table of forty counts
+      at the same total as today's uniform 128, the uniform table the default so a
+      bare launch is unchanged; the allocation carried as a configuration the mini's
+      launch sets (a `SHRIKE_*` variable or a file beside the model, decided at T1.2
+      and stated in the record).
+- [ ] **T1.3 SLRU**: the segmented policy beside aging-LFU in the streamer, selected
+      by configuration, the protected share from S0.4; its own commit and arm.
+- [ ] **T1.4 Tests**: the per-layer counts through the arena and the residency index
+      (no slot of one layer aliases another's), the fitting per layer, the SLRU
+      promotion and demotion against the replay's model, the runner tests' toy
+      shape unchanged.
+- [ ] **T1.5 The gates, the golden, the deploy.**
+- [ ] **T1.6 The arms** against the S0.5 lifetimes, two lifetimes per shape,
+      interleaved with the previous build if the box drifts; misses per token and
+      io the rows, the token and tok/s the verdict; the record in the design
+      document with the pre-registered rows, moved or not.
 
-- [ ] **T2.1 The predicted-future eviction**: the plan's victim choice steered by the
-      table's predictions for the next tokens; its own commit, gates, golden, arms.
-- [ ] **T2.2 The slot split**: the per-layer slot count from S0.4, the total held;
-      its own commit, gates, golden, arms.
-- [ ] **T2.3 The record.**
+## Task 2: folded into Task 1 (Davor's ruling, 2026-09-17)
+
+SLRU is T1.3; the predicted-future eviction was null at a legitimate horizon
+(S0.4) and is not built.
 
 ## Task 3: the agreed cells and the fold (class 1; structure)
 
@@ -137,13 +138,10 @@ Task 3 last, its design note before its build; Task 4 only by ruling; the close.
       error surfacing per layer; tests for each edge.
 - [ ] **T3.4 The gates, the golden, the deploy, the arms, the record.**
 
-## Task 4, held: the attention row's fixed part (B3, B4)
+## Task 4: to a chapter of its own (Davor's ruling, 2026-09-17)
 
-- [ ] **T4.0** Only on S0.6's number and Davor's ruling: the folds into neighbours
-      (the combine into the o-projection's prologue, RoPE and the KV append into the
-      projection's epilogue) with the volatile slot where a fused kernel would elide
-      a rounding, and one pass at short context if B4 earns it; class 1, golden
-      identical.
+B3 and B4, the attention row's fixed part, leave this chapter: S0.6 found the
+per-kernel instrument does not exist, and that chapter's step zero builds it once.
 
 ## Close
 

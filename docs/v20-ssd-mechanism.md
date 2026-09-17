@@ -545,7 +545,11 @@ as planned, its design note first. Task 4 (B3, B4) to a chapter of its own; no
 splitting diagnostic here. The wide capture stays as an instrument. The read
 budget is untouched: nothing recommended spends a read.
 
-Davor's ruling: (pending).
+**Davor's ruling (2026-09-17): proceed with what the data says.** The
+recommendation as written: Task 1 the pool's allocation, the split with SLRU as
+its policy; Task 2 folded in; the table not built; Task 3 the agreed cells and the
+fold as planned, its design note first; Task 4 to a chapter of its own; the width
+closed by S0.5b's number, the distance instrument kept. Step zero closed.
 
 ## Approaches for the predictor's plumbing
 
