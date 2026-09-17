@@ -385,14 +385,113 @@ per-layer allocation transfers, and the same memory serves 15 % fewer misses at
 zero reads and zero cells. SLRU is worth about a miss per position on the longer
 shapes and nothing on the 300, as v18 found.
 
-**What the offline board says before the model runs (2026-09-17).** Ranked by
-the modelled floor, over production's probe: the split 1.8 to 2.6 ms per token
-(3 to 4.5 %); SLRU up to 0.65 on the longer shapes; the table 0.3 to 0.7; the
-draft and the policy's knowledge null. The lead lever, A9, is priced small
-because the pool already holds the neighbour's route and the identity's share of
-a deep route is a third; the clairvoyant gap is context, which no table sees.
-What remains unpriced is the width (S0.5) and the attention row's fixed part
-(S0.6).
+**S0.5 The wide capture (measured on the mini, 2026-09-17, two runs).** The
+diagnostic, off unless `SHRIKE_PREFETCH_TRACE` names a file: the probe router's
+scores kept per layer in two banks by the position's parity (`MoE.probeLogitsPair`,
+128 slots of 256 floats, the pair GEMV and the select reading and writing the
+layer's slot, so production runs the same kernels at a different offset), the
+previous position's rankings to width 32 written one JSON line per layer once its
+commands have completed, in the select kernel's order (the logit plus the bias,
+descending, the lower index on a tie); `SHRIKE_ROUTE_TRACE` gaining `t position id`
+per decode position from the loop and `q position layer e0..` per prefill row from
+the readback the tile planner already makes. The golden identical on all four
+profiles on both boxes with the variables unset. The first run wrote no rankings:
+the pending position was set only on the plain head path and the server takes the
+boundary path, whose held layer zero would also have overwritten slot 0 before the
+read; the second bank and the pending on both paths fixed it, the golden identical
+again, the second run carrying 9,282 / 14,586 / 11,895 / 13,962 ranking rows (the
+card, the 300, the 1k, the 7k) of which none has a top-8 differing from its plan
+row's, the coverage tool's stale-slot check. The two runs' answers are identical
+token for token; the lifetimes decode at 16.5 to 16.8 tok/s with all three traces
+on (16.6 and 16.8 on the 7k's two runs), about twenty misses per token, io 14.7 ms
+on the card: the diagnostic's cost in a lifetime is inside the drift. The captures at
+`~/.claude/handoffs/archive/shrike-v20-step0/capture/`, the pricing at
+`s05-price.md` beside them.
+
+The probe's ranking past eight, joined to the target layer's own misses (the
+misses left after the ring has landed what it lands), per width, the four shapes
+within 0.02 of each other:
+
+| width | per-miss recall | precision | full-layer coverage | reads per token |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 0.30 to 0.33 | 0.15 to 0.16 | 0.20 to 0.21 | 28 to 30 |
+| 12 | 0.54 to 0.57 | 0.13 to 0.14 | 0.47 to 0.48 | 59 to 62 |
+| 16 | 0.67 to 0.69 | 0.10 | 0.61 to 0.62 | 102 to 106 |
+| 24 | 0.80 to 0.82 | 0.06 | 0.76 to 0.77 | 207 to 217 |
+| 32 | 0.86 to 0.87 | 0.04 | 0.83 to 0.84 | 327 to 349 |
+
+(The reads column is the offline scheme's non-resident predictions per token; the
+ring's actual reads at its in-flight budget of one are 21.) **Reading:** the
+ranking carries real information past eight, the displaced experts do sit near the
+top as the hypothesis said, coverage of the remaining miss layers more than
+doubling at width twelve and reaching five sixths at thirty-two. And it cannot be
+spent. Ranks nine to twelve buy about five more useful reads per token for
+thirty-two more wasted ones, a marginal precision of 0.13, so each saved miss
+(0.65 to 1.15 ms) costs 6.5 wasted reads, 3.3 ms of the drive's time, inside a
+window that is bandwidth-bound while it is open. At distance one a read has about
+one layer, 1.05 ms, to land, and the drive moves two experts in that time; the
+in-flight budget above one was measured null in v15 because a speculative read
+shares the drive with the demand read. So the constraint is not the width but the
+reads per layer that can land, and it is already at its ceiling. **The width lever
+is closed at distance one on this drive.** It reopens only with lead, reads issued
+during the GPU-busy two thirds of the token, and the one lead source priced, the
+table, is small (S0.2). The diagnostic stays as an instrument.
+
+The table seeded from the prompt's routes (the `q` lines, every layer at width
+eight), useful fills per position unseeded against seeded: the card 0.86 against
+2.17 at 3.6 against 17.5 fills, the 300 1.80 against 2.00 at 7.0 against 16.2, the
+1k 1.05 against 1.21 at 4.3 against 17.9, the 7k 1.62 against 1.74 at 6.4 against
+18.1; the added fills at a precision of 0.03 to 0.10 and the cells at the pass
+start to 190 or more. **Seeding is closed**: the prompt's route for a token is a
+poor predictor of the answer's, a different context.
+
+**S0.6 The attention row's fixed part (read, 2026-09-17; no run).** The arm as
+written cannot be run on the current tree: since v18's one command per layer the
+kernel stats report an attention layer's whole held command as one role
+(`layer_kv`, `layerKernelRecords` in the runner), and Apple's GPU counters sample
+at encoder boundaries, not dispatch boundaries, so a per-kernel split of the 7.4 ms
+needs one of two instruments neither of which exists: the layer re-encoded as
+per-kernel commands on a diagnostic switch (the three-role shape v18 retired for
+routed layers survives only in `produceDenseLayer`, the dense-layer path the
+served model never takes), or the bench extended from the scan to the whole layer.
+Either is a day's work with a golden gate, for a number whose use is to slot B3 and
+B4, both of which the ledger already grades under the arms' resolution once v18's
+walls are taken out. **Recommendation:** no diagnostic in this chapter; B3 and B4
+go to a chapter of their own on the attention row's fixed part, whose step zero
+builds the per-kernel instrument once. Davor's ruling at S0.7.
+
+**S0.7 The record and the ruling (2026-09-17, for Davor).** The board priced,
+ranked by the modelled floor over production's probe:
+
+| lever | per token, modelled | reads | cells | verdict |
+| --- | ---: | ---: | ---: | --- |
+| the split (A1) | 1.8 to 2.6 ms, 3 to 4.5 % | 0 | 0 | the lever |
+| SLRU (A2) | up to 0.65 ms on the longer shapes, 0 on the 300 | 0 | 0 | cheap, small |
+| the table (A9) | 0.24 ms at layer 0, 0.7 at every layer | +0.4 to +4.2 | 1 to 25 | small, under the arms' resolution |
+| the width (A0) | none at distance one | +32 to +320 | | closed on this drive |
+| the draft (Q3), knowledge in the policy (A2's variant), seeding | null | | | closed |
+
+The lead lever is priced small because the pool already holds the neighbour's
+route and a deep route is only a third identity; the clairvoyant gap is context,
+which no table sees. The width is real information that the window's bandwidth
+cannot spend at distance one.
+
+**Recommendation.** Task 1 becomes *the pool's allocation*: the per-layer slot
+count from a production miss profile (the capture's plan rows carry it, the
+misses per layer with the ring in place) at the same total, re-priced by replay
+with the probe's fills before it is built, then built as a table the arena and
+the residency index take per layer; SLRU as its policy in the same task, a
+second commit and arm. Modelled 2 to 2.7 ms per token together, 17.0 to about
+17.7 tok/s on the mini's three answers; class 1; the rig's two lifetimes per
+shape the verdict. Task 2 folds into Task 1. The table is not built: 0.24 ms at
+its precise layer does not pay for a second prediction source, its cells and its
+reads, and it is under the arms' resolution; the design and the replay mode stay
+on record for a chapter with lead to spend. Task 3, the agreed cells and the fold,
+as planned, its design note first. Task 4 (B3, B4) to a chapter of its own; no
+splitting diagnostic here. The wide capture stays as an instrument. The read
+budget is untouched: nothing recommended spends a read.
+
+Davor's ruling: (pending).
 
 ## Approaches for the predictor's plumbing
 

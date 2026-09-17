@@ -46,19 +46,27 @@ Task 3 last, its design note before its build; Task 4 only by ruling; the close.
       lever: one allocation from the 300's profile (94 to 210 slots per layer, the
       same 5,120) saves 2.4 to 3.7 misses per position over the probe out of sample,
       1.8 to 2.6 ms modelled; SLRU about a miss on the longer shapes; the record.
-- [ ] **S0.5 The wide capture** (**a model run on the mini**): the diagnostic behind
-      `SHRIKE_PREFETCH_TRACE` (the probe's full scores per position and layer; the
-      prefill's per-token top-8 per layer as a new trace line kind), golden identical
-      on both boxes with the var unset; one production lifetime per shape, four
-      shapes, the captures archived; `tools/prefetch-coverage.py --top-m 8 12 16 24`
-      and the table's coverage with the prompt seeded; the lifetimes as the opening
-      ledger; the record.
-- [ ] **S0.6 The attention row's fixed part** (**a model run on the mini**, the rig
-      with kernel stats, the 300): the attention layers' command by kernel; B3 and B4
-      priced on the current tree; the record.
-- [ ] **S0.7 The record and the ruling**: the read budget allocated; Task 1's shape;
-      Task 2's go or no-go; the fold's design note scheduled; B3's home. Davor's
-      ruling on each, recorded.
+- [x] **S0.5 The wide capture.** DONE 2026-09-17: the diagnostic (the probe's scores
+      per layer in two banks by position parity, the rankings to width 32 as JSON
+      lines in `SHRIKE_PREFETCH_TRACE`, the `t` and `q` line kinds in
+      `SHRIKE_ROUTE_TRACE`), golden identical on both boxes, deployed; two runs on the
+      mini (the first without rankings, its bug fixed and folded into the commit), one
+      lifetime per shape, four shapes, archived under
+      `~/.claude/handoffs/archive/shrike-v20-step0/capture/`; zero stale-slot rows;
+      the width priced: coverage of the remaining miss layers 0.21 / 0.47 / 0.62 /
+      0.76 / 0.84 at widths 8 / 12 / 16 / 24 / 32 at precision 0.15 down to 0.04 and
+      reads 30 to 340 per token, closed at distance one on a bandwidth-bound window;
+      the prompt-seeded table closed; the record.
+- [ ] **S0.6 The attention row's fixed part.** READ 2026-09-17, no run: the kernel
+      stats cannot split a held command and the GPU counters sample per encoder, so
+      the arm needs an instrument that does not exist; the record recommends no
+      diagnostic in this chapter and B3/B4 to a chapter of their own. Ticked on
+      Davor's ruling.
+- [ ] **S0.7 The record and the ruling.** The record and the recommendation written
+      2026-09-17 (the design document's step-zero record): Task 1 the pool's
+      allocation (the split with SLRU as its policy), Task 2 folded in, the table not
+      built, Task 3 as planned, Task 4 to its own chapter, the read budget untouched.
+      Davor's ruling pending.
 
 ## Task 1: the predictor (class 1; the shape from S0.7)
 
