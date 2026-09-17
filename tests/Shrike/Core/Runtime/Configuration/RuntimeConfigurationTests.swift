@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Shrike
 
@@ -97,11 +98,65 @@ import Testing
         }
     }
 
-    @Test func theSurvivingThirteenPass() throws {
+    @Test func theSurvivingFourteenPass() throws {
         let names = RuntimeConfiguration.knownEnvironmentNames
-        #expect(names.count == 13)
+        #expect(names.count == 14)
         try RuntimeConfiguration.refuseUnknownEnvironment(
             Dictionary(uniqueKeysWithValues: names.map { ($0, "1") }))
+    }
+
+    @Test func expertSlotTableParsesAndRefuses() throws {
+        let fortyUniform = Array(repeating: 128, count: 40)
+        let list = fortyUniform.map(String.init).joined(separator: ",")
+        let parsed = try RuntimeConfiguration.environmentExpertSlotTable(
+            ["SHRIKE_EXPERT_SLOT_TABLE": list], layers: 40, uniformSlots: 128, leadingDenseLayers: 0)
+        #expect(parsed == fortyUniform)
+        #expect(try RuntimeConfiguration.environmentExpertSlotTable(
+            [:], layers: 40, uniformSlots: 128, leadingDenseLayers: 0) == nil)
+        var split = fortyUniform
+        split[0] += 40
+        split[20] -= 40
+        #expect(try RuntimeConfiguration.environmentExpertSlotTable(
+            ["SHRIKE_EXPERT_SLOT_TABLE": split.map(String.init).joined(separator: ",")],
+            layers: 40, uniformSlots: 128, leadingDenseLayers: 0) == split)
+        let short = Array(repeating: 128, count: 39).map(String.init).joined(separator: ",")
+        #expect(throws: RuntimeConfigurationError.self) {
+            _ = try RuntimeConfiguration.environmentExpertSlotTable(
+                ["SHRIKE_EXPERT_SLOT_TABLE": short], layers: 40, uniformSlots: 128, leadingDenseLayers: 0)
+        }
+        var overBudget = fortyUniform
+        overBudget[0] += 1
+        #expect(throws: RuntimeConfigurationError.self) {
+            _ = try RuntimeConfiguration.environmentExpertSlotTable(
+                ["SHRIKE_EXPERT_SLOT_TABLE": overBudget.map(String.init).joined(separator: ",")],
+                layers: 40, uniformSlots: 128, leadingDenseLayers: 0)
+        }
+        var tooFew = fortyUniform
+        tooFew[3] = 4
+        tooFew[4] += 124
+        #expect(throws: RuntimeConfigurationError.self) {
+            _ = try RuntimeConfiguration.environmentExpertSlotTable(
+                ["SHRIKE_EXPERT_SLOT_TABLE": tooFew.map(String.init).joined(separator: ",")],
+                layers: 40, uniformSlots: 128, leadingDenseLayers: 0)
+        }
+        #expect(throws: RuntimeConfigurationError.self) {
+            _ = try RuntimeConfiguration.environmentExpertSlotTable(
+                ["SHRIKE_EXPERT_SLOT_TABLE": "128,x"], layers: 2, uniformSlots: 128, leadingDenseLayers: 0)
+        }
+        let dense = try RuntimeConfiguration.environmentExpertSlotTable(
+            ["SHRIKE_EXPERT_SLOT_TABLE": "0,200,56"], layers: 3, uniformSlots: 128, leadingDenseLayers: 1)
+        #expect(dense == [0, 200, 56])
+        #expect(throws: RuntimeConfigurationError.self) {
+            _ = try RuntimeConfiguration.environmentExpertSlotTable(
+                ["SHRIKE_EXPERT_SLOT_TABLE": "8,192,56"], layers: 3, uniformSlots: 128, leadingDenseLayers: 1)
+        }
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("shrike-slot-table-\(UUID().uuidString).json")
+        try Data("{\"0\": 200, \"1\": 56}".utf8).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        #expect(try RuntimeConfiguration.environmentExpertSlotTable(
+            ["SHRIKE_EXPERT_SLOT_TABLE": file.path], layers: 2, uniformSlots: 128,
+            leadingDenseLayers: 0) == [200, 56])
     }
 
     @Test func ignoresVariablesOutsideThePrefix() throws {

@@ -736,11 +736,14 @@ public actor ServerModelSession: ServerInferenceBackend {
             expectedArch: expectedArch,
             requestedExpertCacheSlots: requestedExpertCacheSlots,
             expertCacheBudgetBytes: expertCacheBudgetBytes)
+        let slotTable = try RuntimeConfiguration.environmentExpertSlotTable(
+            layers: expectedArch.numLayers, uniformSlots: loadSlots,
+            leadingDenseLayers: expectedArch.numLeadingDenseLayers)
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,
             expecting: expectedArch,
-            streamingMode: .pread(slotCount: loadSlots),
+            streamingMode: .pread(slotCount: loadSlots, perLayer: slotTable),
             integrityPolicy: .resolved(directoryURL: modelDirectory))
         let (runtime, runner) = try makeRunner(
             model: model,

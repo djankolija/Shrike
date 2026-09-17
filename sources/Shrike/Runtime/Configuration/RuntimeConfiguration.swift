@@ -36,9 +36,12 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
     case yaRNUnsupportedArchitecture
     case invalidPrefetch(String)
     case unknownEnvironment([String])
+    case invalidExpertSlotTable(String)
 
     public var description: String {
         switch self {
+        case .invalidExpertSlotTable(let detail):
+            return "SHRIKE_EXPERT_SLOT_TABLE refused: \(detail)"
         case .invalidExpertCacheSlots(let value):
             return "unsupported expert-cache slot count \(value); allowed: \(RuntimeConfiguration.allowedExpertCacheSlots)"
         case .invalidPrefillChunkTokens(let value):
@@ -192,12 +195,73 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         environment["SHRIKE_PREFETCH_TRACE"].flatMap { $0.isEmpty ? nil : $0 }
     }
 
+    /// The per-layer slot table from `SHRIKE_EXPERT_SLOT_TABLE`, one count per
+    /// layer separated by commas or the path of a JSON object keyed by layer
+    /// index; a malformed table is refused, never replaced by the uniform count.
+    public static func environmentExpertSlotTable(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment,
+        layers: Int, uniformSlots: Int, leadingDenseLayers: Int
+    ) throws -> [Int]? {
+        guard let raw = environment["SHRIKE_EXPERT_SLOT_TABLE"], !raw.isEmpty else { return nil }
+        let counts: [Int]
+        if raw.contains("/") || raw.hasSuffix(".json") {
+            guard let data = FileManager.default.contents(atPath: raw),
+                  let map = try? JSONDecoder().decode([String: Int].self, from: data) else {
+                throw RuntimeConfigurationError.invalidExpertSlotTable(
+                    "\(raw) is not a readable JSON object of layer index to slot count")
+            }
+            guard map.count == layers, (0..<layers).allSatisfy({ map[String($0)] != nil }) else {
+                throw RuntimeConfigurationError.invalidExpertSlotTable(
+                    "\(raw) has \(map.count) entries for \(layers) layers")
+            }
+            counts = (0..<layers).map { map[String($0)] ?? 0 }
+        } else {
+            let fields = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            let parsed = fields.compactMap { Int($0) }
+            guard parsed.count == fields.count else {
+                throw RuntimeConfigurationError.invalidExpertSlotTable("not every entry is an integer")
+            }
+            counts = parsed
+        }
+        try validateExpertSlotTable(counts, layers: layers, uniformSlots: uniformSlots,
+                                    leadingDenseLayers: leadingDenseLayers)
+        return counts
+    }
+
+    public static let minimumExpertSlotsPerLayer = 8
+
+    static func validateExpertSlotTable(_ counts: [Int], layers: Int, uniformSlots: Int,
+                                        leadingDenseLayers: Int) throws {
+        guard counts.count == layers else {
+            throw RuntimeConfigurationError.invalidExpertSlotTable(
+                "\(counts.count) entries for \(layers) layers")
+        }
+        for (layer, count) in counts.enumerated() {
+            if layer < leadingDenseLayers {
+                guard count == 0 else {
+                    throw RuntimeConfigurationError.invalidExpertSlotTable(
+                        "dense layer \(layer) must have 0 slots, has \(count)")
+                }
+            } else if count < minimumExpertSlotsPerLayer {
+                throw RuntimeConfigurationError.invalidExpertSlotTable(
+                    "layer \(layer) has \(count) slots, fewer than \(minimumExpertSlotsPerLayer)")
+            }
+        }
+        let budget = uniformSlots * (layers - leadingDenseLayers)
+        let total = counts.reduce(0, +)
+        guard total == budget else {
+            throw RuntimeConfigurationError.invalidExpertSlotTable(
+                "the table totals \(total) slots, the budget affords \(budget) "
+                + "(\(uniformSlots) per routed layer)")
+        }
+    }
+
     public static let knownEnvironmentNames: Set<String> = [
         "SHRIKE_THINKING_MODE", "SHRIKE_REASONING_EFFORT", "SHRIKE_REASONING_RETENTION",
         "SHRIKE_STRIP_CLI_PROMPT", "SHRIKE_STRIP_TAGS", "SHRIKE_CONCISE_MODE",
         "SHRIKE_TOKENIZER_DIR", "SHRIKE_MODEL", "SHRIKE_PREFILL_ANE",
         "SHRIKE_RUNNER_STATS", "SHRIKE_KERNEL_STATS", "SHRIKE_ROUTE_TRACE",
-        "SHRIKE_PREFETCH_TRACE",
+        "SHRIKE_PREFETCH_TRACE", "SHRIKE_EXPERT_SLOT_TABLE",
     ]
 
     /// Fails the launch by name on any `SHRIKE_*` variable this build does not read.

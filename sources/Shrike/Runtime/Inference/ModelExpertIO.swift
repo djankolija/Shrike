@@ -162,11 +162,17 @@ extension Model {
         streamer.abandonExpertCachePlan(plan.cachePlan)
     }
 
-    /// Cache slot count is a per-model streaming property (the same for every
-    /// layer), so it deliberately takes no layer argument.
+    /// The streaming mode's uniform slot count; a layer's own count, which a
+    /// per-layer table can make different, is `routedExpertCacheSlotCount(layer:)`.
     public func routedExpertCacheSlotCount() -> Int? {
-        guard case .pread(let slotCount) = streamingMode else { return nil }
+        guard case .pread(let slotCount, _) = streamingMode else { return nil }
         return slotCount
+    }
+
+    public func routedExpertCacheSlotCount(layer: Int) -> Int? {
+        guard case .pread(let slotCount, let perLayer) = streamingMode else { return nil }
+        guard let perLayer, layer < perLayer.count else { return slotCount }
+        return perLayer[layer]
     }
 
     public func routedExpertBuffers(for plan: RoutedExpertFetchPlan) throws -> [TensorView] {

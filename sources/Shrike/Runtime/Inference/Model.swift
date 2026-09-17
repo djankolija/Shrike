@@ -19,8 +19,10 @@ public struct ModelLoadStats: Sendable {
 
 /// Bounded routed-expert cache configuration.
 public enum ExpertStreamingMode: Sendable {
-    /// Read each expert into one of `slotCount` 2 MB-aligned cache slots.
-    case pread(slotCount: Int)
+    /// Read each expert into one of `slotCount` cache slots per layer, or into
+    /// the layer's own count from `perLayer` (one entry per layer, zero for a
+    /// dense layer, the total the budget's).
+    case pread(slotCount: Int, perLayer: [Int]? = nil)
 }
 
 /// Loaded `.gturbo/` model. Resident weights live behind one mmap'd
@@ -416,19 +418,26 @@ public struct Model {
             expertsPerLayer: packedExpertsLayout.expertsPerLayer,
             expertStride: packedExpertsLayout.expertStride,
             expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset))
-        let slotCount: Int
+        let uniformSlotCount: Int
+        let perLayerSlots: [Int]?
         switch streamingMode {
-        case .pread(let configuredSlotCount):
-            slotCount = configuredSlotCount
+        case .pread(let configuredSlotCount, let table):
+            uniformSlotCount = configuredSlotCount
+            perLayerSlots = table
         }
+        if let perLayerSlots, perLayerSlots.count != packedExpertsLayout.layers.count {
+            throw ModelError.internalInconsistency(
+                detail: "expert slot table has \(perLayerSlots.count) entries for \(packedExpertsLayout.layers.count) layers")
+        }
+        func slots(of layer: Int) -> Int { perLayerSlots?[layer] ?? uniformSlotCount }
         // Dense layers own no cells: the arena is sized by the routed layers.
         let routedLayers = packedExpertsLayout.layers.indices.filter {
             !packedExpertsLayout.layers[$0].experts.isEmpty
         }
+        let poolCells = routedLayers.reduce(0) { $0 + slots(of: $1) }
         if streamersBox.arena == nil {
             let pageSize = Int(getpagesize())
             let stride = ((Int(packedExpertsLayout.expertStride) + pageSize - 1) / pageSize) * pageSize
-            let poolCells = routedLayers.count * slotCount
             streamersBox.arena = try ExpertCellArena(
                 device: device,
                 cellCount: poolCells + streamersBox.prefetchCellCount,
@@ -436,13 +445,15 @@ public struct Model {
             streamersBox.prefetchCells = Array(poolCells..<(poolCells + streamersBox.prefetchCellCount))
         }
         let ordinal = routedLayers.firstIndex(of: L) ?? 0
+        let cellBase = routedLayers[..<ordinal].reduce(0) { $0 + slots(of: $1) }
+        let slotCount = slots(of: L)
         streamersBox.streamers[L] = try PreadExpertStreamer(
             layout: layout,
             device: device,
             slotCount: slotCount,
             eventCoordinator: expertIOEventCoordinator,
             arena: streamersBox.arena,
-            cellRange: (ordinal * slotCount)..<((ordinal + 1) * slotCount))
+            cellRange: cellBase..<(cellBase + slotCount))
     }
 
     /// Test hook: how many layer files have been opened so far.
@@ -534,6 +545,10 @@ extension Model {
             device: device,
             fileDescriptor: weightsFD)
 
+        if case .pread(_, let table?) = streamingMode, table.count != layout.numLayers {
+            throw ModelError.internalInconsistency(
+                detail: "expert slot table has \(table.count) entries for \(layout.numLayers) layers")
+        }
         return Model(
             device: device,
             config: expecting,

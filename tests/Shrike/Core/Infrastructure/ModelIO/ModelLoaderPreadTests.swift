@@ -50,6 +50,38 @@ import Metal
         #expect(model.openLayerFileCount() == 0)
     }
 
+    @Test func perLayerSlotTablePlacesEachLayersCellsAfterThePreviousLayers() async throws {
+        let dir = try ModelLoaderTests.writeToySynthetic()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let probe = try Model.load(directoryURL: dir, device: device,
+                                   expecting: .qwenToy(),
+                                   streamingMode: .pread(slotCount: 2))
+        var table = Array(repeating: 2, count: probe.config.numLayers)
+        table[0] = 3
+        table[1] = 1
+        let model = try Model.load(directoryURL: dir, device: device,
+                                   expecting: .qwenToy(),
+                                   streamingMode: .pread(slotCount: 2, perLayer: table))
+        #expect(model.routedExpertCacheSlotCount() == 2)
+        #expect(model.routedExpertCacheSlotCount(layer: 0) == 3)
+        #expect(model.routedExpertCacheSlotCount(layer: 1) == 1)
+
+        let view = try await model.fetchRoutedExperts(layer: 1, experts: [4])[0]
+        let residency = try model.routedExpertResidency(layer: 1)
+        #expect(view.buffer === residency.expertPool)
+        #expect(view.offset == UInt64(3) * residency.poolSlotStride)
+        let first = try await model.fetchRoutedExperts(layer: 0, experts: [4])[0]
+        #expect(first.offset < UInt64(3) * residency.poolSlotStride)
+
+        let wrong = Array(repeating: 2, count: probe.config.numLayers + 1)
+        #expect(throws: ModelError.self) {
+            _ = try Model.load(directoryURL: dir, device: device,
+                               expecting: .qwenToy(),
+                               streamingMode: .pread(slotCount: 2, perLayer: wrong))
+        }
+    }
+
     @Test func beginOpeningRoutedExpertStreamerIsCompatibleWithLazyFetch() async throws {
         let dir = try ModelLoaderTests.writeToySynthetic()
         defer { try? FileManager.default.removeItem(at: dir) }

@@ -4400,7 +4400,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                        queryCount: t,
                                                        topK: cfg.topKExperts)
         let schedulerConfig: PrefillRoutedTileSchedulerConfig
-        if let slotCount = model.routedExpertCacheSlotCount() {
+        if let slotCount = model.routedExpertCacheSlotCount(layer: L) {
             guard let fitted = Self.prefillRoutedTileSchedulerConfig.fitting(slotCount: slotCount) else {
                 throw PrefillError.chunkedUnsupported(
                     "prefill routed tiles cannot fit the \(slotCount)-slot expert cache")
@@ -4422,7 +4422,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             rowsByExpert: rowsByExpert,
             lastRowByExpert: lastRowByExpert,
             resident: try residentExpertMask(layer: L),
-            slots: model.routedExpertCacheSlotCount() ?? 0,
+            slots: model.routedExpertCacheSlotCount(layer: L) ?? 0,
             tileWidth: schedulerConfig.tileExperts)
         let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
             pairs,
