@@ -7,9 +7,12 @@ prompt is a prefix of another), a suffix chain X (32 entries) -> X+4 ->
 X+16 whose cached prefix is X's entries, and a turns chain X -> Xturn2 ->
 Xturn3 that replays X's own saved 8-token answer as the assistant turn.
 
+v19 added the 7k pair (t7k / t7kb, 112 entries, about 7,000 tokens), the
+context the scan rewrite's verdict lives at.
+
 Usage: turn-prompts.py <outdir>
 Writes t300.json, t300b.json, t1k.json, t1kb.json, t2k.json, t2kb.json,
-tX.json, tXp4.json, tXp16.json, tXturn2.json, tXturn3.json.
+tX.json, tXp4.json, tXp16.json, t7k.json, t7kb.json, tXturn2.json, tXturn3.json.
 """
 import json
 import os
@@ -47,6 +50,7 @@ SHAPES = {
     "t1k": (16, 100), "t1kb": (16, 400),
     "t2k": (32, 200), "t2kb": (32, 500),
     "tX": (32, 600), "tXp4": (36, 600), "tXp16": (48, 600),
+    "t7k": (112, 900), "t7kb": (112, 1000),
 }
 for label, (entries, offset) in SHAPES.items():
     prompt = ledger(entries, offset)

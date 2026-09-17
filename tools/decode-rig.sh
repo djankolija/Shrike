@@ -1,6 +1,6 @@
 #!/bin/bash
 # decode-rig.sh <host> <port> <promptdir> <outdir> <tag> <shape>...
-#   shapes: card | d512-300 | d512-1k | restore
+#   shapes: card | d512-300 | d512-1k | d512-7k | restore
 # The decode pass II chapter's request-shape rig: a fresh server per shape,
 # the cold request STREAMED so every token's arrival time is recorded beside
 # the route trace (tools/decode-stream-client.py runs on the mini), then the
@@ -9,15 +9,16 @@
 # is checked against the payload's assistant turn first; a mismatch is reported
 # and the turns still run, on a cached prefix that no longer matches, so their
 # rows read as a full re-prefill rather than a follow-up). `d512-300` /
-# `d512-1k`: the 300- / 1k-token prompt answered at MAX_TOKENS, the settle
-# awaited, then the warm same-length second prompt (t300b / t1kb) at 8.
-# `restore`: relaunch the bare production server and stop.
+# `d512-1k` / `d512-7k`: the 300- / 1k- / 7k-token prompt answered at
+# MAX_TOKENS, the settle awaited, then the warm same-length second prompt
+# (t300b / t1kb / t7kb) at 8. `restore`: relaunch the bare production server
+# and stop.
 #
 # <host>:<port> is where this machine polls the server's HTTP API for
 # readiness after a relaunch; the requests run ON the mini over ssh and target
 # 127.0.0.1:<port> there. Relaunching goes over the ssh alias `macmini`.
 # <promptdir> holds the turn-prompts.py payloads (tX.json, t300.json,
-# t300b.json, t1k.json, t1kb.json). Outputs land in <outdir>, named
+# t300b.json, t1k.json, t1kb.json, t7k.json, t7kb.json). Outputs land in <outdir>, named
 # <tag>-<shape>: tokens-*.json (the streamed arrivals), route-*.trace,
 # prefetch-*.jsonl (with PREFETCH_TRACE=1), resp-*.json, server-mini-*.log,
 # and one row per request from tools/decode-rows.py.
@@ -126,7 +127,7 @@ PY
         wait_settle 3
       fi
       ;;
-    d512-300|d512-1k)
+    d512-300|d512-1k|d512-7k)
       p="${shape#d512-}"
       relaunch "$traces"
       send_stream "t$p" "$PROMPTS/t$p.json" "$MAX_TOKENS" "$run"

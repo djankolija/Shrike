@@ -36,6 +36,13 @@ rig and the day's sessions. The 4.7 to 5.1 ms at no context is the row's
 context-independent part: the projections, the KV quantize, the combine and the
 dispatch walls. Everything above it is the scan.
 
+Since v18's one command per layer the kernel counters no longer carry
+`attn_layer_kv`: the attention layer's whole held command reports as `layer_kv`
+(the norm, the attention, the projection and the layer's speculative routed work),
+so the row on the current tree is larger by the layer's MoE share and its slope is
+the scan's alone. S0.1 measured it on the four shapes (the step-zero record below):
+8.4 ms at the 300, 24.4 at 7,463 context, **2.23 ms per 1,000 (M)**, the same line.
+
 The KV cache is stored at 8 bits in production: one K row and one V row of 544 bytes
 per position per layer, 512 packed values for both KV heads plus eight fp16 scales
 and eight fp16 biases inside the row (`KVCacheManager.swift:477-485`,
@@ -227,6 +234,133 @@ against the 16 ns per KB roof and the reference's 20.
   layout is itself far from the roof, which would make the row's problem the
   cache's layout and a different chapter).
 
+### Step-zero record
+
+**S0.1 (2026-09-17, the mini at the v18 close's build, two production lifetimes per
+shape, the 7k shape new).** The `t7k` pair is 112 ledger entries at offsets 900 and
+1,000, 7,463 prompt tokens measured (the entries run 66.6 tokens each, not the
+62.6 the earlier shapes averaged); `d512-7k` in the decode rig. The rows, the cold
+answer of each lifetime (`s01-ledger.py` over the arms in
+`~/.claude/handoffs/archive/shrike-v19-step0/`):
+
+| shape | run | prompt | answer | tok/s | ms per token | `layer_kv` | `layer_linear` | fixup | head | misses | io ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| the card | 1 | 2,125 | 219 | 16.20 | 61.73 | 12.338 | 24.722 | 1.773 | 4.647 | 4,392 | 14.73 |
+| the card | 2 | 2,125 | 219 | 15.98 | 62.58 | 12.340 | 24.704 | 1.777 | 4.666 | 4,407 | 14.75 |
+| the 300 | 1 | 289 | 314 | 17.00 | 58.82 | 8.408 | 24.994 | 1.897 | 4.758 | 6,291 | 15.09 |
+| the 300 | 2 | 289 | 314 | 17.15 | 58.31 | 8.362 | 24.879 | 1.886 | 4.717 | 6,291 | 14.90 |
+| the 1k | 1 | 1,069 | 405 | 16.95 | 59.00 | 10.259 | 24.864 | 1.734 | 4.711 | 7,643 | 14.02 |
+| the 1k | 2 | 1,069 | 405 | 16.98 | 58.89 | 10.245 | 24.833 | 1.731 | 4.693 | 7,653 | 14.04 |
+| the 7k | 1 | 7,463 | 368 | 13.66 | 73.21 | 24.400 | 24.783 | 1.659 | 4.675 | 6,794 | 13.69 |
+| the 7k | 2 | 7,463 | 368 | 13.76 | 72.67 | 24.397 | 24.791 | 1.657 | 4.668 | 6,798 | 13.69 |
+
+What the ledger says: `layer_kv` is 8.4 ms at 289 context and 24.4 at 7,463, a
+slope of **2.23 ms per 1,000 (M)** on the current tree, the board's line; the other
+rows are flat with context (`layer_linear` 24.7 to 25.0, the fixup 1.7 to 1.9, the
+head 4.7, the miss window's io 13.7 to 15.1), so the 7k token's extra 14 ms over
+the 300's is the scan and nothing else. The lifetimes agree to 0.1 % on the roles
+and 0.7 % on the wall (the 300's two lifetimes 0.9 % apart on tok/s). The 7k
+lifetime runs 2.6 minutes: 37 s of prefill (5.0 ms per prompt token) and a
+368-token answer at 13.7 tok/s. An oMLX server (a standing service on the box,
+not ours, listening on localhost only) was up throughout; whether it held a model
+could not be read without its key, and the box reported 34 % of memory free
+beside production.
+
+**S0.2 (2026-09-17).** `ShrikeAttnBench` (`sources/ShrikeAttnBench/`, the kernel copy
+in `Metal/ladder.metal`): synthetic rows at the served shape through the production
+quantizer; the production pipeline through the library's own wrapper
+(`Attention.encodeFull`, made public with the wrapper's init and `KVCacheQuantizer`
+for the purpose); the ladder kernel compiled from source at run time with one
+function constant per switch, dispatched on the production geometry with the
+threadgroup memory carved per arm so each carries its own footprint; the median of
+nine command buffers after three untimed and a fifteen-run spin-up (the first timed
+arm of a process ran 3× slow on the M4 Pro before the GPU ramped). Every arm prints
+a hash of its partials, so arms with the same arithmetic must hash equal, and the
+maximum difference of its CPU-combined output against the production pipeline's
+fp16 output. The checks: every arithmetic-preserving arm hashes equal to the copy
+and combines to within 3.8e-6 of production at 4k and 8k; the copy times 7 % under
+the production pipeline on the mini (the combine), inside the 10 % rule; and the
+production pipeline's 0.217 µs per position at 8k is the runner's 2.23 ms per 1,000
+over ten layers to 3 %, so the bench and the rig agree. The unspecialized production
+pipeline is 24 % slower on the mini (v11's 19 % holds).
+
+**S0.3 (2026-09-17, the mini, Shrike stopped, 1k, 4k and 8k positions, nine repeats,
+the ladder run in both arm orders).** At 8k, µs per dispatch, forward / reversed:
+
+| arm | µs | ns per KB | reading |
+| --- | ---: | ---: | --- |
+| prod (the pipeline, partial and combine) | 1,778 / 1,786 | 204 | the row's 200 ns per KB, as the board had it |
+| copy (the shipped kernel) | 1,654 / 1,658 | 190 | the ladder's baseline |
+| qregs (Q in registers) | 1,868 / 1,869 | 215 | 13 % slower |
+| block8 (eight-position blocks) | 2,097 / 2,103 | 241 | 27 % slower |
+| dbuf (double-buffered staging) | 2,143 / 2,321 | 246 to 267 | 30 to 40 % slower |
+| load8 / load16 | 1,650 / 1,647 and 1,862 / 1,871 | 190 and 214 | null and 13 % slower |
+| nosoftmax | 1,605 / 1,818 | 184 to 209 | the exp chain is not the cost |
+| nov (V never loaded or accumulated) | 594 / 618 | 68 to 71 | half the bytes, 64 % of the time |
+| loadonly (the staging only, the same layout) | 177 / 136 | 16 to 20 | at the roof; 50 to 65 GB/s |
+| loadonly+fullrow (the whole row per group) | 258 / 194 | 22 to 30 | the half-row slicing costs nothing |
+
+The reading. The layout streams at the roof when nothing computes, so v11's
+line-utilisation residual is closed; every occupancy and latency remedy the design
+guessed at (Q in registers, larger blocks, double buffering, wider loads) is null or
+slower; the softmax is innocent; and the V half of the work costs 64 % of the time
+for half the bytes. What all of that fits is the loop form, not the memory system:
+the per-lane loops walk `i = lane, lane + 32, ...` with a slot counter the compiler
+cannot bound, so the accumulator array is indexed dynamically and the loop is not
+unrolled. Q in registers getting slower is the same mechanism (a register array
+indexed the same way).
+
+**S0.3b (2026-09-17, the same rig): the loop form as a switch.** The copy's loops
+with a static trip count (`s = 0 ..< 8`, `i = lane + 32 s`, the same elements in
+the same order), everything else untouched:
+
+| arm | µs at 8k | ns per KB | against the copy |
+| --- | ---: | ---: | ---: |
+| sloops | 539 | 62 | 3.07× faster |
+| sloops+nov | 334 | 38 | the V half now costs half |
+| nov (the shipped loop form) | 594 | 68 | the K side alone was 1.8× the static K side |
+| sloops+qregs, sloops+load8, sloops+qregs+load8 | 560 to 690 | 64 to 79 | null to slower |
+| sloops+dbuf | 678 to 1,168 | 78 to 134 | still slower |
+| loadonly | 139 to 196 | 16 to 22 | the floor |
+
+The static form's partials do not hash identical to the copy's, while its combined
+output meets production to the same 3.8e-6: the difference is which multiply the
+compiler fuses in `o * alpha + p * v`, not the algorithm.
+
+**S0.3c (2026-09-17, the same rig): the form search.** The static loops with the V
+accumulate written explicitly, against the copy's hash at 1k and 8k:
+
+| arm | µs at 8k | partials | against the copy |
+| --- | ---: | --- | ---: |
+| copy | 1,653 | the shipped bits | |
+| sloops (as written) | 548 | differ | 3.02× |
+| sloops+o1, `fma(o, alpha, p * v)` | 613 | **the shipped bits** | **2.70×** |
+| sloops+o2, `fma(p, v, o * alpha)` | 619 | as sloops | |
+| sloops+d1, the denominator as an explicit `fma` | 963 | as sloops | the same bits, slow |
+| sloops+safemath, contraction and reassociation off | 961 | the shipped bits | |
+| copy+safemath | 1,780 | the shipped bits | |
+
+So the shipped kernel fuses `o * alpha` into the add and the static loop as
+written fuses `p * v`; the explicit `fma(o, alpha, p * v)` reproduces the shipped
+kernel's partials bit for bit at 2.70× its speed. The denominator's form is
+hash-neutral either way (one multiply, one fusion) and the explicit call is slow for
+no visible reason, so it stays as written. The repair is class 1 on the bench; the
+golden on both boxes is its gate in the runner. A caveat on the S0.3b pair of runs: the later arms of each order came out up to 1.8×
+slower than the same arm early in the other order (the first ladder's pair did not
+show this), so each arm's clean number above is its earlier position, and the
+repair's rig arms are the verdict, not the bench.
+
+**What step zero changes.** The constraint is named and it is neither occupancy nor
+latency nor the layout: it is the loop form. Approach B is no longer a guess about
+staging; it is the static trip count with the explicit fused form, worth 2.70× on
+the kernel in isolation, bit-identical (M on the bench). Transferred to the runner
+(T): the slope 2.23 to about 0.83 ms per 1,000, the 7k row 24.4 to about 14.4, the
+7k token 73 to about 63 ms, most of the chapter's prize, as class 1 under the
+golden. The rewrite's remaining prize is the distance from 0.83 to the reference's
+0.2 to 0.3: about 4 to 4.5 ms at 7k, still above the noise. The bench's
+load-only floor at 4k sits partly in the M1's system cache (the rows are 4.4 MB),
+so the roof stays the nominal 62.5 GB/s, not the bench's best number.
+
 ## Approaches
 
 **A. The streaming scan (the recommendation for the rewrite).** The reference's
@@ -335,21 +469,22 @@ Approach A in the runner, its configuration the one S0.4 chose.
   again for everything after.
 - **The arms** on four shapes against S0.1's ledger. Pre-registered rows, graded:
 
-  | row | today (M) | expected | grade |
+  | row (ms per token) | S0.1 (M, two lifetimes) | expected | grade |
   | --- | ---: | ---: | --- |
-  | `attn_layer_kv`, the 300 | 5.40 | 5.0 to 5.2 | T |
-  | `attn_layer_kv`, the 1k | 7.21 | 5.1 to 5.8 | T |
-  | `attn_layer_kv`, the card | 9.30 | 5.3 to 6.6 | T |
-  | `attn_layer_kv`, the 7k | about 21 | 6 to 11 | T |
-  | the slope, ms per 1,000 | 2.0 to 2.4 | 0.2 to 0.8 | T |
-  | the 7k token, ms | about 74 | 59 to 64 | T |
+  | `layer_kv`, the 300 | 8.36 to 8.41 | 7.8 to 8.0 | T |
+  | `layer_kv`, the 1k | 10.25 | 8.1 to 8.8 | T |
+  | `layer_kv`, the card | 12.34 | 8.0 to 9.3 | T |
+  | `layer_kv`, the 7k | 24.40 | 9.8 to 14.1 | T |
+  | the slope, ms per 1,000 | 2.23 | 0.2 to 0.8 | T |
+  | the 7k token | 72.7 to 73.2 | 59 to 63 | T |
 
-  The expectation is the reference's 0.2 to 0.3 per 1,000 carrying the 2 to 4×
-  range that transfers have missed by, on the measured slope, over the row's
-  measured context-independent 4.7 to 5.1. The 300 sits under the rig's noise
-  (1.7 % of tok/s across clean lifetimes); the 1k and the card should show 2 to
-  6 %; the verdict lives on the 7k. The misses and the miss window are expected
-  flat. The answers are not expected identical (class 2): they are read.
+  The expectation takes the measured slope off each row and puts back the
+  reference's 0.2 to 0.3 per 1,000 carrying the 2 to 4× range that transfers have
+  missed by; the row's context-independent part (the 300's 8.4 less its 0.6 of
+  scan) stays. The 300 sits under the rig's noise (1.7 % of tok/s across clean
+  lifetimes); the 1k and the card should show 2 to 6 %; the verdict lives on the
+  7k. The misses and the miss window are expected flat. The answers are not
+  expected identical (class 2): they are read.
 
 ### Task 4, held: the matrix-unit tile (B6)
 

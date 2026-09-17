@@ -23,7 +23,7 @@ struct AttentionSplitGeometry: Sendable, Equatable {
 ///   - `v`   : same shape as `k`. Full-layer K and V must remain distinct after
 ///             their separate per-head normalization and RoPE paths.
 ///   - `out` : `[numQHeads, headDim]`
-final class Attention {
+public final class Attention {
     private let ctx: MetalContext
     private let psoPartial: MTLComputePipelineState
     private let psoPartialSG: MTLComputePipelineState
@@ -107,15 +107,15 @@ final class Attention {
 
     /// v11: which inner loop the full-attention decode partial runs.
     /// `.simdgroup` reorders the softmax summation (a264b22-class).
-    enum PartialLoopVariant: Sendable { case blockReduce, simdgroup, kvShared }
+    public enum PartialLoopVariant: Sendable { case blockReduce, simdgroup, kvShared }
 
-    init(context: MetalContext,
-         maxQHeads: Int = 16,
-         maxHeadDim: Int = 512,
-         supportsSinks: Bool = false,
-         supportsMLA: Bool = false,
-         partialLoopVariant: PartialLoopVariant = .blockReduce,
-         specializesKVShared: Bool = true) throws {
+    public init(context: MetalContext,
+                maxQHeads: Int = 16,
+                maxHeadDim: Int = 512,
+                supportsSinks: Bool = false,
+                supportsMLA: Bool = false,
+                partialLoopVariant: PartialLoopVariant = .blockReduce,
+                specializesKVShared: Bool = true) throws {
         self.partialLoopVariant = partialLoopVariant
         self.specializesKVShared = specializesKVShared
         // maxHeadDim may exceed kernelMaxHeadDim (Kimi's 576-wide MLA rows
@@ -280,7 +280,7 @@ final class Attention {
 
     /// Full attention. Separate normalization and RoPE make the cache streams
     /// distinct here. `scale` mirrors `encodeSWA`.
-    func encodeFull(commandBuffer: MTLCommandBuffer,
+    public func encodeFull(commandBuffer: MTLCommandBuffer,
                            q: MTLBuffer, qOffset: Int = 0,
                            k: MTLBuffer, kOffset: Int = 0,
                            v: MTLBuffer, vOffset: Int = 0,

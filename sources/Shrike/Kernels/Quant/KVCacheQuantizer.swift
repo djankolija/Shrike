@@ -3,20 +3,20 @@ import Metal
 /// Affine per-group quantization used by the K/V cache. Each token row is
 /// independently quantized in groups of 64 values so appends never rewrite
 /// history and prompt snapshots remain simple byte copies.
-final class KVCacheQuantizer {
+public final class KVCacheQuantizer {
     private let pipeline: MTLComputePipelineState
 
-    init(context: MetalContext) throws {
+    public init(context: MetalContext) throws {
         self.pipeline = try context.pipeline("kv_cache_quantize_affine")
     }
 
-    func encode(commandBuffer: MTLCommandBuffer,
-                source: MTLBuffer,
-                sourceOffset: Int = 0,
-                sourceTokenStrideElements: Int,
-                destination: KVView,
-                tokenCount: Int,
-                elementCount: Int) throws {
+    public func encode(commandBuffer: MTLCommandBuffer,
+                       source: MTLBuffer,
+                       sourceOffset: Int = 0,
+                       sourceTokenStrideElements: Int,
+                       destination: KVView,
+                       tokenCount: Int,
+                       elementCount: Int) throws {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }

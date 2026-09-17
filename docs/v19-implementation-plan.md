@@ -20,48 +20,36 @@ no-load twin; the close.
 
 ## Step zero: the constraint named and the prototype priced (no runtime code)
 
-- [ ] **S0.1 The 7k shape and the four-shape baseline.**
-  - [ ] `tools/turn-prompts.py:45-50`: a `t7k` / `t7kb` pair (about 112 entries at
-        a fresh offset so no prompt is a prefix of another), generated into the rig's
-        prompt directory beside the existing three; the prompt token count measured
-        from the server log and recorded (target about 7,000).
-  - [ ] `tools/decode-rig.sh`: `d512-7k` in the shape list (`:3`) and the case
-        (`:129`), the same 512-token cold answer and eight-token follow-ups.
-  - [ ] Two production lifetimes per shape on the current tree, four shapes; the
-        runner and kernel stats parsed; `attn_layer_kv`, the wall, the misses and the
-        miss window per shape recorded in the design document as the chapter's
-        ledger. The 7k row is expected near the live log's 21.3 ms; a large
-        difference is investigated before anything is built on the number.
-- [ ] **S0.2 The bench executable.**
-  - [ ] `Package.swift`: an executable target `ShrikeAttnBench` at
-        `sources/ShrikeAttnBench`, depending on `Shrike`, its kernel sources under
-        `sources/ShrikeAttnBench/Metal/` shipped as a copied resource and compiled
-        with `makeLibrary(source:)` at run time, the project's own pattern
-        (`Package.swift:48-50`).
-  - [ ] `sources/ShrikeAttnBench/main.swift` and `Bench.swift`: arguments
-        `--arm <name>` (repeatable), `--positions <n>` (repeatable; default 1024,
-        4096, 8192), `--repeats <n>` (default 5), `--kv-bits 8`; synthetic K, V and Q
-        at the served shape (two KV heads, sixteen query heads, head dim 256, int8
-        rows of 544 bytes with random values, scales and biases; Q random fp16);
-        timing by the command buffer's `gpuStartTime` and `gpuEndTime`, the median
-        of the repeats; one line per arm and position count: µs per position, ns per
-        KB scanned, GB/s against the roof, plus a checksum of the output so a broken
-        arm cannot post a fast number.
-  - [ ] The baseline arm dispatches the production kernel through the library's own
-        wrapper (`Attention.swift`) so the bench and the runner agree on the
-        geometry; the ablation arms are the kernel's source under the bench's
-        `Metal/` with one function constant per switch.
-  - [ ] The four gates; a test that the bench's baseline arm and the library's
-        kernel produce the same partials on the same synthetic rows (bitwise); the
-        bench built release and deployed to the mini beside the CLI (the binary and
-        `Shrike_ShrikeAttnBench.bundle`).
-- [ ] **S0.3 The ablation ladder (B7) on the mini, Shrike stopped.** The eight arms
-      of the design document at 1k, 4k and 8k positions: as shipped; Q in registers;
-      the eight-position block; double-buffered staging; the softmax removed; V
-      removed; a pure load at the same layout; a pure load over the full row. The
-      shipped arm calibrated against S0.1's `attn_layer_kv` slope (the bench's µs per
-      position times ten layers against the rig's ms per 1,000). The table in the
-      design document's step-zero record, the constraint named.
+- [x] **S0.1 The 7k shape and the four-shape baseline.** DONE 2026-09-17.
+  - [x] `tools/turn-prompts.py`: the `t7k` / `t7kb` pair (112 entries at offsets 900
+        and 1,000), generated into the rig's prompt directory; 7,463 prompt tokens
+        measured.
+  - [x] `tools/decode-rig.sh`: `d512-7k` in the shape list and the case.
+  - [x] Two production lifetimes per shape, four shapes, at the v18 close's build;
+        the ledger in the design document's step-zero record. The role on the
+        current tree is `layer_kv` (the layer's whole held command since v18), 8.4 ms
+        at the 300 and 24.4 at 7,463 context, the slope 2.23 ms per 1,000; the
+        pre-registered table restated on it. Scripts and arms at
+        `~/.claude/handoffs/archive/shrike-v19-step0/`.
+- [x] **S0.2 The bench executable.** DONE 2026-09-17: `ShrikeAttnBench` at
+      `sources/ShrikeAttnBench` (`Package.swift`), `Metal/ladder.metal` as a copied
+      resource compiled at run time, `--arms`, `--positions`, `--repeats`,
+      `--warmup`, `--seed`, `--list`; the production arm through the wrapper
+      (`Attention` and `KVCacheQuantizer` made public for it); the fidelity check
+      built into every run (the partials' hash per arm, the CPU-combined output
+      against production's, 3.8e-6) rather than a separate test, since the ladder
+      is a measurement tool; deployed to the mini with its bundle. Release build
+      with zero warnings; the full gates run with the step-zero commit.
+- [x] **S0.3 The ablation ladder (B7) on the mini.** DONE 2026-09-17 in both arm
+      orders; the table and the reading in the design document. The constraint is
+      the loop form: the layout streams at the roof, every occupancy and latency
+      remedy is null or slower, the V half costs 64 % of the time. S0.3b: the
+      static trip count is 3.07× faster on the kernel (539 against 1,654 µs at 8k),
+      not bitwise the copy (FMA contraction), the combined output equal to 3.8e-6.
+- [x] **S0.3c The form search.** DONE 2026-09-17: the static loops with the V
+      accumulate as `fma(o, alpha, p * v)` reproduce the shipped kernel's partials
+      bit for bit at 613 µs against 1,653 (2.70×); the denominator stays as written.
+      Task 2 is class 1.
 - [ ] **S0.4 The streaming prototype on the mini.** Approach A as a bench kernel,
       the sweep over heads per simdgroup (1, 2, 4, 8), positions per simdgroup per
       iteration (1, 2) and one or both KV heads per threadgroup, at 1k, 4k and 8k
