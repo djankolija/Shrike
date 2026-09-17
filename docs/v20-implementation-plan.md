@@ -135,6 +135,13 @@ SLRU is T1.3; the predicted-future eviction was null at a legitimate horizon
       before the router has run, with the fallback when a layer's misses exceed its
       free cells; the cancel with two in flight, including the batch's reads in
       flight), written in the design document for Davor's ruling before T3.1.
+      WRITTEN 2026-09-17 (`7596f86` read): the design document's Task 3 section,
+      the tree on the edges, the four edges designed, the stop path as two shapes
+      (A, encoded ahead and committed on the word, recommended; B, committed ahead
+      with a GDN parity and a drain, designed), the fold's drain invariant, the
+      per-encoder error naming, the overflow as a victim on the path, the
+      instruments the fold retires, the pre-registration, five points for the
+      ruling. **Davor's ruling pending; T3.1 waits on it.**
 - [ ] **T3.1 The agreed cells** (v18's T2.1 to T2.5 as written): the read of the
       ring's cell leases and the index swap; the fixup encoded before the route with
       an indirect phase 1 over the classifier's miss list, the reduce, the residual,

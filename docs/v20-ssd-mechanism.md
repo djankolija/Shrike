@@ -710,6 +710,376 @@ with two in flight, the cancel and the stop path, the error surfacing per layer.
 Golden identical; the wall expected flat within the arms' resolution; misses per
 token may drift since the plan runs later, recorded.
 
+**T3.0 The design note (2026-09-17, for Davor's ruling; the tree read at
+`7596f86`).** The runner's anchors in [architecture.md](architecture.md) are stale by
+about 145 lines since v20's diagnostics landed; the anchors below are the tree's, and
+the close re-anchors the document. Every number here is remembered from the chapters
+cited or modelled from them; nothing was run.
+
+**The fold in three commits.** T3.1 *the agreed cells*: a layer's fixup encoded with
+the layer, before its router has run, behind an event wait, its misses read into
+cells the host names on the word; the plan off the path, at the next wake. T3.2 *one
+command per token*: the forty layers' commands and the boundary's as encoders of one
+command, encoded a layer per word during the previous token and committed on the
+boundary word after the stop check, carrying the drain invariant and the per-encoder
+error naming without which it cannot ship. T3.3 *the stop path's ruled shape* and the
+cancel's tests. Each commit golden byte-identical on all four profiles on both boxes;
+the arms after T3.1 and after T3.3, expected flat within the drift. The modelled
+prize is T6.7's 0.6 to 0.85 ms per token less what the ruling on the stop path
+leaves (the decision below); under the arms' resolution either way. The architecture
+is the win.
+
+**The tree on the edges (read, 2026-09-17).**
+
+*The token today.* Forty-one command buffers plus one per miss layer: every served
+layer folds its attention, tail and speculative routed work into one command
+(`tailCB` and `specCB` never exist on this model, `RealForwardRunner.swift:2138`,
+`:2188`), the fixup is a second command on a miss layer (`:3272`), the boundary a
+last one, committed and not waited on (`:2369`); a non-continued pass adds the
+synchronous embed. Layer L+1 is encoded while L runs (`:2470`). The next pass's held
+layer 0 is committed only after the stop check on the boundary word
+(`RawCompletion.swift:313-357`, the produce at `:362-372`); nothing runs a pass late
+(v18 Task 4). No cancel of a committed command exists anywhere; a client's disconnect
+cancels the request's Task, which the loop sees at its top (`:290`), between passes,
+never inside one.
+
+*What a pass mutates in place.* The thirty GDN layers' recurrent state, one FP32
+`[32, 128, 128]` buffer of 2 MiB per layer, and the conv tail, `[3, 8192]` FP16 of
+48 KiB, single-buffered and updated in place by `gdn_delta_step_decode`
+(`gdn.metal:477`, `:489`: `s[i] = srow[idx] * g`, then `srow[idx] = s[i]`) and
+`gdn_conv_mix_decode` (`:268-273`, the shift in place): 61.4 MiB across the model
+(modelled from `ArchConfig.qwen36_35B_A3B`). The KV row at the cursor on the ten
+attention layers: the cursor is `KVCacheManager.position`, advanced only by
+`produceToken` (`:2290`), and a row written past it is dead bytes to every read
+(the views are sized by the cursor, `KVCacheManager.swift:487`). Partial rewind is
+refused whenever GDN state exists (`RealForwardRunner.swift:1075-1078`, "recurrent
+GDN has absorbed every token it was advanced over"); the only restore is the whole
+snapshot at a prompt boundary (`captureInferenceState`, `:1090`). The decode scratch
+(`hidden`, `moeActs`, the readback and dispatch-argument buffers) is single and
+rewritten per layer. The sampler's seed is pure in the position when a seed is set
+(`Sampler.swift:298`); the trace files are append-only. After a generation that did
+not complete, the server invalidates the single-prefix prompt cache and resets the
+runner, KV and GDN state included (`ServerInference.swift:1169-1177`,
+`RealForwardRunner.swift:1046-1051`).
+
+*The miss path today.* The fixup is host-built after the word: the batch's event
+wait (`:3282`), then one encoder with phase 1 over the misses
+(`moe_phase1_gate_up_act_subset_u16load`, a direct dispatch over `active_count` rows,
+the miss positions in `moeMissActiveSlots`, the misses' bytes reached through an
+argument buffer of device pointers filled from the plan's slots, `MoE.swift:606-613`)
+and phase 2 over all eight (`moe_phase2_down_reduce_k8`). The speculative kernels
+are the other shape: pool-addressed, `expert_pool` plus `resolved_slots[position]`
+times `pool_slot_stride` (`moe.metal:923-935`, `:975-989`), their grids the
+classifier's `MoESpecDispatchArgs` (`:109-112`, filled at `:211-216`: phase 1 full
+always, phase 2 full only when no expert missed), the classifier writing
+`0xffffffff` into a miss's resolved slot (`:141`). The gate is `moe_io_ready`
+(`:36-39`) on the batch's status word, 0 loading, 1 complete, 2 failed; phase 1
+returns on not-ready (`:823`), phase 2 writes the residual through and returns
+(`:894-897`). The timeline is one `MTLSharedEvent`, one value and one status word per
+batch reserved at submit (`PreadExpertStreamer.swift:568`), published in order with
+the out-of-order hold (`ExpertIOEventCoordinator.swift:83-88`); a failure publishes
+status 2 and advances the timeline "so a pre-submitted GPU command cannot deadlock"
+(`ExpertLoadOperation.swift:147-150`); an empty plan publishes its value at once
+(`PreadExpertStreamer.swift:572-578`). The host learns of a failed read at the next
+layer's wake, from `finishPendingRoutedCommand`'s `storage.wait()` (`:5276`), as
+`readFailed(errno:)` with no layer in the error. The prefetch's reads never touch the
+timeline (`beginPrefetch` is its own entry; the demand path alone reserves,
+`:5657`). The ring: nine cells, one read in flight, a free cell is `expert < 0`
+(`ExpertPrefetchRing.swift:114`), the refusal counted (`:117`), leases at
+`readyCells` with the 400 µs join (`:161-202`), consumed at the plan (`:222-238`),
+the lock order ring then cache. The reader has no per-batch cancel
+(`shrike_expert_reader_cancel_slot` runs at shutdown only); a third batch parks; a
+failure is thrown on the storage thread. `abandonExpertCachePlan` exists with no
+production caller (`ModelExpertIO.swift:159-163`). The coordinator's status words
+are capped at 4,096 chunks of 4,096 (`ExpertIOEventCoordinator.swift:31-32`).
+
+*Errors today.* `ModelError.commandBufferFailed(detail: String)` carries no layer;
+the deferred drain names the command's role (`layer_linear`, `layer_kv`, "routed
+layer command buffer", `:3431-3449`); the immediate checks name nothing. The
+command buffers are made without a descriptor, so Metal's per-encoder error status
+is not requested; there is one `encodeWaitForEvent` (the fixup's) and no
+`encodeSignalEvent` (the host signals by `signaledValue`).
+
+**Edge (c): the agreed-cell contract (T3.1).**
+
+*The contract.* For every routed layer L of token t the host owns two things before
+L's router runs: a timeline value v(L, t) with its status word, reserved from the
+coordinator at L's encode in layer order, and an `agreed_cells[L]` array of top-k
+words, host-written only, one per top-k position, the sentinel for a hit. The layer's
+fixup is encoded with the layer, after its speculative routed work, as: the event
+wait on v(L, t); phase 1 over the misses, the pool-addressed shape of the speculative
+phase 1 with its rows over `miss_count × F` and each row group's expert
+`topk_indices[miss_positions[j]]` at cell `agreed_cells[L][miss_positions[j]]`;
+phase 2 over all eight, the speculative phase 2 kernel with one resolve added, a
+position's cell `resolved_slots[p]` unless it is the sentinel, then
+`agreed_cells[L][p]`; both behind `moe_io_ready` on v(L, t)'s status word. The grids
+are two new indirect triples the classifier writes beside its two
+(`MoESpecDispatchArgs` grows to four): the fixup's phase 1 at
+`ceil(miss_count × F / 16)` threadgroups, its phase 2 at `D` when any expert missed
+and zero otherwise, so an all-hit layer dispatches nothing and a miss layer's
+speculative phase 2 stays zero as today. "Miss i into cell i" is therefore the
+per-position word: the miss at position p is read into `agreed_cells[L][p]`, and the
+kernel finds it there. No argument buffer, no host-built command, no word written by
+both sides: the classifier writes `resolved_slots`, the host writes `agreed_cells`,
+and the event's happens-before (the host's stores before `signaledValue`, the GPU's
+wait before the reads, the same edge today's fixup crosses for the expert bytes
+themselves) orders the host's cells before the kernel's use.
+
+*The host on the word, in order.* Read the readback (unchanged). For each miss
+position p in the classifier's list: if the ring holds the expert landed, lease its
+cell (`readyCells`' leasing as today); if in flight, join up to 400 µs and lease
+(v15's join, its order before the issue kept, C7's note stands); otherwise claim a
+free ring cell as a landing is claimed (`loading` published at the cell, the
+generation bumped, the ring lock then the cache lock) and add the read to the batch;
+**the fallback when no ring cell is free**: choose a victim slot of the pool by the
+policy, on the path, for this miss alone (the victim published `empty` after its
+cell's bump, the slot `loading`), and the cell is the victim's; write
+`agreed_cells[L][p]`. Submit the batch into the demand lane with v(L, t) as its
+token; a batch with no reads publishes v(L, t) at once (the empty-plan path today).
+Issue the next layer's prediction (unchanged). Then run the *previous* layer's plan,
+off the path: under L−1's cache lock, the hits' use counts and SLRU promotions (the
+policy sees the same access sequence one layer late), every leased cell swapped into
+the pool by index against a victim chosen now (a cell whose read has not landed yet
+swaps the same way; its generation travels with the cell and the completion
+publishes `resident` at it under the guard), the freed pool cells back to the ring,
+the overflow misses already in the pool needing nothing; the route and prefetch
+trace rows written here, unchanged in content. The last layer's plan runs at the
+token's end on every exit. The classifier's miss list is the authority; the fail-
+closed cross-check becomes the deferred plan's: every leased cell's expert must be in
+the layer's route, an `internalInconsistency` otherwise.
+
+*Why the fallback is a victim and not v18's host-built fixup.* v18's T2.2 fell back
+to today's fixup command when a layer's misses exceed its free cells. Under the fold
+a separate command cannot be inserted between two layers of one command, so a second
+GPU path would have to exist for T3.1 and be removed at T3.2. The victim on the path
+is one GPU path throughout: the kernel reads a cell and does not care whether the
+ring or the pool owns it, the read lands where the plan would have put it anyway,
+and the cost is today's plan for that miss alone, counted as `agreed_overflow` per
+token. The ring's free cells at a word are nine less the predictions landed or in
+flight (one issued per layer, consumed a layer later, so one or two held) less the
+cells leased to the previous layer's misses until its plan runs; a layer with more
+than about six misses overflows, which the miss profile makes rare (1.5 per miss
+layer on average). If the arms read `agreed_overflow` above 0.1 per token the remedy
+is the ring's size, top-k more cells (14 MB), as an arm.
+
+*What T3.1 removes from the path.* T2.0's chain: the plan, the pin and the submit
+(`cache_plan_ms`, `path_pin_ms`, `path_submit_ms`, at most 25 µs per miss layer), the
+fixup's build and its commit-to-kernel (`path_fixup_build_ms`, the 27 µs), one
+command per miss layer. Modelled at most 0.34 ms per token, about 0.2 (T2.0, C);
+under the drift. The decode plan stops pinning: it is the decode path's only evictor
+and runs after the layer's kernels are done (encoder order, then the next word), and
+the pin field stays for the other planners. The residency publish stays one release
+store per transition: the claim's `loading`, the completion's `resident`, the
+victim's `empty`; the swap writes nothing, as today.
+
+**Edge (b): the error surfacing per layer when a token is one command (T3.2).**
+
+Three failures reach a token, and each must name its layer and leave no GPU wait
+unsatisfied.
+
+*A failed read.* Unchanged on the GPU: the batch publishes status 2, the timeline
+advances, phase 1 returns and phase 2 writes the residual through, the command
+completes. On the host, the per-layer record inside the token (the tag, the value,
+the status word, the operation) is checked at the next word as
+`finishPendingRoutedCommand` checks it today, and the failure is wrapped with its
+layer: a new `ModelError.expertReadFailed(layer:errno:)`, since the type has no
+layer field today. The host then drains (below) and throws; the server's defer
+resets the runner and invalidates the cache as it does for any incomplete
+generation, so the pass's half-updated state is discarded whole, as today.
+
+*A GPU fault.* With one command per token Metal's error names the token. The
+command is made from a `MTLCommandBufferDescriptor` with
+`errorOptions = .encoderExecutionStatus` (macOS 11 and later): on a failure the
+error's `userInfo` carries one `MTLCommandBufferEncoderInfo` per encoder with its
+label and its state (completed, affected, or the faulting one), and every encoder
+is labelled with its layer and stage (`layer 12 attention`, `layer 12 fixup`,
+`boundary head`), so the drain reports the first encoder that did not complete and
+the affected ones after it. The header's caveat, verbatim: "enabling this error
+reporting option may increase CPU, GPU, and/or memory overhead on some platforms;
+testing for impact is suggested". The option is on from the first T3.2 build and its
+cost is read on the same-box A/B (the token's GPU time and the wall); if it costs
+above the noise it moves behind `SHRIKE_RUNNER_STATS`, not a knob of its own; the
+labels stay in any case, they are free and name the encoders in a GPU capture too.
+
+*A host throw mid-token.* A stale tag, the deferred plan's cross-check, a cursor
+mismatch: today they unwind the pass with the committed layer commands completing
+on their own. Under the fold the whole token's command is committed and its later
+layers wait on values only the host publishes, so an unwind without a drain hangs
+the GPU forever, the one outcome worse than an error. Hence **the fold's invariant:
+a committed token's command is always drained: every value it waits on is
+published, by the reads' completion, by the host at the word, or by the drain.**
+The drain is one routine on every abnormal exit of the token's loop: publish every
+remaining value of the token as failed (status 2, so the fixups skip; the other
+kernels run on what is resident, into scratch that is dead), issue no reads, claim
+no cells, run the pending plan as a drop (the leased cells back to the ring, the
+`loading` entries to `empty` through `abandonExpertCachePlan`'s path, which exists
+with no caller today), wait for the command, then throw with the layer. A read still
+in flight lands later and its landing is dropped by the reclaim under the generation
+guard; the reader needs no cancel (at most two batches of eight, a few milliseconds).
+The one-second fallbacks of the word wakes (`waitForRouterReadback`,
+`awaitBoundaryToken`) then wait on the token's command, up to a token; they gain a
+deadline (ten seconds) after which they throw `commandBufferFailed` naming the layer
+whose word never landed, so a wait the drain missed is a loud, fatal error in the
+server's log rather than a silent hang.
+
+*The status words.* Every routed layer now consumes a value, forty per token where
+about fourteen did (the all-hit layers reserved none), so the coordinator's cap of
+16.7 million words is 420 thousand tokens per process. T3.2 recycles the status
+words by token: a word is free once its token's command completed, so a ring of two
+tokens' worth (eighty) suffices, indexed by value.
+
+**Edge (a): the stop path (T3.3, the decision for the ruling).**
+
+The fold's original sentence is "the next token's command committed before this one
+completes". Two shapes satisfy the structure; they differ in whether a pass can run
+past the stop.
+
+*Shape A, encoded ahead, committed on the word (recommended).* Token t+1's command
+is encoded in full during token t, a layer at each of t's words, as layer L+1 is
+encoded at L's word today, and committed at t's boundary word after the stop check,
+which is today's `holdLayerZero` at the grain of the token. In flight: one committed
+command and one encoded. The stop check stays on time; nothing runs past the stop;
+no state is undone; the GDN buffers, the cursor, the traces and the counters are
+untouched. The cancel with two in flight is the discard of an uncommitted command:
+its forty reserved values published as succeeded (nothing waits on them), its tags
+retired, `discardBoundaryState` at the token's grain; the running command has
+already published all of its values by the time the loop can see a cancellation
+(the produce returns after the last word), and only its boundary encoders remain,
+which `finishPreviousBoundary` waits for as today. Max tokens, the stop token, the
+stop strings and the external stop all end at the boundary word as today; a
+disconnect ends at the next boundary, the same latency as today's. What Shape A
+leaves on the table: the boundary's one gap, 0.25 ms per token (M, v18 Task 4's
+rows: the word's 63 µs, the host's checks, the commit and the driver's start), 0.4 %
+of the token, unreadable by the arms (the drift is 1.7 %). The GPU does see the
+token boundary; the commit does precede the driver's completion mark of the running
+command (about 160 µs after its GPU end) but not its GPU end.
+
+*Shape B, committed ahead.* Token t+1's command is committed as soon as it is
+encoded, after t's last word and before t's sampler runs, so the GPU flows from t's
+embed into t+1's layer 0 with no gap. Then every stop token, stop string and
+external stop is seen one pass late (max tokens is not: the host knows at encode
+time that the pass after the last token is never wanted, and does not encode it),
+and the extra pass has by then embedded the stop token and started updating state.
+The snapshot the ruling names is a parity: the GDN state and conv tail of every
+linear layer double-buffered by token, the kernels taking `state_in` and `state_out`
+(the arithmetic unchanged, one pointer more; class 1, the golden proves it), prefill
+writing the parity the decode continues from, the snapshot and restore reading and
+writing the current parity; 61.4 MiB more (modelled), affordable beside the 8.45 GiB
+arena on the mini. The extra pass writes the other parity and the current one
+survives; the rewind is the parity pointer left where it was, the cursor back by
+one (`rewind(to:)` unlocked for this one case, whose reason the parity removes),
+`hidden` and the scratch dead after a stop, the sampler's nondeterministic counter
+one ahead (harmless), the extra pass's trace rows and counters suppressed by the
+drain. The cancel of the extra pass is edge (b)'s drain: all forty values published
+as failed at the boundary word, no reads, the wait. Unguarded, the drain costs the
+pass's GPU time without its io, about 40 to 45 ms once per answer (modelled: the
+token is 55 to 58 ms with 11 to 13 of io); guarded, a cancel word every heavy kernel
+reads at entry (the attention scan, the GDN delta step, the routed phases, the head
+GEMV: five families, the host's store visible within layer 0's traffic by v16's
+probe), about 3 ms. Against the 0.25 ms per token saved: the 300-token answer gains
+about 75 ms per answer less the drain (0.4 % of the answer unguarded, 0.5 % guarded);
+the turn chapter's 21-token follow-up loses 40 ms unguarded (2.9 % of 1.40 s) and
+gains 2 guarded. Neither is readable by the arms. Shape B's price is the parity
+buffers, the rewind, the guard in five kernel families, and a stop-path surface the
+golden cannot see (the golden checks the answer, not the state after the stop),
+which a new gate would have to cover: a two-turn continuation across a stop token
+byte-identical against the same turns without the early commit.
+
+*The recommendation: Shape A for T3.3.* The ruling asked for a snapshot or a cancel;
+Shape A needs neither, because it keeps v18 Task 4's finding at the grain of the
+token: the stop check on the word, the commit after it. The structural goal is met
+by it in full: one command per token, the host feeding reads and publishing values,
+the plan off the path, two commands in flight in the sense that the next is encoded
+before the current completes. The 0.25 ms Shape B buys is under the arms'
+resolution and is eaten on short turns by its own drain. Shape B is designed above
+and stays on record; if the ruling is for it, the parity and the guard are T3.3's
+build, and the continuation gate is added to the golden's profiles. An event-gated
+variant (t+1 committed early but its first encoder waiting on a value the host
+publishes after the stop check) was considered and is not proposed: the GPU idles at
+the wait instead of at the commit, and the signal's latency is not better than the
+commit's (v10's `io_fixup_wake_ms` measured about 157 µs from a host publish to the
+kernel's start), so it buys nothing and adds a hang path.
+
+**Edge (d): the cancel with two in flight, by trigger (T3.3).** Under Shape A: a stop
+of any kind at the boundary word, the held command discarded (above), the last
+layer's plan run, the ring and the reader untouched (nothing was claimed or issued
+for the held token); a disconnect, the same at the next boundary; a failed read or a
+host throw mid-token, edge (b)'s drain of the running command, then the discard of
+the held one. The ring's reads in flight at any of these: the current layer's demand
+batch completes into leased cells and the drain's drop returns them; the speculative
+read in flight lands and is reclaimed; the generation guard keeps a late completion
+from publishing over a reused cell. Under Shape B, add the extra pass's drain and
+the rewind. No trigger needs a cancel inside the reader, and none needs a cancel of
+a running command beyond the drain, which Metal does not offer in any case.
+
+**Class 1.** Which experts compute, in what order and with what arithmetic is
+unchanged: the fixup's phase 1 computes the misses' rows into `moeActs` at their
+positions as the subset kernel does, phase 2 reduces the eight in the same order
+with the router's weights and the same epilogue; the pool-addressed variant reaches
+the same bytes (`expert_pool + cell × stride + offsets`) that the argument buffer's
+pointers reach. The parity buffers of Shape B change pointers, not arithmetic. The
+golden gates every commit on both boxes; misses per token may drift because the
+plan runs a layer later and the leased cells are held a layer longer, and the arms
+read the drift.
+
+**The instruments the fold retires and what replaces them.** The kernel stats price
+per command (`kernelGPUTimings` from each command's GPU start and end), so with one
+command per token the per-layer rows (`layer_linear`, `layer_kv`, the transitions,
+the fixup roles) collapse to one row per token; S0.6 already found the held command
+unsplittable. The per-layer clock becomes the host's: every word's arrival is
+recorded into a per-token array and a layer's wall is the gap between consecutive
+words (M at the word's resolution, 42 to 45 µs after the classifier by
+`MidCommandVisibilityTests`), which `tools/decode-rows.py` reads as the layer rows;
+the io rows and the `path_*` rows are host-side and survive. The per-encoder GPU
+clock (counter sampling at stage boundaries) is B3 and B4's chapter's instrument,
+not this one's. Two counters the Method asks for and the runner line lacks are
+added at T3.1: `agreed_overflow` per token and the ring's `cells_leased_peak`; reads
+per token the rows tool derives from `expert_read_mib`.
+
+**The build order, v18's T2.1 to T2.5 as written with two amendments.** T2.1 the
+read is this note. T2.2 the build as above, amended in the fixup's addressing (the
+speculative kernels' pool-addressed shape with the indirect grids, not the argument
+buffer) and in the fallback (the victim on the path, not the host-built fixup).
+T2.3 the tests: the contract on the toy model with a forced miss set, the encoded
+fixup against the host-built one bit for bit at zero, one and k misses; the overflow
+taking the victim path with the same output and the counter; the deferred plan's
+ordering under the cache lock and the one-store publish (the landing tests' shape);
+the lock order; the timeline's pre-reserved values published in order, an all-hit
+layer's at the word, a discarded token's at the discard. T2.4 the gates and the
+golden. T2.5 the deploy and the arms, the host's path fields off the path, misses
+per token recorded for the drift. Then T3.2 with the drain invariant's tests (a
+throw injected at layer k of a committed token completes the command, names layer
+k, hangs nothing, and the next request runs; a read failure injected names its
+layer) and the encoders' labels; T3.3 the ruled shape and the cancel's tests (the
+stop token, a stop string, max tokens, a disconnect, each leaving the timeline
+published, the ring empty of leases and the runner reusable).
+
+**The pre-registration for the arms (T, two production lifetimes per shape on four
+shapes against Task 1's arms at `~/.claude/handoffs/archive/shrike-v20-t1/arms/`,
+interleaved).** After T3.1: the token flat within the drift (at most 0.34 ms
+modelled, C), misses per token within 0.3 of Task 1's, `agreed_overflow` under 0.1
+per token, `cache_plan_ms` and `path_fixup_build_ms` off the path and their time
+reappearing under the deferred plan's row. After T3.3 under Shape A: the token flat
+within the drift (the forty command boundaries, 0.2 to 0.4 ms, C), the boundary gap
+unchanged at 0.25, the answers identical in length. Under Shape B: the boundary gap
+gone from the per-token rows and the drain once per answer in the answer's total.
+
+**Risks.** A pre-reserved value never published hangs every later wait: the drain
+invariant and the deadline. The cells: the leases held a layer longer shrink the
+ring's free cells; `agreed_overflow` and the ring's size as the remedy. The error
+option's cost: measured on the first build, behind the stats flag if it shows. The
+per-layer GPU rows retire: the ledger's reading changes to the word clock. The
+encode-ahead shares single scratch buffers across layers, safe by encoder order
+within the command; the host-written `agreed_cells` are per layer so the host never
+writes a word the GPU also writes.
+
+**What the note asks Davor to rule on.** (1) The stop path: Shape A recommended,
+Shape B designed. (2) The overflow fallback as the victim on the path, one GPU path,
+in place of v18's host-built fixup fallback. (3) The per-layer GPU rows retiring
+with the fold and the word clock as the per-layer instrument. (4) The per-encoder
+error option on by default and measured on the first T3.2 build. (5) The order T3.1,
+T3.2, T3.3, the golden on every commit, the arms after T3.1 and T3.3.
+
 ### Task 4, held: the attention row's fixed part (B3, B4)
 
 Only on S0.6's number and Davor's ruling.
