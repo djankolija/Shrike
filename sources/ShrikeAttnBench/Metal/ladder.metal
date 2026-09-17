@@ -1,9 +1,10 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// attention_decode_partial_shared hardcoded to the served shape, one switch per
-// function constant; at the defaults it must time within 10 % of the production
-// pipeline or the ladder is void (docs/v19-scan-rewrite.md, S0.3).
+// attention_decode_partial_shared as shipped at the v18 close, hardcoded to the
+// served shape, one switch per function constant; sloops+o1 is the production
+// form since v19 Task 2 and must time within 10 % of the production pipeline or
+// the ladder is void (docs/v19-scan-rewrite.md, S0.3).
 constant bool L_Q_REGS     [[function_constant(0)]];
 constant uint L_POS_BLOCK  [[function_constant(1)]];
 constant bool L_DOUBLE_BUF [[function_constant(2)]];

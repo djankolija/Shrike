@@ -435,15 +435,68 @@ and v21, and closes the golden's coverage gap the v18 review found on the way.
   at every position except exact ties, a calibration of the band on a known
   class-1 pair.
 
-### Task 2: the class-1 repair (only if S0.5 rules it)
+### Task 2: the loop form (class 1; Davor's ruling 2026-09-17: first)
 
-Approach B on the shipped kernel: Q in registers, the staging double-buffered, the
-loads widened, in whichever order S0.3 priced them. Bitwise: the existing bitwise
-arms extended to compare the repaired kernel against the shipped one at every shape
-class, the golden identical on both boxes, the arms on four shapes. Pre-registered
-row: `attn_layer_kv` at 7k, from 21.3 by the share S0.3 measured. A Task 3 that
-follows replaces this kernel; the work is not wasted only if the ruling was that
-the repair's floor stands on its own.
+What step zero found, in the production kernel: the per-lane loops of
+`attention_decode_partial_shared` walk `slot = 0 ..< 8` with `i = lane + 32 slot`
+and a guard on the head dimension (folded when the shape is specialized), and the
+V accumulate is written `fma(o, alpha, p * v)`, the multiply the shipped compiler
+fused, so the partials are the shipped kernel's bit for bit (S0.3c). Nothing else
+moves: the staging, the barriers, the block, the Q copy, the combine.
+
+**Pre-registered (2026-09-17, before the kernel changed).** The bench's 2.70× on the
+kernel transferred to the runner's scan (T): the slope 2.23 to about 0.83 ms per
+1,000, the row's context-independent part unchanged.
+
+| row (ms per token) | S0.1 (M) | expected | grade |
+| --- | ---: | ---: | --- |
+| `layer_kv`, the 300 | 8.36 to 8.41 | 8.0 | T, under the noise |
+| `layer_kv`, the 1k | 10.25 | 8.8 | T |
+| `layer_kv`, the card | 12.34 | 9.3 | T |
+| `layer_kv`, the 7k | 24.40 | 14.4 | T |
+| the slope, ms per 1,000 | 2.23 | 0.7 to 1.0 | T |
+| the 7k token | 72.7 to 73.2 | 62 to 64 | T |
+| the card's token | 61.7 to 62.6 | 58.5 to 60 | T |
+| the 1k's token | 58.9 to 59.0 | 57 to 58 | T |
+
+The misses, the miss window, `layer_linear`, the fixup and the head are expected
+flat. The answers are expected identical to S0.1's (class 1): the golden on both
+boxes is the gate, the bench's hash the kernel-level arm, the test suite's
+specialized-against-unspecialized bitwise arms the check that the guard folds the
+same way on both paths.
+
+**The record (2026-09-17).** The kernel as described; the four gates (1,250 tests in
+173 suites in 203 s, zero warnings, lint and links clean); the golden identical on
+both profiles on both boxes, the mini's with the server down before the arms; the
+bench's production arm on the M4 Pro 246 µs at 8k against about 650 before, within
+10 % of the bench's bit-identical form plus the combine. Deployed to the mini
+(`ca2d3bab87469ef2`), two production lifetimes per shape against S0.1's, the
+scripts and arms at `~/.claude/handoffs/archive/shrike-v19-t2/`:
+
+| shape | `layer_kv` before | after | the token before | after | tok/s before | after |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| the 300 | 8.36 to 8.41 | 7.67 to 7.68 | 58.3 to 58.8 | 57.7 to 57.9 | 17.00 to 17.15 | 17.27 to 17.32 |
+| the 1k | 10.25 | 8.26 | 58.9 to 59.0 | 57.2 to 58.2 | 16.95 to 16.98 | 17.17 to 17.47 |
+| the card | 12.34 | 8.96 to 9.02 | 61.7 to 62.6 | 59.0 to 59.4 | 15.98 to 16.20 | 16.85 to 16.95 |
+| the 7k | 24.40 | 12.82 to 12.84 | 72.7 to 73.2 | 61.6 to 61.8 | 13.66 to 13.76 | 16.19 to 16.24 |
+
+The slope **2.23 to 0.72 ms per 1,000 (M)**, 3.1× against the 2.7× transferred;
+every pre-registered row moved past its expectation (the 7k row 12.8 against 14.4,
+the 7k token 61.7 against 62 to 64, the card 9.0 against 9.3, the 1k 8.3 against
+8.8); `layer_linear`, the fixup, the head, the misses and the miss window flat
+within their spreads; the eight answers character-identical to S0.1's. The 300
+moved 0.7 ms where its scan was 0.6: the loop form pays on the kernel's fixed cost
+too, not only on its slope. On the 7k, the token is 18 % faster and the attention
+layers' command has gone from a third of the token to a fifth. Kept: class 1, bit
+for bit, and the largest single move on the 7k of any task since the rig was
+built.
+
+**What remains of the row after Task 2.** At 7k the scan is about 5.2 ms of the
+12.8 (the slope times the context), against the reference's 1.4 to 2.1 at its rate:
+the rewrite's remaining prize is about 3 to 4 ms per token at 7k (T), about 5 % of
+the token, above the noise. The context-independent 7.7 (the 300's row) is the
+projections, the quantize, the combine, the walls and the layer's speculative
+routed work, none of it the scan's.
 
 ### Task 3: the streaming scan (class 2)
 

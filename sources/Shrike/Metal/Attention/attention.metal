@@ -596,22 +596,28 @@ void attention_decode_partial_shared(
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         if (liveHead) {
+            // v19 Task 2: the static trip count is 2.7× the lane-strided loop
+            // with a slot counter (the array went to memory), and the explicit
+            // fma is the multiply the shipped compiler fused: keep both for the
+            // shipped bits.
             for (uint j = 0; j < blockCount; ++j) {
                 threadgroup const float* k_row = k_smem + j * HD;
                 threadgroup const float* v_row = v_smem + j * HD;
                 float partial = 0.0f;
-                for (uint i = simd_lane_id; i < HD; i += 32u) {
-                    partial = fma(q_mine[i], k_row[i], partial);
+                for (uint slot = 0; slot < kPerLane; ++slot) {
+                    const uint i = simd_lane_id + 32u * slot;
+                    if (i < HD) { partial = fma(q_mine[i], k_row[i], partial); }
                 }
                 const float s = simd_sum(partial) * attn_fc_scale(scale);
                 const float m_new = max(m_run, s);
                 const float alpha = attn_softmax_exp(m_run - m_new);
                 const float p_exp = attn_softmax_exp(s     - m_new);
                 d_run = d_run * alpha + p_exp;
-                uint slot = 0;
-                for (uint i = simd_lane_id; i < HD; i += 32u) {
-                    o_local[slot] = o_local[slot] * alpha + p_exp * v_row[i];
-                    slot += 1;
+                for (uint slot = 0; slot < kPerLane; ++slot) {
+                    const uint i = simd_lane_id + 32u * slot;
+                    if (i < HD) {
+                        o_local[slot] = fma(o_local[slot], alpha, p_exp * v_row[i]);
+                    }
                 }
                 m_run = m_new;
             }
@@ -624,10 +630,9 @@ void attention_decode_partial_shared(
         const uint base = q_head * NC + chunk;
         if (simd_lane_id == 0) { m_out[base] = m_run; d_out[base] = d_run; }
         device float* o_row = o_out + base * HD;
-        uint slot = 0;
-        for (uint i = simd_lane_id; i < HD; i += 32u) {
-            o_row[i] = o_local[slot];
-            slot += 1;
+        for (uint slot = 0; slot < kPerLane; ++slot) {
+            const uint i = simd_lane_id + 32u * slot;
+            if (i < HD) { o_row[i] = o_local[slot]; }
         }
     }
 }

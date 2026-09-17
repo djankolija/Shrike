@@ -105,22 +105,29 @@ no-load twin; the close.
       the design document's Task 1 record; the four gates; the golden identical on
       all four profiles on both boxes; the commit.
 
-## Task 2: the class-1 repair (only if S0.5 rules it)
+## Task 2: the loop form (class 1; ruled first by Davor, 2026-09-17)
 
-- [ ] **T2.1 The pre-registration.** The rows from S0.3's arms 2 and 4 (Q in
-      registers, double-buffered staging) and the load width, the share of the 7k
-      row each is expected to move, graded, in the design document before the
-      kernel changes.
-- [ ] **T2.2 The kernel.** `attention_decode_partial_shared` (`attention.metal:509`)
-      with Q in per-lane registers, the staging double-buffered and the loads
-      widened, in the order S0.3 priced; the chain, the `simd_sum` and the softmax
-      untouched so the output is bitwise the shipped kernel's.
-- [ ] **T2.3 The arm.** The bitwise arms of `AttentionTests` (`:279-357`, the V4.1
-      pattern) extended: repaired against shipped at every shape class, raw output
-      bytes equal.
-- [ ] **T2.4 The gates, the golden, the arms.** The four gates; the golden identical
-      on all four profiles on both boxes; deploy; the arms on four shapes against
-      S0.1's ledger; the record in the design document; the commit.
+- [x] **T2.1 The pre-registration.** DONE 2026-09-17: the expected rows, graded T
+      from the bench's 2.70×, in the design document's Task 2 section before the
+      kernel changed.
+- [x] **T2.2 The kernel.** DONE 2026-09-17: `attention_decode_partial_shared`
+      (`attention.metal:509`), the three per-lane loops with a static trip count
+      over `kPerLane` and a guard on the head dimension, the V accumulate as
+      `fma(o, alpha, p * v)`; nothing else moved.
+- [x] **T2.3 The arm.** DONE 2026-09-17 as three pieces rather than a new test: the
+      bench's ladder (the v18-close kernel's copy against the production form,
+      partials hashed identical at 1k and 8k on the mini, S0.3c); the existing
+      bitwise arms of `AttentionTests` (specialized against unspecialized, so the
+      guard folds the same on both paths) and the CPU-reference arms, 54 tests in
+      10 suites green; the golden identical on both local profiles. The
+      production pipeline in the bench: 246 µs at 8k on the M4 Pro against about
+      650 before, within 10 % of the bench's form plus the combine.
+- [x] **T2.4 The gates, the golden, the arms.** DONE 2026-09-17: the four gates
+      (1,250 tests, 203 s); the golden identical on both boxes, the mini's with the
+      server down; deployed (`ca2d3bab87469ef2`), two lifetimes per shape: the slope
+      2.23 to 0.72 ms per 1,000, the 7k token 73 to 61.7 ms (13.7 to 16.2 tok/s), the
+      card 62 to 59, the eight answers character-identical to S0.1's; the record in
+      the design document's Task 2 section; production on the mini at this build.
 
 ## Task 3: the streaming scan (class 2)
 
