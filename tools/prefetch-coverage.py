@@ -114,13 +114,41 @@ def render_table(headers, rows):
     return "\n".join(lines)
 
 
+RANKING_MISMATCHES = {"rows": 0, "mismatched": 0}
+
+
 def load_jsonl(path):
+    """The capture's plan rows. A v20 ranking row ({position, layer,
+    probe_ranking}, the probe's order past its top-8, written after the
+    position's plan rows) is folded into the latest plan row at its (position,
+    layer) as `probe_ranking`; the count whose first eight differ from that
+    row's own top-8 is kept in RANKING_MISMATCHES (a stale slot)."""
     rows = []
+    latest = {}
     with open(path) as f:
         for raw in f:
             raw = raw.strip()
-            if raw:
-                rows.append(json.loads(raw))
+            if not raw:
+                continue
+            row = json.loads(raw)
+            if "probe_ranking" in row and "experts" not in row:
+                plan = latest.get((row["position"], row["layer"]))
+                if plan is None:
+                    continue
+                ranking = row["probe_ranking"]
+                top = plan.get("next_layer_prediction") or []
+                RANKING_MISMATCHES["rows"] += 1
+                if ranking[:len(top)] != top:
+                    RANKING_MISMATCHES["mismatched"] += 1
+                    continue
+                plan["probe_ranking"] = ranking
+                continue
+            rows.append(row)
+            latest[(row["position"], row["layer"])] = row
+    if RANKING_MISMATCHES["rows"]:
+        print(f"probe rankings: {RANKING_MISMATCHES['rows']} rows, "
+              f"{RANKING_MISMATCHES['mismatched']} whose top-8 differ from the plan row's "
+              f"(dropped)")
     return rows
 
 
@@ -148,7 +176,7 @@ def build_joins(rows, request_ids, by_rp):
     joins = []
     missing_target = 0
     for row, rid in zip(rows, request_ids):
-        prediction = row.get("next_layer_prediction") or []
+        prediction = row.get("probe_ranking") or row.get("next_layer_prediction") or []
         if not prediction:
             continue
         target_layer = row["layer"] + row["probe_distance"]
@@ -638,10 +666,38 @@ def _self_test_history(failures):
           predictors["same-position-prev-layer"]["coverage"], 1.0)
 
 
+def _self_test_rankings(failures):
+    """A ranking row folds into its plan row when its first entries are the
+    row's own top-k; one whose prefix differs is counted and dropped."""
+    rows = [
+        {"position": 5, "layer": 0, "probe_distance": 1, "experts": [1, 2], "misses": [],
+         "resident": [1, 2], "next_layer_prediction": [3, 4]},
+        {"position": 5, "layer": 1, "probe_distance": 1, "experts": [3, 4], "misses": [],
+         "resident": [3, 4], "next_layer_prediction": [5, 6]},
+        {"position": 5, "layer": 0, "probe_ranking": [3, 4, 7, 8]},
+        {"position": 5, "layer": 1, "probe_ranking": [6, 5, 9, 1]},
+    ]
+    RANKING_MISMATCHES["rows"] = 0
+    RANKING_MISMATCHES["mismatched"] = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "capture.jsonl")
+        with open(path, "w") as f:
+            for row in rows:
+                f.write(json.dumps(row) + "\n")
+        loaded = load_jsonl(path)
+    _check(failures, "rankings: plan rows kept", len(loaded), 2)
+    _check(failures, "rankings: matching prefix folded", loaded[0].get("probe_ranking"), [3, 4, 7, 8])
+    _check(failures, "rankings: mismatched prefix dropped", loaded[1].get("probe_ranking"), None)
+    _check(failures, "rankings: counts", dict(RANKING_MISMATCHES), {"rows": 2, "mismatched": 1})
+    RANKING_MISMATCHES["rows"] = 0
+    RANKING_MISMATCHES["mismatched"] = 0
+
+
 def self_test():
     failures = []
     _self_test_join(failures)
     _self_test_history(failures)
+    _self_test_rankings(failures)
     if failures:
         print(f"SELF-TEST FAILED ({len(failures)} of many checks):")
         for f in failures:

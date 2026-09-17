@@ -1259,6 +1259,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// residency before planning; enabling it cannot submit I/O or alter cache
     /// decisions. Kept separate from SHRIKE_ROUTE_TRACE for compatibility.
     private let prefetchTraceFD: Int32
+    private var pendingProbeDumpPosition: Int?
 
     static let prefetchJoinNanos: UInt64 = 400_000
 
@@ -1388,9 +1389,97 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Marks a request's start in `SHRIKE_ROUTE_TRACE`; called only from
     /// `runRawCompletion`, never from the settle rewrite's `prefillChunked` call.
     func recordRouteTraceRequestStart(cachedTokens: Int, promptTokens: Int) {
+        dumpPendingProbeRankings()
         guard routeTraceFD >= 0 else { return }
         writeRouteTraceLine(Self.formatRouteTraceLine(cachedTokens: cachedTokens,
                                                        promptTokens: promptTokens))
+    }
+
+    /// The loop reports a decode position's input id, since on the boundary
+    /// path the runner never sees it on the host.
+    func recordRouteTraceToken(position: Int, id: Int32) {
+        guard routeTraceFD >= 0 else { return }
+        writeRouteTraceLine(Self.formatRouteTraceTokenLine(position: position, id: id))
+    }
+
+    private func recordRouteTracePrefillRows(layer: Int, startPosition: Int,
+                                             rowCount: Int, ids: [UInt32]) {
+        guard routeTraceFD >= 0 else { return }
+        var lines = ""
+        for row in 0..<rowCount {
+            let start = row * cfg.topKExperts
+            let experts = ids[start..<start + cfg.topKExperts].map { Int($0) }
+            lines += Self.formatRouteTracePrefillRowLine(position: startPosition + row,
+                                                         layer: layer, experts: experts)
+        }
+        writeRouteTraceLine(lines)
+    }
+
+    static func formatRouteTraceTokenLine(position: Int, id: Int32) -> String {
+        "t \(position) \(id)\n"
+    }
+
+    static func formatRouteTracePrefillRowLine(position: Int, layer: Int, experts: [Int]) -> String {
+        var line = "q \(position) \(layer)"
+        for expert in experts { line += " \(expert)" }
+        line += "\n"
+        return line
+    }
+
+    /// The select kernel's order: the logit, or its sigmoid, plus the bias,
+    /// descending, the lower index first on a tie.
+    static func probeRanking(logits: UnsafePointer<Float>, bias: UnsafePointer<UInt16>?,
+                             sigmoid: Bool, count: Int, width: Int) -> [Int] {
+        var scored: [(score: Float, index: Int)] = []
+        scored.reserveCapacity(count)
+        for expert in 0..<count {
+            let raw = logits[expert]
+            let base = sigmoid ? 1 / (1 + exp(-raw)) : raw
+            let shift = bias.map { Float(bitPattern: UInt32($0[expert]) << 16) } ?? 0
+            scored.append((base + shift, expert))
+        }
+        scored.sort { $0.score > $1.score || ($0.score == $1.score && $0.index < $1.index) }
+        return scored.prefix(width).map(\.index)
+    }
+
+    static let probeRankingWidth = 32
+
+    /// Runs at the next pass's entry or the next request's start, after the
+    /// pass's commands have completed, so the slots are coherent.
+    private func dumpPendingProbeRankings() {
+        guard prefetchTraceFD >= 0, let position = pendingProbeDumpPosition else { return }
+        pendingProbeDumpPosition = nil
+        let stride = MoE.probeLogitsStride
+        let base = moe.probeLogitsBuffer.contents().bindMemory(
+            to: Float.self, capacity: stride * MoE.probeLogitsSlots)
+        var lines = ""
+        for layer in 0..<(cfg.numLayers - 1) {
+            let biasEntry = routerLogitBias[layer + 1]
+            var biasPointer: UnsafePointer<UInt16>?
+            if biasEntry.buffer.storageMode == .shared {
+                biasPointer = UnsafePointer(biasEntry.buffer.contents()
+                    .advanced(by: biasEntry.offset)
+                    .bindMemory(to: UInt16.self, capacity: cfg.numExperts))
+            }
+            let slot = layer + (position & 1) * cfg.numLayers
+            let ranking = Self.probeRanking(logits: base.advanced(by: slot * stride),
+                                            bias: biasPointer, sigmoid: moe.selectsOnSigmoid,
+                                            count: cfg.numExperts, width: Self.probeRankingWidth)
+            lines += "{\"position\":\(position),\"layer\":\(layer),\"probe_ranking\":\(ranking)}\n"
+        }
+        writeTraceLine(lines, to: prefetchTraceFD)
+    }
+
+    private func writeTraceLine(_ line: String, to fd: Int32) {
+        let bytes = Array(line.utf8)
+        var written = 0
+        while written < bytes.count {
+            let count = bytes.withUnsafeBytes { raw -> Int in
+                write(fd, raw.baseAddress!.advanced(by: written), bytes.count - written)
+            }
+            if count <= 0 { return }
+            written += count
+        }
     }
 
     private func writeRouteTraceLine(_ line: String) {
@@ -2039,7 +2128,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             perExpertScale: perExpertScale,
             residency: (table: residencyResources.table, readbackTag: readbackTag),
             speculative: specDispatchArguments,
-            d: D, eps: eps)
+            d: D, eps: eps, probeBank: position & 1)
         layerEncoder?.endEncoding()
         let overlapCompletionClock = runnerStatsEnabled ? CommandCompletionClock() : nil
         var specCB: MTLCommandBuffer?
@@ -2079,6 +2168,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // prompts that end exactly on a chunk boundary reach here with the
         // last model still resident. No-op when ANE prefill is off or empty.
         anePrefill?.releaseModels()
+        dumpPendingProbeRankings()
         try kv?.reserve(tokens: position + 1)
         guard position < maxContext else {
             throw PrefillError.prefillCursorMismatch(
@@ -2140,6 +2230,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         try drainDeferredGPURecords(waitIfNeeded: true)
         try finishPreviousBoundary()
 
+        if prefetchTraceFD >= 0 { pendingProbeDumpPosition = position }
         if let boundaryWord, let sample {
             try emitBoundary(into: logits, d: D, rmsEps: eps, outScale: embedOutScale,
                              tokenWord: boundaryWord, sample: sample)
@@ -2652,7 +2743,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         residency: (table: any MTLBuffer, readbackTag: UInt32),
         speculative: MoE.SpeculativeDispatchArguments,
         d D: UInt32,
-        eps: Float
+        eps: Float,
+        probeBank: Int = 0
     ) throws {
         let ownsEncoder = layerEncoder == nil
         guard let tailEncoder = layerEncoder ?? tailCB.makeComputeCommandEncoder() else {
@@ -2686,7 +2778,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     outIndices: prefetchPredictionIndices, outWeights: prefetchPredictionWeights),
                 hidden: routedX,
                 perExpertScale: perExpertScale.buffer, perExpertScaleOffset: perExpertScale.offset,
-                numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
+                numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts),
+                probeSlot: L + probeBank * cfg.numLayers)
         } else {
             moe.encodeRouter(encoder: tailEncoder,
                 weights: routerW.buffer, weightsOffset: Int(routerW.offset),
@@ -4556,6 +4649,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                     : "prefill_attn_router", cb)
 
                 let routing = try buildPrefillRoutes(layer: L, tokenCount: t, scratch: scratch)
+                recordRouteTracePrefillRows(layer: L, startPosition: startPosition, rowCount: t,
+                                            ids: routeIDScratch)
                 let routes = routing.routes
                 let schedulerConfig = routing.schedulerConfig
 

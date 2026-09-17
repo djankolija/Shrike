@@ -62,6 +62,13 @@ final class MoE {
     private let routerSelectK8PairPSO: MTLComputePipelineState
     private let routerSelectK8PairSpecializedPSO: MTLComputePipelineState
     private let routerLogitsPair: MTLBuffer
+    /// Two banks of one slot per layer, by the position's parity, so a token's
+    /// probe scores survive the next position's held layer zero until the wide
+    /// capture reads them.
+    static let probeLogitsSlots = 128
+    static let probeLogitsStride = 256
+    var probeLogitsBuffer: MTLBuffer { routerLogitsPair }
+    var selectsOnSigmoid: Bool { sigmoidRouterScores }
     private let residencyClassifySpecPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
     private let phase1U16PSO: MTLComputePipelineState
@@ -191,7 +198,7 @@ final class MoE {
         }
         self.routerLogits = logits
         guard let pairLogits = context.device.makeBuffer(
-            length: 256 * MemoryLayout<Float>.stride,
+            length: Self.probeLogitsSlots * Self.probeLogitsStride * MemoryLayout<Float>.stride,
             options: .storageModeShared) else {
             throw MetalError.noDevice
         }
@@ -359,13 +366,14 @@ final class MoE {
                           first: RouterOperands, second: RouterOperands,
                           hidden: MTLBuffer,
                           perExpertScale: MTLBuffer, perExpertScaleOffset: Int = 0,
-                          numExperts: UInt32, d: UInt32, topK: UInt32) throws {
+                          numExperts: UInt32, d: UInt32, topK: UInt32,
+                          probeSlot: Int = 0) throws {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
         encodeRouterPair(encoder: encoder, first: first, second: second, hidden: hidden,
                          perExpertScale: perExpertScale, perExpertScaleOffset: perExpertScaleOffset,
-                         numExperts: numExperts, d: d, topK: topK)
+                         numExperts: numExperts, d: d, topK: topK, probeSlot: probeSlot)
         encoder.endEncoding()
     }
 
@@ -374,9 +382,12 @@ final class MoE {
                           first: RouterOperands, second: RouterOperands,
                           hidden: MTLBuffer,
                           perExpertScale: MTLBuffer, perExpertScaleOffset: Int = 0,
-                          numExperts: UInt32, d: UInt32, topK: UInt32) {
+                          numExperts: UInt32, d: UInt32, topK: UInt32,
+                          probeSlot: Int = 0) {
         precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
         precondition(numExperts <= 256)
+        precondition((0..<Self.probeLogitsSlots).contains(probeSlot))
+        let probeOffset = probeSlot * Self.probeLogitsStride * MemoryLayout<Float>.stride
         precondition((1...UInt32(Self.maxStreamedExperts)).contains(topK))
         precondition(topK <= numExperts)
         for operands in [first, second] {
@@ -404,7 +415,7 @@ final class MoE {
         encoder.setBuffer(second.scales, offset: second.scalesOffset, index: 9)
         encoder.setBuffer(second.biases, offset: second.biasesOffset, index: 10)
         encoder.setBuffer(second.effectiveScale, offset: second.effectiveScaleOffset, index: 11)
-        encoder.setBuffer(routerLogitsPair, offset: 0, index: 12)
+        encoder.setBuffer(routerLogitsPair, offset: probeOffset, index: 12)
         encoder.dispatchThreadgroups(
             MTLSize(width: (Int(numExperts) + 3) / 4, height: 2, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
@@ -422,7 +433,7 @@ final class MoE {
             var scaling = routedScalingFactor
             encoder.setBytes(&scaling, length: MemoryLayout<Float>.stride, index: 7)
         }
-        encoder.setBuffer(routerLogitsPair, offset: 0, index: 8)
+        encoder.setBuffer(routerLogitsPair, offset: probeOffset, index: 8)
         encoder.setBuffer(second.outIndices, offset: 0, index: 9)
         encoder.setBuffer(second.outWeights, offset: 0, index: 10)
         encoder.setBuffer(second.logitBias, offset: second.logitBiasOffset, index: 11)

@@ -357,6 +357,7 @@ private func runDecodeLoop(producer: any LogitProducer,
         }
 
         history.append(tokenID)
+        fusedRunner?.recordRouteTraceToken(position: position, id: tokenID)
         let tProduceStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         if useBoundary, let boundaryProducer {
             let samplePosition = generated
