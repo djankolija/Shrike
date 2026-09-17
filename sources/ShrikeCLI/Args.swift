@@ -27,6 +27,7 @@ public struct Args: Equatable, Sendable {
     public var forceTokensPath: String?
     public var dumpLogitsPath: String?
     public var logitsHead: Bool
+    public var tokenizePath: String?
 
     public init(model: String,
                 prompt: String? = nil,
@@ -48,11 +49,13 @@ public struct Args: Equatable, Sendable {
                 ropeScalingMode: RuntimeRoPEScalingMode = .none,
                 forceTokensPath: String? = nil,
                 dumpLogitsPath: String? = nil,
-                logitsHead: Bool = false) {
+                logitsHead: Bool = false,
+                tokenizePath: String? = nil) {
         self.model = model
         self.forceTokensPath = forceTokensPath
         self.dumpLogitsPath = dumpLogitsPath
         self.logitsHead = logitsHead
+        self.tokenizePath = tokenizePath
         self.prompt = prompt
         self.messagesFile = messagesFile
         self.maxNew = maxNew
@@ -143,6 +146,9 @@ extension Args {
                                 class-2 gate's instrument.
       --dump-logits <path>      Write every position's fp16 logits as raw rows
                                 to <path> and a JSON sidecar to <path>.json.
+      --tokenize <path>         Render the prompt exactly as a run would, write
+                                its ids and their pieces as JSON to <path>, and
+                                exit without loading the model.
       --help                    Show this message.
     """
 
@@ -178,6 +184,7 @@ extension Args {
         var forceTokensPath: String?
         var dumpLogitsPath: String?
         var logitsHead = false
+        var tokenizePath: String?
 
         mutating func applyFlags(_ argv: [String]) throws {
             var index = 0
@@ -269,6 +276,8 @@ extension Args {
                 case "--logits-head":
                     logitsHead = true
                     index += 1
+                case "--tokenize":
+                    tokenizePath = try takeValue(argv, &index, flag: flag)
                 default:
                     throw ArgsError.unknownFlag(flag)
                 }
@@ -318,7 +327,8 @@ extension Args {
                         ropeScalingMode: ropeScalingMode,
                         forceTokensPath: forceTokensPath,
                         dumpLogitsPath: dumpLogitsPath,
-                        logitsHead: logitsHead)
+                        logitsHead: logitsHead,
+                        tokenizePath: tokenizePath)
         }
     }
 

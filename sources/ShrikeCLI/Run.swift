@@ -87,6 +87,10 @@ public func run(args: Args,
         case .exit(let result):
             return result
         }
+        if let path = args.tokenizePath {
+            try writeTokenization(promptIds, tokenizer: tokenizer, to: path)
+            return RunResult(exitCode: 0)
+        }
         let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
         var config = GenerationConfig(
             maxNewTokens: effectiveMaxNew,
@@ -288,6 +292,13 @@ private func writeFooter(stats: RawDecodeResult, stderr: FileHandle) {
         : 0
     let footer = "\n[stop=\(String(describing: stats.reason)) prefill=\(stats.prefillTokens)tok/\(String(format: "%.2f", stats.prefillSeconds))s new=\(stats.newTokens)tok decode=\(String(format: "%.2f", stats.decodeSeconds))s tok/s=\(String(format: "%.3f", tokensPerSecond))]\n"
     stderr.write(Data(footer.utf8))
+}
+
+private func writeTokenization(_ ids: [Int32], tokenizer: GFTokenizer, to path: String) throws {
+    let pieces = ids.map { tokenizer.decode([$0], skipSpecialTokens: false) }
+    let body: [String: Any] = ["ids": ids.map { Int($0) }, "pieces": pieces]
+    let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+    try data.write(to: URL(fileURLWithPath: path))
 }
 
 private func errored(_ stderr: FileHandle, _ message: String, _ code: Int32) -> RunResult {

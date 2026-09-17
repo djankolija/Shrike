@@ -21,22 +21,31 @@ Task 3 last, its design note before its build; Task 4 only by ruling; the close.
 
 ## Step zero: the board priced on the current tree
 
-- [ ] **S0.1 The replay's table mode.** `tools/expert-pool-replay.py`: `--table-fills
-      TOKENS.json`, `--table-layers`, `--table-width`, `--table-source
-      last|last2|last3|freq`, `--union-previous`, `--draft prompt-lookup:N`; fills
-      through the `ring` mode with a per-layer cell budget; reads per token and peak
-      cells held per layer reported beside fills, useful and wasted; the prefill's
-      per-token line kind tolerated. A `--tokenize` path in `ShrikeCLI` for the
-      prompt's ids (the tokenizer only, no model load). Self-tests for every switch.
-- [ ] **S0.2 The table as fills** on the eight v19 traces: misses saved and reads per
-      token by layer group, width and source; the selective set against every layer;
-      the union predictor; the record in the design document.
-- [ ] **S0.3 The draft** (Q3, the table form): prompt lookup's proposal and hit rate
-      per shape at N of 2, 3, 4; the table keyed on the draft against the real token
-      at layer 0 and at every layer; the record.
-- [ ] **S0.4 The policy and the split**: the predicted-future Belady against aging-LFU
-      and the real-future bound; the per-layer slot count from the U-shaped profile;
-      the record.
+- [x] **S0.1 The replay's table mode.** DONE 2026-09-17: `tools/expert-pool-replay.py`
+      with `--table-fills`, `--table-layers`, `--table-width`, `--table-source
+      last|last2|last3|freq|none`, `--table-cells`, `--union-previous`, `--draft
+      prompt-lookup:N`, `--draft-layers`, `--prompt-pieces`, `--table-seed prefill`,
+      `--table-future`, `--table-protect`, `--slots-json`; fills as per-source
+      `(candidates, budget)` pairs; the `q` and `t` line kinds; the report by layer
+      group with reads per position and the cells at the pass start; the self-tests.
+      `ShrikeCLI --tokenize <path>` (the tokenizer only); the four rig prompts
+      tokenize to the traces' exact counts. The four gates on the CLI change: 1,259
+      tests in 174 suites, zero warnings, lint and links clean. Scripts and outputs
+      at `~/.claude/handoffs/archive/shrike-v20-step0/`.
+- [x] **S0.2 The table as fills.** DONE 2026-09-17: over the pool 0.33 (layer 0) to
+      1.34 (all forty) misses saved per position; over the probe 0.31 to 0.85, 0.24 to
+      0.71 ms modelled, for 0.4 to 4.2 more reads; the previous position a null by
+      construction; the record in the design document.
+- [x] **S0.3 The draft.** DONE 2026-09-17: prompt lookup proposes on 0.44 of positions
+      at a 0.39 hit rate (n = 2); the table keyed on it saves 0.05 misses per position
+      at layer 0 against 0.33 keyed on the real token; closed for the chapter; the
+      record.
+- [x] **S0.4 The policy and the split.** DONE 2026-09-17: knowledge in the policy at
+      a horizon of one is null (0.06 per position at the ceiling); the Belady-on-the-
+      table form leaks the future tokens and is recorded as a bound; the split is the
+      lever: one allocation from the 300's profile (94 to 210 slots per layer, the
+      same 5,120) saves 2.4 to 3.7 misses per position over the probe out of sample,
+      1.8 to 2.6 ms modelled; SLRU about a miss on the longer shapes; the record.
 - [ ] **S0.5 The wide capture** (**a model run on the mini**): the diagnostic behind
       `SHRIKE_PREFETCH_TRACE` (the probe's full scores per position and layer; the
       prefill's per-token top-8 per layer as a new trace line kind), golden identical

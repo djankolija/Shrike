@@ -238,18 +238,36 @@ def parse_line(raw):
             row_counts = None
             last_rows = None
         return "p", position, layer, tile, experts, row_counts, last_rows
+    if parts[0] == "q":
+        # v20 S0.5: a prefill position's own top-k at one layer
+        # (`q position layer e0 ...`), beside the tile's `p` line. Not a plan.
+        position, layer = int(parts[1]), int(parts[2])
+        experts = [int(x) for x in parts[3:]]
+        return "q", position, layer, None, experts, None, None
+    if parts[0] == "t":
+        # v20 S0.5: the input token id of a decode position (`t position id`).
+        return "t", int(parts[1]), None, None, [int(parts[2])], None, None
     position, layer = int(parts[0]), int(parts[1])
     experts = [int(x) for x in parts[2:]]
     return "decode", position, layer, None, experts, None, None
 
 
-def load_trace(path):
+AUX_KINDS = ("q", "t")
+
+
+def load_trace(path, keep_aux=False):
+    """The trace's plan lines. The v20 auxiliary kinds (`q`, `t`) are not
+    plans and are dropped unless `keep_aux`, so the request segmentation and
+    the pool see the same lines the pool received."""
     lines = []
     with open(path) as f:
         for raw in f:
             parsed = parse_line(raw)
-            if parsed is not None:
-                lines.append(parsed)
+            if parsed is None:
+                continue
+            if parsed[0] in AUX_KINDS and not keep_aux:
+                continue
+            lines.append(parsed)
     return lines
 
 
@@ -475,6 +493,230 @@ def load_two_distance_queue(path_d1, path_d2, top_m, chained=False):
         if window_free and prediction2:
             fills.setdefault((layer + row2["probe_distance"], position), []).extend(prediction2)
     return fills
+
+
+def parse_layer_set(spec, num_layers=40):
+    """`0,30-39` -> the set {0, 30, ..., 39}; `all` -> every layer."""
+    if spec is None or spec.strip() == "all":
+        return frozenset(range(num_layers))
+    layers = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            low, high = part.split("-", 1)
+            layers.update(range(int(low), int(high) + 1))
+        else:
+            layers.add(int(part))
+    return frozenset(layers)
+
+
+def first_request_decode(lines):
+    """(ordered decode positions, {(layer, position): experts}) of the trace's
+    first request: the lines from its `r` marker to the next one, or the
+    first segment of the position heuristic when the trace has no marker."""
+    if has_request_markers(lines):
+        started = False
+        chosen = []
+        for line in lines:
+            if line[0] == "r":
+                if started:
+                    break
+                started = True
+                continue
+            if started:
+                chosen.append(line)
+    else:
+        request_ids = segment_requests(lines)
+        chosen = [line for line, rid in zip(lines, request_ids) if rid == 1]
+    order = []
+    seen = set()
+    routes = {}
+    for kind, position, layer, _tile, experts, _rc, _lr in chosen:
+        if kind != "decode":
+            continue
+        if position not in seen:
+            seen.add(position)
+            order.append(position)
+        routes[(layer, position)] = list(experts)
+    return order, routes
+
+
+def table_prediction(history, source, width):
+    """The table's entry as a list, most recent first, capped at `width`."""
+    if not history or source == "none":
+        return []
+    if source == "last":
+        return list(history[-1])[:width]
+    if source in ("last2", "last3"):
+        depth = 2 if source == "last2" else 3
+        merged = []
+        seen = set()
+        for route in reversed(history[-depth:]):
+            for expert in route:
+                if expert not in seen:
+                    seen.add(expert)
+                    merged.append(expert)
+        return merged[:width]
+    if source == "freq":
+        counts = defaultdict(int)
+        first_seen = {}
+        for index, route in enumerate(reversed(history)):
+            for rank, expert in enumerate(route):
+                counts[expert] += 1
+                first_seen.setdefault(expert, (index, rank))
+        ranked = sorted(counts, key=lambda e: (-counts[e], first_seen[e]))
+        return ranked[:width]
+    raise ValueError(f"unknown table source {source}")
+
+
+def build_table_fills(lines, pieces, layers, width=8, source="last",
+                      union_previous=False, draft_n=0, draft_layers=frozenset(),
+                      prompt_pieces=None, seed_routes=None, info=None):
+    """v20 S0.1: the token-id table as prefetch fills, computed from the
+    trace's own first request. `pieces` is that request's streamed token
+    text per decode position (the input token of the pass at that position,
+    the s02 alignment: the streamed pieces and the decode positions are
+    equal in count and matched by index); the table is keyed by the piece,
+    a stand-in for the id until a capture carries `t` lines.
+
+    Per served layer L, the prediction at position i is the table's entry for
+    pieces[i] built from the earlier positions only (`source`: the last
+    occurrence's route, the union of the last two or three, or the most
+    frequent), plus, with `union_previous`, the route at position i-1 at the
+    same layer (this token's own route, known a pass ahead like the id is);
+    capped at `width`. For a layer in `draft_layers` the key is instead the
+    prompt-lookup draft for pieces[i]: the piece that followed the most
+    recent earlier occurrence of the `draft_n`-gram ending at pieces[i-1],
+    over `prompt_pieces` plus the answer so far; no draft, no fill.
+    `seed_routes` ({(layer, prompt index): experts}, from a capture's `q`
+    lines) pre-fills the table from the prompt when `prompt_pieces` is given.
+    Returns (layer, position) -> prediction; `info`, when a dict, receives
+    the counts (positions, issued and covered per layer, the draft's
+    proposals and hits)."""
+    order, routes = first_request_decode(lines)
+    if len(order) != len(pieces):
+        raise ValueError(
+            f"the trace's first request has {len(order)} decode positions and the token "
+            f"stream {len(pieces)} pieces; they must match one to one")
+    history = {layer: defaultdict(list) for layer in layers}
+    if seed_routes and prompt_pieces:
+        for (layer, index), experts in sorted(seed_routes.items(), key=lambda kv: kv[0][1]):
+            if layer in history and index < len(prompt_pieces):
+                history[layer][prompt_pieces[index]].append(list(experts))
+    context = list(prompt_pieces or [])
+    # n-gram -> the end (exclusive) of its most recent occurrence; the
+    # n-gram ending at the prompt's last piece is registered at position 0's
+    # lookup, not before it, so no lookup can find itself.
+    ngram_last_end = {}
+    if draft_n > 0:
+        for end in range(draft_n, len(context)):
+            ngram_last_end[tuple(context[end - draft_n:end])] = end
+    fills = {}
+    issued = defaultdict(int)
+    covered = defaultdict(int)
+    predicted_total = defaultdict(int)
+    proposals = 0
+    draft_hits = 0
+    prompt_len = len(context)
+    for i, position in enumerate(order):
+        piece = pieces[i]
+        draft = None
+        if draft_n > 0 and prompt_len + i >= draft_n:
+            end = prompt_len + i
+            key = tuple(context[end - draft_n:end])
+            follower_end = ngram_last_end.get(key)
+            if follower_end is not None:
+                draft = context[follower_end]
+                proposals += 1
+                if draft == piece:
+                    draft_hits += 1
+            ngram_last_end[key] = end
+        for layer in layers:
+            key = draft if layer in draft_layers else piece
+            prediction = []
+            if key is not None:
+                prediction = table_prediction(history[layer].get(key), source, width)
+                if prediction:
+                    covered[layer] += 1
+            if union_previous and i > 0:
+                previous = routes.get((layer, order[i - 1]), [])
+                for expert in previous:
+                    if expert not in prediction:
+                        prediction.append(expert)
+                prediction = prediction[:width]
+            if prediction:
+                fills[(layer, position)] = prediction
+                issued[layer] += 1
+                predicted_total[layer] += len(prediction)
+        for layer in layers:
+            route = routes.get((layer, position))
+            if route is not None:
+                history[layer][piece].append(route)
+        context.append(piece)
+    if info is not None:
+        info["positions"] = len(order)
+        info["issued"] = dict(issued)
+        info["covered"] = dict(covered)
+        info["predicted"] = dict(predicted_total)
+        info["draft"] = {"n": draft_n, "proposals": proposals, "hits": draft_hits}
+    return fills
+
+
+def load_pieces(path):
+    """The streamed pieces of a rig token file (`tokens-*.json`), one per
+    decode position, or the `pieces` of a `--tokenize` file."""
+    with open(path) as handle:
+        body = json.load(handle)
+    if "pieces" in body:
+        return list(body["pieces"])
+    return [row[2] for row in body["tokens"]]
+
+
+def load_seed_routes(path):
+    """{(layer, prompt index): experts} from a capture's `q` lines."""
+    seeds = {}
+    for line in load_trace(path, keep_aux=True):
+        if line[0] == "q":
+            _kind, position, layer, _tile, experts, _rc, _lr = line
+            seeds[(layer, position)] = list(experts)
+    return seeds
+
+
+LAYER_GROUPS = (("0-3", range(0, 4)), ("4-9", range(4, 10)), ("10-19", range(10, 20)),
+                ("20-29", range(20, 30)), ("30-39", range(30, 40)), ("all", range(0, 40)))
+
+
+def print_table_report(info, fill_stats, layers, request_id=1):
+    positions = max(info.get("positions", 0), 1)
+    per_layer = fill_stats.get("per_layer", {})
+    misses = fill_stats.get("misses_per_layer", {})
+    per_position = fill_stats.get("per_position", {})
+    served = sorted(layers)
+    print(f"  table fills: positions={positions} layers={len(served)} "
+          f"(served {served[0]}..{served[-1]})" if served else "  table fills: no layers")
+    draft = info.get("draft") or {}
+    if draft.get("n"):
+        rate = draft["hits"] / draft["proposals"] if draft["proposals"] else 0.0
+        print(f"  draft prompt-lookup:{draft['n']}: proposals={draft['proposals']} "
+              f"({draft['proposals'] / positions:.2f} per position) hits={draft['hits']} "
+              f"(rate {rate:.3f})")
+    print("  group    issued/pos  fills/pos  useful/pos  wasted/pos  misses/pos  reads/pos")
+    for name, group in LAYER_GROUPS:
+        members = [layer for layer in group if layer in layers] if name != "all" else list(group)
+        issued = sum(info.get("issued", {}).get(layer, 0) for layer in members)
+        fills = sum(per_layer.get(layer, (0, 0, 0))[0] for layer in members)
+        useful = sum(per_layer.get(layer, (0, 0, 0))[1] for layer in members)
+        wasted = sum(per_layer.get(layer, (0, 0, 0))[2] for layer in members)
+        missed = sum(misses.get((request_id, layer), 0) for layer in members)
+        print(f"  {name:<8} {issued / positions:>10.2f} {fills / positions:>10.2f} "
+              f"{useful / positions:>11.2f} {wasted / positions:>11.2f} "
+              f"{missed / positions:>11.2f} {(fills + missed) / positions:>10.2f}")
+    if per_position:
+        values = list(per_position.values())
+        print(f"  cells at the pass start: mean={sum(values) / positions:.2f} "
+              f"max={max(values)} (fills placed per position across the served layers)")
 
 
 def build_future_occurrences(expert_lists):
@@ -1069,8 +1311,16 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
            prefill_weight="one", sweep_order="index", sweep_carry=False,
            phase_policy=None, profile_window=None, protect="chunk",
            sweep_tail=DEFAULT_SWEEP_TAIL, sweep_head_factor=DEFAULT_SWEEP_HEAD_FACTOR,
-           fills=None, fill_budget=1, fill_stats=None, fill_mode="pool"):
+           fills=None, fill_budget=1, fill_stats=None, fill_mode="pool",
+           predicted_future=None, predicted_protect=None):
     """Returns (stats, total_compulsory, settle_stats, settle_meta, profile).
+    `slots` is one count for every layer or a {layer: count} map (v20 S0.4,
+    the split); `predicted_future` ((layer, position) -> experts) replaces
+    the trace's own future on the belady path for decode plans, which
+    leaks the future tokens' identities and is a bound, not a policy;
+    `predicted_protect` (the same shape) is the online form at a horizon
+    of one: a decode plan's victims exclude the slots holding the experts
+    predicted for the layer's next decode position.
     `fills` ((layer, position) -> predicted experts, see load_prefetch_fills)
     places up to `fill_budget` of them into the layer's pool (`fill_mode`
     pool) or beside it (ring, ring-retain; see LayerPool) before the decode
@@ -1126,9 +1376,17 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
     total_compulsory = 0
 
     for layer, layer_lines in by_layer.items():
-        future = build_future_occurrences(
-            [experts for _k, _p, _t, experts, _rc, _lr, _l in layer_lines])
-        pool = make_pool(slots, policy, future)
+        if predicted_future is not None:
+            # v20 S0.4: the clairvoyant path sees a predicted future (the
+            # table's entries per decode position) in place of the trace's.
+            future = build_future_occurrences(
+                [predicted_future.get((layer, position), []) if kind == "decode" else experts
+                 for kind, position, _t, experts, _rc, _lr, _l in layer_lines])
+        else:
+            future = build_future_occurrences(
+                [experts for _k, _p, _t, experts, _rc, _lr, _l in layer_lines])
+        layer_slots = slots[layer] if isinstance(slots, dict) else slots
+        pool = make_pool(layer_slots, policy, future)
         if fills is not None and not hasattr(pool, "fill"):
             raise ValueError(f"speculative fills are modelled for the lru / lfu / aging-lfu / belady "
                              f"pool only, not {policy.label()}")
@@ -1136,19 +1394,45 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
             pool.fill_mode = fill_mode
         lookback = deque(maxlen=avoid_lookback) if avoid_lookback > 0 else deque()
         next_reverse = sweep_order in ("rows-desc", "last-desc")
+        decode_positions = [p for kind, p, _t, _e, _rc, _lr, _l in layer_lines if kind == "decode"]
+        decode_index = 0
 
         for item in group_into_chunks(layer_lines):
             if item[0] == "decode":
                 _kind, position, experts, label = item
                 active = phase_policy["decode"] if phase_policy else None
+                protect_set = frozenset()
+                if predicted_protect is not None:
+                    decode_index += 1
+                    if decode_index < len(decode_positions):
+                        wanted = predicted_protect.get((layer, decode_positions[decode_index]), ())
+                        protect_set = frozenset(
+                            slot for slot, expert in enumerate(pool.slot_expert)
+                            if expert >= 0 and expert in wanted)
                 if fills is not None:
                     candidates = fills.get((layer, position))
                     if candidates:
-                        pool.fill(candidates, fill_budget)
+                        # A plain list takes `fill_budget`; a list of
+                        # (candidates, budget) pairs gives each source its own
+                        # (v20: the probe at its in-flight budget beside the table).
+                        if isinstance(candidates[0], tuple):
+                            placed = sum(pool.fill(group, budget) for group, budget in candidates)
+                        else:
+                            placed = pool.fill(candidates, fill_budget)
+                        if fill_stats is not None and placed:
+                            per_position = fill_stats.setdefault("per_position", defaultdict(int))
+                            per_position[position] += placed
                 before = (pool.compulsory, pool.capacity)
-                hits, misses, _assigned = pool.plan(experts, policy_override=active)
+                hits, misses, _assigned = pool.plan(experts, protect=protect_set,
+                                                    policy_override=active)
                 _accumulate(stats, settle_stats, label, hits, misses,
                            pool.compulsory - before[0], pool.capacity - before[1])
+                if fill_stats is not None and label[0] == "request":
+                    misses_per_layer = fill_stats.setdefault("misses_per_layer", defaultdict(int))
+                    misses_per_layer[(label[1], layer)] += misses
+                    if misses:
+                        miss_layers = fill_stats.setdefault("miss_layers", defaultdict(int))
+                        miss_layers[(label[1], layer)] += 1
                 if profile_window and label[0] == "request":
                     base = first_decode_position.get(label[1], position)
                     window_index = (position - base) // profile_window
@@ -1162,7 +1446,7 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
                 new_tiles = original_tiles
             elif sweep_order == "resident-first":
                 resident = frozenset(expert for expert in pool.slot_expert if expert >= 0)
-                new_tiles = _retile_resident_first(original_tiles, resident, slots, sweep_head_factor)
+                new_tiles = _retile_resident_first(original_tiles, resident, layer_slots, sweep_head_factor)
             elif sweep_order == "resident-first-grouped":
                 resident = frozenset(expert for expert in pool.slot_expert if expert >= 0)
                 new_tiles = _retile_resident_first_grouped(original_tiles, resident, sweep_tail)
@@ -1202,6 +1486,8 @@ def replay(lines, slots, policy, layer_filter=None, avoid_lookback=DEFAULT_AVOID
             fill_stats["useful"] = fill_stats.get("useful", 0) + pool.useful_fills
             fill_stats["wasted"] = fill_stats.get("wasted", 0) + pool.wasted_fills
             fill_stats["unused_at_end"] = fill_stats.get("unused_at_end", 0) + len(pool.filled_unused)
+            fill_stats.setdefault("per_layer", {})[layer] = (
+                pool.fills, pool.useful_fills, pool.wasted_fills)
 
     return stats, total_compulsory, settle_stats, settle_meta, profile
 
@@ -1344,6 +1630,85 @@ def self_test():
     check("ring wrong fill misses", stats[1]["decode"][1], 3)
     check("ring wrong fill counters",
           (fill_stats["fills"], fill_stats["useful"], fill_stats["wasted"]), (1, 0, 1))
+    # Per-source budgets: the first source's two candidates at budget 1 place
+    # one (the wrong 4), the second source's B at its own budget lands the hit.
+    fill_stats = {}
+    stats, _, _, _, _ = _run(return_trace, slots=2, policy_raw="lru",
+                             fills={(1, 1): [([4, 5], 1), ([letter_ids["B"]], 8)]},
+                             fill_stats=fill_stats, fill_mode="ring")
+    check("grouped fills hits", stats[1]["decode"][0], 1)
+    check("grouped fills counters",
+          (fill_stats["fills"], fill_stats["useful"], fill_stats["wasted"]), (2, 1, 1))
+    check("grouped fills per position", dict(fill_stats["per_position"]), {1: 2})
+    # v20 S0.1: the token-id table as fills. Layer 1 routes A, B, A, C, B, A
+    # at positions 0..5 under pieces x, y, x, z, y, x: at position 2 the table's
+    # entry for x is position 0's route, at 4 y's is position 1's, at 5 x's is
+    # the last occurrence's (position 2), so `last` issues three fills, every
+    # one right; `last2` at position 5 unions positions 2 and 0 (both A);
+    # `freq` the same. A trace with an `r` line and a second request keeps the
+    # second request out of the table. A prefill `p` line before decode is not
+    # a decode position. The union with the previous position adds position
+    # i-1's route: at position 1 that is A, wrong for B, so one wasted fill.
+    table_lines = _lines_from_text("\n".join(
+        ["r 0 4", "p 0 1 0 1 2"]
+        + [f"{i} 1 {letter_ids[e]}" for i, e in enumerate(["A", "B", "A", "C", "B", "A"])]
+        + ["r 0 4"] + [f"{i} 1 {letter_ids['C']}" for i in range(2)]))
+    table_pieces = ["x", "y", "x", "z", "y", "x"]
+    info = {}
+    table_fills = build_table_fills(table_lines, table_pieces, frozenset([1]),
+                                    width=8, source="last", info=info)
+    check("table last fills", table_fills,
+          {(1, 2): [letter_ids["A"]], (1, 4): [letter_ids["B"]], (1, 5): [letter_ids["A"]]})
+    check("table info", (info["positions"], info["issued"], info["covered"]),
+          (6, {1: 3}, {1: 3}))
+    fill_stats = {}
+    stats, _, _, _, _ = _run("\n".join(
+        [f"{i} 1 {letter_ids[e]}" for i, e in enumerate(["A", "B", "A", "C", "B", "A"])]),
+        slots=1, policy_raw="lru", fills=table_fills, fill_stats=fill_stats,
+        fill_budget=8, fill_mode="ring")
+    check("table ring hits", stats[1]["decode"][0], 3)
+    check("table ring counters",
+          (fill_stats["fills"], fill_stats["useful"], fill_stats["wasted"]), (3, 3, 0))
+    check("table per-layer counters", fill_stats["per_layer"], {1: (3, 3, 0)})
+    check("table per-position", dict(fill_stats["per_position"]), {2: 1, 4: 1, 5: 1})
+    check("table misses per layer", dict(fill_stats["misses_per_layer"]), {(1, 1): 3})
+    union_fills = build_table_fills(table_lines, table_pieces, frozenset([1]),
+                                    width=8, source="last", union_previous=True)
+    check("table union previous at 1", union_fills[(1, 1)], [letter_ids["A"]])
+    check("table union previous at 3", union_fills[(1, 3)], [letter_ids["A"]])
+    check("table last2 at 5", build_table_fills(table_lines, table_pieces, frozenset([1]),
+                                                source="last2")[(1, 5)], [letter_ids["A"]])
+    check("table freq at 5", build_table_fills(table_lines, table_pieces, frozenset([1]),
+                                               source="freq")[(1, 5)], [letter_ids["A"]])
+    check("table freq prediction order",
+          table_prediction([[1, 2], [3, 2], [3, 4]], "freq", 8), [3, 2, 4, 1])
+    check("table last3 merged", table_prediction([[1, 2], [3, 2], [5, 4]], "last3", 3), [5, 4, 3])
+    # The draft over the prompt p q y x y then the answer x y x z y x, 2-grams:
+    # at position 1 the 2-gram (y, x) ending at the answer's first piece last
+    # occurred in the prompt followed by y, a hit with no table entry for y yet;
+    # at 2 the 2-gram (x, y) ending at the prompt's tail was followed by x, a
+    # hit, and x's entry is position 0's route, a right fill; at 3 (y, x) is
+    # followed by y in the answer, a miss against z, and y's entry fills B for
+    # the real C, a wasted fill; positions 4 and 5 have no earlier 2-gram.
+    draft_info = {}
+    draft_fills = build_table_fills(
+        table_lines, table_pieces, frozenset([1]), width=8, source="last",
+        draft_n=2, draft_layers=frozenset([1]), prompt_pieces=["p", "q", "y", "x", "y"],
+        info=draft_info)
+    check("draft proposals", (draft_info["draft"]["proposals"], draft_info["draft"]["hits"]),
+          (3, 2))
+    check("draft fills", draft_fills, {(1, 2): [letter_ids["A"]], (1, 3): [letter_ids["B"]]})
+    seeded = build_table_fills(
+        table_lines, table_pieces, frozenset([1]), width=8, source="last",
+        prompt_pieces=["p", "q", "x", "y", "z"], seed_routes={(1, 2): [letter_ids["C"]]})
+    check("table seeded from the prompt", seeded[(1, 0)], [letter_ids["C"]])
+    check("layer set", sorted(parse_layer_set("0,30-31,5")), [0, 5, 30, 31])
+    check("layer set all", len(parse_layer_set("all")), 40)
+    try:
+        build_table_fills(table_lines, table_pieces[:3], frozenset([1]))
+        check("table length mismatch raises", False, True)
+    except ValueError:
+        pass
     # The two-distance queue keys each capture's target by its own probe_distance:
     # the second capture here is at distance 3, so its fill lands three layers on.
     import os
@@ -2004,6 +2369,48 @@ def main():
                              "addressable by the classifier, nothing retained); ring-retain "
                              "then places a hit expert in a victim slot (the ring with "
                              "adoption before v16's merge, and the merge's swap)")
+    parser.add_argument("--table-fills", default=None, metavar="TOKENS_JSON",
+                        help="v20: the token-id table as fills, keyed by the streamed piece per "
+                             "decode position of the trace's first request (a rig tokens-*.json); "
+                             "fills go through --fill-mode ring with --table-cells per layer")
+    parser.add_argument("--table-layers", default="all",
+                        help="with --table-fills: the served layers, e.g. 0,30-39 (default all)")
+    parser.add_argument("--table-width", type=int, default=8,
+                        help="with --table-fills: the prediction's cap per layer (default 8)")
+    parser.add_argument("--table-source", choices=["last", "last2", "last3", "freq", "none"],
+                        default="last",
+                        help="with --table-fills: the entry is the last occurrence's route, the "
+                             "union of the last two or three, or the most frequent experts; none "
+                             "keeps the table empty so --union-previous is priced alone")
+    parser.add_argument("--table-cells", type=int, default=None,
+                        help="with --table-fills: the cell budget per layer per position "
+                             "(default: --table-width)")
+    parser.add_argument("--union-previous", action="store_true",
+                        help="with --table-fills: add the previous position's route at the same "
+                             "layer to the prediction")
+    parser.add_argument("--draft", default=None, metavar="prompt-lookup:N",
+                        help="with --table-fills: key --draft-layers by the prompt-lookup draft "
+                             "(the piece after the last earlier occurrence of the N-gram ending "
+                             "at the previous piece) instead of the real piece; no draft, no fill")
+    parser.add_argument("--draft-layers", default="0",
+                        help="with --draft: the layers keyed by the draft (default 0)")
+    parser.add_argument("--prompt-pieces", default=None, metavar="TOKENIZE_JSON",
+                        help="with --draft or --table-seed: the prompt's pieces from "
+                             "`ShrikeCLI --tokenize`, so the draft matches into the prompt")
+    parser.add_argument("--table-seed", choices=["none", "prefill"], default="none",
+                        help="with --table-fills and --prompt-pieces: seed the table from the "
+                             "capture's q lines (the prefill's per-token routes; v20 S0.5)")
+    parser.add_argument("--table-future", action="store_true",
+                        help="with --table-fills and --policy belady: the clairvoyant path sees "
+                             "the table's predictions as the future in place of the trace's, and "
+                             "no fill is placed (v20 S0.4, knowledge in the policy)")
+    parser.add_argument("--table-protect", action="store_true",
+                        help="with --table-fills: the online form at a horizon of one, a decode "
+                             "plan's victims exclude the experts the table predicts for the "
+                             "layer's next position; no fill is placed (v20 S0.4)")
+    parser.add_argument("--slots-json", default=None, metavar="FILE",
+                        help="a JSON map of layer -> slots overriding --slots per layer "
+                             "(v20 S0.4, the split)")
     parser.add_argument("--self-test", action="store_true",
                          help="run the built-in synthetic-trace checks and exit")
     args = parser.parse_args()
@@ -2029,6 +2436,64 @@ def main():
         fills = load_prefetch_fills(args.speculative_fills, args.fill_top_m)
     else:
         fills = None
+    table_info = None
+    table_layers = None
+    fill_budget = args.fill_budget
+    fill_mode = args.fill_mode
+    if args.table_fills:
+        if fills is not None:
+            parser.error("--table-fills cannot be combined with --speculative-fills")
+        table_layers = parse_layer_set(args.table_layers)
+        draft_n = 0
+        draft_layers = frozenset()
+        if args.draft:
+            name, _sep, count = args.draft.partition(":")
+            if name != "prompt-lookup" or not count.isdigit() or int(count) < 1:
+                parser.error("--draft takes prompt-lookup:N with N a positive integer")
+            draft_n = int(count)
+            draft_layers = parse_layer_set(args.draft_layers)
+        prompt_pieces = load_pieces(args.prompt_pieces) if args.prompt_pieces else None
+        if args.draft and prompt_pieces is None:
+            parser.error("--draft needs --prompt-pieces so the draft can match into the prompt")
+        seed_routes = None
+        if args.table_seed == "prefill":
+            if prompt_pieces is None:
+                parser.error("--table-seed prefill needs --prompt-pieces")
+            seed_routes = load_seed_routes(args.trace)
+            if not seed_routes:
+                parser.error("--table-seed prefill: the trace carries no q lines")
+        table_info = {}
+        try:
+            fills = build_table_fills(
+                lines, load_pieces(args.table_fills), table_layers,
+                width=args.table_width, source=args.table_source,
+                union_previous=args.union_previous, draft_n=draft_n,
+                draft_layers=draft_layers, prompt_pieces=prompt_pieces,
+                seed_routes=seed_routes, info=table_info)
+        except ValueError as e:
+            parser.error(str(e))
+        fill_budget = args.table_cells if args.table_cells is not None else args.table_width
+        # A landing the plan wants is swapped into the pool (v16's merge), so
+        # the table's fills follow production's ring-retain profile unless told otherwise.
+        fill_mode = args.fill_mode if args.fill_mode != "pool" else "ring-retain"
+    predicted_future = None
+    if args.table_future:
+        if table_info is None or policy.name != "belady":
+            parser.error("--table-future needs --table-fills and --policy belady")
+        predicted_future = fills
+        fills = None
+        table_info = None
+    predicted_protect = None
+    if args.table_protect:
+        if table_info is None:
+            parser.error("--table-protect needs --table-fills")
+        predicted_protect = fills
+        fills = None
+        table_info = None
+    slots = args.slots
+    if args.slots_json:
+        with open(args.slots_json) as handle:
+            slots = {int(layer): int(count) for layer, count in json.load(handle).items()}
     fill_stats = {} if fills is not None else None
     phase_policy = None
     if args.phase_policy:
@@ -2039,23 +2504,30 @@ def main():
 
     try:
         stats, total_compulsory, settle_stats, settle_meta, profile = replay(
-            lines, args.slots, policy, args.layer, args.avoid_lookback,
+            lines, slots, policy, args.layer, args.avoid_lookback,
             args.prefill_weight, args.sweep_order, args.sweep_carry == "on",
             phase_policy, args.profile_window, protect=args.protect,
             sweep_tail=args.sweep_tail, sweep_head_factor=args.sweep_head_factor,
-            fills=fills, fill_budget=args.fill_budget, fill_stats=fill_stats,
-            fill_mode=args.fill_mode)
+            fills=fills, fill_budget=fill_budget, fill_stats=fill_stats,
+            fill_mode=fill_mode, predicted_future=predicted_future,
+            predicted_protect=predicted_protect)
     except ValueError as e:
         parser.error(str(e))
 
     print_report(stats, total_compulsory, policy, args.slots, args.layer,
                  args.avoid_lookback, settle_stats, settle_meta, protect=args.protect)
-    if fill_stats is not None:
-        print(f"  speculative fills (top-m={args.fill_top_m} budget={args.fill_budget} "
-              f"mode={args.fill_mode}): "
+    if fill_stats is not None and table_info is None:
+        print(f"  speculative fills (top-m={args.fill_top_m} budget={fill_budget} "
+              f"mode={fill_mode}): "
               f"placed={fill_stats.get('fills', 0)} useful={fill_stats.get('useful', 0)} "
               f"wasted={fill_stats.get('wasted', 0)} "
               f"unused_at_end={fill_stats.get('unused_at_end', 0)}")
+    if table_info is not None:
+        print(f"  table (source={args.table_source} width={args.table_width} cells={fill_budget} "
+              f"union_previous={'on' if args.union_previous else 'off'} "
+              f"seed={args.table_seed}): placed={fill_stats.get('fills', 0)} "
+              f"useful={fill_stats.get('useful', 0)} wasted={fill_stats.get('wasted', 0)}")
+        print_table_report(table_info, fill_stats, table_layers)
     if args.profile_window:
         print_profile(profile, args.profile_window)
     if args.expect:

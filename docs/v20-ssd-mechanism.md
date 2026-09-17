@@ -283,7 +283,116 @@ misses saved, because those are what the design allocates.
 
 ### Step-zero record
 
-(Filled as the arms run.)
+**S0.1 (2026-09-17).** `tools/expert-pool-replay.py` gained the table mode:
+`--table-fills`, `--table-layers`, `--table-width`, `--table-source
+last|last2|last3|freq|none`, `--table-cells`, `--union-previous`, `--draft
+prompt-lookup:N` with `--draft-layers` and `--prompt-pieces`, `--table-seed
+prefill`, `--table-future` (the clairvoyant path on the table's predictions),
+`--table-protect` (the online horizon-one form), `--slots-json` (per-layer slot
+counts); fills as `(candidates, budget)` pairs so two sources keep their own
+budgets; the `q` and `t` line kinds parsed and dropped from the plans; the report
+by layer group with fills, useful, wasted, misses, reads per position and the
+cells at the pass start; misses and miss layers per (request, layer) in the fill
+stats; the self-tests extended. The table's fills follow production's
+ring-retain profile (a wanted landing is swapped into the pool). `ShrikeCLI
+--tokenize <path>` renders the prompt as a run would and writes its ids and
+pieces without loading the model; the four rig prompts tokenize to exactly the
+counts the traces' `r` lines carry (289, 1,069, 2,125, 7,463). The four gates
+passed on the CLI change (1,259 tests in 174 suites). Scripts, outputs and the
+prompt pieces at `~/.claude/handoffs/archive/shrike-v20-step0/`.
+
+The table is keyed by the streamed piece, the s02 alignment (the pieces and the
+first request's decode positions are equal in count and matched by index; the
+piece is the pass's input token). Costs are modelled from the v18 ledger: a saved
+miss layer 1.15 ms (the first miss's latency, transfer and wake), a saved further
+miss 0.65 ms (transfer only). Two bases: the eight v19 traces (four shapes, two
+lifetimes each, the v18 close's build) against the replay's pool without the
+ring, and the three v14 Task 1 captures (the card, the 300, the 1k, one
+lifetime each, the probe's jsonl beside the route trace) against the probe at its
+in-flight budget of one, which reproduces production's misses (29.7 to 19.5 per
+position on those captures, production's 20).
+
+**S0.2 The table as fills (measured by replay, 2026-09-17).** Over the pool, per
+position, the eight lifetimes' mean:
+
+| served layers, source | saved | fills | useful | precision | reads | modelled ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| layer 0, last | 0.33 | 0.51 | 0.33 | 0.64 | 29.3 | 0.26 |
+| layers 0-3, last | 0.74 | 1.83 | 0.73 | 0.40 | 30.2 | 0.57 |
+| layers 30-39, last | 0.21 | 1.19 | 0.21 | 0.18 | 30.1 | 0.19 |
+| 0 and 30-39, last | 0.55 | 1.71 | 0.54 | 0.32 | 30.3 | 0.45 |
+| 0 and 30-39, last3 at 16 | 0.66 | 3.08 | 0.66 | 0.21 | 31.5 | 0.55 |
+| all forty, last | 1.34 | 5.14 | 1.34 | 0.26 | 32.9 | 1.11 |
+| 0 and 30-39, previous position only | 0.00 | 0.15 | 0.00 | 0.02 | 29.2 | 0.00 |
+
+The baseline is 29.1 misses per position. Over the probe on the v14 captures the
+probe itself saves 10.2 misses per position (5.2 miss layers) for 20.8 fills at
+precision 0.49, 9.3 ms modelled; the table on top of it: layer 0 0.31 saved (0.24
+ms, precision 0.70 on its own fills), layers 30-39 0.10, both 0.41 (0.33 ms), all
+forty 0.85 (0.71 ms) for 4.2 more fills per position and 25 cells at the pass
+start (74 at the peak). The union with the previous position is a null by
+construction: the previous pass's experts are still resident, so the union adds
+0.15 fills and saves nothing; the pool already holds the neighbour's route. The
+wider sources buy a fifth more at twice the fills. **Reading:** the table is real
+and small. Its best form, every layer at width eight, is worth 0.7 ms per token
+over production (1.2 %, modelled), under the arms' resolution; the selective set
+0.33 ms. Layer 0 is the one place it is precise.
+
+**S0.3 The draft (measured by replay, 2026-09-17).** Prompt lookup over the
+prompt's pieces plus the answer so far proposes on 0.44 of positions at n = 2 with
+a hit rate of 0.39, 0.25 at 0.46 for n = 3, 0.15 at 0.42 for n = 4; the 7k, the
+shape with the most context to copy from, 0.39 at 0.38. The table keyed on the
+draft at layer 0 saves 0.05 misses per position (0.05 ms) against 0.33 keyed on
+the real token, precision 0.23 against 0.65; at layers 0-3, 0.19 against 0.74.
+Over the probe the same. **Reading:** the draft path is closed for this chapter.
+Its ceiling was the real-key number, 0.26 ms, and the draft reaches a fifth of it.
+The rig's prompts are synthetic ledgers; a tool turn that copies more might
+propose more, but the hit rate, not the proposal rate, is what limits it.
+
+**S0.4 The policy and the split (measured by replay, 2026-09-17).** Decode misses
+per position on the v19 traces, the eight lifetimes' mean, the pool without the
+ring: aging-LFU 29.09 (shipped); LRU 28.17; SLRU at 0.5 27.77; Belady 10.69. Belady
+fed the table's predictions as its future reaches 17.76, but that form leaks the
+future tokens' identities to the policy and is a bound, not a policy. The online
+form at a horizon of one, the next token's table entry protecting its experts
+from eviction at the plan, saves 0.06 per position keyed on the real next token
+(the ceiling, every plan deferred past the sampler) and 0.02 keyed on the draft:
+null. Knowledge in the policy is closed.
+
+The split is the surface's lever. One allocation derived from the 300's first
+lifetime (its aging-LFU miss profile per layer, all requests, blended half-way
+between uniform and proportional, 94 to 210 slots per layer at the same total of
+5,120) applied to every trace:
+
+| basis | trace | misses per position | saved | modelled ms |
+| --- | --- | ---: | ---: | ---: |
+| the pool (v19) | the card | 30.68 | 3.34 | 2.20 |
+| | the 300 (in sample) | 30.25 | 2.06 | 1.30 |
+| | the 1k | 28.21 | 1.77 | 1.03 |
+| | the 7k | 27.22 | 4.16 | 3.13 |
+| the probe (v14) | the card | 19.97 | 3.65 | 2.62 |
+| | the 300 | 19.84 | 2.76 | 2.06 |
+| | the 1k | 18.72 | 2.44 | 1.76 |
+
+Over the probe the mean is 2.95 of 19.5 misses per position, 15 %, 2.15 ms
+modelled; the blends at 0.35 and 0.65 are within a tenth of it, proportional
+alone is worse than uniform (the middle layers starve). The allocation per layer
+0 to 39: 210 201 207 175 167 148 145 131 147 118 132 143 117 109 109 104 96 103
+94 96 103 99 110 121 106 111 99 115 116 114 103 107 137 125 133 125 125 126 143
+150. The split combined with the horizon-one protect adds nothing over the split.
+**Reading:** the U-shaped profile is stable enough across shapes that a fixed
+per-layer allocation transfers, and the same memory serves 15 % fewer misses at
+zero reads and zero cells. SLRU is worth about a miss per position on the longer
+shapes and nothing on the 300, as v18 found.
+
+**What the offline board says before the model runs (2026-09-17).** Ranked by
+the modelled floor, over production's probe: the split 1.8 to 2.6 ms per token
+(3 to 4.5 %); SLRU up to 0.65 on the longer shapes; the table 0.3 to 0.7; the
+draft and the policy's knowledge null. The lead lever, A9, is priced small
+because the pool already holds the neighbour's route and the identity's share of
+a deep route is a third; the clairvoyant gap is context, which no table sees.
+What remains unpriced is the width (S0.5) and the attention row's fixed part
+(S0.6).
 
 ## Approaches for the predictor's plumbing
 
