@@ -153,6 +153,13 @@ public func run(args: Args,
         if !args.quiet {
             writeFooter(stats: stats, stderr: stderr)
         }
+        if let followUp = args.followUp {
+            if case .exit(let result) = try await runFollowUp(
+                followUp, args: args, tokenizer: tokenizer, loaded: loaded,
+                config: config, first: stats, stdout: stdout, stderr: stderr) {
+                return result
+            }
+        }
         return RunResult(exitCode: 0)
     } catch is CancellationError {
         stdout.write(Data("\n".utf8))
@@ -160,6 +167,50 @@ public func run(args: Args,
     } catch {
         return errored(stderr, "\(error)", 1)
     }
+}
+
+/// The boundary token the first answer sampled but never fed is re-fed here, as the server's cached continuation does.
+private func runFollowUp(_ followUp: String,
+                         args: Args,
+                         tokenizer: GFTokenizer,
+                         loaded: LoadedRuntime,
+                         config: GenerationConfig,
+                         first: RawDecodeResult,
+                         stdout: FileHandle,
+                         stderr: FileHandle) async throws -> StageOutcome<Void> {
+    let promptIds = first.kvBackedTokenIDs + first.uncommittedBoundaryTokenIDs
+        + tokenizer.encode(followUp, addBOS: false)
+    guard promptIds.count < args.maxContext else {
+        return .exit(errored(
+            stderr,
+            "context overflow: follow-up \(promptIds.count) reaches maxContext \(args.maxContext)",
+            2))
+    }
+    var followUpConfig = config
+    followUpConfig.maxNewTokens = min(args.maxNew, args.maxContext - promptIds.count)
+    stdout.write(Data("\n--- follow-up ---\n".utf8))
+    let stats = try await runRawCompletion(
+        producer: loaded.runner,
+        tokenizer: tokenizer,
+        promptIds: promptIds,
+        config: followUpConfig,
+        context: loaded.context,
+        scratch: loaded.scratch,
+        prefillConfig: loaded.runtime.prefillConfig,
+        start: .resume(cachedPromptTokens: first.kvPosition)) { progress in
+            switch progress {
+            case .prefill:
+                break
+            case .token(_, _, let delta):
+                if !delta.isEmpty { stdout.write(Data(delta.utf8)) }
+            case .tail(let tail):
+                stdout.write(Data(tail.utf8))
+            }
+        }
+    if !args.quiet {
+        writeFooter(stats: stats, stderr: stderr)
+    }
+    return .value(())
 }
 
 private func resolveExpectedArch(modelURL: URL,

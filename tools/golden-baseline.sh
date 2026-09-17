@@ -8,8 +8,12 @@
 #
 # Profiles: short and long on the CLI's fused greedy head; short-lh and long-lh
 # on the server's head path (--logits-head: the logits head and the GPU greedy
-# sampler), the files named ...-<profile>.<tag>.txt. The default set is all
-# four, so `--check` alone covers both heads (v19 Task 1).
+# sampler), the files named ...-<profile>.<tag>.txt. turns-lh is the two-turn
+# continuation gate (v20 T3.3): a chat turn answered to its stop token on the
+# server's head path, then a follow-up generated from the state the stop left,
+# so the pass committed ahead of the stop and drained must leave that state
+# exactly as a run without it. The default set is all five, so `--check` alone
+# covers both heads and the continuation (v19 Task 1, v20 T3.3).
 #
 # Determinism comes from greedy decoding: --temperature 0 with a fixed seed and
 # a fixed prompt. Greedy means the sampler never draws, so the only inputs are
@@ -62,9 +66,16 @@ long_prompt() {
   printf 'Summarize: how many entries, which shelf received the most bundles, and the trend in build times.\n'
 }
 
+# The continuation gate's turns. The question must end at the model's stop
+# token within max-new, or the gate never exercises the drained pass; the
+# follow-up is encoded verbatim behind that stop token, as a chat template
+# would render the next user turn.
+TURNS_MESSAGES='[{"role":"user","content":"In one sentence, what is a mutex?"}]'
+TURNS_FOLLOW_UP=$'\n<|im_start|>user\nAnd a semaphore, in one sentence?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n'
+
 mode=capture
 if [ "${1:-}" = "--check" ]; then mode=check; shift; fi
-profiles=("$@"); [ ${#profiles[@]} -eq 0 ] && profiles=(short long short-lh long-lh)
+profiles=("$@"); [ ${#profiles[@]} -eq 0 ] && profiles=(short long short-lh long-lh turns-lh)
 
 if [ ! -x "$CLI" ]; then
   echo "missing $CLI — run: swift build -c release (or set CLI=)" >&2
@@ -82,10 +93,17 @@ mkdir -p "$OUT_DIR"
 status=0
 
 for profile in "${profiles[@]}"; do
+  prompt_args=()
   case "$profile" in
-    short|short-lh) prompt="$SHORT_PROMPT"; max_new="$MAX_NEW" ;;
-    long|long-lh)   prompt="$(long_prompt)"; max_new=128 ;;
-    *) echo "unknown profile: $profile (expected short, long, short-lh or long-lh)" >&2
+    short|short-lh) prompt="$SHORT_PROMPT"; max_new="$MAX_NEW"
+                    prompt_args=(--prompt "$prompt") ;;
+    long|long-lh)   prompt="$(long_prompt)"; max_new=128
+                    prompt_args=(--prompt "$prompt") ;;
+    turns-lh)       prompt="$TURNS_MESSAGES"; max_new=128
+                    messages="$(mktemp "${TMPDIR:-/tmp}/golden-turns.XXXXXX")"
+                    printf '%s' "$TURNS_MESSAGES" > "$messages"
+                    prompt_args=(--messages-file "$messages" --follow-up "$TURNS_FOLLOW_UP") ;;
+    *) echo "unknown profile: $profile (expected short, long, short-lh, long-lh or turns-lh)" >&2
        status=1; continue ;;
   esac
   case "$profile" in
@@ -98,9 +116,10 @@ for profile in "${profiles[@]}"; do
   echo "== $profile =="
   # --quiet keeps the timing footer out of the compared text; only the
   # generated tokens are the contract. Timings vary run to run by design.
-  "$CLI" --model "$MODEL" --prompt "$prompt" --max-new "$max_new" \
+  "$CLI" --model "$MODEL" "${prompt_args[@]}" --max-new "$max_new" \
          --temperature 0 --seed "$SEED" --quiet $head_flag > "$work" 2>"$work.err"
   rc=$?
+  [ "$profile" = turns-lh ] && rm -f "$messages"
   if [ $rc -ne 0 ]; then
     echo "  FAILED (exit $rc)"; sed 's/^/  /' "$work.err" | head -20
     rm -f "$work" "$work.err"; status=1; continue

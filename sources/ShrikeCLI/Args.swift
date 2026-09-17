@@ -28,6 +28,7 @@ public struct Args: Equatable, Sendable {
     public var dumpLogitsPath: String?
     public var logitsHead: Bool
     public var tokenizePath: String?
+    public var followUp: String?
 
     public init(model: String,
                 prompt: String? = nil,
@@ -50,12 +51,14 @@ public struct Args: Equatable, Sendable {
                 forceTokensPath: String? = nil,
                 dumpLogitsPath: String? = nil,
                 logitsHead: Bool = false,
-                tokenizePath: String? = nil) {
+                tokenizePath: String? = nil,
+                followUp: String? = nil) {
         self.model = model
         self.forceTokensPath = forceTokensPath
         self.dumpLogitsPath = dumpLogitsPath
         self.logitsHead = logitsHead
         self.tokenizePath = tokenizePath
+        self.followUp = followUp
         self.prompt = prompt
         self.messagesFile = messagesFile
         self.maxNew = maxNew
@@ -149,6 +152,11 @@ extension Args {
       --tokenize <path>         Render the prompt exactly as a run would, write
                                 its ids and their pieces as JSON to <path>, and
                                 exit without loading the model.
+      --follow-up <string>      After the first answer stops, append this text
+                                (encoded verbatim) to the tokens the run holds
+                                and generate once more from that state; the
+                                second answer follows a separator line. The
+                                two-turn continuation gate.
       --help                    Show this message.
     """
 
@@ -185,6 +193,7 @@ extension Args {
         var dumpLogitsPath: String?
         var logitsHead = false
         var tokenizePath: String?
+        var followUp: String?
 
         mutating func applyFlags(_ argv: [String]) throws {
             var index = 0
@@ -278,6 +287,8 @@ extension Args {
                     index += 1
                 case "--tokenize":
                     tokenizePath = try takeValue(argv, &index, flag: flag)
+                case "--follow-up":
+                    followUp = try takeValue(argv, &index, flag: flag)
                 default:
                     throw ArgsError.unknownFlag(flag)
                 }
@@ -328,7 +339,8 @@ extension Args {
                         forceTokensPath: forceTokensPath,
                         dumpLogitsPath: dumpLogitsPath,
                         logitsHead: logitsHead,
-                        tokenizePath: tokenizePath)
+                        tokenizePath: tokenizePath,
+                        followUp: followUp)
         }
     }
 
