@@ -64,8 +64,9 @@ final class MoE {
     private let routerLogitsPair: MTLBuffer
     /// Two banks of one slot per layer, by the position's parity, so a token's
     /// probe scores survive the next position's held layer zero until the wide
-    /// capture reads them.
-    static let probeLogitsSlots = 128
+    /// capture reads them; the pair's distance one in the first two, the
+    /// capture's distances two and three in the next four.
+    static let probeLogitsSlots = 256
     static let probeLogitsStride = 256
     var probeLogitsBuffer: MTLBuffer { routerLogitsPair }
     var selectsOnSigmoid: Bool { sigmoidRouterScores }
@@ -360,6 +361,43 @@ final class MoE {
         var logitBiasOffset = 0
         let outIndices: MTLBuffer
         let outWeights: MTLBuffer
+    }
+
+    /// The router's scores alone into a probe slot, no selection: the wide
+    /// capture's evaluation of a router two or three layers ahead on this
+    /// layer's state.
+    func encodeRouterScores(encoder: MTLComputeCommandEncoder,
+                            weights: MTLBuffer, weightsOffset: Int,
+                            scales: MTLBuffer, scalesOffset: Int,
+                            biases: MTLBuffer, biasesOffset: Int,
+                            hidden: MTLBuffer,
+                            effectiveScale: MTLBuffer, effectiveScaleOffset: Int = 0,
+                            numExperts: UInt32, d: UInt32, topK: UInt32,
+                            probeSlot: Int) {
+        precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
+        precondition(numExperts <= 256)
+        precondition((0..<Self.probeLogitsSlots).contains(probeSlot))
+        precondition(effectiveScale.length >= Int(d) * MemoryLayout<UInt16>.stride)
+        var expertCount = numExperts
+        var dimension = d
+        let useSpecialized = numExperts == realDecodeNumExperts
+            && d == realDecodeD
+            && topK == realDecodeTopK
+        encoder.setComputePipelineState(
+            useSpecialized ? routerGemvSpecializedPSO : routerGemvPSO)
+        encoder.setBuffer(weights, offset: weightsOffset, index: 0)
+        encoder.setBuffer(scales, offset: scalesOffset, index: 1)
+        encoder.setBuffer(biases, offset: biasesOffset, index: 2)
+        encoder.setBuffer(hidden, offset: 0, index: 3)
+        encoder.setBuffer(effectiveScale, offset: effectiveScaleOffset, index: 4)
+        encoder.setBuffer(routerLogitsPair,
+                          offset: probeSlot * Self.probeLogitsStride * MemoryLayout<Float>.stride,
+                          index: 5)
+        encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 7)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (Int(numExperts) + 3) / 4, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
     }
 
     func encodeRouterPair(commandBuffer: MTLCommandBuffer,

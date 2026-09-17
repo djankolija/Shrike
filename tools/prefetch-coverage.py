@@ -115,6 +115,7 @@ def render_table(headers, rows):
 
 
 RANKING_MISMATCHES = {"rows": 0, "mismatched": 0}
+JOIN_DISTANCE = {"value": 1}
 
 
 def load_jsonl(path):
@@ -142,6 +143,11 @@ def load_jsonl(path):
                     RANKING_MISMATCHES["mismatched"] += 1
                     continue
                 plan["probe_ranking"] = ranking
+                # v20 S0.5b: the routers two and three layers ahead, evaluated
+                # on this layer's state, ranked the same way; no top-8 to check.
+                for key in ("probe_ranking_d2", "probe_ranking_d3"):
+                    if key in row:
+                        plan[key] = row[key]
                 continue
             rows.append(row)
             latest[(row["position"], row["layer"])] = row
@@ -176,10 +182,15 @@ def build_joins(rows, request_ids, by_rp):
     joins = []
     missing_target = 0
     for row, rid in zip(rows, request_ids):
-        prediction = row.get("probe_ranking") or row.get("next_layer_prediction") or []
+        distance = JOIN_DISTANCE["value"]
+        if distance == 1:
+            prediction = row.get("probe_ranking") or row.get("next_layer_prediction") or []
+            target_layer = row["layer"] + row["probe_distance"]
+        else:
+            prediction = row.get(f"probe_ranking_d{distance}") or []
+            target_layer = row["layer"] + distance
         if not prediction:
             continue
-        target_layer = row["layer"] + row["probe_distance"]
         target_row = by_rp.get((rid, row["position"]), {}).get(target_layer)
         if target_row is None:
             missing_target += 1
@@ -674,7 +685,7 @@ def _self_test_rankings(failures):
          "resident": [1, 2], "next_layer_prediction": [3, 4]},
         {"position": 5, "layer": 1, "probe_distance": 1, "experts": [3, 4], "misses": [],
          "resident": [3, 4], "next_layer_prediction": [5, 6]},
-        {"position": 5, "layer": 0, "probe_ranking": [3, 4, 7, 8]},
+        {"position": 5, "layer": 0, "probe_ranking": [3, 4, 7, 8], "probe_ranking_d2": [9, 8]},
         {"position": 5, "layer": 1, "probe_ranking": [6, 5, 9, 1]},
     ]
     RANKING_MISMATCHES["rows"] = 0
@@ -687,6 +698,7 @@ def _self_test_rankings(failures):
         loaded = load_jsonl(path)
     _check(failures, "rankings: plan rows kept", len(loaded), 2)
     _check(failures, "rankings: matching prefix folded", loaded[0].get("probe_ranking"), [3, 4, 7, 8])
+    _check(failures, "rankings: distance two folded", loaded[0].get("probe_ranking_d2"), [9, 8])
     _check(failures, "rankings: mismatched prefix dropped", loaded[1].get("probe_ranking"), None)
     _check(failures, "rankings: counts", dict(RANKING_MISMATCHES), {"rows": 2, "mismatched": 1})
     RANKING_MISMATCHES["rows"] = 0
@@ -719,6 +731,10 @@ def main():
         "join", help="join a SHRIKE_PREFETCH_TRACE capture's own next-layer "
                      "prediction against its own recorded misses")
     join_p.add_argument("trace", help="path to a SHRIKE_PREFETCH_TRACE JSONL capture")
+    join_p.add_argument("--distance", type=int, choices=[1, 2, 3], default=1,
+                        help="v20 S0.5b: join the probe's ranking at this distance (2 and 3 "
+                             "from the capture's probe_ranking_d2/d3 rows, evaluated on the "
+                             "same layer's state; the target is the layer that far ahead)")
     join_p.add_argument("--top-m", default=DEFAULT_TOP_M,
                         help=f"comma-separated prefix lengths of next_layer_prediction "
                              f"to evaluate (default {DEFAULT_TOP_M})")
@@ -754,6 +770,7 @@ def main():
     if not args.mode:
         parser.error("a mode (join or history) is required unless --self-test is given")
 
+    JOIN_DISTANCE["value"] = getattr(args, "distance", 1)
     if args.mode == "join":
         run_join(args)
     else:

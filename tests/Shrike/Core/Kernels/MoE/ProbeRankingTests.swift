@@ -27,6 +27,23 @@ struct ProbeRankingTests {
         }
     }
 
+    @Test func probeSlotsKeepDistancesAndBanksApart() {
+        let layers = 40
+        var seen = Set<Int>()
+        for distance in 1...3 {
+            for bank in 0...1 {
+                for layer in 0..<layers {
+                    seen.insert(RealForwardRunner.probeSlot(
+                        layer: layer, distance: distance, bank: bank, numLayers: layers))
+                }
+            }
+        }
+        #expect(seen.count == 240)
+        #expect(seen.max() == 239)
+        #expect(RealForwardRunner.probeSlot(layer: 7, distance: 1, bank: 1, numLayers: layers) == 47)
+        #expect(RealForwardRunner.probeSlot(layer: 7, distance: 2, bank: 0, numLayers: layers) == 87)
+    }
+
     @Test func traceLineFormats() {
         #expect(RealForwardRunner.formatRouteTraceTokenLine(position: 289, id: 1234) == "t 289 1234\n")
         #expect(RealForwardRunner.formatRouteTracePrefillRowLine(position: 7, layer: 3, experts: [5, 1, 9])

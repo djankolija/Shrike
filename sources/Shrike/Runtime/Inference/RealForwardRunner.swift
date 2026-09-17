@@ -1443,6 +1443,35 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     static let probeRankingWidth = 32
+    static let probeDistances = 3
+
+    /// Distance one is the pair's own slot; the capture's further distances
+    /// take the banks after it.
+    static func probeSlot(layer: Int, distance: Int, bank: Int, numLayers: Int) -> Int {
+        (distance - 1) * 2 * numLayers + bank * numLayers + layer
+    }
+
+    /// The routers two and three layers ahead on this layer's state, scores
+    /// only, into their probe slots; the capture reads them with the pair's.
+    private func encodeProbeDistanceScores(encoder: MTLComputeCommandEncoder, layer L: Int,
+                                           hidden: MTLBuffer, probeBank: Int, d D: UInt32) throws {
+        for distance in 2...Self.probeDistances where L + distance < cfg.numLayers {
+            let slot = Self.probeSlot(layer: L, distance: distance, bank: probeBank,
+                                      numLayers: cfg.numLayers)
+            guard slot < MoE.probeLogitsSlots else { return }
+            let target = L + distance
+            let router = try model.router(layer: target)
+            moe.encodeRouterScores(
+                encoder: encoder,
+                weights: router.buffer, weightsOffset: Int(router.offset),
+                scales: router.buffer, scalesOffset: Int(router.scaleOffset),
+                biases: router.buffer, biasesOffset: Int(router.biasOffset),
+                hidden: hidden,
+                effectiveScale: effectiveScaleBuffers[target],
+                numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts),
+                probeSlot: slot)
+        }
+    }
 
     /// Runs at the next pass's entry or the next request's start, after the
     /// pass's commands have completed, so the slots are coherent.
@@ -1454,18 +1483,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             to: Float.self, capacity: stride * MoE.probeLogitsSlots)
         var lines = ""
         for layer in 0..<(cfg.numLayers - 1) {
-            let biasEntry = routerLogitBias[layer + 1]
-            var biasPointer: UnsafePointer<UInt16>?
-            if biasEntry.buffer.storageMode == .shared {
-                biasPointer = UnsafePointer(biasEntry.buffer.contents()
-                    .advanced(by: biasEntry.offset)
-                    .bindMemory(to: UInt16.self, capacity: cfg.numExperts))
+            var fields = "\"position\":\(position),\"layer\":\(layer)"
+            for distance in 1...Self.probeDistances where layer + distance < cfg.numLayers {
+                let slot = Self.probeSlot(layer: layer, distance: distance, bank: position & 1,
+                                          numLayers: cfg.numLayers)
+                guard slot < MoE.probeLogitsSlots else { continue }
+                let biasEntry = routerLogitBias[layer + distance]
+                var biasPointer: UnsafePointer<UInt16>?
+                if biasEntry.buffer.storageMode == .shared {
+                    biasPointer = UnsafePointer(biasEntry.buffer.contents()
+                        .advanced(by: biasEntry.offset)
+                        .bindMemory(to: UInt16.self, capacity: cfg.numExperts))
+                }
+                let ranking = Self.probeRanking(logits: base.advanced(by: slot * stride),
+                                                bias: biasPointer, sigmoid: moe.selectsOnSigmoid,
+                                                count: cfg.numExperts, width: Self.probeRankingWidth)
+                let key = distance == 1 ? "probe_ranking" : "probe_ranking_d\(distance)"
+                fields += ",\"\(key)\":\(ranking)"
             }
-            let slot = layer + (position & 1) * cfg.numLayers
-            let ranking = Self.probeRanking(logits: base.advanced(by: slot * stride),
-                                            bias: biasPointer, sigmoid: moe.selectsOnSigmoid,
-                                            count: cfg.numExperts, width: Self.probeRankingWidth)
-            lines += "{\"position\":\(position),\"layer\":\(layer),\"probe_ranking\":\(ranking)}\n"
+            lines += "{\(fields)}\n"
         }
         writeTraceLine(lines, to: prefetchTraceFD)
     }
@@ -2779,7 +2815,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 hidden: routedX,
                 perExpertScale: perExpertScale.buffer, perExpertScaleOffset: perExpertScale.offset,
                 numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts),
-                probeSlot: L + probeBank * cfg.numLayers)
+                probeSlot: Self.probeSlot(layer: L, distance: 1, bank: probeBank,
+                                          numLayers: cfg.numLayers))
         } else {
             moe.encodeRouter(encoder: tailEncoder,
                 weights: routerW.buffer, weightsOffset: Int(routerW.offset),
@@ -2793,6 +2830,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 logitBiasOffset: routerLogitBias[L].offset,
                 outIndices: outIndices, outWeights: outWeights,
                 numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
+        }
+        if prefetchTraceFD >= 0 {
+            try encodeProbeDistanceScores(encoder: tailEncoder, layer: L, hidden: routedX,
+                                          probeBank: probeBank, d: D)
         }
         moe.encodeResidencyClassification(
             encoder: tailEncoder,

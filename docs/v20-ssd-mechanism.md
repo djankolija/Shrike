@@ -445,6 +445,26 @@ eight), useful fills per position unseeded against seeded: the card 0.86 against
 start to 190 or more. **Seeding is closed**: the prompt's route for a token is a
 poor predictor of the answer's, a different context.
 
+**S0.5b The ranking at distance two and three (pre-registered 2026-09-17, on
+Davor's ruling that the width is not closed while lead could make it free).** The
+argument: width twelve asks about thirty more non-resident reads per token than
+eight, inside the drive's idle capacity of about seventy-five during the GPU-busy
+stretches; what makes them costly today is the timing, one millisecond of lead
+issued from inside the windows. Two layers of lead doubles the time and lets the
+reads be issued from the GPU-busy layers, where the drive is idle, given a
+demand-first discipline in the reader (the piece v15's null lacked). The unknown
+is what the ranking loses at distance two: v14 measured a tenth of coverage lost
+per layer of lookahead at width eight, and nothing past eight. The instrument: the
+routers two and three layers ahead evaluated on layer L's state on the diagnostic
+path (a scores-only GEMV each, `MoE.encodeRouterScores`, into the probe buffer's
+further banks), ranked and dumped beside the pair's as `probe_ranking_d2` and
+`probe_ranking_d3`; the coverage tool joins at `--distance`. **The bar:** width
+twelve at distance two must recall more of the remaining misses than width eight
+does at distance one today (0.32) at a precision no worse than ranks nine to
+twelve show at distance one (0.13). Cleared, the prize is the recall times the
+remaining twenty misses per token at 0.65 to 1.15 ms each, potentially larger than
+the split; not cleared, the width closes with a number. Result: (pending).
+
 **S0.6 The attention row's fixed part (read, 2026-09-17; no run).** The arm as
 written cannot be run on the current tree: since v18's one command per layer the
 kernel stats report an attention layer's whole held command as one role
