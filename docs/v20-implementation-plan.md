@@ -139,7 +139,7 @@ SLRU is T1.3; the predicted-future eviction was null at a legitimate horizon
       the overflow as the on-the-spot eviction; the word clock in place of the
       per-layer GPU rows; the per-encoder error option on and measured on the first
       T3.2 build; the order T3.1, T3.2, T3.3.**
-- [x] **T3.1 The agreed cells.** DONE 2026-09-17 (`782f477`): the fixup encoded
+- [x] **T3.1 The agreed cells.** DONE 2026-09-17 (`2a0f7d9`): the fixup encoded
       with the layer behind the event wait as the speculative kernels over the
       host's per-layer cell row, `MoESpecDispatchArgs` at four grids, the
       speculative pair gaining the status word and the fallback cells; a timeline
@@ -157,7 +157,7 @@ SLRU is T1.3; the predicted-future eviction was null at a legitimate horizon
       within 0.4 ms, no overflow, the answers identical), the record in the design
       document; the scripts, logs and rows at
       `~/.claude/handoffs/archive/shrike-v20-t31/`.
-- [x] **T3.2 One command per token.** DONE 2026-09-17 (`1a61928`): `TokenCommand`
+- [x] **T3.2 One command per token.** DONE 2026-09-17 (`51fc54f`): `TokenCommand`
       with the descriptor's `encoderExecutionStatus` always on (measured free on
       the mini's four shapes through a variable that lived for the arms only; the
       known names stay fifteen), the layers and the boundary as its encoders,
@@ -175,8 +175,8 @@ SLRU is T1.3; the predicted-future eviction was null at a legitimate horizon
       boundary gap measured directly at 0.26 to 0.34 ms per token; the record in
       the design document; the scripts, logs and rows at
       `~/.claude/handoffs/archive/shrike-v20-t32/`.
-- [x] **T3.3 Committed ahead (Shape B).** DONE 2026-09-17 (`213412f` the gate,
-      `266c402` the runtime): the GDN state and conv tail of every linear layer in
+- [x] **T3.3 Committed ahead (Shape B).** DONE 2026-09-17 (`4df0be3` the gate,
+      `d356a8e` the runtime): the GDN state and conv tail of every linear layer in
       two parities, the decode kernels taking the state entering the step and the
       state leaving it, a pass reading the cursor's parity and writing the other,
       prefill, the snapshot and the restore on the cursor's parity; the next
@@ -219,12 +219,30 @@ per-kernel instrument does not exist, and that chapter's step zero builds it onc
 
 ## Close
 
-- [ ] ThreadSanitizer once on the whole suite at the final tree
-      (`env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test --no-parallel --sanitize=thread`).
-- [ ] The whole-branch review; the fixes folded into their owning commits.
-- [ ] `docs/architecture.md` brought to the tree: the table, the batch, the cells,
-      the fold, the instruments, the v20 history entry, references re-anchored.
-- [ ] The design document's closing block: the tally from S0.5's ledger to the last
-      task on four shapes, what the chapter settled, what remains and where it went.
-- [ ] Production on the mini at the close's build, golden verified.
-- [ ] The merge to `main` on Davor's go.
+- [x] ThreadSanitizer once on the whole suite at the final tree. DONE 2026-09-18:
+      twice, clean both times, at `a4c6431`'s tree before the review's folds (1,289
+      tests, 852 s) and at the final tree after them (1,292 tests, 850 s); the logs at
+      `~/.claude/handoffs/archive/shrike-v20-t33/close-tsan*.log`.
+- [x] The whole-branch review; the fixes folded into their owning commits. DONE
+      2026-09-18: five findings (the report at `shrike-v20-t33/close-review.md`), each
+      verified and folded: the KV growth under a running command and the drain's
+      swallowed fault into T3.3's commit, the word wake's completion fallback into
+      T3.2's, the overflow victim among the route's hits and SLRU's overflow placement
+      into T3.1's; three tests added, 1,292 in 176 suites; the four gates and the
+      golden on both boxes rerun at the folded tree; the record in the design
+      document's close.
+- [x] `docs/architecture.md` brought to the tree. DONE 2026-09-18: the decode path
+      rewritten for the token's command, the drain invariant, the agreed cells and the
+      commit ahead; the residency writers' table at twelve sites; the arena and the
+      ring under the table and SLRU; the demand path's status ring; the knobs at
+      fifteen; the long functions by swiftlint's count; the instruments; the v20
+      history entry; every line reference re-anchored at the close's tree.
+- [x] The design document's closing block. DONE 2026-09-18: the tally from the
+      opening ledger to T3.4 on four shapes, the count, what the chapter settled, the
+      review's folds, what remains and where it went.
+- [x] Production on the mini at the close's build, golden verified. DONE 2026-09-18:
+      the final build deployed, the golden identical on all five profiles bare and
+      configured on both boxes, production relaunched under the v20 configuration and
+      its load line confirmed.
+- [x] The merge to `main` on Davor's go. DONE 2026-09-18: main fast-forwarded from
+      `c4a96d6` and pushed; the branch and its backups deleted.

@@ -1095,7 +1095,7 @@ parity buffers, the rewind by one, the suppressed rows and the two-turn
 continuation gate are T3.3's build; T3.2 lands one command per token committed on
 the word, the stop path unchanged, and T3.3 moves the commit ahead.
 
-**T3.1 The agreed cells (2026-09-17, `782f477`; the arms measured on the mini at
+**T3.1 The agreed cells (2026-09-17, `2a0f7d9`; the arms measured on the mini at
 that tree, graded M, the verdict against Task 1's arms at `f0e056c`).**
 
 *What was built.* No new kernel. `MoESpecDispatchArgs` carries four grids: the
@@ -1191,8 +1191,8 @@ neither term was measured on its own). The host's on-path rows: `path_submit_ms`
 wake. The structure is in place for T3.2: every routed layer is one command
 holding its fixup, the host feeds reads and the batch publishes the value.
 
-**T3.2 One command per token (2026-09-17, `1a61928`; the arms measured on the
-mini at that tree, graded M, the verdict against T3.1's arms at `782f477`).**
+**T3.2 One command per token (2026-09-17, `51fc54f`; the arms measured on the
+mini at that tree, graded M, the verdict against T3.1's arms at `2a0f7d9`).**
 
 *What was built.* The token is one command: `TokenCommand` holds the command
 buffer, made from a `MTLCommandBufferDescriptor` with `encoderExecutionStatus`
@@ -1220,10 +1220,13 @@ path is unchanged: nothing runs past the stop. The drain invariant in full: ever
 abnormal exit of the token's loop abandons the pending plan, publishes every
 remaining armed value as failed, waits for the running command with
 `awaitCompletion`'s ten-second deadline, and unwinds; `awaitCompletion` is also
-the fallback of the word wake and the boundary wake after their first second, so
-a wait nothing will publish ends as `commandBufferFailed` naming the layer or the
-boundary rather than a hang, and the drain on the throw path then releases the
-GPU. A failed command is described by `describeCommandBufferError`: the encoders
+the fallback of the boundary wake after its first second, and the word wake keeps
+polling its word to the same deadline (the close's review fold: the token's
+command cannot complete before the host has serviced every later layer, so a
+completion wait there would have turned any read slower than a second into a
+certain failure), so a wait nothing will publish ends as `commandBufferFailed`
+naming the layer or the boundary rather than a hang, and the drain on the throw
+path then releases the GPU. A failed command is described by `describeCommandBufferError`: the encoders
 that faulted by label and the affected count from `MTLCommandBufferEncoderInfo`
 when the option is on, the plain error otherwise. Retired: the per-layer command
 buffers and their records (`HeldLayerCommands`, the deferred GPU records, the
@@ -1299,7 +1302,7 @@ encoder, a failed read names its layer, and the boundary gap is a row the
 kernel stats print. T3.3 moves the commit ahead of the stop check and takes
 that row.
 
-**T3.3 Committed ahead, Shape B (2026-09-17, `266c402`; the gates, the golden
+**T3.3 Committed ahead, Shape B (2026-09-17, `d356a8e`; the gates, the golden
 on both boxes and the continuation gate at that tree; the arms at T3.4).**
 
 *What was built.* The GDN state and the conv tail of every linear layer in
@@ -1355,7 +1358,7 @@ restoring to the same logits, the release letting the pass run through before
 the drain waits, `settle` idempotent; the loop naming only the pass before
 max tokens as the last and releasing the pass ahead on a stop token and a
 stop string; the two-turn continuation gate as the golden's `turns-lh`
-profile (the CLI's `--follow-up`), its reference captured at `213412f` on
+profile (the CLI's `--follow-up`), its reference captured at `4df0be3` on
 both boxes. 1,289 tests in 176 suites; the four gates; the golden identical on
 all five profiles bare and configured on both boxes.
 
@@ -1416,6 +1419,131 @@ is complete in its ruled shape.
 ### Task 4, held: the attention row's fixed part (B3, B4)
 
 Only on S0.6's number and Davor's ruling.
+
+## The chapter's close (2026-09-18)
+
+**The tally, the mini, two production lifetimes per shape, from the opening ledger at
+the v19 close's build to T3.4's arms under the production configuration:**
+
+| shape | misses per token | io ms per token | the token ms | tok/s | the move |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| the card (2k) | 20.1 to 15.7 | 14.7 to 11.6 to 12.1 | 57.8 to 58.7 → 54.0 to 54.4 | 17.0 to 17.3 → 18.4 to 18.5 | +6.4 to +8.8 % |
+| the 300 | 20.0 to 16.6 | 14.9 to 15.1 → 12.3 | 57.4 to 58.5 → 54.3 to 54.8 | 17.1 to 17.4 → 18.2 to 18.4 | +4.6 to +7.6 % |
+| the 1k | 18.9 to 15.0 to 15.1 | 14.0 → 11.1 | 57.4 to 57.5 → 53.0 to 53.3 | 17.4 → 18.8 to 18.9 | +8.0 to +8.6 % |
+| the 7k | 18.5 to 14.3 | 13.7 → 10.6 | 58.5 to 58.8 → 54.9 | 17.0 to 17.1 → 18.2 | +6.4 to +7.1 % |
+
+Two levers, both real and both free. The pool's allocation (Task 1: the per-layer
+slot table from the production miss profile with segmented LRU) took the misses per
+token from 19 to 20 down to 14 to 17 and the io by 2.6 to 3.4 ms per token, +4.4 to
++7.8 % tok/s at its own arms; the fold (Task 3: the agreed cells, one command per
+token, the commit ahead) took the host out of the token's critical path, the forty
+command boundaries and the token boundary with it, about 0.5 to 1.5 ms per token on
+the bare arm (56.6 to 57.6 ms against the opening's 57.4 to 58.8) and 0.4 to 1.2
+against T3.2's on the configured one, the boundary gap 0.26 to 0.34 ms per token to
+0.033 to 0.038. Every answer identical in bytes across every arm since Task 1's;
+the golden byte-identical on both boxes at every commit; the class-1 gate never
+opened.
+
+**The count:** twenty-one commits (`043beed` to `a4c6431`) plus the close's; 50
+source, test and tool files changed, 3,358 insertions and 1,587 deletions outside
+the docs and baselines; no Metal kernel added or retired, 66 in the tree (the
+classifier gained two grids, the speculative pair a status word and a fallback
+array, the GDN decode pair an out pointer); tests 1,258 to 1,289, suites 174 to 176;
+two environment names added under the tripwire, 13 to 15 (`SHRIKE_EXPERT_SLOT_TABLE`,
+`SHRIKE_EXPERT_POLICY`, both product settings, both the mini's launch
+configuration); two CLI flags (`--tokenize`, `--follow-up`); one golden profile per
+box added (`turns-lh`, the two-turn continuation); no rig shape added; the runner
+line lost eight rows that measured paths that no longer exist and gained four;
+the replay's table mode and the coverage tool's distance for the pricing.
+
+**What the chapter settled.**
+
+- The split is the lever on the pool, not the predictor. Step zero's replay priced
+  the token-id table at 0.24 ms at its precise layer for a second prediction source
+  and its reads; the split of the same 5,120 cells by the production miss profile
+  saved 2.4 to 3.0 ms per token where 1.3 to 3.1 was modelled, and SLRU on top 1.8
+  ms where it mattered. The table is designed and on record, not built.
+- The width is closed at distance one by the window's bandwidth and at distance
+  two by a number: recall 0.40 to 0.45 of the remaining misses at precision 0.08
+  to 0.09 against the bar's 0.13.
+- The fold's structure holds in its ruled shape. The token is one command; the
+  host feeds reads and publishes values; every value reserved at an encode is
+  published by the batch, by the host at the word or by the drain, and every wait
+  has a deadline that names what it waited on; a failed command names its encoder,
+  a failed read its layer; the GPU runs from one token's embed into the next
+  token's first layer with nothing of the host between them.
+- Shape B's price was the wait, not the pass. The design note priced the
+  unguarded drain at 40 to 45 ms once per answer and weighed a cancel word in five
+  kernel families against it. Released at the loop's exit and waited out at the
+  next GPU submission, the pass committed ahead of a stop runs through during the
+  finish frames and the cache's capture, and the wait measures 0.000 ms; the
+  guard was never needed.
+- Two of the box's steps were not needed, on the tree's evidence: the cursor
+  needs no rewind, because a pass's advance sits at the end of its own word loop
+  and the extra pass's loop never runs; the settle needs no drain, because the
+  snapshot reads the cursor's parity and the rows below the cursor, neither of
+  which the extra pass writes. Both are held by construction and by the toy tests,
+  and the continuation gate checks the whole path end to end.
+- A counter charged between two requests' snapshots reads zero on both lines. The
+  drain's first rows were all zero because the settle's re-prefill did the waiting
+  after one runner line and before the next snapshot; the rows now read against
+  what the last line reported.
+- The mini drifts, still; interleaved arms, two lifetimes per shape, remain the
+  only readings that survive it.
+
+**The whole-branch review (a fresh reader over `c4a96d6..a4c6431` with the records
+as the specification; the report at `~/.claude/handoffs/archive/shrike-v20-t33/close-review.md`).**
+Five findings, each verified against the code before its fold, folded into the commit
+that owned the defect:
+
+1. *KV growth under a running command* (into T3.3's commit). `KVCacheManager.reserve`
+   replaces a full layer's buffers and copies only the rows below the cursor; since
+   T3.2 the reserve for the next token ran after the current token's commit, so at a
+   growth boundary (position 8,191, 16,383 and 32,767 on the mini's context) the row
+   the running command was writing would have been lost from the new buffers and every
+   later layer would have attended over it for the rest of the conversation. Silent:
+   the golden's profiles and the rig's shapes never decode across 8,191. Now a pass
+   whose next position would grow the KV commits nothing ahead, growth happens at the
+   next produce with nothing in flight (the reserve moved behind the drain), and a
+   continued pass that finds no command ahead runs fresh from the token the previous
+   boundary's sampler wrote (`continuedTokenFromTheWord`); `needsGrowth` is the guard.
+2. *The word wake's fallback* (into T3.2's commit). Past its first second the wake
+   waited for the token's command to complete, which cannot happen before the host has
+   serviced every later layer, so any read slower than a second became a certain
+   failure ten seconds later. The wake now keeps polling its word, gently, to the
+   deadline, checking the command's status as it goes.
+3. *The overflow victim among the route's own hits* (into T3.1's commit).
+   `reserveOverflowSlot` chose its victim with only the loading slots reserved, so
+   with the ring out of cells it could evict an expert the classifier had just
+   resolved as a hit, tearing the bytes under the layer's speculative work and
+   throwing at the next plan. The route's experts are now protected before the victim
+   is chosen; never fired on the arms.
+4. *The drain's swallowed fault* (into T3.3's commit). A drained command's fault or
+   deadline went unrecorded; it is now counted (`drain_failures` on the runner line)
+   with the last error's description kept.
+5. *SLRU's overflow placement* (into T3.1's commit). An overflow read was resident by
+   the time its own route's deferred plan ran, so the plan promoted it on the placing
+   route instead of landing it in probation as the record says; the streamer now
+   keeps the placing route's overflow slots out of that one promotion. A fidelity
+   fix, bounded by the overflow rate.
+
+The tests: `needsGrowth`, the protected overflow victim, the continued pass with no
+command ahead running fresh from the word and refused without one; 1,292 tests in 176
+suites. Nothing real was found in the drain invariant's paths, the parities, the
+boundary words, the `last` flag, the seed mapping, the status-word ring, the ring's
+leases, the CLI's resume or the server's rows. ThreadSanitizer over the whole suite:
+clean at `a4c6431`'s tree before the folds and at the final tree after them.
+
+**What remains, and where it went.** The read itself: 0.73 to 0.80 ms at p50 per
+miss on the mini's drive is untouched by every chapter since v13, and the token's
+largest row is now the misses' count times that cost; the count moved here, the cost
+is the drive's. The attention row's fixed part (B3, B4) went to a chapter of its own
+with the instrument it needs (S0.6). The token-id table (A9) stays designed on record,
+and the table shipped beside the model or derived at load from a profile the model
+carries is Task 1's follow-up. Distance two at width eight is noted in S0.5b. Lossless
+compression is v21. The KV row at the cursor after a stop is written by the extra
+pass and read by nothing, overwritten by the next prefill; recorded, not a defect.
+The cancel word stays unbuilt.
 
 ## Method
 
