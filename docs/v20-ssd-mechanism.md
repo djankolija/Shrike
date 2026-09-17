@@ -1299,6 +1299,120 @@ encoder, a failed read names its layer, and the boundary gap is a row the
 kernel stats print. T3.3 moves the commit ahead of the stop check and takes
 that row.
 
+**T3.3 Committed ahead, Shape B (2026-09-17, `266c402`; the gates, the golden
+on both boxes and the continuation gate at that tree; the arms at T3.4).**
+
+*What was built.* The GDN state and the conv tail of every linear layer in
+two parities (`GDNStateManager`, `[parity][layer]`, 61.4 MiB more on
+ornith15): `gdn_conv_mix_decode` and the `gdn_delta_step_decode` pair take
+the tail and the state entering the step and a `tail_out` / `state_out`
+leaving it, the arithmetic unchanged (every element read before its row is
+written, so the same buffer twice is the old in-place step); a decode pass
+reads the parity holding the state at the cursor and writes the other, and
+the cursor's advance flips the runner's parity; prefill, the snapshot and the
+restore work in place on the cursor's parity; `reset` zeroes both. The next
+token's command is committed after the current token's last word: the
+boundary encoders need the caller's sampler, so `BoundaryLogitProducer`'s
+sampler closure now takes the position of the pass it ends and the word its
+token goes into, and the runner encodes it for this pass when the pass is
+fresh and for the next pass at the end of every pass; the loop passes `last`
+on the pass whose boundary sample would reach max tokens, and that pass
+commits nothing ahead. Two boundary words by token parity, the runner's,
+since the pass committed ahead would otherwise overwrite the one word before
+the host read it; the sentinel goes into a token's word at its commit. At the
+loop's exit on every path (the stop token, a stop string, the external stop,
+a disconnect's cancellation) `releasePassAhead` publishes the forty values
+the pass committed ahead waits on as failed, so it runs through with its
+fixups skipped during the finish frames and the client's turnaround; the
+wait is the next entry point's (`reset`, `prepareForContinuation`, `rewind`,
+`restoreInferenceState`, `prefillChunked`, a fresh `produce`, the CLI's
+`settle` before exit), counted as `drained_passes` and `drain_ms` on the
+runner line after the submission that waited it out. The extra
+pass's trace rows and counters never exist: the host's word loop never runs
+for it, and no `token` row is recorded for a drained command. The word clock's
+first row for a token committed ahead runs from the previous token's word,
+not the commit. The kernel stats' `gap token->token` row is the boundary gap
+the commit ahead removes.
+
+*Two deviations from the box, on the tree's evidence.* The cursor is not
+rewound: a pass's cursor advance sits at the end of its own word loop, and
+the extra pass's loop never runs, so after the stop the cursor is where T3.2
+left it (the parity at the cursor is the one the stop saw) and
+`rewind(to:)` stays refused under GDN state, gaining only the drain. The
+prompt cache's settle does not wait for the drain: the snapshot reads the
+cursor's parity and the rows below the cursor, which the extra pass never
+writes, so the finish frames and the settle go out as at T3.2 and the pass
+runs through behind them; the wait lands at the next request's entry, by then
+usually complete.
+
+*Tests.* The GDN decode step into the other parity matching the in-place
+step bit for bit with the input untouched; on the Qwen toy, the state the
+stop saw surviving the extra pass and its drain (the continuation's logits
+identical to the synchronous path's, the timeline empty, the ring without
+leases), the last pass committing nothing ahead, a reset during the extra
+pass leaving the runner reusable, a snapshot taken during the extra pass
+restoring to the same logits, the release letting the pass run through before
+the drain waits, `settle` idempotent; the loop naming only the pass before
+max tokens as the last and releasing the pass ahead on a stop token and a
+stop string; the two-turn continuation gate as the golden's `turns-lh`
+profile (the CLI's `--follow-up`), its reference captured at `213412f` on
+both boxes. 1,289 tests in 176 suites; the four gates; the golden identical on
+all five profiles bare and configured on both boxes.
+
+*The arms* (measured on the mini at the T3.3 tree, two arms per shape
+interleaved, two production lifetimes each, the first request of each: the
+bare launch and the production configuration; the answers byte-identical to
+T3.2's on every arm and shape, all twenty responses, and so identical in
+length, 226 / 369 / 300 / 353):
+
+| shape | arm | misses per token | io ms | overflow per token | cells leased peak | the token ms | tok/s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| the card | bare | 19.9 | 14.3 | 0.00 | 8 | 56.6 to 57.5 | 17.4 to 17.7 |
+| | configured | 15.7 | 11.6 to 12.1 | 0.00 | 6 | 54.0 to 54.4 | 18.4 to 18.5 |
+| the 300 | bare | 19.4 | 14.0 to 14.3 | 0.00 | 8 | 56.6 to 56.7 | 17.6 to 17.7 |
+| | configured | 16.6 | 12.3 | 0.00 | 7 | 54.3 to 54.8 | 18.2 to 18.4 |
+| the 1k | bare | 18.9 to 19.0 | 13.9 to 14.2 | 0.00 | 8 | 56.8 to 56.9 | 17.6 |
+| | configured | 15.0 to 15.1 | 11.1 | 0.00 | 7 | 53.0 to 53.3 | 18.8 to 18.9 |
+| the 7k | bare | 18.0 | 13.1 | 0.00 | 8 | 57.4 to 57.6 | 17.4 |
+| | configured | 14.3 | 10.6 | 0.00 | 8 | 54.9 | 18.2 |
+
+Against T3.2's arms at the same configuration (T3.2 / T3.3, the token ms):
+the card 54.4 to 55.8 / 54.0 to 54.4, the 300 54.7 to 55.6 / 54.3 to 54.8,
+the 1k 53.6 to 54.5 / 53.0 to 53.3, the 7k 55.9 to 56.1 / 54.9; the bare arm
+57.3 to 58.3 / 56.6 to 57.5, 56.4 to 57.2 / 56.6 to 56.7, 56.6 to 56.7 /
+56.8 to 56.9, 58.3 to 58.6 / 57.4 to 57.6. The misses per token, the io, the
+overflow and the leased peak identical to T3.2's on every row.
+
+*The instruments, the same lifetimes.* The boundary gap, the gap between
+consecutive `token` commands in the kernel stats: 0.033 to 0.038 ms per token
+on every arm and shape (M), against T3.2's 0.26 to 0.34; what remains is the
+driver's turnaround between two commands already queued. The `token` row's
+GPU span now equals the token within 0.2 ms on every arm (52.8 to 57.3 ms):
+the GPU is busy through the token and its boundary both. The word clock: the
+first routed layer's word 0.57 to 0.59 ms after the previous token's word
+(T3.2's 0.70 to 0.77 after the commit; the commit, the driver's start and
+the host's round trip are gone from it, the embed and layer 0 remain), the
+thirty-nine later layers 47.1 to 51.5 ms, the boundary 5.44 to 5.79 ms from
+the last word to the token word, unchanged; the three sum to the token
+within 0.3 ms. The drain: the rig's first request of a lifetime has no
+predecessor, so its line reads zero; the answer's stop is followed by the
+prompt cache's settle, which re-prefills the closed turn's two tokens
+(`settle_rewind`), and that submission is where the pass committed ahead is
+waited out, after the completion's finish frames: on a card lifetime run for
+it, the second request's line reads one drained pass and a wait of 0.000 ms,
+the pass having run through during the finish frames and the cache's capture
+(the release at the loop's exit is what makes that so; a drain that only
+published at the next submission would have charged the whole pass there).
+
+**Reading.** The prize taken as pre-registered: the boundary gap 0.26 to
+0.34 ms per token at T3.2 is 0.033 to 0.038 at T3.3 on every arm and shape,
+and the token is faster by about that or more on every configured row (0.4
+to 1.2 ms, the larger differences inside the mini's drift) and on two of the
+four bare rows, level on the other two; the misses, the io and the answers'
+bytes unchanged, no overflow. The GPU now runs from one token's embed into
+the next token's first layer with nothing of the host between them: the fold
+is complete in its ruled shape.
+
 ### Task 4, held: the attention row's fixed part (B3, B4)
 
 Only on S0.6's number and Davor's ruling.

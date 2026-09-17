@@ -175,24 +175,42 @@ SLRU is T1.3; the predicted-future eviction was null at a legitimate horizon
       boundary gap measured directly at 0.26 to 0.34 ms per token; the record in
       the design document; the scripts, logs and rows at
       `~/.claude/handoffs/archive/shrike-v20-t32/`.
-- [ ] **T3.3 Committed ahead (Shape B)**: the GDN state and conv tail of every linear
-      layer double-buffered by token parity, the kernels taking `state_in` and
-      `state_out`, prefill writing the parity the decode continues from, the
-      snapshot and restore on the current parity; the next token's command
-      committed after the current token's last word; the stop token, the stop
-      strings and the external stop seen one pass late, max tokens never (the pass
-      after the last token not encoded); the finish frames before the drain, the
-      extra pass drained unguarded (all forty values published failed, no reads, no
-      cells, the wait), the parity left where it was, the cursor rewound by one,
-      the extra pass's trace rows and counters suppressed, the settle after; the
-      two-turn continuation gate, byte-identical against the same turns without
-      the early commit; the cancel's tests (the stop token, a stop string, max
-      tokens, a disconnect: the timeline published, the ring without leases, the
-      runner reusable); gates and golden; deploy.
-- [ ] **T3.4 The gates, the golden, the deploy, the arms, the record**: after T3.3,
-      two lifetimes per shape on four shapes against Task 1's arms, the boundary gap
-      gone from the per-token rows, the drain once per answer in the answer's
-      total, the answers identical in length; the record in the design document.
+- [x] **T3.3 Committed ahead (Shape B).** DONE 2026-09-17 (`213412f` the gate,
+      `266c402` the runtime): the GDN state and conv tail of every linear layer in
+      two parities, the decode kernels taking the state entering the step and the
+      state leaving it, a pass reading the cursor's parity and writing the other,
+      prefill, the snapshot and the restore on the cursor's parity; the next
+      token's command committed after the current token's last word, its boundary
+      from the caller's sampler closure given the pass's position and the word of
+      its parity (two boundary words, the runner's), the loop's `last` on the pass
+      before max tokens so it commits nothing ahead; the stop token, the stop
+      strings, the external stop and a disconnect seen one pass late and the pass
+      ahead released at the loop's exit (its forty values published failed, no
+      reads, no cells) so it runs through during the finish frames and the client's
+      turnaround, the wait at the next entry point counted as `drained_passes` and
+      `drain_ms`; the parity left where it was; the extra pass's trace rows and
+      counters never written; two deviations on the tree's evidence, recorded: the
+      cursor needs no rewind (a pass's advance sits at the end of its own word
+      loop, which the extra pass never runs) and the settle needs no drain (the
+      snapshot reads what the extra pass never writes); the two-turn continuation
+      gate as the golden's `turns-lh` profile (the CLI's `--follow-up`), its
+      reference captured before the commit ahead on both boxes; the cancel's tests
+      on the Qwen toy and the loop; 1,289 tests in 176 suites; the four gates; the
+      golden identical on all five profiles bare and configured on both boxes;
+      deployed, production under the v20 configuration; the scripts and logs at
+      `~/.claude/handoffs/archive/shrike-v20-t33/`.
+- [x] **T3.4 The arms and the record.** DONE 2026-09-18: two lifetimes per shape
+      on four shapes, bare and configured, against T3.2's arms: the boundary gap
+      0.26 to 0.34 ms per token at T3.2 is 0.033 to 0.038 at T3.3 on every arm and
+      shape, the token faster by about that or more on every configured row (0.4
+      to 1.2 ms, the larger differences inside the drift) and on two bare rows,
+      level on the other two, the misses, the io and the answers' bytes unchanged
+      (all twenty responses identical to T3.2's), no overflow; the `token` row's
+      GPU span equal to the token within 0.2 ms; the word clock's first row 0.57
+      to 0.59 ms from the previous token's word; the drain's wait on the request
+      after a stop 0.000 ms (one drained pass on a card lifetime's second line);
+      the record in the design document; the scripts, logs, rows and instruments
+      at `~/.claude/handoffs/archive/shrike-v20-t33/`.
 
 ## Task 4: to a chapter of its own (Davor's ruling, 2026-09-17)
 
