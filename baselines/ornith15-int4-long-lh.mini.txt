@@ -1,0 +1,28 @@
+# profile:     long (prompt 9857 bytes)
+# max-new:     128
+# temperature: 0 (greedy)
+# head:        logits
+# seed:        1234
+# model:       ornith15.gturbo
+# captured-on: Macmini9,1, 16 GB, macOS 26.5.2
+# commit:      unknown
+---
+
+
+<think>
+Let me analyze the build ledger entries.
+
+I need to:
+1. Count the number of entries
+2. Determine which shelf received the most bundles
+3. Identify the trend in build times
+
+Let me count the entries first. The entries go from Entry 1 to Entry 60, so there are 60 entries.
+
+Now let me track the shelf assignments:
+- Entry 1: shelf s1
+- Entry 2: shelf s2
+- Entry 3: shelf s3
+- Entry 4: shelf s4
+- Entry 5: shelf s5
+-

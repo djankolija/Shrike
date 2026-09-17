@@ -24,6 +24,9 @@ public struct Args: Equatable, Sendable {
     public var prefillChunk: PrefillChunkChoice?
     public var kvCachePrecision: KVCachePrecision
     public var ropeScalingMode: RuntimeRoPEScalingMode
+    public var forceTokensPath: String?
+    public var dumpLogitsPath: String?
+    public var logitsHead: Bool
 
     public init(model: String,
                 prompt: String? = nil,
@@ -42,8 +45,14 @@ public struct Args: Equatable, Sendable {
                 expertCacheSlots: Int = 64,
                 prefillChunk: PrefillChunkChoice? = nil,
                 kvCachePrecision: KVCachePrecision = .int8,
-                ropeScalingMode: RuntimeRoPEScalingMode = .none) {
+                ropeScalingMode: RuntimeRoPEScalingMode = .none,
+                forceTokensPath: String? = nil,
+                dumpLogitsPath: String? = nil,
+                logitsHead: Bool = false) {
         self.model = model
+        self.forceTokensPath = forceTokensPath
+        self.dumpLogitsPath = dumpLogitsPath
+        self.logitsHead = logitsHead
         self.prompt = prompt
         self.messagesFile = messagesFile
         self.maxNew = maxNew
@@ -126,6 +135,14 @@ extension Args {
                                 decide. These models do not define effort
                                 levels.
       --quiet                   Suppress the timing footer.
+      --logits-head             Run the server's logits head even at
+                                temperature 0 (the fused greedy head is the
+                                default there).
+      --force-tokens <path>     Feed these ids (one per line) in place of the
+                                sampler's and stop when they run out; the
+                                class-2 gate's instrument.
+      --dump-logits <path>      Write every position's fp16 logits as raw rows
+                                to <path> and a JSON sidecar to <path>.json.
       --help                    Show this message.
     """
 
@@ -158,6 +175,9 @@ extension Args {
         var prefillChunk: PrefillChunkChoice?
         var kvCachePrecision: KVCachePrecision = .int8
         var ropeScalingMode: RuntimeRoPEScalingMode = .none
+        var forceTokensPath: String?
+        var dumpLogitsPath: String?
+        var logitsHead = false
 
         mutating func applyFlags(_ argv: [String]) throws {
             var index = 0
@@ -242,6 +262,13 @@ extension Args {
                     kvCachePrecision = parsed
                 case "--stop":
                     stops.append(try takeValue(argv, &index, flag: flag))
+                case "--force-tokens":
+                    forceTokensPath = try takeValue(argv, &index, flag: flag)
+                case "--dump-logits":
+                    dumpLogitsPath = try takeValue(argv, &index, flag: flag)
+                case "--logits-head":
+                    logitsHead = true
+                    index += 1
                 default:
                     throw ArgsError.unknownFlag(flag)
                 }
@@ -288,7 +315,10 @@ extension Args {
                         expertCacheSlots: expertCacheSlots,
                         prefillChunk: prefillChunk,
                         kvCachePrecision: kvCachePrecision,
-                        ropeScalingMode: ropeScalingMode)
+                        ropeScalingMode: ropeScalingMode,
+                        forceTokensPath: forceTokensPath,
+                        dumpLogitsPath: dumpLogitsPath,
+                        logitsHead: logitsHead)
         }
     }
 

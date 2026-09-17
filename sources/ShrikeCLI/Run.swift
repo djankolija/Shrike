@@ -88,7 +88,7 @@ public func run(args: Args,
             return result
         }
         let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
-        let config = GenerationConfig(
+        var config = GenerationConfig(
             maxNewTokens: effectiveMaxNew,
             temperature: args.temperature,
             topK: args.topK,
@@ -98,11 +98,28 @@ public func run(args: Args,
             seed: args.seed,
             stopStrings: args.stops,
             extraStopTokens: [])
+        if let path = args.forceTokensPath {
+            let forced = try readForcedTokens(path: path)
+            guard forced.count <= effectiveMaxNew else {
+                return errored(
+                    stderr,
+                    "forced tokens: \(forced.count) ids exceed the budget of \(effectiveMaxNew); raise --max-new or --max-context",
+                    2)
+            }
+            config.forcedTokens = forced
+        }
+        let dump = try args.dumpLogitsPath.map {
+            try FileLogitsSink(path: $0, forced: config.forcedTokens)
+        }
+        defer { try? dump?.finish() }
+        config.logitsSink = dump
+        let logitsHead = !config.isPureGreedy || args.logitsHead
+            || config.forcedTokens != nil || dump != nil
         let loaded: LoadedRuntime
         switch try buildRuntime(args: args,
                                 modelURL: modelURL,
                                 expectedArch: expectedArch,
-                                config: config,
+                                logitsHead: logitsHead,
                                 promptIds: promptIds,
                                 stderr: stderr) {
         case .value(let value):
@@ -127,6 +144,7 @@ public func run(args: Args,
                     stdout.write(Data(tail.utf8))
                 }
             }
+        try dump?.finish()
 
         if !args.quiet {
             writeFooter(stats: stats, stderr: stderr)
@@ -210,12 +228,12 @@ private func buildPrompt(args: Args,
 private func buildRuntime(args: Args,
                           modelURL: URL,
                           expectedArch: ArchConfig,
-                          config: GenerationConfig,
+                          logitsHead: Bool,
                           promptIds: [Int32],
                           stderr: FileHandle) throws -> StageOutcome<LoadedRuntime> {
     let loadRuntime = try RuntimeConfiguration(
         expertCacheSlots: args.expertCacheSlots,
-        forceLogitsHead: !config.isPureGreedy,
+        forceLogitsHead: logitsHead,
         prefetchTracePath: RuntimeConfiguration.environmentPrefetchTracePath())
 
     guard MTLCreateSystemDefaultDevice() != nil else {
@@ -244,7 +262,7 @@ private func buildRuntime(args: Args,
     let runtime = try RuntimeConfiguration(
         expertCacheSlots: loadRuntime.expertCacheSlots,
         prefillChunkTokens: prefillChunkTokens,
-        forceLogitsHead: !config.isPureGreedy,
+        forceLogitsHead: logitsHead,
         prefetchTracePath: loadRuntime.prefetchTracePath,
         kvCachePrecision: args.kvCachePrecision,
         ropeScalingMode: args.ropeScalingMode,

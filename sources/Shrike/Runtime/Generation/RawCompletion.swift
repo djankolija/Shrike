@@ -95,11 +95,19 @@ public func runRawCompletion(producer: any LogitProducer,
     guard !promptIds.isEmpty else {
         throw GeneratorError.emptyPrompt
     }
+    var config = config
+    if let forced = config.forcedTokens {
+        config.maxNewTokens = min(config.maxNewTokens, forced.count)
+    }
     let fusedRunner = producer as? RealForwardRunner
     let fusedGreedy = fusedRunner?.usesFusedGreedyHead == true
     guard !fusedGreedy || config.isPureGreedy else {
         throw PrefillError.unsupportedPrefillSeed(
             "the fused-head producer cannot serve this sampling configuration; use a logits head")
+    }
+    guard !fusedGreedy || (config.forcedTokens == nil && config.logitsSink == nil) else {
+        throw PrefillError.unsupportedPrefillSeed(
+            "forced tokens and the logits sink need the logits on the host; construct the runner with forceLogitsHead: true")
     }
 
     let cachedPromptTokens: Int
@@ -273,15 +281,25 @@ private func runDecodeLoop(producer: any LogitProducer,
     var reason: StopReason = .maxTokens
     var uncommittedBoundaryTokenIDs: [Int32] = []
     let boundaryProducer = producer as? any BoundaryLogitProducer
-    let useBoundary = boundaryProducer != nil && !fusedGreedy && config.repetitionPenalty == 1.0
+    let instrumented = config.forcedTokens != nil || config.logitsSink != nil
+    let useBoundary = boundaryProducer != nil && !fusedGreedy
+        && config.repetitionPenalty == 1.0 && !instrumented
     var boundaryPending = false
 
     while true {
         try Task.checkCancellation()
 
         let tLoopStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        if let sink = config.logitsSink {
+            let count = scratch.logits.length / MemoryLayout<Float16>.size
+            let base = scratch.logits.contents().assumingMemoryBound(to: Float16.self)
+            sink.record(position: generated,
+                        logits: UnsafeBufferPointer(start: base, count: count))
+        }
         let tokenID: Int32
-        if generated == 0, let seed = prefillSeed {
+        if let forced = config.forcedTokens {
+            tokenID = forced[generated]
+        } else if generated == 0, let seed = prefillSeed {
             switch seed {
             case .greedyToken(let token):
                 tokenID = Int32(bitPattern: token)
@@ -300,6 +318,7 @@ private func runDecodeLoop(producer: any LogitProducer,
                                  timing: fusedRunner)
         }
         let tSampled = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        config.logitsSink?.chose(position: generated, token: tokenID)
         generated += 1
         uncommittedBoundaryTokenIDs = [tokenID]
 

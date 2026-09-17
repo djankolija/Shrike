@@ -503,6 +503,37 @@ and v21, and closes the golden's coverage gap the v18 review found on the way.
   at every position except exact ties, a calibration of the band on a known
   class-1 pair.
 
+**The record (2026-09-17).** Built as designed: `LogitsSink` and the two fields on
+`GenerationConfig`; the loop takes a forced id in place of the sampler's, records
+each position's logits before the choice and the choice after it, bypasses the
+boundary producer and refuses a fused greedy head when instrumented; the CLI's
+three flags, `FileLogitsSink` with its sidecar, the forced-id reader;
+`tools/logit-compare.py` with the median band and the outlier rule; the golden
+script's `HEAD=logits` mode. Tests: the forced list replaces the sampler and stops
+when it runs out, the sink's rows carry the logits each token was chosen from, an
+empty list is refused, the flags parse and the usage inventory holds. On the dev
+box with the real model, the short prompt at twelve positions: the free run's dump
+against the forced replay of its own ids, KL and |Δ| zero at every position, the
+texts identical (the instrument's old-against-old test); a shifted list stops
+where it ends with a different text. The logits-head golden captured on both
+profiles locally and compared with the fused-head baselines: character-identical
+on both, so the two heads agree at every position of these prompts and the
+gate now covers the server's path. A lesson on the way: the first full gate run
+segfaulted in the server suites (a concurrency job with no Shrike frames in the
+crash report), reproduced four times, passed on the last commit with the tree
+stashed, and vanished on a clean debug build with the change fully in place. A
+public struct gaining stored properties (`GenerationConfig`) left stale objects in
+a dependent module's incremental build; the same staleness could sit in the
+release products, so the release was rebuilt from scratch before the mini saw
+it. Added to the Method: after a layout change to a public struct, clean the
+build before trusting a crash. Then the four gates on the clean builds (1,254
+tests in 173 suites in 206 s, four new; zero warnings; lint and links clean), the
+local golden identical on all four profiles. On the mini (`beeba44a30bbeb12`,
+the server down): the fused golden identical on both profiles, the two
+logits-head profiles captured (`baselines/ornith15-int4-{short,long}-lh.mini.txt`)
+and checked, their text identical to the fused profiles' there too; production
+relaunched on this build. The gate now has four profiles on each box.
+
 ### Task 2: the loop form (class 1; Davor's ruling 2026-09-17: first)
 
 What step zero found, in the production kernel: the per-lane loops of
@@ -568,7 +599,30 @@ routed work, none of it the scan's.
 
 ### Task 3: the streaming scan (class 2)
 
-Approach A in the runner, its configuration the one S0.4 chose.
+Approach A in the runner, its configuration the one S0.4 chose: four query heads
+per simdgroup, two head sets by four position streams per threadgroup, contiguous
+runs, sixteen threadgroups per KV head writing sixty-four partials per query
+head; no unroll, no lazy rescale.
+
+**Pre-registered (2026-09-17, before the kernel landed).** From the bench's 1.7×
+over the fix's form, interleaved on the mini (T for the runner):
+
+| row (ms per token) | Task 2 (M) | expected | grade |
+| --- | ---: | ---: | --- |
+| `layer_kv`, the 300 | 7.67 | 7.6 | T, under the noise |
+| `layer_kv`, the 1k | 8.26 | 7.9 | T |
+| `layer_kv`, the card | 8.96 to 9.02 | 8.2 | T |
+| `layer_kv`, the 7k | 12.82 to 12.84 | 10.7 | T |
+| the slope, ms per 1,000 | 0.72 | 0.4 to 0.5 | T |
+| the 7k token | 61.6 to 61.8 | 59 to 60 | T |
+| the card's token | 59.0 to 59.4 | 58.3 to 58.8 | T |
+
+The kernel arm's band: relative error against the CPU reference at most 0.02 on
+int8 rows (the shared kernel's own bound), and the stream kernel against the
+shared kernel on the same rows a maximum |Δ| under 1e-2 on outputs of order one
+half. The instrument: every flip inside three times the median |Δ|, no position
+above ten times it. The misses and the other rows flat. The answers not expected
+identical.
 
 - **The kernel**, `attention_decode_partial_stream`, beside the shipped one in
   `attention.metal`, on the V4.1 function constants (bits, stride, value bytes,
@@ -629,6 +683,10 @@ chapter:
   a regression at short context, where the row is walls and projections.
 - A class-2 task's record carries the instrument's table and the read's answers,
   not a digest.
+- After a public struct changes layout (a stored property added or removed),
+  clean the debug and release build directories before trusting a crash or a
+  deploy: SwiftPM's incremental build left a dependent module's objects stale
+  in Task 1 and the test helper segfaulted with no Shrike frame on the stack.
 
 ## Numerics policy
 

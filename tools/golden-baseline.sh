@@ -3,8 +3,13 @@
 # can be checked against byte-identical output rather than "the tests still
 # pass".
 #
-#   tools/golden-baseline.sh [short|long ...]     # capture; default: both
-#   tools/golden-baseline.sh --check [short|long ...]
+#   tools/golden-baseline.sh [profile ...]     # capture; default: all four
+#   tools/golden-baseline.sh --check [profile ...]
+#
+# Profiles: short and long on the CLI's fused greedy head; short-lh and long-lh
+# on the server's head path (--logits-head: the logits head and the GPU greedy
+# sampler), the files named ...-<profile>.<tag>.txt. The default set is all
+# four, so `--check` alone covers both heads (v19 Task 1).
 #
 # Determinism comes from greedy decoding: --temperature 0 with a fixed seed and
 # a fixed prompt. Greedy means the sampler never draws, so the only inputs are
@@ -59,7 +64,7 @@ long_prompt() {
 
 mode=capture
 if [ "${1:-}" = "--check" ]; then mode=check; shift; fi
-profiles=("$@"); [ ${#profiles[@]} -eq 0 ] && profiles=(short long)
+profiles=("$@"); [ ${#profiles[@]} -eq 0 ] && profiles=(short long short-lh long-lh)
 
 if [ ! -x "$CLI" ]; then
   echo "missing $CLI — run: swift build -c release (or set CLI=)" >&2
@@ -78,10 +83,14 @@ status=0
 
 for profile in "${profiles[@]}"; do
   case "$profile" in
-    short) prompt="$SHORT_PROMPT"; max_new="$MAX_NEW" ;;
-    long)  prompt="$(long_prompt)"; max_new=128 ;;
-    *) echo "unknown profile: $profile (expected short or long)" >&2
+    short|short-lh) prompt="$SHORT_PROMPT"; max_new="$MAX_NEW" ;;
+    long|long-lh)   prompt="$(long_prompt)"; max_new=128 ;;
+    *) echo "unknown profile: $profile (expected short, long, short-lh or long-lh)" >&2
        status=1; continue ;;
+  esac
+  case "$profile" in
+    *-lh) head=logits; head_flag="--logits-head" ;;
+    *)    head=fused;  head_flag="" ;;
   esac
   file="$OUT_DIR/ornith15-int4-${profile}.${MACHINE_TAG}.txt"
   work="$(mktemp "${TMPDIR:-/tmp}/golden-baseline.XXXXXX")"
@@ -90,7 +99,7 @@ for profile in "${profiles[@]}"; do
   # --quiet keeps the timing footer out of the compared text; only the
   # generated tokens are the contract. Timings vary run to run by design.
   "$CLI" --model "$MODEL" --prompt "$prompt" --max-new "$max_new" \
-         --temperature 0 --seed "$SEED" --quiet > "$work" 2>"$work.err"
+         --temperature 0 --seed "$SEED" --quiet $head_flag > "$work" 2>"$work.err"
   rc=$?
   if [ $rc -ne 0 ]; then
     echo "  FAILED (exit $rc)"; sed 's/^/  /' "$work.err" | head -20
@@ -102,10 +111,11 @@ for profile in "${profiles[@]}"; do
       echo "# profile:     $profile (prompt $(printf '%s' "$prompt" | wc -c | tr -d ' ') bytes)"
       echo "# max-new:     $max_new"
       echo "# temperature: 0 (greedy)"
+      echo "# head:        $head"
       echo "# seed:        $SEED"
       echo "# model:       $(basename "$MODEL")"
       echo "# captured-on: $(sysctl -n hw.model), $(( $(sysctl -n hw.memsize) / 1073741824 )) GB, macOS $(sw_vers -productVersion)"
-      echo "# commit:      $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+      echo "# commit:      $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$(git -C "$ROOT" diff --quiet 2>/dev/null || echo '-dirty')"
       echo "---"
       cat "$work"
     } > "$file"

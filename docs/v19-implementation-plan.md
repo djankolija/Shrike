@@ -67,46 +67,43 @@ no-load twin; the close.
 
 ## Task 1: the instrument (class 1; beside step zero)
 
-- [ ] **T1.1 The forced-token mode.** `GenerationConfig` (`Sampler.swift:18`) gains
-      `forcedTokens: [Int32]?`; `RawCompletion.swift:275-296` takes the list's next
-      id in place of the sampler's from the first generated position, through the
-      synchronous logits path (`useBoundary` false and the fused greedy head off
-      whenever the list is set), and stops when the list ends. A test with the
-      `ScriptedLogitProducer` fixture
-      (`ShrikeValidation/Support/Fixtures/ScriptedLogitProducer.swift`) asserts the
-      fed ids are the list's, in order, whatever the scripted logits say.
-- [ ] **T1.2 The logits dump.** `GenerationConfig` gains `logitsSink:
-      (any LogitsSink)?`, a protocol with `record(position:logits:)` over the fp16
-      logits buffer and `chose(position:token:)` for the id the loop took; the loop
-      calls them once per position on the synchronous logits path (the boundary
-      producer is bypassed whenever a sink or forced tokens are set, and a fused
-      greedy head is refused); a file sink in the CLI writes raw fp16 rows to
-      `<file>` and a JSON sidecar `<file>.json` (vocab, positions, chosen, forced,
-      the binary's hash). A test with the scripted producer asserts the rows
-      recorded equal the logits scripted and the ids equal the tokens chosen.
-- [ ] **T1.3 The CLI flags.** `Args.swift`: `--force-tokens <file>` (one id per
-      line), `--dump-logits <file>`, `--logits-head`; `Run.swift:218` and `:247`
-      pass `forceLogitsHead: !config.isPureGreedy || logitsHead || forcedTokens != nil`.
-      The usage block updated; a parser test per flag.
-- [ ] **T1.4 The comparison.** `tools/logit-compare.py <old> <new>` (pure Python,
-      no numpy on either box): per position the KL divergence old to new in fp64,
-      max |Δ logit|, both argmaxes, the old build's top-2 margin; the band three
-      times the run's max |Δ|; every flip listed with its margin and the verdict
-      variance or defect; a summary line; exit 1 on a defect. `--self-test` over a
-      synthetic pair with one variance flip and one defect; old against old on a
-      real dump at T1.6.
-- [ ] **T1.5 The logits-head golden.** `tools/golden-baseline.sh`: a `HEAD=logits`
-      mode adding `--logits-head` to the CLI line and a `-lh` suffix to the profile
-      name; the two profiles captured on both boxes on the current tree
-      (`baselines/ornith15-int4-{short,long}-lh.{Mac167,mini}.txt`); `--check`
-      covers all four from here on. The mini's capture through the archived
-      `mini-golden.sh` pattern (Shrike stopped, deploy leave).
-- [ ] **T1.6 The calibration run and the record.** On each box: both golden prompts
-      forced with the golden's own tokens through the same build twice (old against
-      old: zero), then the fused greedy head against the logits head at temperature
-      zero (a known class-1 pair: agreement everywhere but exact ties); the tables in
-      the design document's Task 1 record; the four gates; the golden identical on
-      all four profiles on both boxes; the commit.
+- [x] **T1.1 The forced-token mode.** DONE 2026-09-17: `GenerationConfig.forcedTokens`
+      (`Sampler.swift`), the loop in `RawCompletion.swift` taking the list's next
+      id from the first generated position on the synchronous logits path (the
+      boundary producer bypassed, a fused greedy head refused), stopping when the
+      list ends; validated non-empty. Tests in
+      `RawCompletionLoopTests+Instrument.swift` with the scripted producer.
+- [x] **T1.2 The logits dump.** DONE 2026-09-17: `LogitsSink` (`LogitProducer.swift`)
+      with `record(position:logits:)` over the fp16 buffer and
+      `chose(position:token:)`; `GenerationConfig.logitsSink`; the loop records
+      before the choice and reports the choice; `FileLogitsSink` in the CLI
+      (`LogitsDump.swift`) writing raw fp16 rows and the JSON sidecar (vocab,
+      positions, chosen, forced, the binary's SHA-256). Tested with the scripted
+      producer: the rows' argmaxes are the tokens chosen.
+- [x] **T1.3 The CLI flags.** DONE 2026-09-17: `--force-tokens`, `--dump-logits`,
+      `--logits-head` in `Args.swift`; `Run.swift` reads the ids, caps the token
+      count to the list, installs the sink, and takes the logits head whenever a
+      sampler, the flag, forced tokens or a dump asks for it; the usage block and
+      its inventory test updated; `CLIArgumentsTests+Instrument.swift`.
+- [x] **T1.4 The comparison.** DONE 2026-09-17: `tools/logit-compare.py` (pure
+      Python); the band three times the median of the per-position max |Δ| and an
+      outlier rule at ten times the median (the board's run-maximum band hid every
+      flip behind one bad position in the self-test); `--self-test` green; on the
+      dev box a free run's dump against the forced replay of its own ids: KL and
+      |Δ| zero at every position, the texts identical, a shifted list stopping
+      where it ends.
+- [x] **T1.5 The logits-head golden.** DONE 2026-09-17: `HEAD=logits` in
+      `tools/golden-baseline.sh` (`--logits-head` on the CLI line, the `-lh` suffix);
+      the two profiles captured on both boxes
+      (`baselines/ornith15-int4-{short,long}-lh.{Mac167,mini}.txt`) and checked;
+      `--check` with `HEAD=logits` covers them from here on.
+- [x] **T1.6 The calibration run and the record.** DONE 2026-09-17: on the dev box
+      the free dump against the forced replay, zero everywhere; the fused head
+      against the logits head at temperature zero, character-identical on both
+      profiles on both boxes; the stale-build segfault chased to a clean rebuild;
+      the four gates on clean builds (1,254 tests); the golden identical on all
+      four profiles on both boxes; production on the mini at `beeba44a30bbeb12`;
+      the record in the design document.
 
 ## Task 2: the loop form (class 1; ruled first by Davor, 2026-09-17)
 

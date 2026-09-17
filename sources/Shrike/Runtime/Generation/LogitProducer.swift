@@ -23,6 +23,12 @@ public protocol BoundaryLogitProducer: LogitProducer {
     func awaitBoundaryToken() throws -> Int32
 }
 
+/// The class-2 gate's instrument (docs/v19-scan-rewrite.md, Task 1).
+public protocol LogitsSink: AnyObject, Sendable {
+    func record(position: Int, logits: UnsafeBufferPointer<Float16>)
+    func chose(position: Int, token: Int32)
+}
+
 public protocol ContinuableLogitProducer: LogitProducer {
     var continuationPosition: Int { get }
     func prepareForContinuation(expectedPosition: Int) throws

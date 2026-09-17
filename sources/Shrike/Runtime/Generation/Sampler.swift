@@ -28,6 +28,9 @@ public struct GenerationConfig: Sendable {
     public var seed: UInt64? = nil         // nil = nondeterministic
     public var stopStrings: [String] = []
     public var extraStopTokens: Set<Int32> = []
+    /// Both diagnostics need the logits on the host, so a fused greedy head is refused.
+    public var forcedTokens: [Int32]?
+    public var logitsSink: (any LogitsSink)?
 
     public init(maxNewTokens: Int = 256,
                 temperature: Float = GenerationDefaults.temperature,
@@ -73,6 +76,10 @@ public struct GenerationConfig: Sendable {
         if temperature > 0, topK == nil, let topP, topP < 1 {
             throw GeneratorError.invalidGenerationConfig(
                 "topP below one requires topK; full-vocabulary nucleus sampling is not implemented")
+        }
+        if let forcedTokens, forcedTokens.isEmpty {
+            throw GeneratorError.invalidGenerationConfig(
+                "forcedTokens must hold at least one id when set")
         }
     }
 
