@@ -215,4 +215,6 @@ no-load twin; the close.
       build of `2dec184` deployed (`d0a9e3f4e2d5a5ff`), the golden identical on all
       four profiles on both boxes, the server relaunched on the production line and
       answering.
-- [ ] The merge to `main` on Davor's go.
+- [x] The merge to `main` on Davor's go: DONE 2026-09-17, `main` fast-forwarded
+      `2d357c6` to `c4a96d6` and pushed; the branch and its backup deleted (ticked
+      at v20's open, since the box could not be ticked before the merge it records).
