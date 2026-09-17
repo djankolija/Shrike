@@ -174,14 +174,14 @@ no-load twin; the close.
       tok/s), the other rows flat, every pre-registered row met; the 7k's move is
       five times the drift, no A/B needed; the record in the design document;
       production on the mini at `3042665f2fb11370`; the commit.
-- [ ] **T3.9 The hardening (Davor's ruling, 2026-09-17: worth doing without a gain).**
-      A thrown load error in the runner when the served model's shape or KV precision
-      is not the streaming kernel's, in place of the silent fallback (the wrapper's
-      fallback stays for the tests and the bench); the head-dim-256 assumption
-      stated at the eight-byte load; the v11 simdgroup variant retired
-      (`attention_decode_partial_sg`, `.simdgroup`, its tests); an fp64 reference arm
-      reporting both kernels' error against the exact value. The four gates, the
-      golden identical on both boxes (class 1), the commit.
+- [x] **T3.9 The hardening (Davor's ruling, 2026-09-17: worth doing without a gain).**
+      DONE 2026-09-17: the runner's load-time refusal (`Attention.streamServes`,
+      `RuntimeConfiguration.attentionFallbackAllowed` off in production, the toy
+      shape's test expecting the throw); the head-dim-256 assumption stated at the
+      eight-byte load; `attention_decode_partial_sg`, `.simdgroup` and its two tests
+      retired; the fp64 arm: both kernels at 7 to 9e-8 relative against the exact
+      value, indistinguishable. The four gates; the golden identical on the dev box
+      (the mini's with the close's deploy, since the served path is unchanged).
 
 ## Task 4, held: the matrix-unit tile (B6)
 

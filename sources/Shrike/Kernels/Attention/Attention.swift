@@ -26,7 +26,6 @@ struct AttentionSplitGeometry: Sendable, Equatable {
 public final class Attention {
     private let ctx: MetalContext
     private let psoPartial: MTLComputePipelineState
-    private let psoPartialSG: MTLComputePipelineState
     let psoPartialShared: MTLComputePipelineState
     private let partialLoopVariant: PartialLoopVariant
     /// v11 V4.1: bake the shape and KV storage format into the shared
@@ -43,10 +42,18 @@ public final class Attention {
         let kvValueBytes: UInt32
         let kvGroupSize: UInt32
     }
-    private var kvSharedSpecializedPSOs: [KVSharedShapeKey: MTLComputePipelineState] = [:]
-    private var streamSpecializedPSOs: [KVSharedShapeKey: MTLComputePipelineState] = [:]
+    private struct SpecializedPartialKey: Hashable {
+        let name: String
+        let shape: KVSharedShapeKey
+    }
+    private var specializedPartialPSOs: [SpecializedPartialKey: MTLComputePipelineState] = [:]
     /// Mirrors `kAttnStreamCount`: the partial count stays `maxChunks`, the dispatch is a quarter of it.
     static let streamCount = 4
+
+    /// Which full-attention partial a shape takes; one function decides it for the
+    /// encode's geometry and for the pipeline lookup, so the two cannot disagree.
+    enum SharedPartialChoice: Equatable { case stream, shared, generic }
+    private(set) var lastSplitChoice: SharedPartialChoice?
 
     /// v11 V4 applicability: full-attention path only, head slice fits the
     /// kernel's threadgroup staging, and the GQA fan-in fits the simdgroups.
@@ -66,8 +73,19 @@ public final class Attention {
         psoPartial.maxTotalThreadsPerThreadgroup
     }
 
-    /// v19 Task 3: the served shape on int8 rows; everything else keeps the
-    /// shared kernel.
+    /// The shape the streaming scan is written for (v19 Task 3): the runner refuses
+    /// a model outside it rather than fall back silently; the wrapper itself still
+    /// falls back, for the tests and the bench.
+    public static func streamServesShape(headDim: Int, numQHeads: Int, numKVHeads: Int) -> Bool {
+        headDim == 256 && numKVHeads > 0 && numQHeads == 8 * numKVHeads
+    }
+
+    public static func streamServes(headDim: Int, numQHeads: Int, numKVHeads: Int,
+                                    precision: KVCachePrecision) -> Bool {
+        streamServesShape(headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads)
+            && precision == .int8
+    }
+
     private func streamApplicable(headDim: UInt32,
                                   numQHeads: UInt32,
                                   numKVHeads: UInt32,
@@ -75,12 +93,28 @@ public final class Attention {
                                   ringCapacity: UInt32,
                                   kvFormat: KVView?) -> Bool {
         guard partialLoopVariant == .stream, !useGQAPartial, ringCapacity == 0,
-              headDim == 256, numQHeads == 8 * numKVHeads,
-              let kvFormat, kvFormat.precision == .int8,
+              let kvFormat,
+              Self.streamServes(headDim: Int(headDim), numQHeads: Int(numQHeads),
+                                numKVHeads: Int(numKVHeads), precision: kvFormat.precision),
               kvFormat.groupSize == KVCacheManager.quantizationGroupSize else {
             return false
         }
         return true
+    }
+
+    func sharedPartialChoice(headDim: UInt32, numQHeads: UInt32, numKVHeads: UInt32,
+                             useGQAPartial: Bool, ringCapacity: UInt32,
+                             kvFormat: KVView?) -> SharedPartialChoice {
+        if streamApplicable(headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
+                            useGQAPartial: useGQAPartial, ringCapacity: ringCapacity,
+                            kvFormat: kvFormat) {
+            return .stream
+        }
+        if kvSharedApplicable(headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
+                              useGQAPartial: useGQAPartial, ringCapacity: ringCapacity) {
+            return .shared
+        }
+        return .generic
     }
     private let psoGQAPartial: MTLComputePipelineState
     private let psoCombine: MTLComputePipelineState
@@ -121,13 +155,13 @@ public final class Attention {
     // Partial state written by pass 1, read by pass 2. One shared allocation:
     // attention runs once per layer, serially, and pass 2 hazard-tracks pass 1
     // within the same command buffer — no race (mirrors MoE.routerLogits).
-    private let mPartial: MTLBuffer
-    private let dPartial: MTLBuffer
-    private let oPartial: MTLBuffer
+    let mPartial: MTLBuffer
+    let dPartial: MTLBuffer
+    let oPartial: MTLBuffer
 
-    /// v11: which inner loop the full-attention decode partial runs.
-    /// `.simdgroup` reorders the softmax summation (a264b22-class).
-    public enum PartialLoopVariant: Sendable { case blockReduce, simdgroup, kvShared, stream }
+    /// Which inner loop the full-attention decode partial runs: `.stream` (v19)
+    /// where its shape gate allows, `.kvShared` (v11) elsewhere.
+    public enum PartialLoopVariant: Sendable { case blockReduce, kvShared, stream }
 
     public init(context: MetalContext,
                 maxQHeads: Int = 16,
@@ -155,7 +189,6 @@ public final class Attention {
             ? try context.pipeline("attention_decode_mla_partial")
             : nil
         self.psoPartial = try context.pipeline("attention_decode_partial")
-        self.psoPartialSG = try context.pipeline("attention_decode_partial_sg")
         self.psoPartialShared = try context.pipeline("attention_decode_partial_shared")
         self.psoGQAPartial = try context.pipeline("attention_decode_gqa_swa_partial")
         self.psoCombine = try context.pipeline("attention_decode_combine")
@@ -508,31 +541,27 @@ public final class Attention {
         let useSWAGQAPartial = geometry.useSWAGroupedPartial
         var nChunks = geometry.numChunks
         var chunkLen = geometry.chunkLength
-        let usesKVShared = kvSharedApplicable(headDim: headDim,
-                                              numQHeads: numQHeads,
-                                              numKVHeads: numKVHeads,
-                                              useGQAPartial: useSWAGQAPartial,
-                                              ringCapacity: ringCapacity)
-        if usesKVShared {
+        let choice = sharedPartialChoice(headDim: headDim, numQHeads: numQHeads,
+                                         numKVHeads: numKVHeads,
+                                         useGQAPartial: useSWAGQAPartial,
+                                         ringCapacity: ringCapacity, kvFormat: kvFormat)
+        let effective = max(1, Int(seqLen) - Int(kvStart))
+        switch choice {
+        case .shared:
             // The shared partial has numKVHeads-fold fewer TGs per chunk, so it
             // takes the full chunk budget to keep the machine occupied.
-            let effective = max(1, Int(seqLen) - Int(kvStart))
             nChunks = max(1, min(Self.maxChunks, effective))
             chunkLen = (effective + nChunks - 1) / nChunks
-        }
-        let usesStream = streamApplicable(headDim: headDim, numQHeads: numQHeads,
-                                          numKVHeads: numKVHeads,
-                                          useGQAPartial: useSWAGQAPartial,
-                                          ringCapacity: ringCapacity,
-                                          kvFormat: kvFormat)
-        if usesStream {
+        case .stream:
             // Every (chunk, stream) slot writes a partial, empty ones as
             // (-inf, 0, 0), so the partial count stays maxChunks at any length.
-            let effective = max(1, Int(seqLen) - Int(kvStart))
             nChunks = Self.maxChunks
             let dispatched = Self.maxChunks / Self.streamCount
             chunkLen = (effective + dispatched - 1) / dispatched
+        case .generic:
+            break
         }
+        lastSplitChoice = choice
         let partialPSO = partialPipeline(headDim: headDim,
                                          numQHeads: numQHeads,
                                          numKVHeads: numKVHeads,
@@ -568,9 +597,12 @@ public final class Attention {
         p1.setBytes(&kvStride, length: MemoryLayout<UInt32>.size, index: 15)
         p1.setBytes(&kvValueBytes, length: MemoryLayout<UInt32>.size, index: 16)
         p1.setBytes(&kvGroupSize, length: MemoryLayout<UInt32>.size, index: 17)
-        let partialGroups = usesStream
-            ? Int(numKVHeads) * (nChunks / Self.streamCount)
-            : usesKVShared ? Int(numKVHeads) * nChunks : geometry.partialThreadgroups
+        let partialGroups: Int
+        switch choice {
+        case .stream: partialGroups = Int(numKVHeads) * (nChunks / Self.streamCount)
+        case .shared: partialGroups = Int(numKVHeads) * nChunks
+        case .generic: partialGroups = geometry.partialThreadgroups
+        }
         p1.dispatchThreadgroups(MTLSize(width: partialGroups, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
 
@@ -641,11 +673,13 @@ public final class Attention {
         return try context.pipeline(name, constants: constants)
     }
 
-    private func kvSharedSpecializedPipeline(headDim: UInt32,
-                                             numQHeads: UInt32,
-                                             numKVHeads: UInt32,
-                                             kvFormat: KVView?) -> MTLComputePipelineState {
-        let key = KVSharedShapeKey(
+    private func specializedPartialPipeline(named name: String,
+                                            numChunks: UInt32?,
+                                            headDim: UInt32,
+                                            numQHeads: UInt32,
+                                            numKVHeads: UInt32,
+                                            kvFormat: KVView?) -> MTLComputePipelineState {
+        let shape = KVSharedShapeKey(
             headDim: headDim,
             numQHeads: numQHeads,
             numKVHeads: numKVHeads,
@@ -653,46 +687,19 @@ public final class Attention {
             kvStride: UInt32(kvFormat?.stride ?? 0),
             kvValueBytes: UInt32(kvFormat?.valueBytes ?? 0),
             kvGroupSize: UInt32(kvFormat?.groupSize ?? KVCacheManager.quantizationGroupSize))
-        if let cached = kvSharedSpecializedPSOs[key] { return cached }
+        let key = SpecializedPartialKey(name: name, shape: shape)
+        if let cached = specializedPartialPSOs[key] { return cached }
         do {
-            let pso = try Self.specializedPipeline(ctx,
-                                                   "attention_decode_partial_shared",
+            let pso = try Self.specializedPipeline(ctx, name,
                                                    headDim: headDim,
                                                    numQHeads: numQHeads,
                                                    numKVHeads: numKVHeads,
-                                                   kvShapeKey: key)
-            kvSharedSpecializedPSOs[key] = pso
+                                                   numChunks: numChunks,
+                                                   kvShapeKey: shape)
+            specializedPartialPSOs[key] = pso
             return pso
         } catch {
-            preconditionFailure("failed to build kv-shared attention pipeline: \(error)")
-        }
-    }
-
-    private func streamSpecializedPipeline(headDim: UInt32,
-                                           numQHeads: UInt32,
-                                           numKVHeads: UInt32,
-                                           kvFormat: KVView?) -> MTLComputePipelineState {
-        let key = KVSharedShapeKey(
-            headDim: headDim,
-            numQHeads: numQHeads,
-            numKVHeads: numKVHeads,
-            kvBits: UInt32(kvFormat?.precision.rawValue ?? 16),
-            kvStride: UInt32(kvFormat?.stride ?? 0),
-            kvValueBytes: UInt32(kvFormat?.valueBytes ?? 0),
-            kvGroupSize: UInt32(kvFormat?.groupSize ?? KVCacheManager.quantizationGroupSize))
-        if let cached = streamSpecializedPSOs[key] { return cached }
-        do {
-            let pso = try Self.specializedPipeline(ctx,
-                                                   "attention_decode_partial_stream",
-                                                   headDim: headDim,
-                                                   numQHeads: numQHeads,
-                                                   numKVHeads: numKVHeads,
-                                                   numChunks: UInt32(Self.maxChunks),
-                                                   kvShapeKey: key)
-            streamSpecializedPSOs[key] = pso
-            return pso
-        } catch {
-            preconditionFailure("failed to build streaming attention pipeline: \(error)")
+            preconditionFailure("failed to build the \(name) pipeline: \(error)")
         }
     }
 
@@ -718,24 +725,22 @@ public final class Attention {
                 preconditionFailure("failed to build KV ring attention pipeline: \(error)")
             }
         }
-        if partialLoopVariant == .simdgroup, !useGQAPartial {
-            return psoPartialSG
-        }
-        if streamApplicable(headDim: headDim, numQHeads: numQHeads,
-                            numKVHeads: numKVHeads, useGQAPartial: useGQAPartial,
-                            ringCapacity: ringCapacity, kvFormat: kvFormat) {
-            return streamSpecializedPipeline(headDim: headDim, numQHeads: numQHeads,
-                                             numKVHeads: numKVHeads, kvFormat: kvFormat)
-        }
-        if kvSharedApplicable(headDim: headDim, numQHeads: numQHeads,
-                              numKVHeads: numKVHeads,
-                              useGQAPartial: useGQAPartial,
-                              ringCapacity: ringCapacity) {
+        switch sharedPartialChoice(headDim: headDim, numQHeads: numQHeads,
+                                   numKVHeads: numKVHeads, useGQAPartial: useGQAPartial,
+                                   ringCapacity: ringCapacity, kvFormat: kvFormat) {
+        case .stream:
+            return specializedPartialPipeline(named: "attention_decode_partial_stream",
+                                              numChunks: UInt32(Self.maxChunks),
+                                              headDim: headDim, numQHeads: numQHeads,
+                                              numKVHeads: numKVHeads, kvFormat: kvFormat)
+        case .shared:
             guard specializesKVShared else { return psoPartialShared }
-            return kvSharedSpecializedPipeline(headDim: headDim,
-                                               numQHeads: numQHeads,
-                                               numKVHeads: numKVHeads,
-                                               kvFormat: kvFormat)
+            return specializedPartialPipeline(named: "attention_decode_partial_shared",
+                                              numChunks: nil,
+                                              headDim: headDim, numQHeads: numQHeads,
+                                              numKVHeads: numKVHeads, kvFormat: kvFormat)
+        case .generic:
+            break
         }
         if useGQAPartial && headDim == 256 && numQHeads == 16 && numKVHeads == 8 {
             if numChunks == 16 {

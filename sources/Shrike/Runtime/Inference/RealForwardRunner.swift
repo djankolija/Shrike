@@ -611,6 +611,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         } else {
             mla = nil
         }
+        if cfg.family == .qwen36, !runtimeConfiguration.attentionFallbackAllowed {
+            guard Attention.streamServesShape(headDim: cfg.fullHeadDim, numQHeads: cfg.numHeads,
+                                              numKVHeads: cfg.numFullKVHeads) else {
+                throw ModelError.unsupportedArchitecture(detail:
+                    "the streaming attention scan (v19) serves head dim 256 and eight query "
+                    + "heads per KV head; this model has head dim \(cfg.fullHeadDim) and "
+                    + "\(cfg.numHeads) query heads over \(cfg.numFullKVHeads) KV heads, and "
+                    + "the fallback to the shared kernel is disabled for served models")
+            }
+            if runtimeConfiguration.kvCachePrecision != .int8 {
+                print("Shrike attention: the streaming scan serves int8 KV rows; "
+                      + "\(runtimeConfiguration.kvCachePrecision.label) rows run the v11 shared kernel")
+            }
+        }
         return DecodeKernels(
             embedInt4: try EmbedLookupInt4(context: context),
             affineEmbed: model.embeddingWeightBits == 4 ? nil

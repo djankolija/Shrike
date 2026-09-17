@@ -154,6 +154,8 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let kvCachePrecision: KVCachePrecision
     public let ropeScalingMode: RuntimeRoPEScalingMode
     public let yarnContextTokens: Int
+    /// Off in production: a Qwen-family model outside the streaming scan's shape is refused, not served slower.
+    public let attentionFallbackAllowed: Bool
 
     public init(expertCacheSlots: Int = 64,
                 prefillEnabled: Bool = true,
@@ -162,7 +164,8 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 prefetchTracePath: String? = nil,
                 kvCachePrecision: KVCachePrecision = .int8,
                 ropeScalingMode: RuntimeRoPEScalingMode = .none,
-                yarnContextTokens: Int = RuntimeConfiguration.defaultYaRNContextTokens) throws {
+                yarnContextTokens: Int = RuntimeConfiguration.defaultYaRNContextTokens,
+                attentionFallbackAllowed: Bool = false) throws {
         guard Self.allowedExpertCacheSlots.contains(expertCacheSlots) else {
             throw RuntimeConfigurationError.invalidExpertCacheSlots(expertCacheSlots)
         }
@@ -180,6 +183,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.kvCachePrecision = kvCachePrecision
         self.ropeScalingMode = ropeScalingMode
         self.yarnContextTokens = yarnContextTokens
+        self.attentionFallbackAllowed = attentionFallbackAllowed
     }
 
     public static func environmentPrefetchTracePath(

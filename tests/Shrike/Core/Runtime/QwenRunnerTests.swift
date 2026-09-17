@@ -18,8 +18,20 @@ import ShrikeValidationSupport
                                    expecting: .qwenToy())
         let runner = try RealForwardRunner(model: model,
                                            context: ctx,
-                                           maxContext: 64)
+                                           maxContext: 64,
+                                           runtimeConfiguration: RuntimeConfiguration(
+                                               attentionFallbackAllowed: true))
         return (dir, ctx, runner)
+    }
+
+    @Test func productionRefusesAQwenShapeTheStreamingScanDoesNotServe() throws {
+        let dir = try QwenToySynthetic.write(weightBits: 4)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ctx = try MetalContext()
+        let model = try Model.load(directoryURL: dir, device: ctx.device, expecting: .qwenToy())
+        #expect(throws: ModelError.self) {
+            _ = try RealForwardRunner(model: model, context: ctx, maxContext: 64)
+        }
     }
 
     @Test(arguments: [8])

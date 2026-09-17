@@ -64,7 +64,8 @@ To serve exactly one model and ignore any config or roster:
   Smaller budgets are markedly slower, because expert reads bypass the page cache
   and have no fallback.
 - `--kv-bits <4|8|16>` — KV-cache precision, independent of model quantization
-  (default 8).
+  (default 8). The streaming attention scan (v19) serves 8; 4 and 16 run the v11
+  shared kernel, slower at long context, and the load says so.
 
 Any OpenAI-compatible client can point at the loopback endpoint. The repository no
 longer ships launcher scripts; a server has no business shipping its own launcher,

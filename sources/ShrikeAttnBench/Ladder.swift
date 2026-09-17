@@ -1,6 +1,7 @@
 import Foundation
 import Metal
 import Shrike
+import ShrikeValidationSupport
 
 /// Dispatched on the production geometry so its times compare with the wrapper's.
 final class LadderKernel {
@@ -107,29 +108,11 @@ final class LadderKernel {
                                                                     height: 1, depth: 1))
     }
 
-    /// Mirrors attention_decode_combine so a ladder arm's output can meet the production's.
     func combineOnCPU(numQHeads: Int, headDim: Int) -> [Float] {
-        let chunks = Self.numChunks
-        let m = mBuf.contents().assumingMemoryBound(to: Float.self)
-        let d = dBuf.contents().assumingMemoryBound(to: Float.self)
-        let o = oBuf.contents().assumingMemoryBound(to: Float.self)
-        var out = [Float](repeating: 0, count: numQHeads * headDim)
-        for head in 0..<numQHeads {
-            let base = head * chunks
-            var mGlob = -Float.infinity
-            for c in 0..<chunks { mGlob = max(mGlob, m[base + c]) }
-            var denom: Float = 0
-            for c in 0..<chunks where m[base + c] > -Float.infinity {
-                denom += d[base + c] * expf(m[base + c] - mGlob)
-            }
-            for i in 0..<headDim {
-                var acc: Float = 0
-                for c in 0..<chunks where m[base + c] > -Float.infinity {
-                    acc += o[(base + c) * headDim + i] * expf(m[base + c] - mGlob)
-                }
-                out[head * headDim + i] = acc / denom
-            }
-        }
-        return out
+        AttentionRef.combinePartials(m: mBuf.contents().assumingMemoryBound(to: Float.self),
+                                     d: dBuf.contents().assumingMemoryBound(to: Float.self),
+                                     o: oBuf.contents().assumingMemoryBound(to: Float.self),
+                                     numQHeads: numQHeads, numChunks: Self.numChunks,
+                                     headDim: headDim)
     }
 }

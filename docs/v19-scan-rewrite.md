@@ -721,6 +721,32 @@ the fp16 output rounds away everywhere but at a few elements. What decides a
 near-tied token is chaos, not correctness; the golden is a change detector, not
 an oracle.
 
+**The hardening (T3.9, Davor's ruling: worth doing without a gain).** What the
+rewrite left worse was the surface, and four small pieces trim it:
+
+- **A load-time refusal.** The runner throws `ModelError.unsupportedArchitecture`
+  when a Qwen-family model's head dimension, heads per KV head or KV precision are
+  not the streaming scan's (`Attention.streamServes`), naming both shapes in the
+  message, instead of serving it slower on the shared kernel without a word.
+  `RuntimeConfiguration.attentionFallbackAllowed` (off in production) lets the
+  runner tests load their toy shape; the wrapper's own fallback stays, for the
+  tests and the bench. A test loads the toy model under the production
+  configuration and expects the throw.
+- **The assumption stated.** The eight-byte load in the stream kernel now says it
+  is head dim 256 only, where a reader would otherwise trust the general-looking
+  guards.
+- **The v11 simdgroup variant retired**: `attention_decode_partial_sg` (132 lines),
+  `.simdgroup`, its pipeline and its two tests. Its thesis was falsified in v11 and
+  it served nothing; git history is its record.
+- **The fp64 arm** (`bothKernelsAgainstTheExactValue`): both kernels' fp32 partials
+  combined in double against the exact attention of the same dequantized rows, so
+  neither the int8 quantization nor the fp16 output rounding is in the number.
+  Relative error, the shared kernel against the streaming one: 7.3e-8 against
+  7.4e-8 at 500 positions, 9.2e-8 against 8.9e-8 at 1,100. Indistinguishable, a
+  part in ten million each, which is the answer to "which kernel is correct":
+  neither is closer to the exact value than the other, and both are a thousand
+  times closer to it than the fp16 output can express.
+
 - **The kernel**, `attention_decode_partial_stream`, beside the shipped one in
   `attention.metal`, on the V4.1 function constants (bits, stride, value bytes,
   group size folded), the same buffers and the same partial contract. The shape gate as today's (`Attention.swift:50-60`);

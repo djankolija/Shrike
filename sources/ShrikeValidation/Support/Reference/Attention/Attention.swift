@@ -7,6 +7,32 @@ import Accelerate
 /// the V columns. The kernel runs FlashAttention-style tiled online
 /// softmax; this reference does no online merging at all.
 public enum AttentionRef {
+    /// Mirrors `attention_decode_combine`, a chunk at −∞ being empty and skipped.
+    public static func combinePartials(m: UnsafePointer<Float>, d: UnsafePointer<Float>,
+                                       o: UnsafePointer<Float>, numQHeads: Int,
+                                       numChunks: Int, headDim: Int) -> [Float] {
+        var out = [Float](repeating: 0, count: numQHeads * headDim)
+        for head in 0..<numQHeads {
+            let base = head * numChunks
+            var mGlob = -Float.infinity
+            for c in 0..<numChunks { mGlob = max(mGlob, m[base + c]) }
+            var weights = [Float](repeating: 0, count: numChunks)
+            var denom: Float = 0
+            for c in 0..<numChunks where m[base + c] > -Float.infinity {
+                weights[c] = expf(m[base + c] - mGlob)
+                denom += d[base + c] * weights[c]
+            }
+            for i in 0..<headDim {
+                var acc: Float = 0
+                for c in 0..<numChunks where weights[c] > 0 {
+                    acc += o[(base + c) * headDim + i] * weights[c]
+                }
+                out[head * headDim + i] = acc / denom
+            }
+        }
+        return out
+    }
+
     /// Q layout: `[numQHeads, headDim]`.
     /// K, V layout: `[seqLen, numKVHeads, headDim]`. (V may alias K when
     /// the caller passes the same array — the math is unchanged.)
