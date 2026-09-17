@@ -44,12 +44,10 @@ import Testing
         let diagnostics = AppRunnerDiagnostics(
             cb1MillisecondsPerToken: 1,
             ioMillisecondsPerToken: 2,
-            cb2MillisecondsPerToken: 3,
             headMillisecondsPerToken: 4)
 
         #expect(diagnostics.cb1MillisecondsPerToken == 1)
         #expect(diagnostics.ioMillisecondsPerToken == 2)
-        #expect(diagnostics.cb2MillisecondsPerToken == 3)
         #expect(diagnostics.headMillisecondsPerToken == 4)
     }
 }

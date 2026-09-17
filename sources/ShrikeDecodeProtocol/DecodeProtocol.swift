@@ -106,16 +106,13 @@ public enum DecodeServiceEventKind: String, Codable, Sendable {
 public struct DecodeRunnerDiagnostics: Codable, Sendable, Equatable {
     public var cb1MillisecondsPerToken: Double
     public var ioMillisecondsPerToken: Double
-    public var cb2MillisecondsPerToken: Double
     public var headMillisecondsPerToken: Double
 
     public init(cb1MillisecondsPerToken: Double,
                 ioMillisecondsPerToken: Double,
-                cb2MillisecondsPerToken: Double,
                 headMillisecondsPerToken: Double) {
         self.cb1MillisecondsPerToken = cb1MillisecondsPerToken
         self.ioMillisecondsPerToken = ioMillisecondsPerToken
-        self.cb2MillisecondsPerToken = cb2MillisecondsPerToken
         self.headMillisecondsPerToken = headMillisecondsPerToken
     }
 }

@@ -166,7 +166,6 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         DecodeRunnerDiagnostics(
             cb1MillisecondsPerToken: value.cb1MillisecondsPerToken,
             ioMillisecondsPerToken: value.ioMillisecondsPerToken,
-            cb2MillisecondsPerToken: value.cb2MillisecondsPerToken,
             headMillisecondsPerToken: value.headMillisecondsPerToken)
     }
 }

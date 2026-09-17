@@ -35,7 +35,6 @@ import ShrikeDecodeProtocol
         let runner = DecodeRunnerDiagnostics(
             cb1MillisecondsPerToken: 0.6,
             ioMillisecondsPerToken: 12,
-            cb2MillisecondsPerToken: 0.4,
             headMillisecondsPerToken: 1.7)
         let event = DecodeServiceEvent(
             kind: .finished,

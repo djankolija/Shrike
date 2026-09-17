@@ -4,11 +4,11 @@
 One row per request from a decode-rig.sh server log: the server's timing line
 (prefill_s, decode_s, decode_tok_s, completion), the runner's decode pool and
 I/O counters (expert_hit_rate_decode, expert_misses_decode, hit_fixup_layers,
-io_ms, io_fixup_wake_ms, io_fetch_ms, io_hidden_pct), and the two decode gaps
-that hold the miss window (the miss window from moe_phase1_hit, or from
-moe_spec_routed when the speculative command computes the hits, or from
-layer_linear / layer_kv once the layer is one command, to
-moe_phase1_miss_fixup_phase2), per token. A tokens-*.json from
+io_ms, io_fetch_ms, cache_plan_ms, agreed_overflow, cells_leased_peak), and
+the two decode gaps that held the miss window in logs before v20 T3.1 (from
+moe_phase1_hit, moe_spec_routed or layer_linear / layer_kv to
+moe_phase1_miss_fixup_phase2; since T3.1 the fixup rides in the layer's
+command and the gaps read n/a), per token. A tokens-*.json from
 decode-stream-client.py adds the streamed answer's wall per token (the mean of
 consecutive arrivals after the first chunk) as a separate line.
 """
@@ -22,16 +22,14 @@ GAPS = {
     "adopted": r"gap (?:moe_phase1_hit|moe_spec_routed|layer_linear|layer_kv)->moe_phase1_miss_fixup_phase2_adopted total_ms=\s*[\d.]+ per_token_ms=([\d.]+) count=(\d+)",
 }
 RUNNER = ["expert_hit_rate_decode", "expert_misses_decode", "hit_fixup_layers", "io_ms",
-          "io_fixup_wake_ms", "io_fetch_ms", "io_hidden_pct", "cache_plan_ms",
+          "io_fetch_ms", "cache_plan_ms", "agreed_overflow", "cells_leased_peak",
           "prefetch_begin_ms", "prefetch_issued", "prefetch_adopted", "prefetch_reclaimed",
           "prefetch_deferred", "prefetch_overlapped", "prefetch_late", "prefetch_refused", "prefetch_failed",
           "prefetch_joined", "prefetch_landed_hits", "prefetch_before_classify",
           "prefetch_during_tail", "prefetch_during_lt50us", "prefetch_during_50_150us",
           "prefetch_during_gt150us", "prefetch_after_classify", "prefetch_race_unknown",
           "prefetch_hook_failed",
-          "router_readback_ms", "path_pin_ms", "path_submit_ms", "path_argbuf_ms",
-          "path_hit_encode_ms", "path_fixup_build_ms", "path_hit_commit_to_kernel_ms",
-          "path_hit_kernel_to_gpu_ms", "path_fixup_commit_to_kernel_ms", "path_router_wake_ms",
+          "router_readback_ms", "path_submit_ms", "path_router_wake_ms",
           "path_router_wake_fallbacks"]
 
 
@@ -90,21 +88,17 @@ for block in blocks:
           f"hit_rate={fmt(runner['expert_hit_rate_decode'], 4)} "
           f"misses={fmt(runner['expert_misses_decode'], 0)} "
           f"fixup_layers={fmt(runner['hit_fixup_layers'], 0)} "
-          f"io_ms={fmt(runner['io_ms'])} wake_ms={fmt(runner['io_fixup_wake_ms'])} "
-          f"fetch_ms={fmt(runner['io_fetch_ms'])} hidden_pct={fmt(runner['io_hidden_pct'], 1)} "
-          f"plan_ms={fmt(runner['cache_plan_ms'])} | "
+          f"io_ms={fmt(runner['io_ms'])} fetch_ms={fmt(runner['io_fetch_ms'])} "
+          f"plan_ms={fmt(runner['cache_plan_ms'])} "
+          f"overflow={fmt(runner['agreed_overflow'], 0)} "
+          f"leased_peak={fmt(runner['cells_leased_peak'], 0)} | "
           f"window_ms/tok={fmt_gap(gaps['window'], completion)} "
           f"adopted_ms/tok={fmt_gap(gaps['adopted'], completion)}")
-    if runner["path_pin_ms"] is not None:
+    if runner["path_submit_ms"] is not None:
         print(f"    path: router_wake={fmt(runner['path_router_wake_ms'])} "
               f"wake_fallbacks={fmt(runner['path_router_wake_fallbacks'], 0)} "
               f"readback={fmt(runner['router_readback_ms'])} plan={fmt(runner['cache_plan_ms'])} "
-              f"pin={fmt(runner['path_pin_ms'])} submit={fmt(runner['path_submit_ms'])} "
-              f"argbuf={fmt(runner['path_argbuf_ms'])} hit_encode={fmt(runner['path_hit_encode_ms'])} "
-              f"fixup_build={fmt(runner['path_fixup_build_ms'])} | "
-              f"hit commit>kernel={fmt(runner['path_hit_commit_to_kernel_ms'])} "
-              f"kernel>gpu={fmt(runner['path_hit_kernel_to_gpu_ms'])} "
-              f"fixup commit>kernel={fmt(runner['path_fixup_commit_to_kernel_ms'])} (ms per token)")
+              f"submit={fmt(runner['path_submit_ms'])} (ms per token)")
     if runner["prefetch_issued"] is not None:
         print(f"    prefetch: begin_ms={fmt(runner['prefetch_begin_ms'])} "
               f"issued={fmt(runner['prefetch_issued'], 0)} adopted={fmt(runner['prefetch_adopted'], 0)} "

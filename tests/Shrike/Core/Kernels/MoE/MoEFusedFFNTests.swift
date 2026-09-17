@@ -644,7 +644,7 @@ import ShrikeValidationSupport
         let offsets: MoEExpertOffsets
     }
 
-    private static func makeOneEncoderFixture() throws -> OneEncoderFixture {
+    private static func makeOneEncoderFixture(eventGatedIO: Bool = false) throws -> OneEncoderFixture {
         var rng = SeedTree(0x2D3).key("production-routed-moe")
         func matrix(rows: Int, columns: Int) -> [[Float]] {
             (0..<rows).map { _ in (0..<columns).map { _ in rng.uniform(-0.4, 0.4) } }
@@ -662,7 +662,7 @@ import ShrikeValidationSupport
             Self.makeBlob(gate: gates[$0], up: ups[$0], down: downs[$0])
         }
         let context = try MetalContext()
-        let kernel = try MoE(context: context)
+        let kernel = try MoE(context: context, eventGatedIO: eventGatedIO)
         let elementwise = try Elementwise(context: context)
         let routedBuffers = blobs.compactMap {
             context.device.makeBuffer(bytes: $0.bytes, length: $0.bytes.count,
@@ -774,6 +774,94 @@ import ShrikeValidationSupport
         command.waitUntilCompleted()
         #expect(command.error == nil)
         return Data(bytes: hidden.contents(), count: hidden.length)
+    }
+
+    private struct AgreedFixupOutput {
+        let hidden: Data
+        let delta: Data
+        let acts: Data
+    }
+
+    /// The agreed cells' fixup (v20 T3.1): phase 1 as the speculative kernel
+    /// over a host-written cell array with the sentinel at the hits, phase 2
+    /// as the speculative kernel resolving a sentinel through that array,
+    /// both behind the batch's status word; the misses' bytes in the pool at
+    /// cells 1, 3, 4 and 7.
+    private static func runAgreedFixup(_ fixture: OneEncoderFixture,
+                                       failedStatus: Bool) throws -> AgreedFixupOutput {
+        let device = fixture.context.device
+        let agreedCells: [UInt32] = [UInt32](repeating: 0xffffffff, count: 4) + [1, 3, 4, 7]
+        for (position, cell) in zip(4..<Self.topK, [1, 3, 4, 7]) {
+            let blob = fixture.routedBuffers[position]
+            fixture.pool.contents().advanced(by: cell * fixture.poolSlotStride)
+                .copyMemory(from: blob.contents(), byteCount: blob.length)
+        }
+        let agreed = try #require(device.makeBuffer(
+            bytes: agreedCells, length: agreedCells.count * MemoryLayout<UInt32>.stride,
+            options: .storageModeShared))
+        let phase1 = MoE.specPhase1FullGrid(f: UInt32(Self.intermediate), topK: UInt32(Self.topK))
+        let phase2 = MoE.specPhase2FullGrid(d: UInt32(Self.dimension))
+        let grids: [UInt32] = [UInt32(phase1.width), 1, 1, 0, 1, 1,
+                               UInt32(phase1.width), 1, 1, UInt32(phase2.width), 1, 1]
+        let args = try #require(device.makeBuffer(
+            bytes: grids, length: MoE.specDispatchArgsLength, options: .storageModeShared))
+        var statusWord: UInt32 = failedStatus ? 2 : 1
+        let status = try #require(device.makeBuffer(
+            bytes: &statusWord, length: MemoryLayout<UInt32>.stride, options: .storageModeShared))
+        let acts = try #require(Fp16Buffer.make(device, count: Self.topK * Self.intermediate))
+        memset(acts.contents(), 0, acts.length)
+        let delta = try #require(Fp16Buffer.make(device, count: Self.dimension))
+        let hidden = try #require(Fp16Buffer.make(device, values: fixture.residual))
+        let command = fixture.context.queue.makeCommandBuffer()!
+        let encoder = try #require(command.makeComputeCommandEncoder())
+        fixture.kernel.encodeSpecPhase1U16Load(
+            encoder: encoder, expertPool: fixture.pool,
+            poolSlotStride: UInt64(fixture.poolSlotStride), resolvedSlots: fixture.resolvedSlots,
+            routedOffsets: fixture.offsets, x: fixture.xBuffer, acts: acts,
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate), topK: UInt32(Self.topK),
+            indirectArguments: args)
+        fixture.kernel.encodeSpecPhase1U16Load(
+            encoder: encoder, expertPool: fixture.pool,
+            poolSlotStride: UInt64(fixture.poolSlotStride), resolvedSlots: agreed,
+            routedOffsets: fixture.offsets, x: fixture.xBuffer, acts: acts,
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate), topK: UInt32(Self.topK),
+            indirectArguments: args, indirectOffset: MoE.fixupPhase1ArgsOffset,
+            ioStatus: status)
+        fixture.kernel.encodeSpecPhase2Reduce(
+            encoder: encoder, expertPool: fixture.pool,
+            poolSlotStride: UInt64(fixture.poolSlotStride), resolvedSlots: fixture.resolvedSlots,
+            fallbackCells: agreed,
+            routedOffsets: fixture.offsets, acts: acts, routingWeights: fixture.routingBuffer,
+            residual: fixture.zeroResidual, y: delta, hidden: hidden,
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate), topK: UInt32(Self.topK),
+            indirectArguments: args, indirectOffset: MoE.fixupPhase2ArgsOffset,
+            ioStatus: status)
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        #expect(command.error == nil)
+        return AgreedFixupOutput(
+            hidden: Data(bytes: hidden.contents(), count: hidden.length),
+            delta: Data(bytes: delta.contents(), count: delta.length),
+            acts: Data(bytes: acts.contents(), count: acts.length))
+    }
+
+    @Test func agreedFixupMatchesTheHostBuiltFixupBitForBit() throws {
+        let fixture = try Self.makeOneEncoderFixture(eventGatedIO: true)
+        let hostBuilt = try Self.runSeparateEncoders(fixture)
+        let agreed = try Self.runAgreedFixup(fixture, failedStatus: false)
+        #expect(agreed.hidden == hostBuilt)
+    }
+
+    @Test func agreedFixupSkipsOnAFailedStatusWord() throws {
+        let fixture = try Self.makeOneEncoderFixture(eventGatedIO: true)
+        let output = try Self.runAgreedFixup(fixture, failedStatus: true)
+        let acts = output.acts.withUnsafeBytes { Array($0.bindMemory(to: Float16.self)) }
+        #expect(acts[..<(4 * Self.intermediate)].contains { $0 != 0 })
+        #expect(acts[(4 * Self.intermediate)...].allSatisfy { $0 == 0 })
+        #expect(output.delta == Data(count: Self.dimension * MemoryLayout<Float16>.stride))
+        let residual = fixture.residual.map { Float16($0) }
+        #expect(output.hidden == residual.withUnsafeBytes { Data($0) })
     }
 
     private static func makeConstantBlob(bits: Int) -> RoutedBlob {

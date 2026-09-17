@@ -585,7 +585,6 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         AppRunnerDiagnostics(
             cb1MillisecondsPerToken: value.cb1MillisecondsPerToken,
             ioMillisecondsPerToken: value.ioMillisecondsPerToken,
-            cb2MillisecondsPerToken: value.cb2MillisecondsPerToken,
             headMillisecondsPerToken: value.headMillisecondsPerToken)
     }
 

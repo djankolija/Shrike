@@ -104,11 +104,15 @@ static inline float gelu_pytorch_tanh(float x) {
     return 0.5f * x * (1.0f + tanh(inner));
 }
 
-/// Indirect threadgroup counts for the speculative phase-1 and phase-2
-/// dispatches, in MTLDispatchThreadgroupsIndirectArguments layout.
+/// Indirect threadgroup counts, each in MTLDispatchThreadgroupsIndirectArguments
+/// layout: the speculative phase-1 and phase-2 dispatches, then the agreed
+/// fixup's phase-1 and phase-2 (v20 T3.1), encoded with the layer behind the
+/// batch's event wait and sized full only when an expert missed.
 struct MoESpecDispatchArgs {
     uint phase1_threadgroups[3];
     uint phase2_threadgroups[3];
+    uint fixup_phase1_threadgroups[3];
+    uint fixup_phase2_threadgroups[3];
 };
 
 /// Classifies the router's exact top-k result against the CPU-published cache
@@ -183,7 +187,10 @@ static inline void moe_publish_router_readback(
 /// resolved_slots, so on a miss layer it computes the hits and the host's
 /// fixup computes only the misses (v18 Task 1). Phase 2, which carries the
 /// residual add since v18 T6.3, takes the full grid only when every routed
-/// expert is resident, a zero-width grid otherwise.
+/// expert is resident, a zero-width grid otherwise. The agreed fixup's grids
+/// (v20 T3.1) are the full grids only when an expert missed: encoded with the
+/// layer behind the batch's event wait, the fixup dispatches nothing on an
+/// all-hit layer.
 kernel void moe_classify_expert_residency_spec(
     device const uint* topk_indices [[buffer(0)]],
     device const ulong* residency [[buffer(1)]],
@@ -213,6 +220,10 @@ kernel void moe_classify_expert_residency_spec(
         spec_args->phase1_threadgroups[i] = spec_full_grids.phase1_threadgroups[i];
         spec_args->phase2_threadgroups[i] = all_hit
             ? spec_full_grids.phase2_threadgroups[i] : zero_grid;
+        spec_args->fixup_phase1_threadgroups[i] = all_hit
+            ? zero_grid : spec_full_grids.fixup_phase1_threadgroups[i];
+        spec_args->fixup_phase2_threadgroups[i] = all_hit
+            ? zero_grid : spec_full_grids.fixup_phase2_threadgroups[i];
     }
     moe_publish_router_readback(
         host_readback, host_readback_tag, topk_indices, topk_weights,
@@ -919,7 +930,10 @@ kernel void moe_phase2_down_reduce_k8(
 /// v9 speculative phase-1: identical math to moe_phase1_gate_up_act_u16load,
 /// but expert bases come from `expert_pool + resolved_slots[k] * stride`
 /// (the classifier's output) instead of a CPU-encoded RoutedBlobs table, and
-/// the miss guard is the zero-sized indirect dispatch, not io_status.
+/// the miss guard is the zero-sized indirect dispatch. The agreed fixup (v20
+/// T3.1) dispatches the same kernel behind the batch's event wait over the
+/// host's cell array, the sentinel at the hits, gated by the batch's status
+/// word; the speculative dispatch binds an always-ready word.
 kernel void moe_phase1_gate_up_act_spec_u16load(
     device const uint8_t* expert_pool [[buffer(0)]],
     constant ExpertOffsets& routed_offsets [[buffer(1)]],
@@ -930,10 +944,12 @@ kernel void moe_phase1_gate_up_act_spec_u16load(
     constant uint& top_k [[buffer(6)]],
     device const uint* resolved_slots [[buffer(7)]],
     constant ulong& pool_slot_stride [[buffer(8)]],
+    device const uint* io_status [[buffer(9)]],
     uint tg_idx [[threadgroup_position_in_grid]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
+    if (!moe_io_ready(io_status)) return;
     constexpr uint rows_per_tg = 16;
     threadgroup half xt[kMoEXMaxD];
     threadgroup half xsum[kMoEXSumMax];
@@ -971,7 +987,12 @@ kernel void moe_phase1_gate_up_act_spec_u16load(
 }
 
 /// v9 speculative phase-2: pool-addressed twin of moe_phase2_down_reduce_k8;
-/// same zero-sized-indirect miss guard as spec phase-1.
+/// same zero-sized-indirect miss guard as spec phase-1. The agreed fixup (v20
+/// T3.1) dispatches it behind the batch's event wait with the host's cell
+/// array as the fallback for a sentinel position and the batch's status word
+/// as the gate, the residual written through when the batch failed; the
+/// speculative dispatch binds the classifier's array twice and an always-ready
+/// word.
 kernel void moe_phase2_down_reduce_spec_k8(
     device const uint8_t* expert_pool [[buffer(0)]],
     constant ExpertOffsets& routed_offsets [[buffer(1)]],
@@ -985,6 +1006,8 @@ kernel void moe_phase2_down_reduce_spec_k8(
     constant uint& top_k [[buffer(9)]],
     constant ulong& pool_slot_stride [[buffer(10)]],
     device half* hidden [[buffer(11)]],
+    device const uint* io_status [[buffer(12)]],
+    device const uint* fallback_cells [[buffer(13)]],
     uint d [[threadgroup_position_in_grid]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
@@ -994,9 +1017,14 @@ kernel void moe_phase2_down_reduce_spec_k8(
     const uint FF = moe_fc_f(F);
     const uint TK = min(moe_fc_top_k(top_k), kMaxStreamedExperts);
     if (d >= DD) return;
+    if (!moe_io_ready(io_status)) {
+        if (sg_idx == 0 && lane == 0) moe_phase2_finish(y, hidden, d, residual[d]);
+        return;
+    }
 
-    device const uint8_t* base =
-        expert_pool + ulong(resolved_slots[sg_idx]) * pool_slot_stride;
+    uint cell = resolved_slots[sg_idx];
+    if (cell == 0xffffffffu) cell = fallback_cells[sg_idx];
+    device const uint8_t* base = expert_pool + ulong(cell) * pool_slot_stride;
     const ExpertOffsets re = routed_offsets;
     device const uint8_t* dW = base + re.down_W_off;
     device const bfloat* dS = (device const bfloat*)(base + re.down_s_off);

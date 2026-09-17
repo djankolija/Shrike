@@ -351,6 +351,54 @@ import Testing
         #expect(issued == [[1]])
     }
 
+    @Test func claimDemandLeasesFreeCellsOutsideThePredictionBudgetAndConsumeFreesThem() throws {
+        let drops = Drops()
+        let ring = try makeRing(drops: drops)
+        let prediction = ExpertLoadOperation()
+        try ring.begin(layer: 2, experts: [1], resident: []) { _, _ in prediction }
+        prediction.markInFlight()
+
+        let claimed = ring.claimDemand(layer: 2, experts: [7, 8])
+        #expect(claimed == [7: 11, 8: 12])
+        #expect(ring.statistics.leasedPeak == 2)
+        let demand = ExpertLoadOperation()
+        ring.attachDemand(layer: 2, experts: Set(claimed.keys), operation: demand)
+        demand.markInFlight()
+        demand.finish(.success(()))
+        #expect(ring.inFlightCount == 1)
+
+        try ring.begin(layer: 3, experts: [5], resident: []) { _, _ in ExpertLoadOperation() }
+        #expect(drops.dropped.isEmpty)
+
+        ring.consume(layer: 2, experts: Set(claimed.keys), freedCells: [7: 20])
+        #expect(drops.dropped.map { $0.expert } == [8])
+        prediction.finish(.success(()))
+        let again = ring.claimDemand(layer: 4, experts: [9, 10, 11, 12, 13])
+        #expect(drops.dropped.map { $0.expert } == [8, 1])
+        #expect(Set(again.values) == [10, 20, 12, 13])
+        #expect(again.count == 4)
+    }
+
+    @Test func claimDemandReusesTheLayersOwnFailedSlot() throws {
+        let ring = try makeRing()
+        let failed = ExpertLoadOperation()
+        try ring.begin(layer: 2, experts: [7], resident: []) { _, _ in failed }
+        failed.markInFlight()
+        failed.finish(.failure(CancellationError()))
+        let claimed = ring.claimDemand(layer: 2, experts: [7])
+        #expect(claimed == [7: 10])
+        #expect(ring.statistics.failed == 1)
+    }
+
+    @Test func claimDemandNeverDoublesAPredictionStillInFlight() throws {
+        let ring = try makeRing()
+        let inFlight = ExpertLoadOperation()
+        try ring.begin(layer: 3, experts: [9], resident: []) { _, _ in inFlight }
+        inFlight.markInFlight()
+        #expect(ring.claimDemand(layer: 3, experts: [9]).isEmpty)
+        #expect(ring.claimDemand(layer: 3, experts: [4]) == [4: 11])
+    }
+
     @Test func anEmptyRingIsRefused() {
         #expect(throws: (any Error).self) {
             try ExpertPrefetchRing(cells: []) { _, _, _ in }

@@ -98,7 +98,8 @@ extension Model {
                                   avoidingSlots: Set<Int> = [],
                                   protectedExperts: [Bool]? = nil,
                                   gpuMissedExperts: Set<Int>? = nil,
-                                  leasedLandings: Set<Int> = []) throws
+                                  leasedLandings: Set<Int> = [],
+                                  missesCounted: Int? = nil) throws
         -> RoutedExpertFetchPlan? {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
@@ -106,7 +107,53 @@ extension Model {
         return RoutedExpertFetchPlan(
             layer: layer, cachePlan: try streamer.planExpertsCached(
                 experts: experts, avoidingSlots: validSlots, protectedExperts: protectedExperts,
-                gpuMissedExperts: gpuMissedExperts, leasedLandings: leasedLandings))
+                gpuMissedExperts: gpuMissedExperts, leasedLandings: leasedLandings,
+                missesCounted: missesCounted))
+    }
+
+    // MARK: The agreed cells (v20 T3.1)
+
+    /// A value on the expert I/O timeline for a layer's agreed fixup,
+    /// reserved at the layer's encode.
+    public func reserveExpertIOCompletionToken() throws -> ExpertIOCompletionToken {
+        guard let expertIOEventCoordinator else {
+            throw ModelError.internalInconsistency(
+                detail: "event-driven expert I/O requested without a shared event")
+        }
+        return try expertIOEventCoordinator.reserve()
+    }
+
+    /// A value the host owes the timeline itself: a drained pass's, so no
+    /// GPU wait is left unsatisfied.
+    public func publishExpertIOCompletionToken(_ token: ExpertIOCompletionToken,
+                                               succeeded: Bool) {
+        expertIOEventCoordinator?.publish(token, succeeded: succeeded)
+    }
+
+    func claimRoutedExpertLanding(layer: Int, expert: Int, cell: Int) throws -> Bool {
+        try ensureLayerOpened(layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
+        return streamer.claimLanding(expert: expert, cell: cell)
+    }
+
+    func reserveRoutedExpertOverflowSlot(layer: Int, expert: Int,
+                                         protecting: [Int]) throws -> Int? {
+        try ensureLayerOpened(layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
+        return streamer.reserveOverflowSlot(expert: expert, protecting: protecting)
+    }
+
+    func abandonRoutedExpertOverflowSlot(layer: Int, expert: Int, cell: Int) throws {
+        try ensureLayerOpened(layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
+        streamer.abandonOverflowSlot(expert: expert, cell: cell)
+    }
+
+    func beginAgreedRoutedReads(layer: Int, experts: [Int], cells: [Int],
+                                token: ExpertIOCompletionToken) throws -> ExpertLoadOperation {
+        try ensureLayerOpened(layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
+        return try streamer.beginAgreedReads(experts: experts, cells: cells, token: token)
     }
 
     /// The ring's cell count has to be known before the arena exists, which

@@ -129,6 +129,26 @@ import Testing
     }
 }
 
+extension ExpertLoadOperationTests {
+    @Test func statusWordsRecycleAfterOneRingOfValues() throws {
+        let context = try MetalContext()
+        let coordinator = try #require(ExpertIOEventCoordinator(device: context.device))
+        let first = try coordinator.reserve()
+        for _ in 1..<ExpertIOEventCoordinator.statusWordCount {
+            coordinator.publish(try coordinator.reserve(), succeeded: true)
+        }
+        coordinator.publish(first, succeeded: false)
+        let recycled = try coordinator.reserve()
+        #expect(recycled.value == first.value + UInt64(ExpertIOEventCoordinator.statusWordCount))
+        #expect(recycled.status === first.status)
+        #expect(recycled.statusOffset == first.statusOffset)
+        #expect(recycled.status.contents().advanced(by: recycled.statusOffset)
+            .load(as: UInt32.self) == 0)
+        coordinator.publish(recycled, succeeded: true)
+        #expect(recycled.event.signaledValue == recycled.value)
+    }
+}
+
 private final class HookRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: [ExpertLoadOperationState] = []

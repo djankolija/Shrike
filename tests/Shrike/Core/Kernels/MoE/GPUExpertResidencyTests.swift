@@ -15,8 +15,11 @@ import Testing
 
     private static let phase1FullGrid = MTLSize(width: 256, height: 1, depth: 1)
     private static let phase2FullGrid = MTLSize(width: 13, height: 7, depth: 1)
-    private static let missGrids: [UInt32] = [256, 1, 1, 0, 1, 1]
-    private static let fullGrids: [UInt32] = [256, 1, 1, 13, 7, 1]
+    /// The four grids the classifier writes: the speculative phase 1 and 2,
+    /// then the agreed fixup's phase 1 and 2 (v20 T3.1), the fixup's full
+    /// only when an expert missed and the speculative phase 2's only when none did.
+    private static let missGrids: [UInt32] = [256, 1, 1, 0, 1, 1, 256, 1, 1, 13, 7, 1]
+    private static let fullGrids: [UInt32] = [256, 1, 1, 13, 7, 1, 0, 1, 1, 0, 1, 1]
 
     @Test func loadingResidentAndEvictedEntriesClassifyCorrectly() throws {
         let url = try PreadExpertStreamerTests.writeSyntheticLayer()
@@ -186,7 +189,7 @@ import Testing
             misses: values(missPositions, count: missN, as: UInt32.self),
             missExperts: values(missExperts, count: missN, as: UInt32.self),
             slots: values(slots, count: experts.count, as: UInt32.self),
-            specArgs: values(specArgsBuffer, count: 6, as: UInt32.self),
+            specArgs: values(specArgsBuffer, count: 12, as: UInt32.self),
             hostReadback: readbackWords.flatMap { words in
                 RouterHostReadback.decode(
                     words: words.contents().bindMemory(

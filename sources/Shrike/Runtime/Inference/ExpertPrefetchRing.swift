@@ -8,7 +8,9 @@ import Foundation
 /// still in flight past the join bound when the exact route asked for them,
 /// `refused` predictions that found no budget or cell or an expert the pool
 /// already held, `joined` predictions in flight that finished inside the join
-/// bound, `failed` reads reclaimed failed.
+/// bound, `failed` reads reclaimed failed, `leasedPeak` the most cells leased
+/// at once to a layer's route (its landed predictions and its agreed demand
+/// reads, from the word to the plan at the next wake; v20 T3.1).
 public struct ExpertPrefetchStatistics: Sendable, Equatable {
     public var issued: UInt64 = 0
     public var adopted: UInt64 = 0
@@ -21,6 +23,7 @@ public struct ExpertPrefetchStatistics: Sendable, Equatable {
     public var failed: UInt64 = 0
     public var hookFailures: UInt64 = 0
     public var beginNanos: UInt64 = 0
+    public var leasedPeak: UInt64 = 0
 
     public init() {}
 }
@@ -53,6 +56,9 @@ final class ExpertPrefetchRing: @unchecked Sendable {
         /// Handed to a plan by `readyCells` and not yet consumed: the plan may
         /// still swap it, so no `begin` on another thread may reclaim it.
         var leased = false
+        /// A cell `claimDemand` leased to a route's agreed read rather than
+        /// to a prediction; consumed the same way, never counted adopted.
+        var demand = false
 
         /// A claimed slot whose operation is not yet attached is in flight:
         /// its submission is between the claim and the attach.
@@ -229,11 +235,54 @@ final class ExpertPrefetchRing: @unchecked Sendable {
             } else {
                 drop(layer, slots[index].expert, slots[index].cell)
             }
+            if !slots[index].demand { stats.adopted &+= 1 }
             slots[index].layer = -1
             slots[index].expert = -1
             slots[index].operation = nil
             slots[index].leased = false
-            stats.adopted &+= 1
+            slots[index].demand = false
+        }
+    }
+
+    /// Leases free cells to `layer`'s agreed demand reads (v20 T3.1), one per
+    /// expert in order, outside the prediction budget, after the other layers'
+    /// terminal entries are reclaimed; the layer's own failed entry for an
+    /// expert is reused and one still in flight is left to the join, so no
+    /// expert is ever read twice into the ring. Fewer cells than experts when
+    /// the ring runs out; the batch's operation follows by `attachDemand`.
+    func claimDemand(layer: Int, experts: [Int]) -> [Int: Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        reclaimTerminalSlotsUnlocked(keeping: layer)
+        var cells: [Int: Int] = [:]
+        for expert in experts {
+            if let index = slots.firstIndex(where: { $0.layer == layer && $0.expert == expert }) {
+                guard !slots[index].leased, slots[index].operation?.state == .failed else { continue }
+                stats.failed &+= 1
+                slots[index].operation = nil
+                slots[index].leased = true
+                slots[index].demand = true
+                cells[expert] = slots[index].cell
+                continue
+            }
+            guard let index = slots.firstIndex(where: { $0.expert < 0 }) else { break }
+            slots[index].layer = layer
+            slots[index].expert = expert
+            slots[index].operation = nil
+            slots[index].leased = true
+            slots[index].demand = true
+            cells[expert] = slots[index].cell
+        }
+        stats.leasedPeak = max(stats.leasedPeak, UInt64(slots.count(where: { $0.leased })))
+        return cells
+    }
+
+    func attachDemand(layer: Int, experts: Set<Int>, operation: ExpertLoadOperation) {
+        lock.withLock {
+            for index in slots.indices where slots[index].demand && slots[index].layer == layer
+                && experts.contains(slots[index].expert) {
+                slots[index].operation = operation
+            }
         }
     }
 

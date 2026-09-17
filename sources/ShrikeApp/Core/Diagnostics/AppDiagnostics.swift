@@ -17,16 +17,13 @@ public enum AppStopReason: String, Equatable, Sendable {
 public struct AppRunnerDiagnostics: Equatable, Sendable {
     public var cb1MillisecondsPerToken: Double
     public var ioMillisecondsPerToken: Double
-    public var cb2MillisecondsPerToken: Double
     public var headMillisecondsPerToken: Double
 
     public init(cb1MillisecondsPerToken: Double = 0,
                 ioMillisecondsPerToken: Double = 0,
-                cb2MillisecondsPerToken: Double = 0,
                 headMillisecondsPerToken: Double = 0) {
         self.cb1MillisecondsPerToken = cb1MillisecondsPerToken
         self.ioMillisecondsPerToken = ioMillisecondsPerToken
-        self.cb2MillisecondsPerToken = cb2MillisecondsPerToken
         self.headMillisecondsPerToken = headMillisecondsPerToken
     }
 }

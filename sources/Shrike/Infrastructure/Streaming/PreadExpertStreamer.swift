@@ -207,6 +207,9 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     }
 
     private var reservedSlots: [Bool]
+    /// Overflow placements that must land in probation: the placing route's
+    /// own deferred plan sees them resident and would otherwise promote them.
+    private var overflowProbationSlots: Set<Int> = []
     private var victimSlotsScratch: [Int]
     private var slotExpert: [Int]
     private var slotLastUse: [Int]
@@ -352,20 +355,25 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// into the pool and the landing is dropped when the ring reclaims it).
     /// `gpuMissedExperts` is the residency classifier's view when it ran
     /// before this plan: a landed prediction it missed is swapped in all the
-    /// same but reported `adopted`, so the fixup computes it.
+    /// same but reported `adopted`, so the fixup computes it. `missesCounted`
+    /// is the classifier's miss count for a plan that runs after the reads
+    /// landed (v20 T3.1), so the statistics count the misses the route paid
+    /// rather than the none the plan finds.
     public func planExpertsCached(experts: [Int],
                                   layer: Int = 0,
                                   avoidingSlots: Set<Int> = [],
                                   protectedExperts: [Bool]? = nil,
                                   gpuMissedExperts: Set<Int>? = nil,
-                                  leasedLandings: Set<Int> = []) throws
+                                  leasedLandings: Set<Int> = [],
+                                  missesCounted: Int? = nil) throws
         -> ExpertCachePlan {
         guard let plan = makeExpertCachePlan(layer: layer,
                                              experts: experts,
                                              avoidingSlots: avoidingSlots,
                                              protectedExperts: protectedExperts,
                                              gpuMissedExperts: gpuMissedExperts,
-                                             leasedLandings: leasedLandings) else {
+                                             leasedLandings: leasedLandings,
+                                             missesCounted: missesCounted) else {
             // K10: config-triggered placement failure (too few slots for the
             // requested expert set) is recoverable — throw instead of
             // crashing; the runner already handles thrown errors.
@@ -392,7 +400,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                                      avoidingSlots rawAvoidingSlots: consuming Set<Int>,
                                      protectedExperts: [Bool]?,
                                      gpuMissedExperts: Set<Int>?,
-                                     leasedLandings: Set<Int>)
+                                     leasedLandings: Set<Int>,
+                                     missesCounted: Int? = nil)
         -> ExpertCachePlan? {
         precondition(experts.count <= slotCount,
                      "expert cache needs at least \(experts.count) slots")
@@ -457,6 +466,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
         if case .slru = policy {
             for slot in assignedSlots where slot >= 0 && !slotProtected[slot] {
+                if overflowProbationSlots.remove(slot) != nil { continue }
                 promoteToProtected(slot, clock: clock)
             }
         }
@@ -473,6 +483,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             assignedSlots[index] = slot
             reservedSlots[slot] = true
             demoteIfProtected(slot)
+            overflowProbationSlots.remove(slot)
             let cell = cellIndexUnlocked(slot)
             arena.bumpCellGeneration(cell)
             if previousExpert >= 0 {
@@ -500,12 +511,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             misses.append(index)
         }
 
-        recordPrefetchLandingsUnlocked(landedExperts)
+        recordExpertLoadsUnlocked(landedExperts)
 
+        let countedMisses = missesCounted ?? misses.count
         statisticsPlans &+= 1
         statisticsRequestedExperts &+= UInt64(experts.count)
-        statisticsHits &+= UInt64(experts.count - misses.count)
-        statisticsMisses &+= UInt64(misses.count)
+        statisticsHits &+= UInt64(experts.count - countedMisses)
+        statisticsMisses &+= UInt64(countedMisses)
         statisticsPeakLoadingSlots = max(
             statisticsPeakLoadingSlots,
             slotState.count(where: { $0 == .loading }))
@@ -829,6 +841,160 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         dropLanding(expert: expert, cell: cell)
     }
 
+    /// A value on the model's timeline for a layer's agreed fixup, reserved
+    /// at the layer's encode (v20 T3.1); `beginAgreedReads` publishes it.
+    public func reserveCompletionToken() throws -> ExpertIOCompletionToken {
+        guard let eventCoordinator else {
+            throw ModelError.internalInconsistency(
+                detail: "event-driven expert I/O requested without a shared event")
+        }
+        return try eventCoordinator.reserve()
+    }
+
+    /// A pool slot for a miss the ring could not house (v20 T3.1): the
+    /// policy's victim, its occupant evicted, the slot `loading` at its cell.
+    /// nil when no slot is evictable or the pool already holds the expert.
+    public func reserveOverflowSlot(expert: Int, protecting: [Int] = []) -> Int? {
+        guard expert >= 0, expert < layout.expertsPerLayer else { return nil }
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard !slotExpert.contains(expert) else { return nil }
+        reservedSlots.withUnsafeMutableBufferPointer { buffer in
+            buffer.update(repeating: false)
+        }
+        for slot in 0..<slotCount where slotState[slot] == .loading {
+            reservedSlots[slot] = true
+        }
+        for slot in 0..<slotCount
+        where slotState[slot] == .resident && protecting.contains(slotExpert[slot]) {
+            reservedSlots[slot] = true
+        }
+        guard selectVictimSlots(missCount: 1) else { return nil }
+        let slot = victimSlotsScratch[0]
+        overflowProbationSlots.insert(slot)
+        if slotState[slot] == .resident { statisticsEvictions &+= 1 }
+        let previousExpert = slotExpert[slot]
+        demoteIfProtected(slot)
+        let cell = cellIndexUnlocked(slot)
+        arena.bumpCellGeneration(cell)
+        if previousExpert >= 0 {
+            publish(expert: previousExpert, cell: cell, state: ExpertResidencyEntry.empty)
+        }
+        slotExpert[slot] = expert
+        slotLastUse[slot] = useClock
+        slotState[slot] = .loading
+        publish(expert: expert, cell: cell, state: ExpertResidencyEntry.loading)
+        return cell
+    }
+
+    /// The demand reads of a route's misses into the cells agreed for them
+    /// (v20 T3.1): ring cells claimed as landings and pool cells reserved by
+    /// `reserveOverflowSlot`. On the storage thread each cell is published
+    /// `resident` as the bytes land and `token` is published with the batch;
+    /// a failed batch drops the landings, empties the pool cells and publishes
+    /// the failure, so the fixup behind the value skips. An empty batch
+    /// publishes at once.
+    public func beginAgreedReads(experts: [Int], cells: [Int],
+                                 token: ExpertIOCompletionToken?) throws -> ExpertLoadOperation {
+        guard experts.count == cells.count else {
+            throw ModelError.internalInconsistency(
+                detail: "agreed reads' experts and cells differ in count")
+        }
+        let operation = ExpertLoadOperation(completionToken: token,
+                                            eventCoordinator: eventCoordinator)
+        guard !experts.isEmpty else {
+            operation.finish(.success(()))
+            return operation
+        }
+        var offsets: [UInt64] = []
+        var destinations: [UnsafeMutableRawPointer] = []
+        for (expert, cell) in zip(experts, cells) {
+            guard expert >= 0, expert < layout.expertsPerLayer,
+                  cell >= 0, cell < arena.cellCount else {
+                throw ModelError.internalInconsistency(detail: "invalid agreed read")
+            }
+            let regionOffset = layout.expertOffset(layer: 0, expert: expert)
+            guard regionOffset + layout.expertStride <= layout.streamSize else {
+                throw StreamerError.offsetOutOfRange(regionOffset)
+            }
+            offsets.append(layout.streamOffset + regionOffset)
+            destinations.append(arena.pointer(cell: cell))
+        }
+        let poolCells = Set(cells.filter { ownsCell($0) })
+        let safeDestinations = PrefetchDestinations(destinations)
+        let readOffsets = offsets
+        let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        ExpertIOScheduler.shared.submit { [self, operation, safeDestinations] in
+            operation.markInFlight()
+            let fetchStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            do {
+                try boundedReader.fetch(offsets: readOffsets, into: safeDestinations.values)
+                let landed = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                for (expert, cell) in zip(experts, cells) {
+                    if poolCells.contains(cell) {
+                        markOverflowResident(expert: expert, cell: cell)
+                    } else {
+                        _ = completeLanding(expert: expert, cell: cell)
+                    }
+                }
+                recordAgreedLoads(experts: experts, cells: cells, poolCells: poolCells,
+                                  elapsedNanos: landed - started,
+                                  fetchNanos: landed - fetchStarted)
+                operation.finish(.success(()))
+            } catch {
+                for (expert, cell) in zip(experts, cells) {
+                    if poolCells.contains(cell) {
+                        emptyOverflowSlot(expert: expert, cell: cell)
+                    } else {
+                        failLanding(expert: expert, cell: cell)
+                    }
+                }
+                operation.finish(.failure(error))
+            }
+        }
+        return operation
+    }
+
+    private func markOverflowResident(expert: Int, cell: Int) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard let slot = slotIndexUnlocked(cell: cell),
+              slotState[slot] == .loading, slotExpert[slot] == expert else { return }
+        slotState[slot] = .resident
+        slotLastUse[slot] = useClock
+        publish(expert: expert, cell: cell, state: ExpertResidencyEntry.resident)
+    }
+
+    /// A reserved overflow slot whose read was never issued goes back to
+    /// `empty`, as a failed read's does.
+    public func abandonOverflowSlot(expert: Int, cell: Int) {
+        emptyOverflowSlot(expert: expert, cell: cell)
+    }
+
+    private func emptyOverflowSlot(expert: Int, cell: Int) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard let slot = slotIndexUnlocked(cell: cell),
+              slotState[slot] == .loading, slotExpert[slot] == expert else { return }
+        slotState[slot] = .empty
+        slotExpert[slot] = -1
+        overflowProbationSlots.remove(slot)
+        publish(expert: expert, cell: cell, state: ExpertResidencyEntry.empty)
+    }
+
+    private func recordAgreedLoads(experts: [Int], cells: [Int], poolCells: Set<Int>,
+                                   elapsedNanos: UInt64, fetchNanos: UInt64) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        recordLoadBatchUnlocked(count: experts.count, elapsedNanos: elapsedNanos,
+                                fetchNanos: fetchNanos)
+        recordExpertLoadsUnlocked(zip(experts, cells).filter { poolCells.contains($0.1) }.map(\.0))
+    }
+
+    private func slotIndexUnlocked(cell: Int) -> Int? {
+        slotBufferOffsets.firstIndex(of: arena.offset(cell: cell))
+    }
+
     /// The ring's reclaim of a landing no plan wanted: the entry is emptied
     /// unless the pool owns the expert, whose entry then stands.
     public func dropLanding(expert: Int, cell: Int) {
@@ -974,21 +1140,25 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private func recordSuccessfulLoadsUnlocked(experts: [Int], elapsedNanos: UInt64,
                                                fetchNanos: UInt64 = 0) {
         guard !experts.isEmpty else { return }
-        statisticsBytesRead &+= UInt64(experts.count) * layout.expertStride
-        statisticsReadOperations &+= UInt64(experts.count)
+        recordLoadBatchUnlocked(count: experts.count, elapsedNanos: elapsedNanos,
+                                fetchNanos: fetchNanos)
+        recordExpertLoadsUnlocked(experts)
+    }
+
+    private func recordLoadBatchUnlocked(count: Int, elapsedNanos: UInt64, fetchNanos: UInt64) {
+        statisticsBytesRead &+= UInt64(count) * layout.expertStride
+        statisticsReadOperations &+= UInt64(count)
         statisticsLoadBatches &+= 1
         statisticsTotalLoadNanos &+= elapsedNanos
         statisticsFetchNanos &+= fetchNanos
         statisticsMaximumLoadNanos = max(statisticsMaximumLoadNanos, elapsedNanos)
         let bucket = Self.latencyBucketIndex(nanos: elapsedNanos)
         statisticsLatencyHistogram[bucket] &+= 1
-        for expert in experts where expert >= 0 && expert < expertLoadCount.count {
-            if expertLoadCount[expert] > 0 { statisticsReloads &+= 1 }
-            expertLoadCount[expert] &+= 1
-        }
     }
 
-    private func recordPrefetchLandingsUnlocked(_ experts: [Int]) {
+    /// A landing counts as the expert's load when the plan swaps it in, an
+    /// agreed read into a pool cell when it lands.
+    private func recordExpertLoadsUnlocked(_ experts: [Int]) {
         for expert in experts where expert >= 0 && expert < expertLoadCount.count {
             if expertLoadCount[expert] > 0 { statisticsReloads &+= 1 }
             expertLoadCount[expert] &+= 1

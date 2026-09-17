@@ -177,13 +177,13 @@ final class MoE {
             constants: moeConstants)
         self.specPhase1PSO = try context.pipeline(
             "moe_phase1_gate_up_act_spec_u16load",
-            constants: activationConstants + weightConstants)
+            constants: activationConstants + weightConstants + ioConstants)
         self.specPhase1SpecializedPSO = try context.pipeline(
             "moe_phase1_gate_up_act_spec_u16load",
             constants: moeConstants)
         self.specPhase2PSO = try context.pipeline(
             "moe_phase2_down_reduce_spec_k8",
-            constants: weightConstants)
+            constants: weightConstants + ioConstants)
         self.specPhase2SpecializedPSO = try context.pipeline(
             "moe_phase2_down_reduce_spec_k8",
             constants: moeConstants)
@@ -494,17 +494,22 @@ final class MoE {
         return buffer
     }
 
-    /// `arguments` receives two MTLDispatchThreadgroupsIndirectArguments
-    /// (phase-1 at offset 0, phase-2 at `specPhase2ArgsOffset`); the grids are
-    /// what the classifier publishes when every routed expert is resident.
+    /// `arguments` receives four MTLDispatchThreadgroupsIndirectArguments
+    /// (the speculative phase-1 at offset 0 and phase-2 at
+    /// `specPhase2ArgsOffset`, the agreed fixup's at `fixupPhase1ArgsOffset`
+    /// and `fixupPhase2ArgsOffset`); the grids are what the classifier
+    /// publishes for the speculative pair when every routed expert is
+    /// resident and for the fixup pair when one missed.
     struct SpeculativeDispatchArguments {
         let arguments: MTLBuffer
         let phase1Threadgroups: MTLSize
         let phase2Threadgroups: MTLSize
     }
 
-    static let specDispatchArgsLength = MemoryLayout<UInt32>.stride * 6
+    static let specDispatchArgsLength = MemoryLayout<UInt32>.stride * 12
     static let specPhase2ArgsOffset = MemoryLayout<UInt32>.stride * 3
+    static let fixupPhase1ArgsOffset = MemoryLayout<UInt32>.stride * 6
+    static let fixupPhase2ArgsOffset = MemoryLayout<UInt32>.stride * 9
 
     /// The classifier's tagged copy of the host's readback; `RouterHostReadback` gives the layout.
     struct RouterHostReadbackArguments {
@@ -581,14 +586,15 @@ final class MoE {
         encoder.setBuffer(resolvedSlots, offset: 0, index: 7)
         encoder.setBytes(&topKValue, length: MemoryLayout<UInt32>.stride, index: 9)
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 10)
-        var grids: [UInt32] = [
-            UInt32(speculative.phase1Threadgroups.width),
-            UInt32(speculative.phase1Threadgroups.height),
-            UInt32(speculative.phase1Threadgroups.depth),
-            UInt32(speculative.phase2Threadgroups.width),
-            UInt32(speculative.phase2Threadgroups.height),
-            UInt32(speculative.phase2Threadgroups.depth),
-        ]
+        let phase1Full = [speculative.phase1Threadgroups.width,
+                          speculative.phase1Threadgroups.height,
+                          speculative.phase1Threadgroups.depth].map { UInt32($0) }
+        let phase2Full = [speculative.phase2Threadgroups.width,
+                          speculative.phase2Threadgroups.height,
+                          speculative.phase2Threadgroups.depth].map { UInt32($0) }
+        // The agreed fixup's full grids are the speculative ones: the same
+        // kernels over the same rows, sized by the classifier.
+        var grids: [UInt32] = phase1Full + phase2Full + phase1Full + phase2Full
         encoder.setBytes(&grids, length: Self.specDispatchArgsLength, index: 11)
         encoder.setBuffer(speculative.arguments, offset: 0, index: 12)
         // A zero tag tells the kernel there is no copy to write; the bindings
@@ -900,6 +906,7 @@ final class MoE {
         expertPool: MTLBuffer,
         poolSlotStride: UInt64,
         resolvedSlots: MTLBuffer,
+        resolvedSlotsOffset: Int = 0,
         routedOffsets: MoEExpertOffsets,
         x: MTLBuffer,
         acts: MTLBuffer,
@@ -907,7 +914,9 @@ final class MoE {
         f: UInt32,
         topK: UInt32,
         indirectArguments: MTLBuffer,
-        indirectOffset: Int = 0
+        indirectOffset: Int = 0,
+        ioStatus: MTLBuffer? = nil,
+        ioStatusOffset: Int = 0
     ) {
         precondition(d <= Self.maxStagedHiddenD)
         precondition((1...UInt32(Self.maxStreamedExperts)).contains(topK))
@@ -927,8 +936,10 @@ final class MoE {
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 4)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 5)
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
-        encoder.setBuffer(resolvedSlots, offset: 0, index: 7)
+        encoder.setBuffer(resolvedSlots, offset: resolvedSlotsOffset, index: 7)
         encoder.setBytes(&stride, length: MemoryLayout<UInt64>.stride, index: 8)
+        encoder.setBuffer(ioStatus ?? alwaysReadyIOStatus,
+                          offset: ioStatus == nil ? 0 : ioStatusOffset, index: 9)
         encoder.dispatchThreadgroups(
             indirectBuffer: indirectArguments,
             indirectBufferOffset: indirectOffset,
@@ -977,6 +988,9 @@ final class MoE {
         expertPool: MTLBuffer,
         poolSlotStride: UInt64,
         resolvedSlots: MTLBuffer,
+        resolvedSlotsOffset: Int = 0,
+        fallbackCells: MTLBuffer? = nil,
+        fallbackCellsOffset: Int = 0,
         routedOffsets: MoEExpertOffsets,
         acts: MTLBuffer,
         routingWeights: MTLBuffer,
@@ -987,7 +1001,9 @@ final class MoE {
         f: UInt32,
         topK: UInt32,
         indirectArguments: MTLBuffer,
-        indirectOffset: Int = MoE.specPhase2ArgsOffset
+        indirectOffset: Int = MoE.specPhase2ArgsOffset,
+        ioStatus: MTLBuffer? = nil,
+        ioStatusOffset: Int = 0
     ) {
         precondition((1...UInt32(Self.maxStreamedExperts)).contains(topK))
         var dimension = d
@@ -1007,10 +1023,15 @@ final class MoE {
         encoder.setBuffer(y, offset: 0, index: 5)
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 6)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 7)
-        encoder.setBuffer(resolvedSlots, offset: 0, index: 8)
+        encoder.setBuffer(resolvedSlots, offset: resolvedSlotsOffset, index: 8)
         encoder.setBytes(&topKValue, length: MemoryLayout<UInt32>.stride, index: 9)
         encoder.setBytes(&stride, length: MemoryLayout<UInt64>.stride, index: 10)
         encoder.setBuffer(hidden, offset: 0, index: 11)
+        encoder.setBuffer(ioStatus ?? alwaysReadyIOStatus,
+                          offset: ioStatus == nil ? 0 : ioStatusOffset, index: 12)
+        encoder.setBuffer(fallbackCells ?? resolvedSlots,
+                          offset: fallbackCells == nil ? resolvedSlotsOffset : fallbackCellsOffset,
+                          index: 13)
         encoder.dispatchThreadgroups(
             indirectBuffer: indirectArguments,
             indirectBufferOffset: indirectOffset,

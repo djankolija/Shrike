@@ -93,7 +93,6 @@ private struct AdvancedRunnerDiagnosticsView: View {
     var body: some View {
         VStack(spacing: 8) {
             DiagnosticRow("cb1 / token", MetricFormat.milliseconds(runner.cb1MillisecondsPerToken))
-            DiagnosticRow("cb2 / token", MetricFormat.milliseconds(runner.cb2MillisecondsPerToken))
             DiagnosticRow("Head / token", MetricFormat.milliseconds(runner.headMillisecondsPerToken))
         }
         .frame(maxWidth: .infinity)

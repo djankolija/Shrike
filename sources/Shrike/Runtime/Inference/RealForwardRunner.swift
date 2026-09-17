@@ -223,7 +223,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // pair would be overwritten before the comparison reads it.
     private let specDispatchArguments: MoE.SpeculativeDispatchArguments
     private let residencyReadback: ResidencyReadbackBuffers
-    private var moeMissActiveSlots: MTLBuffer { residencyReadback.moeMissActiveSlots } // [topK] UInt32
+    private var agreedCells: MTLBuffer { residencyReadback.agreedCells } // [numLayers * topK] UInt32
     private var residencyHitCount: MTLBuffer { residencyReadback.hitCount }
     private var residencyHitPositions: MTLBuffer { residencyReadback.hitPositions }
     private var residencyMissCount: MTLBuffer { residencyReadback.missCount }
@@ -275,10 +275,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var routeWeightScratch: [Float16] = []
     private var prefillResidentExpertScratch: [Bool] = []
     private var decodeExpertsScratch: [Int] = []
-    private var decodeHitSlotsScratch: [UInt32] = []
-    private var decodeMissSlotsScratch: [UInt32] = []
-    private var decodeRoutedBufsScratch: [MTLBuffer] = []
-    private var decodeRoutedOffsetsScratch: [Int] = []
+    /// The values reserved for encoded layers and not yet handed to a batch
+    /// or published: what the drain publishes on the way out of a pass.
+    private var armedAgreedTokens: [ExpertIOCompletionToken] = []
 
     /// Two routed tiles pending, one per command buffer, the next tile's
     /// fetch begun before the current one is awaited (v12 P16, v13 T3).
@@ -856,7 +855,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     private struct ResidencyReadbackBuffers {
-        let moeMissActiveSlots: MTLBuffer
+        /// One row of top-k cells per layer, host-written at the word: the
+        /// miss at position p reads into `agreedCells[p]`, a hit's the sentinel.
+        let agreedCells: MTLBuffer
         let hitCount: MTLBuffer
         let hitPositions: MTLBuffer
         let missCount: MTLBuffer
@@ -874,8 +875,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         let topK = cfg.topKExperts
         let u32 = MemoryLayout<UInt32>.size
+        let agreedCells = try buf(cfg.numLayers * topK, u32, label: "decode.agreedCells")
+        memset(agreedCells.contents(), 0xff, agreedCells.length)
         return ResidencyReadbackBuffers(
-            moeMissActiveSlots: try buf(topK, u32, label: "decode.moeMissActiveSlots"),
+            agreedCells: agreedCells,
             hitCount: try buf(1, u32, label: "decode.residencyHitCount"),
             hitPositions: try buf(topK, u32, label: "decode.residencyHitPositions"),
             missCount: try buf(1, u32, label: "decode.residencyMissCount"),
@@ -1172,7 +1175,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     public private(set) var totalIoNanos: UInt64 = 0
     public private(set) var totalCb1Nanos: UInt64 = 0
-    public private(set) var totalCb2Nanos: UInt64 = 0
     public private(set) var totalHeadNanos: UInt64 = 0
     public private(set) var totalHeadFusedNanos: UInt64 = 0
     // Overlap-analysis counters (SHRIKE_RUNNER_STATS): the per-layer wall spent
@@ -1182,11 +1184,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalWaitNanos: UInt64 = 0
     public private(set) var totalBodyNanos: UInt64 = 0
     public private(set) var totalMissIoNanos: UInt64 = 0
-    public private(set) var totalExposedIoNanos: UInt64 = 0
-    /// I/O-event signal to fixup-CB GPU execution start — the wake latency
-    /// the GPU pays on top of the read itself (both clocks are mach-based).
-    public private(set) var totalFixupWakeNanos: UInt64 = 0
+    /// Routed layers whose route missed an expert, so the fixup computed.
     public private(set) var totalHitFixupLayers: UInt64 = 0
+    /// Misses given a pool victim on the path because the ring had no free
+    /// cell for them (v20 T3.1).
+    public private(set) var totalAgreedOverflow: UInt64 = 0
     public private(set) var totalRouterReadbackNanos: UInt64 = 0
     /// Mean routing-weight mass per rank (E0): summed normalized top-K weights
     /// by descending-score position, over `totalRankWeightLayers` layer-steps.
@@ -1207,16 +1209,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalPrefetchDuringEarlier: UInt64 = 0
     public private(set) var totalPrefetchAfterClassify: UInt64 = 0
     public private(set) var totalPrefetchRaceUnknown: UInt64 = 0
-    public private(set) var totalRoutedPinNanos: UInt64 = 0
     public private(set) var totalRoutedSubmitNanos: UInt64 = 0
-    public private(set) var totalFixupBuildNanos: UInt64 = 0
-    public private(set) var totalFixupCommitToKernelNanos: UInt64 = 0
     public private(set) var totalRouterWakeNanos: UInt64 = 0
     public private(set) var totalRouterWakeFallbacks: UInt64 = 0
     public var prefetchStatistics: ExpertPrefetchStatistics { predictivePrefetch.statistics }
     public private(set) var totalBoundaryWakeFallbacks: UInt64 = 0
     public private(set) var totalIOQueueNanos: UInt64 = 0
-    public private(set) var totalExpertIOHostWaitsAvoided: UInt64 = 0
     public private(set) var lastGreedyToken: UInt32 = 0
     public var usesFusedGreedyHead: Bool { useFusedGreedyHead }
 
@@ -1671,6 +1669,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         heldLayerZero = nil
         boundaryCommand = nil
         boundaryTokenWord = nil
+        drainArmedAgreedTokens()
     }
 
     private func takeHeldLayerZero() throws -> HeldLayerCommands? {
@@ -2088,10 +2087,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         /// the separately committed tail); nil when it rides in `attnCB` behind
         /// the tail, one command per layer.
         let specCB: MTLCommandBuffer?
-        let overlapCompletionClock: CommandCompletionClock?
         /// The tag the classifier stamps on this layer's host readback; zero
         /// when no classifier ran (the host then reads the raw buffers).
         let readbackTag: UInt32
+        /// The timeline value the layer's fixup waits on, reserved at the
+        /// encode and published by the word's batch (v20 T3.1).
+        let agreedToken: ExpertIOCompletionToken
 
         /// The CB whose completion publishes the router output.
         var routerCB: MTLCommandBuffer { tailCB ?? attnCB }
@@ -2183,7 +2184,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             speculative: specDispatchArguments,
             d: D, eps: eps, probeBank: position & 1)
         layerEncoder?.endEncoding()
-        let overlapCompletionClock = runnerStatsEnabled ? CommandCompletionClock() : nil
         var specCB: MTLCommandBuffer?
         if tailCB != nil {
             guard let separate = ctx.queue.makeCommandBuffer() else {
@@ -2195,13 +2195,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             into: specCB ?? attnCB,
             layer: L,
             residency: residencyResources,
-            arguments: specDispatchArguments,
-            completionClock: overlapCompletionClock)
+            arguments: specDispatchArguments)
+        let agreedToken = try model.reserveExpertIOCompletionToken()
+        armedAgreedTokens.append(agreedToken)
+        try encodeAgreedFixup(into: specCB ?? attnCB, layer: L,
+                              residency: residencyResources,
+                              arguments: specDispatchArguments, token: agreedToken)
         return HeldLayerCommands(
             layer: L, attnCB: attnCB, softmaxCB: softmaxCB, tailCB: tailCB,
-            specCB: specCB,
-            overlapCompletionClock: overlapCompletionClock,
-            readbackTag: readbackTag)
+            specCB: specCB, readbackTag: readbackTag, agreedToken: agreedToken)
     }
 
     /// The orchestrator for one decode step, in the same shape as executePrefillChunk: embed, the per-layer dispatch, the head.
@@ -2232,17 +2234,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let embedOutScale = cfg.embeddingScaledBySqrtHidden
             ? Float(cfg.hiddenSize).squareRoot()
             : 1.0
-        var pendingRoutedCommand: PendingRoutedCommand?
-
-        /// Drain a routed layer's command buffers, surfacing any `.error`
-        /// (R1/R2): the routed-CB failure must fail the generation rather than
-        /// print-and-continue into silently corrupt output. The per-layer call
-        /// (waitIfNeeded: false) runs right after the next layer's tailCB
-        /// wait, so the routed CBs have completed on the GPU and their spans
-        /// are valid — recording them here (not only in the waitIfNeeded
-        /// drain) makes SHRIKE_KERNEL_STATS cover every layer instead of just
-        /// the final layer of each token.
-
+        var pendingAgreedLayer: PendingAgreedLayer?
         var heldNext: HeldLayerCommands?
         if let token {
             discardBoundaryState()
@@ -2253,34 +2245,40 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         // Records a previous token left behind when it threw belong to that token.
         deferredGPURecords.removeAll()
-        for L in 0..<cfg.numLayers {
-            let tBodyStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let isLinear = cfg.layerIsLinear(L)
-            let isDense = L < cfg.numLeadingDenseLayers
+        do {
+            for L in 0..<cfg.numLayers {
+                let tBodyStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                let isLinear = cfg.layerIsLinear(L)
+                let isDense = L < cfg.numLeadingDenseLayers
 
-            let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            // GDN/MLA/gated layers run the whole stage, input norm through
-            // router and the speculative routed work, in one CB (roles
-            // layer_linear / layer_kv). gpt-oss and plain
-            // layers keep the attn/softmax/tail CB split, whose commit order
-            // sequences o_proj after the softmax. Same queue either way, one
-            // wait on the last CB; only the router readback forces the
-            // barrier.
-            if isDense {
-                try produceDenseLayer(layer: L, position: position, isLinear: isLinear,
-                                      d: D, rmsEps: eps,
-                                      cb1Start: tCb1Start, bodyStart: tBodyStart)
-                continue
+                let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                // GDN/MLA/gated layers run the whole stage, input norm through
+                // router and the speculative routed work, in one CB (roles
+                // layer_linear / layer_kv). gpt-oss and plain
+                // layers keep the attn/softmax/tail CB split, whose commit order
+                // sequences o_proj after the softmax. Same queue either way, one
+                // wait on the last CB; only the router readback forces the
+                // barrier.
+                if isDense {
+                    try produceDenseLayer(layer: L, position: position, isLinear: isLinear,
+                                          d: D, rmsEps: eps,
+                                          cb1Start: tCb1Start, bodyStart: tBodyStart)
+                    continue
+                }
+                try produceRoutedLayer(layer: L, position: position,
+                                       heldNext: &heldNext, pending: &pendingAgreedLayer,
+                                       cb1Start: tCb1Start, bodyStart: tBodyStart)
             }
-            try await produceRoutedLayer(layer: L, position: position,
-                                         heldNext: &heldNext, pending: &pendingRoutedCommand,
-                                         cb1Start: tCb1Start, bodyStart: tBodyStart)
+            if let pending = pendingAgreedLayer {
+                try finishPendingAgreedLayer(pending, waitIfNeeded: true)
+                pendingAgreedLayer = nil
+            }
+            try drainDeferredGPURecords(waitIfNeeded: true)
+        } catch {
+            if let pending = pendingAgreedLayer { abandonPendingAgreedLayer(pending) }
+            drainArmedAgreedTokens()
+            throw error
         }
-        if let pending = pendingRoutedCommand {
-            try finishPendingRoutedCommand(pending, waitIfNeeded: true)
-            pendingRoutedCommand = nil
-        }
-        try drainDeferredGPURecords(waitIfNeeded: true)
         try finishPreviousBoundary()
 
         if prefetchTraceFD >= 0 { pendingProbeDumpPosition = position }
@@ -2453,9 +2451,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     private func produceRoutedLayer(layer L: Int, position: Int,
                                     heldNext: inout HeldLayerCommands?,
-                                    pending pendingRoutedCommand: inout PendingRoutedCommand?,
+                                    pending: inout PendingAgreedLayer?,
                                     cb1Start tCb1Start: UInt64,
-                                    bodyStart tBodyStart: UInt64) async throws {
+                                    bodyStart tBodyStart: UInt64) throws {
         let cmds: HeldLayerCommands
         if let held = heldNext, held.layer == L {
             cmds = held
@@ -2483,44 +2481,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         let waitNanos = woke - tWait
         totalWaitNanos &+= waitNanos
-        if let pending = pendingRoutedCommand {
-            try finishPendingRoutedCommand(pending, waitIfNeeded: false,
-                                           deferTimings: wordWake)
-            pendingRoutedCommand = nil
+        if let previous = pending {
+            try finishPendingAgreedLayer(previous, waitIfNeeded: false)
+            pending = nil
         }
         if wordWake { try drainDeferredGPURecords(waitIfNeeded: false) }
         totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
-        let hostReadback = try decodeRouterHostReadback(for: cmds)
-        let predictedNextLayer: [Int]
-        if L + 1 < cfg.numLayers {
-            if let hostReadback {
-                predictedNextLayer = hostReadback.predictedIDs.map {
-                    min(Int($0), cfg.numExperts - 1)
-                }
-            } else {
-                let ptr = prefetchPredictionIndices.contents().bindMemory(
-                    to: UInt32.self, capacity: cfg.topKExperts)
-                predictedNextLayer = (0..<cfg.topKExperts).map {
-                    min(Int(ptr[$0]), cfg.numExperts - 1)
-                }
-            }
-        } else {
-            predictedNextLayer = []
+        guard let hostReadback = try decodeRouterHostReadback(for: cmds) else {
+            throw ModelError.internalInconsistency(
+                detail: "layer \(L) ran without its residency classifier")
         }
-
-        // CPU readback to fetch routed-expert blobs from disk. The expert
-        // id list is reused host scratch (R16); the runner is single-flight
-        // per generation, so it never aliases concurrent decode work.
-        try await encodeDecodeRoutedMoE(
-            layer: L, position: position,
-            tailCB: cmds.routerCB,
-            specCB: cmds.routedCB,
-            specIsSeparate: cmds.specCB != nil,
-            overlapCompletionClock: cmds.overlapCompletionClock,
-            pending: &pendingRoutedCommand,
-            bodyStart: tBodyStart,
-            hostReadback: hostReadback,
-            predictedNextLayer: predictedNextLayer)
+        let predictedNextLayer: [Int] = L + 1 < cfg.numLayers
+            ? hostReadback.predictedIDs.map { min(Int($0), cfg.numExperts - 1) }
+            : []
+        pending = try serviceAgreedLayer(
+            layer: L, position: position, cmds: cmds, readback: hostReadback,
+            predictedNextLayer: predictedNextLayer, bodyStart: tBodyStart)
     }
 
     private func emitHead(_ wanted: Bool, into logits: MTLBuffer,
@@ -3255,91 +3231,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
-    /// Builds, gates, and commits the miss-fixup routed CB: the I/O
-    /// event wait, phase 1
-    /// (full or hit-split subset), the phase-2 reduce, the residual tail,
-    /// and the S3b layer-done signal wiring.
-    private func buildAndCommitMissFixupCommand(
-        eventLoad: RoutedExpertLoadOperation?,
-        missesOnly: Bool,
-        phase1MissSlots: [UInt32],
-        routedBufs: [MTLBuffer],
-        routedOffsets: MoEExpertOffsets,
-        topK: UInt32,
-        d D: UInt32,
-        f FmoE: UInt32
-    ) throws -> (cb: MTLCommandBuffer, commitNanos: UInt64) {
-        guard let routedCB = ctx.queue.makeCommandBuffer() else {
-            throw ModelError.residentBufferWrapFailed
-        }
-        let ioToken = eventLoad?.storage.completionToken
-        let ioStatus = ioToken.map { ($0.status, $0.statusOffset) }
-        // A host-spin late commit (spin on the I/O timeline, commit the CB
-        // wait-free) measured null on the M1 — the parked-CB wake is as fast
-        // as a fresh-commit schedule (v10 T3, 2026-08-31); keep the encoded
-        // wait.
-        if let token = ioToken {
-            routedCB.encodeWaitForEvent(token.event, value: token.value)
-        }
-        let argBuf = moe.makeReusedRoutedArgumentBuffer(
-            routedBlobs: routedBufs,
-            topK: topK,
-            routedBufferOffsets: decodeRoutedOffsetsScratch)
-        guard let encoder = routedCB.makeComputeCommandEncoder() else {
-            throw ModelError.residentBufferWrapFailed
-        }
-        if missesOnly {
-            totalHitFixupLayers &+= 1
-            writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
-            moe.encodeRoutedPersistentPhase1SubsetU16Load(
-                encoder: encoder,
-                routedArgBuffer: argBuf,
-                routedBlobs: routedBufs,
-                routedOffsets: routedOffsets,
-                x: routedX,
-                acts: moeActs,
-                activeSlots: moeMissActiveSlots,
-                activeSlotIndices: phase1MissSlots,
-                activeCount: UInt32(phase1MissSlots.count),
-                d: D,
-                f: FmoE,
-                topK: topK,
-                ioStatus: ioStatus?.0,
-                ioStatusOffset: ioStatus?.1 ?? 0)
-        } else {
-            moe.encodeRoutedPersistentPhase1U16Load(
-                encoder: encoder,
-                routedArgBuffer: argBuf,
-                routedBlobs: routedBufs,
-                routedOffsets: routedOffsets,
-                x: routedX,
-                acts: moeActs,
-                d: D,
-                f: FmoE,
-                topK: topK,
-                ioStatus: ioStatus?.0,
-                ioStatusOffset: ioStatus?.1 ?? 0)
-        }
-        moe.encodeRoutedPersistentPhase2Reduce(encoder: encoder,
-                                               routedArgBuffer: argBuf,
-                                               routedBlobs: routedBufs,
-                                               routedOffsets: routedOffsets,
-                                               acts: moeActs,
-                                               routingWeights: outWeights,
-                                               residual: h1Buf,
-                                               y: h2Buf,
-                                               hidden: hidden,
-                                               d: D,
-                                               f: FmoE,
-                                               topK: topK,
-                                               ioStatus: ioStatus?.0,
-                                               ioStatusOffset: ioStatus?.1 ?? 0)
-        encoder.endEncoding()
-        let commitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        routedCB.commit()
-        return (routedCB, commitNanos)
-    }
-
     /// Polls instead of parking the thread, trading a busy core for the
     /// scheduler-wake latency on the per-layer router wait (v10 T5's spin).
     /// Falls back to blocking after ~1s so a stalled CB cannot wedge a core.
@@ -3425,7 +3316,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private enum DeferredGPURecord {
         case kernel(role: String, cb: MTLCommandBuffer)
         case routerWake(cb: MTLCommandBuffer, wokeAt: UInt64)
-        case routed(PendingRoutedCommand, ioCompletedNanos: UInt64)
         case prefetchRace(completions: [Int: UInt64], landed: [Int], tailCB: MTLCommandBuffer)
 
         var commandBuffers: [(label: String, cb: MTLCommandBuffer)] {
@@ -3436,15 +3326,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 return [("router command buffer", cb)]
             case .prefetchRace(_, _, let tailCB):
                 return [("attn_tail_router", tailCB)]
-            case .routed(let pending, _):
-                var buffers = [("routed layer command buffer", pending.cb)]
-                if let specCB = pending.specCB {
-                    buffers.append(("speculative routed command buffer", specCB))
-                }
-                if let layerCB = pending.layerCB {
-                    buffers.append(("layer command buffer", layerCB))
-                }
-                return buffers
             }
         }
     }
@@ -3474,8 +3355,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 recordKernelGPU(role: role, cb)
             case .routerWake(let cb, let woke):
                 recordRouterWake(cb, wokeAt: woke, deferred: false)
-            case .routed(let pending, let ioCompletedNanos):
-                try recordRoutedCommandTimings(pending, ioCompletedNanos: ioCompletedNanos)
             case .prefetchRace(let completions, let landed, let tailCB):
                 countPrefetchRace(completions: completions, landed: landed, tailCB: tailCB)
             }
@@ -5200,126 +5079,316 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
-    // MARK: - Decode routed-expert helpers
+    // MARK: - The agreed cells (v20 T3.1)
 
-    /// A routed-expert command whose completion is deferred to the next layer.
-    private struct PendingRoutedCommand {
+    static let agreedCellSentinel: UInt32 = 0xffff_ffff
+
+    private func agreedCellsOffset(layer L: Int) -> Int {
+        L * cfg.topKExperts * MemoryLayout<UInt32>.stride
+    }
+
+    /// The layer's fixup, encoded with the layer before its router has run:
+    /// the wait on the layer's value, then phase 1 over the host's cell row
+    /// (the sentinel at the hits) and phase 2 over the eight resolving a
+    /// sentinel through that row, the speculative kernels behind the batch's
+    /// status word, sized by the classifier's fixup grids.
+    private func encodeAgreedFixup(into cb: MTLCommandBuffer, layer L: Int,
+                                   residency: ExpertResidencyResources,
+                                   arguments: MoE.SpeculativeDispatchArguments,
+                                   token: ExpertIOCompletionToken) throws {
+        cb.encodeWaitForEvent(token.event, value: token.value)
+        guard let encoder = cb.makeComputeCommandEncoder() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        defer { encoder.endEncoding() }
+        let offsets = try model.routedExpertOffsets(layer: L)
+        let cellsOffset = agreedCellsOffset(layer: L)
+        let d = UInt32(cfg.hiddenSize)
+        let f = UInt32(cfg.moeIntermediateSize)
+        let topK = UInt32(cfg.topKExperts)
+        moe.encodeSpecPhase1U16Load(
+            encoder: encoder,
+            expertPool: residency.expertPool,
+            poolSlotStride: residency.poolSlotStride,
+            resolvedSlots: agreedCells, resolvedSlotsOffset: cellsOffset,
+            routedOffsets: offsets,
+            x: routedX, acts: moeActs,
+            d: d, f: f, topK: topK,
+            indirectArguments: arguments.arguments,
+            indirectOffset: MoE.fixupPhase1ArgsOffset,
+            ioStatus: token.status, ioStatusOffset: token.statusOffset)
+        moe.encodeSpecPhase2Reduce(
+            encoder: encoder,
+            expertPool: residency.expertPool,
+            poolSlotStride: residency.poolSlotStride,
+            resolvedSlots: residencyResolvedSlots,
+            fallbackCells: agreedCells, fallbackCellsOffset: cellsOffset,
+            routedOffsets: offsets,
+            acts: moeActs, routingWeights: outWeights,
+            residual: h1Buf, y: h2Buf, hidden: hidden,
+            d: d, f: f, topK: topK,
+            indirectArguments: arguments.arguments,
+            indirectOffset: MoE.fixupPhase2ArgsOffset,
+            ioStatus: token.status, ioStatusOffset: token.statusOffset)
+    }
+
+    private func disarmAgreedToken(_ token: ExpertIOCompletionToken) {
+        armedAgreedTokens.removeAll { $0.value == token.value }
+    }
+
+    /// The fold's invariant in its T3.1 form: every value a committed or held
+    /// command waits on is published, by the batch, by the host at the word,
+    /// or here on the way out of a pass, so no GPU wait is left unsatisfied.
+    private func drainArmedAgreedTokens() {
+        for token in armedAgreedTokens {
+            model.publishExpertIOCompletionToken(token, succeeded: false)
+        }
+        armedAgreedTokens.removeAll()
+    }
+
+    /// One routed layer at its word: the route, the landed predictions
+    /// leased, every miss given its cell, the reads issued with the layer's
+    /// value, the next layer's prediction issued.
+    private struct AgreedLayerContext {
+        let layer: Int
+        let position: Int
         let cb: MTLCommandBuffer
-        let specCB: MTLCommandBuffer?
-        /// The layer's own command when the speculative work rides in it and
-        /// the fixup is the pending command, so its error is checked too.
-        let layerCB: MTLCommandBuffer?
-        let expertLease: RoutedExpertLease?
-        let storageOperation: RoutedExpertLoadOperation?
-        let overlapCompletionClock: CommandCompletionClock?
-        let expectedOverlapCompletions: Int
-        let routedCommitNanos: UInt64
-        /// nil when the command is the layer's own, already recorded under the
-        /// layer's role.
-        let kernelRole: String?
-        let encodeAndCommitNanos: UInt64
+        let bodyStart: UInt64
+        let readback: RouterHostReadback
+        let predictedNextLayer: [Int]
+        let experts: [Int]
+        let token: ExpertIOCompletionToken
+        var residentBeforePlan: [Int] = []
+        var leasedPredictions: [Int: Int] = [:]
+        var claimedCells: [Int: Int] = [:]
+        var readExperts: [Int] = []
+        var readCells: [Int] = []
+        var overflowExperts: [Int: Int] = [:]
+        var operation: ExpertLoadOperation?
     }
 
-    /// Diagnostic-only completion clock used to measure the I/O tail left
-    /// after already-runnable GPU work. It is allocated only with
-    /// SHRIKE_RUNNER_STATS, never in the production hot path.
-    /// unchecked-invariant: completion timestamps are mutated and read only
-    /// while holding `lock`.
-    private final class CommandCompletionClock: @unchecked Sendable {
-        private let lock = NSLock()
-        private var completionCount = 0
-        private var latestCompletion: UInt64 = 0
+    /// A serviced layer carried to the next wake, where its batch is checked,
+    /// its plan run off the path and its cells consumed.
+    private struct PendingAgreedLayer {
+        let layer: Int
+        let position: Int
+        let cb: MTLCommandBuffer
+        let experts: [Int]
+        let missExperts: Set<Int>
+        let leasedPredictions: [Int]
+        let claimedExperts: Set<Int>
+        let readExperts: [Int]
+        let operation: ExpertLoadOperation
+        let residentBeforePlan: [Int]
+        let predictedNextLayer: [Int]
+    }
 
-        func track(_ commandBuffer: MTLCommandBuffer) {
-            commandBuffer.addCompletedHandler { [self] _ in
-                lock.lock()
-                completionCount += 1
-                latestCompletion = max(
-                    latestCompletion,
-                    clock_gettime_nsec_np(CLOCK_UPTIME_RAW))
-                lock.unlock()
+    private func serviceAgreedLayer(layer L: Int, position: Int, cmds: HeldLayerCommands,
+                                    readback: RouterHostReadback, predictedNextLayer: [Int],
+                                    bodyStart: UInt64) throws -> PendingAgreedLayer {
+        let experts = readDecodeRouterReadback(layer: L, position: position,
+                                               hostReadback: readback)
+        var context = AgreedLayerContext(
+            layer: L, position: position, cb: cmds.routedCB, bodyStart: bodyStart,
+            readback: readback, predictedNextLayer: predictedNextLayer,
+            experts: experts, token: cmds.agreedToken)
+        do {
+            try joinAgreedLandings(&context)
+            try agreeCells(&context)
+            let pending = try submitAgreedReads(&context)
+            schedulePredictivePrefetch(layer: L, predicted: predictedNextLayer,
+                                       demand: pending.operation)
+            totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - bodyStart
+            return pending
+        } catch {
+            abandonAgreedContext(context)
+            throw error
+        }
+    }
+
+    private func readDecodeRouterReadback(
+        layer L: Int, position: Int, hostReadback: RouterHostReadback
+    ) -> [Int] {
+        let readbackStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        decodeExpertsScratch.removeAll(keepingCapacity: true)
+        decodeExpertsScratch.reserveCapacity(cfg.topKExperts)
+        for id in hostReadback.expertIDs {
+            decodeExpertsScratch.append(min(Int(id), cfg.numExperts - 1))
+        }
+        totalRouterReadbackNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - readbackStarted
+        if runnerStatsEnabled {
+            if totalRankWeightMass.count != cfg.topKExperts {
+                totalRankWeightMass = [Double](repeating: 0, count: cfg.topKExperts)
             }
+            for i in 0..<cfg.topKExperts {
+                totalRankWeightMass[i] += Double(Float16(bitPattern: hostReadback.weightBits[i]))
+            }
+            totalRankWeightLayers &+= 1
         }
+        let experts = decodeExpertsScratch
+        recordRouteTrace(layer: L, position: position, experts: experts)
+        return experts
+    }
 
-        func latest(expected: Int) -> UInt64? {
-            lock.lock()
-            defer { lock.unlock() }
-            guard completionCount == expected else { return nil }
-            return latestCompletion
+    private func joinAgreedLandings(_ context: inout AgreedLayerContext) throws {
+        context.residentBeforePlan = prefetchTraceFD >= 0
+            ? try model.routedExpertResidentIDs(layer: context.layer) : []
+        context.leasedPredictions = predictivePrefetch.readyCells(
+            layer: context.layer, experts: context.experts, joinNanos: Self.prefetchJoinNanos)
+    }
+
+    /// Every miss of the classifier's list gets its cell: a landing the ring
+    /// leased (no read), a free ring cell claimed as a landing, or, when the
+    /// ring has none, the pool's victim chosen here for this miss alone; the
+    /// row written before the batch publishes the value the fixup waits on.
+    private func agreeCells(_ context: inout AgreedLayerContext) throws {
+        let L = context.layer
+        let missPositions = context.readback.missPositions.map { Int($0) }
+        let unleased = missPositions.map { context.experts[$0] }
+            .filter { context.leasedPredictions[$0] == nil }
+        context.claimedCells = predictivePrefetch.claimDemand(layer: L, experts: unleased)
+        let row = agreedCells.contents().advanced(by: agreedCellsOffset(layer: L))
+            .assumingMemoryBound(to: UInt32.self)
+        for position in 0..<cfg.topKExperts { row[position] = Self.agreedCellSentinel }
+        for position in missPositions {
+            let expert = context.experts[position]
+            row[position] = UInt32(try agreeCell(for: expert, &context))
+        }
+        totalAgreedOverflow &+= UInt64(context.overflowExperts.count)
+    }
+
+    private func agreeCell(for expert: Int, _ context: inout AgreedLayerContext) throws -> Int {
+        let L = context.layer
+        if let landed = context.leasedPredictions[expert] { return landed }
+        if let claimed = context.claimedCells[expert] {
+            if try model.claimRoutedExpertLanding(layer: L, expert: expert, cell: claimed) {
+                context.readExperts.append(expert)
+                context.readCells.append(claimed)
+                return claimed
+            }
+            predictivePrefetch.consume(layer: L, experts: [expert], freedCells: [:])
+            context.claimedCells[expert] = nil
+        }
+        // A prediction issued between the join and the claim: joined now.
+        if let late = predictivePrefetch.readyCells(
+            layer: L, experts: [expert], joinNanos: Self.prefetchJoinNanos)[expert] {
+            context.leasedPredictions[expert] = late
+            return late
+        }
+        guard let victim = try model.reserveRoutedExpertOverflowSlot(
+            layer: L, expert: expert, protecting: context.experts) else {
+            throw ModelError.expertCacheUnplaceable(
+                detail: "layer \(L) has no cell for expert \(expert)")
+        }
+        context.overflowExperts[expert] = victim
+        context.readExperts.append(expert)
+        context.readCells.append(victim)
+        return victim
+    }
+
+    private func submitAgreedReads(_ context: inout AgreedLayerContext) throws -> PendingAgreedLayer {
+        let L = context.layer
+        let submitStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let operation = try model.beginAgreedRoutedReads(
+            layer: L, experts: context.readExperts, cells: context.readCells,
+            token: context.token)
+        context.operation = operation
+        disarmAgreedToken(context.token)
+        predictivePrefetch.attachDemand(layer: L, experts: Set(context.claimedCells.keys),
+                                        operation: operation)
+        totalRoutedSubmitNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - submitStarted
+        if !context.readExperts.isEmpty { predictivePrefetch.noteDemandSubmission() }
+        let missExperts = Set(context.readback.missPositions.map { context.experts[Int($0)] })
+        if !missExperts.isEmpty { totalHitFixupLayers &+= 1 }
+        return PendingAgreedLayer(
+            layer: L, position: context.position, cb: context.cb, experts: context.experts,
+            missExperts: missExperts,
+            leasedPredictions: Array(context.leasedPredictions.keys),
+            claimedExperts: Set(context.claimedCells.keys),
+            readExperts: context.readExperts, operation: operation,
+            residentBeforePlan: context.residentBeforePlan,
+            predictedNextLayer: context.predictedNextLayer)
+    }
+
+    private func abandonAgreedContext(_ context: AgreedLayerContext) {
+        if let operation = context.operation { _ = try? operation.wait() }
+        let held = Set(context.leasedPredictions.keys).union(context.claimedCells.keys)
+        predictivePrefetch.consume(layer: context.layer, experts: held, freedCells: [:])
+        for (expert, cell) in context.overflowExperts {
+            try? model.abandonRoutedExpertOverflowSlot(layer: context.layer, expert: expert, cell: cell)
         }
     }
 
-    private func finishPendingRoutedCommand(_ pending: PendingRoutedCommand,
-                                    waitIfNeeded: Bool,
-                                    deferTimings: Bool = false) throws {
-        defer { pending.expertLease?.release() }
+    private func abandonPendingAgreedLayer(_ pending: PendingAgreedLayer) {
+        _ = try? pending.operation.wait()
+        let leased = Set(pending.leasedPredictions).union(pending.claimedExperts)
+        predictivePrefetch.consume(layer: pending.layer, experts: leased, freedCells: [:])
+    }
+
+    /// The previous layer at this wake: its command's error, its batch's
+    /// (a failed read names the layer), the io rows, then the plan.
+    private func finishPendingAgreedLayer(_ pending: PendingAgreedLayer,
+                                          waitIfNeeded: Bool) throws {
         if waitIfNeeded {
             try waitForCompletion(pending.cb)
         } else if let err = pending.cb.error {
             throw ModelError.commandBufferFailed(
-                detail: "routed layer command buffer: \(err)")
+                detail: "layer \(pending.layer) command buffer: \(err)")
         }
-        if let layerCB = pending.layerCB {
-            if waitIfNeeded {
-                try waitForCompletion(layerCB)
-            } else if let err = layerCB.error {
-                throw ModelError.commandBufferFailed(
-                    detail: "layer command buffer: \(err)")
-            }
+        do {
+            try pending.operation.wait()
+        } catch {
+            abandonPendingAgreedLayer(pending)
+            throw ModelError.expertReadFailed(layer: pending.layer,
+                                              detail: String(describing: error))
         }
-        var ioCompletedNanos: UInt64 = 0
-        if let operation = pending.storageOperation {
-            // Event-gated commands cannot complete before this operation is
-            // terminal, so this is an error check, not a successful-I/O host
-            // wait. A failed read is surfaced after safe no-op kernels have
-            // prevented incomplete slot bytes from being dereferenced.
-            try operation.storage.wait()
-            totalIOQueueNanos &+= operation.storage.submissionToStartNanos
-            totalIoNanos &+= operation.storage.loadNanos
-            totalMissIoNanos &+= operation.storage.loadNanos
-            ioCompletedNanos = operation.storage.completedNanos
+        if !pending.readExperts.isEmpty {
+            totalIOQueueNanos &+= pending.operation.submissionToStartNanos
+            totalIoNanos &+= pending.operation.loadNanos
+            totalMissIoNanos &+= pending.operation.loadNanos
         }
-        totalCb2Nanos &+= pending.encodeAndCommitNanos
-        if deferTimings, !waitIfNeeded {
-            deferredGPURecords.append(.routed(pending, ioCompletedNanos: ioCompletedNanos))
-        } else {
-            try recordRoutedCommandTimings(pending, ioCompletedNanos: ioCompletedNanos)
-        }
+        try planAgreedLayer(pending)
     }
 
-    /// The terms that read a command's GPU stamps, so the word wake can defer
-    /// them until the driver has marked the commands complete.
-    private func recordRoutedCommandTimings(_ pending: PendingRoutedCommand,
-                                            ioCompletedNanos: UInt64) throws {
-        if let specCB = pending.specCB {
-            try waitForCompletion(specCB)
-            recordKernelGPU(role: "moe_spec_routed", specCB)
-        }
-        if pending.storageOperation != nil {
-            let gpuStartNanos = UInt64(max(0, pending.cb.gpuStartTime) * 1_000_000_000)
-            if gpuStartNanos > ioCompletedNanos, ioCompletedNanos > 0 {
-                totalFixupWakeNanos &+= gpuStartNanos - ioCompletedNanos
+    /// The plan, off the path: the hits' use counts and promotions, every
+    /// leased cell swapped into the pool by index against a victim chosen
+    /// now, the freed cells back to the ring, the trace rows.
+    private func planAgreedLayer(_ pending: PendingAgreedLayer) throws {
+        let leased = Set(pending.leasedPredictions).union(pending.claimedExperts)
+        let planStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let plan: RoutedExpertFetchPlan
+        do {
+            guard let planned = try model.planRoutedExperts(
+                layer: pending.layer, experts: pending.experts,
+                gpuMissedExperts: pending.missExperts, leasedLandings: leased,
+                missesCounted: pending.readExperts.count) else {
+                throw ModelError.expertCacheUnplaceable(
+                    detail: "layer \(pending.layer): the route does not fit its pool")
             }
-            if let latest = pending.overlapCompletionClock?.latest(
-                expected: pending.expectedOverlapCompletions),
-               ioCompletedNanos > latest {
-                totalExposedIoNanos &+= ioCompletedNanos - latest
-            }
+            plan = planned
+        } catch {
+            predictivePrefetch.unlease(layer: pending.layer, experts: leased)
+            throw error
         }
-        if let role = pending.kernelRole {
-            recordKernelGPU(role: role, pending.cb)
+        totalCachePlanNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - planStarted
+        guard plan.misses.isEmpty else {
+            try? model.abandonRoutedExpertPlan(plan)
+            predictivePrefetch.consume(layer: pending.layer, experts: leased,
+                                       freedCells: plan.freedCells)
+            throw ModelError.internalInconsistency(
+                detail: "layer \(pending.layer): an agreed read did not land for experts "
+                    + "\(plan.misses.map { plan.experts[$0] })")
         }
-        if pending.routedCommitNanos > 0, pending.cb.kernelStartTime > 0 {
-            let kernelStart = UInt64(pending.cb.kernelStartTime * 1_000_000_000)
-            totalFixupCommitToKernelNanos &+= kernelStart > pending.routedCommitNanos
-                ? kernelStart - pending.routedCommitNanos : 0
-        }
-    }
-
-
-    private func writeActiveSlots(_ slots: [UInt32], into buffer: MTLBuffer) {
-        let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
-        for i in 0..<slots.count { ptr[i] = slots[i] }
+        totalPrefetchLandedHits &+= UInt64(
+            pending.leasedPredictions.filter { !pending.missExperts.contains($0) }.count)
+        recordPrefetchRace(landed: pending.leasedPredictions, layer: pending.layer,
+                           tailCB: pending.cb)
+        predictivePrefetch.consume(layer: pending.layer, experts: leased,
+                                   freedCells: plan.freedCells)
+        recordPrefetchTrace(layer: pending.layer, position: pending.position,
+                            experts: pending.experts, misses: pending.readExperts,
+                            resident: pending.residentBeforePlan,
+                            nextLayerPrediction: pending.predictedNextLayer)
     }
 
     /// The shared-expert chain (or the h1Buf zero-fill when the arch has
@@ -5428,14 +5497,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         into cb: MTLCommandBuffer,
         layer L: Int,
         residency: ExpertResidencyResources,
-        arguments: MoE.SpeculativeDispatchArguments,
-        completionClock: CommandCompletionClock?
+        arguments: MoE.SpeculativeDispatchArguments
     ) throws {
         let pool = residency.expertPool
         if !cfg.hasSharedExpert {
             try encodeSharedExpertZeroFill(into: cb)
         }
-        completionClock?.track(cb)
         let offsets = try model.routedExpertOffsets(layer: L)
         // One serial encoder for the shared chain and the routed work; a
         // .concurrent encoder segfaults the AGX driver when an indirect
@@ -5476,356 +5543,4 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             indirectArguments: arguments.arguments)
     }
 
-    private struct DecodeRoutedLayerContext {
-        let layer: Int
-        let position: Int
-        let tailCB: MTLCommandBuffer
-        let specCB: MTLCommandBuffer
-        let specIsSeparate: Bool
-        let overlapCompletionClock: CommandCompletionClock?
-        let bodyStart: UInt64
-        let hostReadback: RouterHostReadback?
-        let predictedNextLayer: [Int]
-        let d: UInt32
-        let f: UInt32
-        let experts: [Int]
-        let routedOffsets: MoEExpertOffsets
-        let topK: UInt32
-        let canUsePlannedFetch: Bool
-        var residentBeforePlan: [Int] = []
-        var landedPrefetches: [Int: Int] = [:]
-        var gpuMissedExperts: Set<Int>?
-        var plannedFetch: RoutedExpertFetchPlan?
-        var expertLease: RoutedExpertLease?
-        var plannedLoad: RoutedExpertLoadOperation?
-        var transferredExpertLease = false
-        var phase1MissSlots: [UInt32] = []
-        var missCount = 0
-        var fixupMissCount = 0
-        var expectedOverlapCompletions = 0
-        var eventLoad: RoutedExpertLoadOperation?
-        var routedBufs: [MTLBuffer] = []
-        var tCb2Start: UInt64 = 0
-        var missesOnlyFixup = false
-    }
-
-    /// Routed-expert stage of one decode layer: top-k readback, expert fetch,
-    /// phase-1/phase-2 encode, and the deferred completion hand-off.
-    private func encodeDecodeRoutedMoE(
-        layer L: Int,
-        position: Int,
-        tailCB: MTLCommandBuffer,
-        specCB: MTLCommandBuffer,
-        specIsSeparate: Bool,
-        overlapCompletionClock: CommandCompletionClock?,
-        pending pendingRoutedCommand: inout PendingRoutedCommand?,
-        bodyStart tBodyStart: UInt64,
-        hostReadback: RouterHostReadback?,
-        predictedNextLayer: [Int]
-    ) async throws {
-        let D    = UInt32(cfg.hiddenSize)
-        let FmoE = UInt32(cfg.moeIntermediateSize)
-        let experts = readDecodeRouterReadback(layer: L, position: position,
-                                               hostReadback: hostReadback)
-
-        let routedOffsets = try model.routedExpertOffsets(layer: L)
-        let topK = UInt32(cfg.topKExperts)
-        let canUsePlannedFetch = cfg.topKExperts <= MoE.maxStreamedExperts
-        var context = DecodeRoutedLayerContext(
-            layer: L, position: position, tailCB: tailCB, specCB: specCB,
-            specIsSeparate: specIsSeparate,
-            overlapCompletionClock: overlapCompletionClock, bodyStart: tBodyStart,
-            hostReadback: hostReadback, predictedNextLayer: predictedNextLayer,
-            d: D, f: FmoE, experts: experts, routedOffsets: routedOffsets,
-            topK: topK, canUsePlannedFetch: canUsePlannedFetch)
-        try joinDecodePrefetch(&context)
-        try planDecodeRoutedExperts(&context)
-        try pinAndSubmitDecodeRoutedExperts(&context)
-        defer {
-            // On a throw before a hand-off the committed layer command may still
-            // be reading the leased hit slots; they must not become evictable first.
-            if !context.transferredExpertLease, let lease = context.expertLease {
-                try? waitForCompletion(context.specCB)
-                lease.release()
-            }
-        }
-        try partitionDecodeRoutedExperts(&context)
-        try await acquireDecodeRoutedIO(&context)
-        if try handOffDecodeSpeculativeAllHit(&context, pending: &pendingRoutedCommand) {
-            return
-        }
-        let (routedCB, routedCommitNanos) = try buildDecodeFixup(
-            &context, pending: pendingRoutedCommand)
-        handOffDecodeFixup(&context, routedCB: routedCB, routedCommitNanos: routedCommitNanos,
-                           pending: &pendingRoutedCommand)
-    }
-
-    private func readDecodeRouterReadback(
-        layer L: Int, position: Int, hostReadback: RouterHostReadback?
-    ) -> [Int] {
-        let readbackStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        decodeExpertsScratch.removeAll(keepingCapacity: true)
-        decodeExpertsScratch.reserveCapacity(cfg.topKExperts)
-        if let hostReadback {
-            for id in hostReadback.expertIDs {
-                decodeExpertsScratch.append(min(Int(id), cfg.numExperts - 1))
-            }
-        } else {
-            let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,
-                                                          capacity: cfg.topKExperts)
-            for i in 0..<cfg.topKExperts {
-                decodeExpertsScratch.append(min(Int(idxPtr[i]), cfg.numExperts - 1))
-            }
-        }
-        totalRouterReadbackNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - readbackStarted
-        if runnerStatsEnabled {
-            if totalRankWeightMass.count != cfg.topKExperts {
-                totalRankWeightMass = [Double](repeating: 0, count: cfg.topKExperts)
-            }
-            if let hostReadback {
-                for i in 0..<cfg.topKExperts {
-                    totalRankWeightMass[i] += Double(Float16(bitPattern: hostReadback.weightBits[i]))
-                }
-            } else {
-                let wPtr = outWeights.contents().bindMemory(to: Float16.self,
-                                                            capacity: cfg.topKExperts)
-                for i in 0..<cfg.topKExperts {
-                    totalRankWeightMass[i] += Double(wPtr[i])
-                }
-            }
-            totalRankWeightLayers &+= 1
-        }
-        let experts = decodeExpertsScratch
-        recordRouteTrace(layer: L, position: position, experts: experts)
-        return experts
-    }
-
-    private func joinDecodePrefetch(_ context: inout DecodeRoutedLayerContext) throws {
-        context.residentBeforePlan = prefetchTraceFD >= 0
-            ? try model.routedExpertResidentIDs(layer: context.layer) : []
-        context.landedPrefetches = predictivePrefetch.readyCells(
-            layer: context.layer, experts: context.experts, joinNanos: Self.prefetchJoinNanos)
-        // The classifier's view, taken before this plan: a landing it missed
-        // is swapped in all the same and reported adopted for the fixup.
-        context.gpuMissedExperts = context.hostReadback.map { readback in
-            Set(readback.missPositions.map { Int(readback.expertIDs[Int($0)]) })
-        }
-    }
-
-    private func planDecodeRoutedExperts(_ context: inout DecodeRoutedLayerContext) throws {
-        let cachePlanStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        do {
-            context.plannedFetch = context.canUsePlannedFetch
-                ? try model.planRoutedExperts(layer: context.layer, experts: context.experts,
-                                              gpuMissedExperts: context.gpuMissedExperts,
-                                              leasedLandings: Set(context.landedPrefetches.keys))
-                : nil
-        } catch {
-            predictivePrefetch.unlease(layer: context.layer, experts: Set(context.landedPrefetches.keys))
-            throw error
-        }
-        totalCachePlanNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cachePlanStarted
-        let landed = Array(context.landedPrefetches.keys)
-        recordPrefetchRace(landed: landed, layer: context.layer, tailCB: context.tailCB)
-        if !landed.isEmpty {
-            let swapped = context.plannedFetch?.freedCells.count ?? 0
-            let adoptedCount = context.plannedFetch?.adopted.count ?? 0
-            // A landed hit is one the classifier counted; without one none is.
-            if context.gpuMissedExperts != nil {
-                totalPrefetchLandedHits &+= UInt64(max(0, swapped - adoptedCount))
-            }
-            predictivePrefetch.consume(layer: context.layer, experts: Set(landed),
-                                       freedCells: context.plannedFetch?.freedCells ?? [:])
-        }
-        let missesForTrace = context.plannedFetch.map { plan in
-            plan.misses.map { context.experts[$0] }
-        } ?? context.experts
-        recordPrefetchTrace(layer: context.layer, position: context.position, experts: context.experts,
-                            misses: missesForTrace, resident: context.residentBeforePlan,
-                            nextLayerPrediction: context.predictedNextLayer)
-    }
-
-    private func pinAndSubmitDecodeRoutedExperts(_ context: inout DecodeRoutedLayerContext) throws {
-        let pinStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        context.expertLease = try context.plannedFetch.map { try model.pinRoutedExperts(for: $0) }
-        totalRoutedPinNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - pinStarted
-        // v4.2 Phase B: once slots and generations are reserved and pinned,
-        // submit real storage immediately. Hit partitioning, argument binding,
-        // and command encoding below now overlap the reader queue.
-        let submitStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        context.plannedLoad = try context.plannedFetch.map {
-            try model.beginFetchRoutedExperts(plan: $0, eventDriven: !$0.misses.isEmpty)
-        }
-        totalRoutedSubmitNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - submitStarted
-        if let plannedLoad = context.plannedLoad, !plannedLoad.plan.misses.isEmpty {
-            predictivePrefetch.noteDemandSubmission()
-        }
-    }
-
-    private func partitionDecodeRoutedExperts(_ context: inout DecodeRoutedLayerContext) throws {
-        decodeHitSlotsScratch.removeAll(keepingCapacity: true)
-        decodeMissSlotsScratch.removeAll(keepingCapacity: true)
-
-        if let plan = context.plannedFetch {
-            DecodeExpertPartition.populate(
-                topK: cfg.topKExperts,
-                missIndices: plan.misses,
-                adoptedIndices: plan.adopted,
-                hits: &decodeHitSlotsScratch,
-                misses: &decodeMissSlotsScratch)
-            // The spec command computed the GPU's partition, not the plan's;
-            // the fixup must finish exactly what it skipped. CPU planning is
-            // still the eviction authority: a prefetch the planner adopted is
-            // a miss there and a resident hit here, and any other mismatch
-            // means metadata publication raced or became stale. Fail closed
-            // rather than executing a different partition.
-            guard let hostReadback = context.hostReadback else {
-                throw ModelError.internalInconsistency(
-                    detail: "GPU residency classification ran without its host readback")
-            }
-            guard hostReadback.missPositions.elementsEqual(decodeMissSlotsScratch) else {
-                throw ModelError.internalInconsistency(
-                    detail: "GPU residency classification disagrees with cache plan")
-            }
-        }
-        // Capture the populated arrays. Capturing them before `populate` made
-        // empty value-semantic snapshots and silently disabled hit/fixup.
-        context.phase1MissSlots = decodeMissSlotsScratch
-    }
-
-    private func acquireDecodeRoutedIO(_ context: inout DecodeRoutedLayerContext) async throws {
-        context.missCount = context.plannedFetch?.misses.count ?? context.experts.count
-        context.fixupMissCount = context.plannedFetch == nil
-            ? context.experts.count : max(context.missCount, context.phase1MissSlots.count)
-        let completionClock = context.missCount > 0 ? context.overlapCompletionClock : nil
-        context.expectedOverlapCompletions = 1
-
-        // Routed-expert pread — overlaps the shared MLP GPU work above.
-        let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        let blobs: [TensorView]
-        context.eventLoad = context.plannedLoad.flatMap { operation -> RoutedExpertLoadOperation? in
-            operation.storage.completionToken == nil ? nil : operation
-        }
-        if let eventLoad = context.eventLoad {
-            // Slot resources and offsets are known from the reservation. Their
-            // bytes are consumed only after the shared-event wait encoded
-            // below, so no successful completion has to resume this task.
-            blobs = try model.routedExpertBuffers(for: eventLoad.plan)
-            totalExpertIOHostWaitsAvoided &+= 1
-        } else if let plannedFetch = context.plannedFetch, plannedFetch.misses.isEmpty {
-            // An all-hit layer has already pinned its current cell generations.
-            // Do not manufacture a completed storage operation and an async
-            // continuation only to retrieve the same cache views.
-            blobs = try model.routedExpertBuffers(for: plannedFetch)
-            totalExpertIOHostWaitsAvoided &+= 1
-        } else {
-            guard context.plannedFetch == nil else {
-                throw ModelError.internalInconsistency(
-                    detail: "a demand batch with misses carried no completion token")
-            }
-            blobs = try await model.fetchRoutedExperts(layer: context.layer, experts: context.experts)
-        }
-        let layerIo = context.eventLoad == nil
-            ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart : 0
-        if context.eventLoad == nil { totalIoNanos &+= layerIo }
-        if context.missCount > 0 && context.eventLoad == nil {
-            totalMissIoNanos &+= layerIo
-            if let latest = completionClock?.latest(expected: context.expectedOverlapCompletions) {
-                let overlapEnd = max(tIoStart, latest)
-                if overlapEnd < tIoStart + layerIo {
-                    totalExposedIoNanos &+= tIoStart + layerIo - overlapEnd
-                }
-            }
-        }
-        schedulePredictivePrefetch(layer: context.layer, predicted: context.predictedNextLayer,
-                                   demand: context.plannedLoad?.storage)
-        decodeRoutedBufsScratch.removeAll(keepingCapacity: true)
-        decodeRoutedOffsetsScratch.removeAll(keepingCapacity: true)
-        for blob in blobs {
-            decodeRoutedBufsScratch.append(blob.buffer)
-            decodeRoutedOffsetsScratch.append(Int(blob.offset))
-        }
-        context.routedBufs = decodeRoutedBufsScratch
-    }
-
-    private func handOffDecodeSpeculativeAllHit(
-        _ context: inout DecodeRoutedLayerContext,
-        pending pendingRoutedCommand: inout PendingRoutedCommand?
-    ) throws -> Bool {
-        context.tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        // v9 S3a: on an all-hit layer in speculative mode, the already-running
-        // spec CB wrote moeActs/h2Buf/hidden itself — it IS the layer's routed
-        // command; nothing classic gets encoded.
-        if context.plannedFetch != nil,
-           context.fixupMissCount == 0 {
-            guard pendingRoutedCommand == nil else {
-                throw ModelError.internalInconsistency(
-                    detail: "routed command-buffer pipeline not drained before queuing the next layer")
-            }
-            pendingRoutedCommand = PendingRoutedCommand(
-                cb: context.specCB,
-                specCB: nil,
-                layerCB: nil,
-                expertLease: context.expertLease,
-                storageOperation: context.eventLoad,
-                overlapCompletionClock: context.eventLoad == nil ? nil : context.overlapCompletionClock,
-                expectedOverlapCompletions: context.expectedOverlapCompletions,
-                routedCommitNanos: 0,
-                kernelRole: context.specIsSeparate ? "moe_spec_routed" : nil,
-                encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - context.tCb2Start)
-            context.transferredExpertLease = true
-            totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - context.bodyStart
-            return true
-        }
-        return false
-    }
-
-    private func buildDecodeFixup(
-        _ context: inout DecodeRoutedLayerContext,
-        pending pendingRoutedCommand: PendingRoutedCommand?
-    ) throws -> (routedCB: MTLCommandBuffer, routedCommitNanos: UInt64) {
-        // The speculative command already computed the classifier's hits, so the fixup covers the misses alone.
-        context.missesOnlyFixup = context.hostReadback != nil && !context.phase1MissSlots.isEmpty
-        guard pendingRoutedCommand == nil else {
-            // The pipeline drains the previous layer's routed CB before
-            // queuing the next, so this is a logic error, not a user
-            // condition — but it must fail the generation, not trap.
-            throw ModelError.internalInconsistency(
-                detail: "routed command-buffer pipeline not drained before queuing the next layer")
-        }
-        let fixupBuildStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        let (routedCB, routedCommitNanos) = try buildAndCommitMissFixupCommand(
-            eventLoad: context.eventLoad,
-            missesOnly: context.missesOnlyFixup,
-            phase1MissSlots: context.phase1MissSlots,
-            routedBufs: context.routedBufs,
-            routedOffsets: context.routedOffsets,
-            topK: context.topK, d: context.d, f: context.f)
-        totalFixupBuildNanos &+= routedCommitNanos - fixupBuildStarted
-        return (routedCB, routedCommitNanos)
-    }
-
-    private func handOffDecodeFixup(
-        _ context: inout DecodeRoutedLayerContext,
-        routedCB: MTLCommandBuffer, routedCommitNanos: UInt64,
-        pending pendingRoutedCommand: inout PendingRoutedCommand?
-    ) {
-        pendingRoutedCommand = PendingRoutedCommand(
-            cb: routedCB,
-            specCB: context.specIsSeparate ? context.specCB : nil,
-            layerCB: context.specIsSeparate ? nil : context.specCB,
-            expertLease: context.expertLease,
-            storageOperation: context.eventLoad,
-            overlapCompletionClock: context.eventLoad == nil ? nil : context.overlapCompletionClock,
-            expectedOverlapCompletions: context.expectedOverlapCompletions,
-            routedCommitNanos: routedCommitNanos,
-            kernelRole: !context.missesOnlyFixup
-                ? "moe_phase1_2_routed"
-                : context.missCount == 0
-                    ? "moe_phase1_miss_fixup_phase2_adopted"
-                    : "moe_phase1_miss_fixup_phase2",
-            encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - context.tCb2Start)
-        context.transferredExpertLease = true
-        totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - context.bodyStart
-    }
 }

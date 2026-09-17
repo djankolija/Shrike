@@ -27,9 +27,13 @@ public final class ExpertIOEventCoordinator: @unchecked Sendable {
     private var nextValue: UInt64 = 1
     private var publishedValue: UInt64 = 0
     private var terminalValues: Set<UInt64> = []
-    private var statusChunks: [MTLBuffer] = []
-    private static let statusesPerChunk = 4_096
-    private static let maximumStatusChunks = 4_096
+    /// The status words: one ring of `statusWordCount`, a value's word at
+    /// `(value - 1) % statusWordCount`, rewritten that many values later.
+    /// Every routed layer reserves a value at its encode (v20 T3.1), forty per
+    /// token, and a token's command drains within a few tokens; a wait older
+    /// than the ring would have hung the runner long before its word turned.
+    static let statusWordCount = 4_096
+    private var statusWords: MTLBuffer?
 
     init?(device: MTLDevice) {
         guard let event = device.makeSharedEvent() else { return nil }
@@ -45,23 +49,18 @@ public final class ExpertIOEventCoordinator: @unchecked Sendable {
             throw ModelError.internalInconsistency(
                 detail: "expert I/O shared-event value space exhausted")
         }
-        let zeroBasedValue = Int(nextValue - 1)
-        let chunkIndex = zeroBasedValue / Self.statusesPerChunk
-        guard chunkIndex < Self.maximumStatusChunks else {
-            throw ModelError.internalInconsistency(
-                detail: "expert I/O status timeline exhausted")
-        }
-        if chunkIndex == statusChunks.count {
-            guard let chunk = device.makeBuffer(
-                length: Self.statusesPerChunk * MemoryLayout<UInt32>.stride,
+        if statusWords == nil {
+            guard let words = device.makeBuffer(
+                length: Self.statusWordCount * MemoryLayout<UInt32>.stride,
                 options: .storageModeShared)
             else {
                 throw ModelError.residentBufferWrapFailed
             }
-            statusChunks.append(chunk)
+            words.label = "Shrike expert I/O status words"
+            statusWords = words
         }
-        let status = statusChunks[chunkIndex]
-        let statusOffset = (zeroBasedValue % Self.statusesPerChunk)
+        let status = statusWords!
+        let statusOffset = Int((nextValue - 1) % UInt64(Self.statusWordCount))
             * MemoryLayout<UInt32>.stride
         status.contents().advanced(by: statusOffset)
             .storeBytes(of: UInt32(0), as: UInt32.self)

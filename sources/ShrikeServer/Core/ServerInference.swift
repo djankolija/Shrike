@@ -407,15 +407,14 @@ public actor ServerCoordinator {
 private struct RunnerCounterSnapshot {
     let cb1: UInt64
     let io: UInt64
-    let cb2: UInt64
     let head: UInt64
     let headFused: UInt64
     let wait: UInt64
     let body: UInt64
     let missIo: UInt64
-    let exposedIo: UInt64
-    let fixupWake: UInt64
     let hitFixupLayers: UInt64
+    let agreedOverflow: UInt64
+    let prefetchLeasedPeak: UInt64
     let routerReadback: UInt64
     let rankWeightMass: [Double]
     let rankWeightLayers: UInt64
@@ -443,29 +442,24 @@ private struct RunnerCounterSnapshot {
     let prefetchAfterClassify: UInt64
     let prefetchRaceUnknown: UInt64
     let prefetchHookFailures: UInt64
-    let pathPin: UInt64
     let pathSubmit: UInt64
-    let pathFixupBuild: UInt64
-    let pathFixupCommitToKernel: UInt64
     let pathRouterWake: UInt64
     let pathRouterWakeFallbacks: UInt64
     let boundaryWakeFallbacks: UInt64
     let ioQueue: UInt64
-    let ioHostWaitsAvoided: UInt64
     let expertStreaming: ExpertStreamingStatistics
 
     init(_ runner: RealForwardRunner) {
         cb1 = runner.totalCb1Nanos
         io = runner.totalIoNanos
-        cb2 = runner.totalCb2Nanos
         head = runner.totalHeadNanos
         headFused = runner.totalHeadFusedNanos
         wait = runner.totalWaitNanos
         body = runner.totalBodyNanos
         missIo = runner.totalMissIoNanos
-        exposedIo = runner.totalExposedIoNanos
-        fixupWake = runner.totalFixupWakeNanos
         hitFixupLayers = runner.totalHitFixupLayers
+        agreedOverflow = runner.totalAgreedOverflow
+        prefetchLeasedPeak = runner.prefetchStatistics.leasedPeak
         routerReadback = runner.totalRouterReadbackNanos
         rankWeightMass = runner.totalRankWeightMass
         rankWeightLayers = runner.totalRankWeightLayers
@@ -493,15 +487,11 @@ private struct RunnerCounterSnapshot {
         prefetchAfterClassify = runner.totalPrefetchAfterClassify
         prefetchRaceUnknown = runner.totalPrefetchRaceUnknown
         prefetchHookFailures = runner.prefetchStatistics.hookFailures
-        pathPin = runner.totalRoutedPinNanos
         pathSubmit = runner.totalRoutedSubmitNanos
-        pathFixupBuild = runner.totalFixupBuildNanos
-        pathFixupCommitToKernel = runner.totalFixupCommitToKernelNanos
         pathRouterWake = runner.totalRouterWakeNanos
         pathRouterWakeFallbacks = runner.totalRouterWakeFallbacks
         boundaryWakeFallbacks = runner.totalBoundaryWakeFallbacks
         ioQueue = runner.totalIOQueueNanos
-        ioHostWaitsAvoided = runner.totalExpertIOHostWaitsAvoided
         expertStreaming = runner.expertStreamingStatistics()
     }
 }
@@ -2006,10 +1996,6 @@ public actor ServerModelSession: ServerInferenceBackend {
         let ms: (UInt64, UInt64) -> Double = { delta, base in
             Double(delta > base ? delta - base : 0) / Double(tokens) / 1_000_000
         }
-        let missIoNanos = runner.totalMissIoNanos - snapshot.missIo
-        let exposedIoNanos = runner.totalExposedIoNanos - snapshot.exposedIo
-        let hiddenPercent = missIoNanos == 0 ? 100.0
-            : 100 * (1 - Double(exposedIoNanos) / Double(missIoNanos))
         let expertNow = runner.expertStreamingStatistics()
         let expert = expertNow.subtracting(snapshot.expertStreaming)
         let expertPrefill = expertAtDecodeStart?.subtracting(snapshot.expertStreaming) ?? .zero
@@ -2026,20 +2012,19 @@ public actor ServerModelSession: ServerInferenceBackend {
             rankMass = "n/a"
         }
         writeDiagnosticLine(String(
-            format: "Shrike runner cb1_ms=%.3f io_ms=%.3f cb2_ms=%.3f "
+            format: "Shrike runner cb1_ms=%.3f io_ms=%.3f "
                 + "head_ms=%.3f head_fused_ms=%.3f "
                 + "wait_ms=%.3f body_ms=%.3f "
                 + "expert_hit_rate=%.4f expert_hits=%llu expert_misses=%llu "
                 + "expert_evictions=%llu expert_reloads=%llu expert_read_mib=%.1f "
                 + "expert_load_p50_ms=%.3f expert_load_p95_ms=%.3f "
-                + "expert_load_p99_ms=%.3f io_hidden_pct=%.2f hit_fixup_layers=%llu "
+                + "expert_load_p99_ms=%.3f hit_fixup_layers=%llu "
+                + "agreed_overflow=%llu cells_leased_peak=%llu "
                 + "router_readback_ms=%.4f cache_plan_ms=%.4f %@ "
-                + "path_pin_ms=%.4f path_submit_ms=%.4f path_fixup_build_ms=%.4f "
-                + "path_fixup_commit_to_kernel_ms=%.4f path_router_wake_ms=%.4f "
+                + "path_submit_ms=%.4f path_router_wake_ms=%.4f "
                 + "path_router_wake_fallbacks=%llu boundary_wake_fallbacks=%llu "
                 + "io_queue_ms=%.4f "
-                + "io_load_ms=%.4f io_fetch_ms=%.4f io_fixup_wake_ms=%.4f "
-                + "io_host_waits_avoided=%llu "
+                + "io_load_ms=%.4f io_fetch_ms=%.4f "
                 + "expert_slots_loading=%d expert_slots_pinned=%d "
                 + "expert_hit_rate_prefill=%.4f expert_hits_prefill=%llu "
                 + "expert_misses_prefill=%llu expert_hit_rate_decode=%.4f "
@@ -2049,7 +2034,6 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "expert_rank_mass=%@",
             ms(runner.totalCb1Nanos, snapshot.cb1),
             ms(runner.totalIoNanos, snapshot.io),
-            ms(runner.totalCb2Nanos, snapshot.cb2),
             ms(runner.totalHeadNanos, snapshot.head),
             ms(runner.totalHeadFusedNanos, snapshot.headFused),
             ms(runner.totalWaitNanos, snapshot.wait),
@@ -2059,22 +2043,19 @@ public actor ServerModelSession: ServerInferenceBackend {
             Double(expert.loadLatencyPercentile(0.50)) / 1_000_000,
             Double(expert.loadLatencyPercentile(0.95)) / 1_000_000,
             Double(expert.loadLatencyPercentile(0.99)) / 1_000_000,
-            hiddenPercent, runner.totalHitFixupLayers - snapshot.hitFixupLayers,
+            runner.totalHitFixupLayers - snapshot.hitFixupLayers,
+            runner.totalAgreedOverflow - snapshot.agreedOverflow,
+            runner.prefetchStatistics.leasedPeak,
             ms(runner.totalRouterReadbackNanos, snapshot.routerReadback),
             ms(runner.totalCachePlanNanos, snapshot.cachePlan),
             prefetchRunnerLine(snapshot: snapshot, tokens: tokens),
-            ms(runner.totalRoutedPinNanos, snapshot.pathPin),
             ms(runner.totalRoutedSubmitNanos, snapshot.pathSubmit),
-            ms(runner.totalFixupBuildNanos, snapshot.pathFixupBuild),
-            ms(runner.totalFixupCommitToKernelNanos, snapshot.pathFixupCommitToKernel),
             ms(runner.totalRouterWakeNanos, snapshot.pathRouterWake),
             runner.totalRouterWakeFallbacks - snapshot.pathRouterWakeFallbacks,
             runner.totalBoundaryWakeFallbacks - snapshot.boundaryWakeFallbacks,
             ms(runner.totalIOQueueNanos, snapshot.ioQueue),
             Double(expert.totalLoadNanos) / Double(tokens) / 1_000_000,
             Double(expert.fetchNanos) / Double(tokens) / 1_000_000,
-            ms(runner.totalFixupWakeNanos, snapshot.fixupWake),
-            runner.totalExpertIOHostWaitsAvoided - snapshot.ioHostWaitsAvoided,
             expertNow.loadingSlots, expertNow.pinnedSlots,
             expertPrefill.hitRate, expertPrefill.hits, expertPrefill.misses,
             expertDecode.hitRate, expertDecode.hits, expertDecode.misses,

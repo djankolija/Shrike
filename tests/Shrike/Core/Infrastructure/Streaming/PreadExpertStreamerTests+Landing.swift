@@ -14,15 +14,17 @@ extension PreadExpertStreamerTests {
     }
 
     private static func makeLanded(slotCount: Int = 4, cellRange: Range<Int>? = nil,
-                                   arenaCells: Int? = nil) throws -> Landed {
+                                   arenaCells: Int? = nil,
+                                   withCoordinator: Bool = false) throws -> Landed {
         let url = try writeSyntheticLayer()
         let device = try MetalContext().device
         let cells = arenaCells ?? slotCount + 2
         let arena = try ExpertCellArena(device: device, cellCount: cells, stride: expertStride)
         let range = cellRange ?? 0..<slotCount
+        let coordinator = withCoordinator ? ExpertIOEventCoordinator(device: device) : nil
         let streamer = try PreadExpertStreamer(
             layout: makeLayout(path: url.path), device: device, slotCount: slotCount,
-            arena: arena, cellRange: range)
+            eventCoordinator: coordinator, arena: arena, cellRange: range)
         let ringCells = Array((cells - 2)..<cells)
         return Landed(url: url, arena: arena, streamer: streamer, ringCells: ringCells)
     }
@@ -76,6 +78,111 @@ extension PreadExpertStreamerTests {
         #expect(Self.cell(of: plan, index: 0, in: fixture) < 4)
         fixture.streamer.abandonExpertCachePlan(plan)
         #expect(!fixture.streamer.claimLanding(expert: 1, cell: fixture.ringCells[1]))
+    }
+
+    private static func statusWord(_ token: ExpertIOCompletionToken) -> UInt32 {
+        token.status.contents().advanced(by: token.statusOffset).load(as: UInt32.self)
+    }
+
+    @Test func anOverflowSlotIsAVictimOfThePoolLoadingAtItsCell() throws {
+        let fixture = try Self.makeLanded(slotCount: 2)
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        _ = try fixture.streamer.loadExpertsCached(experts: [0, 1])
+
+        let first = try #require(fixture.streamer.reserveOverflowSlot(expert: 2))
+        #expect((0..<2).contains(first))
+        #expect(fixture.streamer.residencyEntry(expert: 2) == Self.loading(first))
+        #expect(fixture.streamer.residentExperts().count == 1)
+        let evicted = fixture.streamer.residentExperts() == [0] ? 1 : 0
+        #expect(fixture.streamer.residencyEntry(expert: evicted) == Self.empty)
+
+        let second = try #require(fixture.streamer.reserveOverflowSlot(expert: 3))
+        #expect(second != first)
+        #expect(fixture.streamer.residentExperts().isEmpty)
+        #expect(fixture.streamer.reserveOverflowSlot(expert: evicted) == nil)
+    }
+
+    @Test func theOverflowVictimIsNeverOneOfTheRouteItServes() throws {
+        let fixture = try Self.makeLanded(slotCount: 2)
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        _ = try fixture.streamer.loadExpertsCached(experts: [0, 1])
+
+        #expect(fixture.streamer.reserveOverflowSlot(expert: 2, protecting: [0, 1]) == nil)
+        #expect(fixture.streamer.residentExperts() == [0, 1])
+
+        let cell = try #require(fixture.streamer.reserveOverflowSlot(expert: 2, protecting: [0, 5]))
+        #expect(fixture.streamer.residencyEntry(expert: 2) == Self.loading(cell))
+        #expect(fixture.streamer.residentExperts() == [0])
+        #expect(fixture.streamer.residencyEntry(expert: 1) == Self.empty)
+    }
+
+    @Test func agreedReadsLandInARingCellAndAPoolCellAndPublishTheToken() throws {
+        let fixture = try Self.makeLanded(slotCount: 2, withCoordinator: true)
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        _ = try fixture.streamer.loadExpertsCached(experts: [0, 1])
+        let token = try fixture.streamer.reserveCompletionToken()
+        let ringCell = fixture.ringCells[0]
+        #expect(fixture.streamer.claimLanding(expert: 3, cell: ringCell))
+        let poolCell = try #require(fixture.streamer.reserveOverflowSlot(expert: 2))
+
+        let operation = try fixture.streamer.beginAgreedReads(
+            experts: [3, 2], cells: [ringCell, poolCell], token: token)
+        try operation.wait()
+
+        #expect(fixture.streamer.residencyEntry(expert: 3) == Self.resident(ringCell))
+        #expect(fixture.streamer.residencyEntry(expert: 2) == Self.resident(poolCell))
+        #expect(fixture.streamer.residentExperts().contains(2))
+        #expect(!fixture.streamer.residentExperts().contains(3))
+        for (expert, cell) in [(3, ringCell), (2, poolCell)] {
+            let bytes = Self.bytes(of: fixture.arena.buffer, offset: fixture.arena.offset(cell: cell),
+                                   count: Self.expertStride)
+            #expect(bytes.allSatisfy { $0 == Self.tagByte(expert) })
+        }
+        #expect(Self.statusWord(token) == 1)
+        #expect(token.event.signaledValue == token.value)
+        #expect(fixture.streamer.statistics().readOperations == 4)
+
+        let plan = try fixture.streamer.planExpertsCached(
+            experts: [3, 2], leasedLandings: [3], missesCounted: 2)
+        #expect(plan.misses.isEmpty)
+        #expect(plan.freedCells[3] != nil)
+        #expect(Self.cell(of: plan, index: 0, in: fixture) == ringCell)
+        #expect(Self.cell(of: plan, index: 1, in: fixture) == poolCell)
+        let stats = fixture.streamer.statistics()
+        #expect(stats.misses == 4)
+        #expect(stats.hits == 0)
+    }
+
+    @Test func anEmptyAgreedBatchPublishesItsTokenAtOnce() throws {
+        let fixture = try Self.makeLanded(withCoordinator: true)
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        let token = try fixture.streamer.reserveCompletionToken()
+        let operation = try fixture.streamer.beginAgreedReads(experts: [], cells: [], token: token)
+        #expect(operation.state == .completed)
+        #expect(Self.statusWord(token) == 1)
+        #expect(token.event.signaledValue == token.value)
+    }
+
+    @Test func aFailedAgreedReadDropsItsLandingEmptiesItsPoolCellAndStillPublishes() throws {
+        let fixture = try Self.makeLanded(slotCount: 2, withCoordinator: true)
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        _ = try fixture.streamer.loadExpertsCached(experts: [0, 1])
+        let token = try fixture.streamer.reserveCompletionToken()
+        let ringCell = fixture.ringCells[0]
+        #expect(fixture.streamer.claimLanding(expert: 3, cell: ringCell))
+        let poolCell = try #require(fixture.streamer.reserveOverflowSlot(expert: 2))
+        #expect(truncate(fixture.url.path, 0) == 0)
+
+        let operation = try fixture.streamer.beginAgreedReads(
+            experts: [3, 2], cells: [ringCell, poolCell], token: token)
+        #expect(throws: (any Error).self) { try operation.wait() }
+
+        #expect(fixture.streamer.residencyEntry(expert: 3) == Self.empty)
+        #expect(fixture.streamer.residencyEntry(expert: 2) == Self.empty)
+        #expect(Self.statusWord(token) == 2)
+        #expect(token.event.signaledValue == token.value)
+        #expect(fixture.streamer.claimLanding(expert: 3, cell: ringCell))
+        #expect(fixture.streamer.reserveOverflowSlot(expert: 2) != nil)
     }
 
     @Test func aCompletedLandingIsAHitThatSwapsItsCellIntoThePool() throws {

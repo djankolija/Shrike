@@ -491,6 +491,9 @@ public enum ModelError: Error, CustomStringConvertible, Equatable {
     /// A Metal command buffer reported `.error`; the GPU work it carried
     /// (decode layer, head, or routed-expert pass) did not complete.
     case commandBufferFailed(detail: String)
+    /// A routed layer's demand read failed; the fixup skipped its misses and
+    /// the pass is discarded, the layer named (v20 T3.1).
+    case expertReadFailed(layer: Int, detail: String)
     /// A runtime invariant the code believes is impossible was violated
     /// (arch/kernel mismatch, pipeline state corruption). Thrown instead of
     /// trapping so generation fails loudly without crashing the process.
@@ -530,6 +533,8 @@ public enum ModelError: Error, CustomStringConvertible, Equatable {
             return "trusted install receipt invalid: \(detail)"
         case .expertCacheUnplaceable(let detail):
             return "expert cache cannot place requested experts: \(detail)"
+        case .expertReadFailed(let layer, let detail):
+            return "expert read failed at layer \(layer): \(detail)"
         case .commandBufferFailed(let detail):
             return "Metal command buffer failed: \(detail)"
         case .internalInconsistency(let detail):

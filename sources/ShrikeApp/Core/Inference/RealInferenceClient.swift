@@ -499,7 +499,6 @@ actor RealInferenceSession {
         return AppRunnerDiagnostics(
             cb1MillisecondsPerToken: ms(now.cb1, base.cb1),
             ioMillisecondsPerToken: ms(now.io, base.io),
-            cb2MillisecondsPerToken: ms(now.cb2, base.cb2),
             headMillisecondsPerToken: ms(now.head, base.head))
     }
 
@@ -575,13 +574,11 @@ private final class ProgressState {
 private struct RunnerCounterSnapshot {
     let cb1: UInt64
     let io: UInt64
-    let cb2: UInt64
     let head: UInt64
 
     init(_ runner: RealForwardRunner) {
         cb1 = runner.totalCb1Nanos
         io = runner.totalIoNanos
-        cb2 = runner.totalCb2Nanos
         head = runner.totalHeadNanos &+ runner.totalHeadFusedNanos
     }
 }
