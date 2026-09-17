@@ -1080,6 +1080,21 @@ with the fold and the word clock as the per-layer instrument. (4) The per-encode
 error option on by default and measured on the first T3.2 build. (5) The order T3.1,
 T3.2, T3.3, the golden on every commit, the arms after T3.1 and T3.3.
 
+**Davor's ruling (2026-09-17): Shape B for the stop path; the overflow as the
+on-the-spot eviction; the word clock in place of the per-layer GPU rows; the
+per-encoder error option on and measured on the first T3.2 build; the order T3.1,
+T3.2, T3.3 as proposed.** His reasoning on the stop path: a human cannot write the
+next prompt within 40 ms, and an agentic loop's tool result takes longer than that
+before its prefill begins, so the drain's cost once per answer is never seen. The
+refinement recorded with it: what hides the drain is the client's turnaround, not
+the prefill's length, and the answer's finish frames go out before the drain, the
+prompt cache's settle after it, so the answer's end is unchanged even for a tight
+loop. Consequences: the unguarded drain is taken and no cancel word is built, so
+the only kernel change of Shape B is the GDN pair's second state pointer; the
+parity buffers, the rewind by one, the suppressed rows and the two-turn
+continuation gate are T3.3's build; T3.2 lands one command per token committed on
+the word, the stop path unchanged, and T3.3 moves the commit ahead.
+
 ### Task 4, held: the attention row's fixed part (B3, B4)
 
 Only on S0.6's number and Davor's ruling.

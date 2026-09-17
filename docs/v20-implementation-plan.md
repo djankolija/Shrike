@@ -129,34 +129,76 @@ SLRU is T1.3; the predicted-future eviction was null at a legitimate horizon
 
 ## Task 3: the agreed cells and the fold (class 1; structure)
 
-- [ ] **T3.0 The design note**: the four edges (the stop path against the GDN state a
-      committed pass mutates in place; the error surfacing per layer when a token is
-      one command; the agreed-cell contract between the host and the kernels, encoded
-      before the router has run, with the fallback when a layer's misses exceed its
-      free cells; the cancel with two in flight, including the batch's reads in
-      flight), written in the design document for Davor's ruling before T3.1.
-      WRITTEN 2026-09-17 (`7596f86` read): the design document's Task 3 section,
-      the tree on the edges, the four edges designed, the stop path as two shapes
-      (A, encoded ahead and committed on the word, recommended; B, committed ahead
-      with a GDN parity and a drain, designed), the fold's drain invariant, the
+- [x] **T3.0 The design note.** DONE 2026-09-17 (`8ee535f`): the design document's
+      Task 3 section, the tree read on the edges at `7596f86`, the four edges
+      designed, the stop path as two shapes, the fold's drain invariant, the
       per-encoder error naming, the overflow as a victim on the path, the
       instruments the fold retires, the pre-registration, five points for the
-      ruling. **Davor's ruling pending; T3.1 waits on it.**
-- [ ] **T3.1 The agreed cells** (v18's T2.1 to T2.5 as written): the read of the
-      ring's cell leases and the index swap; the fixup encoded before the route with
-      an indirect phase 1 over the classifier's miss list, the reduce, the residual,
-      behind the event wait; the host's on-word path reduced to the reads' issue into
-      agreed cells; the plan moved to the next wake; the fallback to the host-built
-      fixup when misses exceed free cells, counted; tests; gates and golden; deploy
-      and arms (the host's path fields off the path, misses per token recorded for
-      drift).
-- [ ] **T3.2 One command per token**: the forty layers' held commands as one, the
-      token boundary inside it, the host feeding reads and signalling events; tests;
-      gates and golden; arms expected flat.
-- [ ] **T3.3 Two in flight and the cancel**: the next token's command encoded while
-      the current runs; the cancel path per the design note; the stop path; the
-      error surfacing per layer; tests for each edge.
-- [ ] **T3.4 The gates, the golden, the deploy, the arms, the record.**
+      ruling. **Davor's ruling (2026-09-17): Shape B for the stop path (the drain's
+      cost hidden by the client's turnaround; the unguarded drain, no cancel word);
+      the overflow as the on-the-spot eviction; the word clock in place of the
+      per-layer GPU rows; the per-encoder error option on and measured on the first
+      T3.2 build; the order T3.1, T3.2, T3.3.**
+- [ ] **T3.1 The agreed cells** (v18's T2.1 to T2.5 as written, amended in the
+      fixup's addressing and in the fallback): the read of the ring's leases and the
+      index swap, the plan's swap and victim path, the fixup's encode and the
+      speculative kernels' addressing; the build: a timeline value and status word
+      per routed layer reserved at the layer's encode, a host-written `agreed_cells`
+      array per layer, the fixup encoded with the layer as the pool-addressed phase
+      1 over the classifier's miss list and phase 2 over the eight behind the event
+      wait, `MoESpecDispatchArgs` grown to four grids, the host's on-word path (the
+      readback, a landed cell leased, an in-flight one joined within 400 µs, a free
+      ring cell claimed, the overflow's victim chosen on the path for that miss
+      alone and counted as `agreed_overflow`, the batch into the demand lane with
+      the layer's value, an empty batch publishing at once, the next layer's
+      prediction), the previous layer's plan at the wake (the counters and the SLRU
+      promotions, the swap by index, the freed cells back to the ring, the trace
+      rows, the cross-check that every leased cell's expert is in the route), the
+      last layer's plan at the token's end on every exit, the decode plan's pins
+      dropped; `agreed_overflow` and `cells_leased_peak` on the runner line and in
+      `tools/decode-rows.py`; tests (the contract on the toy model with a forced
+      miss set at zero, one and k misses bit for bit against the host-built fixup,
+      the overflow's victim path with the same output and the counter, the deferred
+      plan's ordering under the cache lock and the one-store publish, the lock
+      order, the pre-reserved values published in order and an all-hit layer's at
+      the word); the four gates; the golden on both boxes; deploy; the arms against
+      Task 1's (the token flat within the drift, misses per token within 0.3,
+      `agreed_overflow` under 0.1 per token, the plan's and the fixup build's time
+      off the path); the record.
+- [ ] **T3.2 One command per token**: the forty layers' commands and the boundary's
+      as encoders of one command, encoded a layer per word during the previous
+      token, committed on the boundary word after the stop check (the stop path
+      unchanged); the drain invariant, one routine on every abnormal exit (the
+      remaining values published failed, no reads, the pending plan dropped, the
+      wait, the throw naming the layer) and a ten-second deadline on the word wakes'
+      fallbacks; the status words recycled by token; `ModelError.expertReadFailed
+      (layer:errno:)`; the command from a descriptor with `encoderExecutionStatus`,
+      every encoder labelled by layer and stage, the drain reporting the encoder
+      that did not complete, the option's cost read on the same-box A/B and moved
+      behind `SHRIKE_RUNNER_STATS` only if it shows; the per-layer GPU rows retired
+      and the word clock's per-token array read by `tools/decode-rows.py` as the
+      layer rows; tests (a throw injected at layer k of a committed token completes
+      the command, names layer k, hangs nothing and the next request runs; an
+      injected read failure names its layer; the labels); gates and golden; deploy;
+      the arms expected flat.
+- [ ] **T3.3 Committed ahead (Shape B)**: the GDN state and conv tail of every linear
+      layer double-buffered by token parity, the kernels taking `state_in` and
+      `state_out`, prefill writing the parity the decode continues from, the
+      snapshot and restore on the current parity; the next token's command
+      committed after the current token's last word; the stop token, the stop
+      strings and the external stop seen one pass late, max tokens never (the pass
+      after the last token not encoded); the finish frames before the drain, the
+      extra pass drained unguarded (all forty values published failed, no reads, no
+      cells, the wait), the parity left where it was, the cursor rewound by one,
+      the extra pass's trace rows and counters suppressed, the settle after; the
+      two-turn continuation gate, byte-identical against the same turns without
+      the early commit; the cancel's tests (the stop token, a stop string, max
+      tokens, a disconnect: the timeline published, the ring without leases, the
+      runner reusable); gates and golden; deploy.
+- [ ] **T3.4 The gates, the golden, the deploy, the arms, the record**: after T3.3,
+      two lifetimes per shape on four shapes against Task 1's arms, the boundary gap
+      gone from the per-token rows, the drain once per answer in the answer's
+      total, the answers identical in length; the record in the design document.
 
 ## Task 4: to a chapter of its own (Davor's ruling, 2026-09-17)
 
