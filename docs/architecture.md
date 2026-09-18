@@ -614,10 +614,21 @@ is [v17-consolidation.md](v17-consolidation.md)'s Task 4 table.
   the class-2 gate's instrument (v19): two builds decode the same forced tokens, every
   position's logits dumped, the comparison lists each argmax flip against the old
   build's top-2 margin and a band from the median logit difference.
+- `ShrikeCLI --dump-hidden <file>`: every position's fp16 residual before the final
+  norm, the prompt's rows then the answer's, with a JSON sidecar of the positions; a
+  `HiddenSink` beside the logits sink that forces the plain pass, fed from the prefill
+  chunk (a blit out of the private scratch) and from each decode pass after its command
+  completes (the Q3 close, 2026-09-18). With `tools/q3-drafter-routes.py` it replays the
+  MTP drafter over a run and scores route predictors against the route trace.
 - `ShrikeAttnBench`: the decode attention scan on synthetic rows at the served shape,
   the production pipeline through the wrapper, the shipped kernel's copy with one switch
   per function constant, and the streaming prototype; deployed to the mini beside the
   CLI (v19).
+- `ShrikeExpertBench`: the decode phase-1 gate/up kernel on eight real experts of a
+  layer read from the `.gturbo`, the production pipeline itself as the plain arm and any
+  variant held to bit-identity against it, timed with the GPU kept busy by a batch of
+  dispatches per command buffer (v21's step zero, which closed the lossless-compression
+  avenue on its numbers).
 - `tools/decode-rig.sh` with `tools/decode-rows.py`: the four request shapes on the
   mini (the card, the 300, the 1k and, since v19, the 7k), a fresh server per shape,
   every token's arrival streamed, one row per request.
@@ -729,3 +740,18 @@ the status of record.
   the golden's fifth profile). No Metal kernel added or retired, 66 in the tree; the
   golden byte-identical at every commit on both boxes; production on the mini 17.0 to
   17.4 tok/s to 18.2 to 18.9 over the chapter.
+- Q3 ([v18-avenues.md](v18-avenues.md), A9): the MTP drafter's hidden state through the
+  forty main routers as the next pass's routes, measured and closed 2026-09-18: the
+  drafter replayed in fp32 over the four shapes (the head 64 of 64, the token guess 82
+  to 86 %), its vector through each layer's post-norm and router overlaps the real
+  top-8 at 0.10 to 0.14, the same as the main model's own true final residual does; the
+  routers read their own layer's features. The `--dump-hidden` instrument stays.
+- v21 ([v21-compression.md](v21-compression.md)): lossless compression, closed at step
+  zero the day it opened. The palette per group closed (every group uses all sixteen
+  levels), the aux table 11 bits, the entropy code the only path and its per-lane
+  framing 4.7 % of a row; the drive scales a read with its size (0.16 ms fixed, 0.35 ms
+  per MB); the pool's misses fall twice as fast as its capacity grows (22 to 29 % at a
+  0.88 stride); and the gate: the production phase-1 kernel at the roof on the mini
+  (60.5 to 63.0 GB/s), the in-lane decoder 5.3 to 6.9× slower at bit-identical
+  arithmetic, the bytes 4 % of the stride rather than 11. No runtime code changed;
+  `ShrikeExpertBench` stays as the instrument.

@@ -12,6 +12,7 @@ let package = Package(
         .executable(name: "ShrikeRepack", targets: ["ShrikeRepack"]),
         .executable(name: "ShrikeCLI", targets: ["ShrikeCLI"]),
         .executable(name: "ShrikeAttnBench", targets: ["ShrikeAttnBench"]),
+        .executable(name: "ShrikeExpertBench", targets: ["ShrikeExpertBench"]),
         .executable(name: "ShrikeMac", targets: ["ShrikeMac"]),
         .executable(name: "ShrikeDecodeService", targets: ["ShrikeDecodeService"]),
         .executable(name: "ShrikeServer", targets: ["ShrikeServer"]),
@@ -75,6 +76,14 @@ let package = Package(
             name: "ShrikeAttnBench",
             dependencies: ["Shrike", "ShrikeValidationSupport"],
             path: "sources/ShrikeAttnBench",
+            resources: [
+                .copy("Metal"),
+            ]
+        ),
+        .executableTarget(
+            name: "ShrikeExpertBench",
+            dependencies: ["Shrike"],
+            path: "sources/ShrikeExpertBench",
             resources: [
                 .copy("Metal"),
             ]

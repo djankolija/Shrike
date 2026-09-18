@@ -905,6 +905,19 @@ more tokens, or make each byte carry more information. Both exist as engineering
   indices, are what a second-order code would go after. Modelled prize at the
   roof: 12 % of 1,800 MB is 3.5 ms per token of streaming and 1.2 ms off the miss
   window's transfer floor, before the decoder's own cost. v20's basis.
+  **Measured and closed at v21's step zero (2026-09-18;
+  [v21-compression.md](v21-compression.md), S0.1 to S0.5).** Two findings, each
+  sufficient: the in-lane decoder runs 5.3 to 6.9× slower than the production
+  phase-1 kernel on the mini (which runs at the roof), bit-identical arithmetic,
+  measured by `ShrikeExpertBench` on real experts; and the bytes a code reaches
+  are about 4 % of the stride, not 12: the indices sit at 3.71 bits of entropy,
+  a prefix code lands at 3.795, and the per-lane framing a GEMV needs costs 4.7 %
+  of a row, so the indices come out at 0.986 of plain and the scales and biases
+  give 3.5 to 4 through a fixed-width table. The 12 % had counted the indices
+  without framing and the aux at its entropy, which a fixed-width decoder does not
+  reach. The drive does scale a read with its size (S0.3) and the pool's misses
+  do fall steeply with capacity (S0.2, 22 to 29 % at a 0.88 stride), which is
+  worth knowing for any lever that shrinks an expert by other means.
 - **H3. The draft lives in the host's spin-wait (Claude, 2026-09-09).** A9 and H1
   both want a draft token and both are priced against the draft's cost. MTP's head
   cost 17.5 ms per pass on the GPU and on the critical path. There is a place where a
