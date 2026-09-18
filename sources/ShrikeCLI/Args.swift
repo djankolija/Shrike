@@ -26,6 +26,7 @@ public struct Args: Equatable, Sendable {
     public var ropeScalingMode: RuntimeRoPEScalingMode
     public var forceTokensPath: String?
     public var dumpLogitsPath: String?
+    public var dumpHiddenPath: String?
     public var logitsHead: Bool
     public var tokenizePath: String?
     public var followUp: String?
@@ -50,12 +51,14 @@ public struct Args: Equatable, Sendable {
                 ropeScalingMode: RuntimeRoPEScalingMode = .none,
                 forceTokensPath: String? = nil,
                 dumpLogitsPath: String? = nil,
+                dumpHiddenPath: String? = nil,
                 logitsHead: Bool = false,
                 tokenizePath: String? = nil,
                 followUp: String? = nil) {
         self.model = model
         self.forceTokensPath = forceTokensPath
         self.dumpLogitsPath = dumpLogitsPath
+        self.dumpHiddenPath = dumpHiddenPath
         self.logitsHead = logitsHead
         self.tokenizePath = tokenizePath
         self.followUp = followUp
@@ -149,6 +152,10 @@ extension Args {
                                 class-2 gate's instrument.
       --dump-logits <path>      Write every position's fp16 logits as raw rows
                                 to <path> and a JSON sidecar to <path>.json.
+      --dump-hidden <path>      Write every position's fp16 residual before the
+                                final norm, the prompt's rows then the answer's,
+                                as raw rows to <path> and a JSON sidecar to
+                                <path>.json.
       --tokenize <path>         Render the prompt exactly as a run would, write
                                 its ids and their pieces as JSON to <path>, and
                                 exit without loading the model.
@@ -191,6 +198,7 @@ extension Args {
         var ropeScalingMode: RuntimeRoPEScalingMode = .none
         var forceTokensPath: String?
         var dumpLogitsPath: String?
+        var dumpHiddenPath: String?
         var logitsHead = false
         var tokenizePath: String?
         var followUp: String?
@@ -282,6 +290,8 @@ extension Args {
                     forceTokensPath = try takeValue(argv, &index, flag: flag)
                 case "--dump-logits":
                     dumpLogitsPath = try takeValue(argv, &index, flag: flag)
+                case "--dump-hidden":
+                    dumpHiddenPath = try takeValue(argv, &index, flag: flag)
                 case "--logits-head":
                     logitsHead = true
                     index += 1
@@ -338,6 +348,7 @@ extension Args {
                         ropeScalingMode: ropeScalingMode,
                         forceTokensPath: forceTokensPath,
                         dumpLogitsPath: dumpLogitsPath,
+                        dumpHiddenPath: dumpHiddenPath,
                         logitsHead: logitsHead,
                         tokenizePath: tokenizePath,
                         followUp: followUp)

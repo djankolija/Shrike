@@ -28,9 +28,11 @@ public struct GenerationConfig: Sendable {
     public var seed: UInt64? = nil         // nil = nondeterministic
     public var stopStrings: [String] = []
     public var extraStopTokens: Set<Int32> = []
-    /// Both diagnostics need the logits on the host, so a fused greedy head is refused.
+    /// The diagnostics need the logits on the host and the plain pass, so a
+    /// fused greedy head is refused and the boundary path is not taken.
     public var forcedTokens: [Int32]?
     public var logitsSink: (any LogitsSink)?
+    public var hiddenSink: (any HiddenSink)?
 
     public init(maxNewTokens: Int = 256,
                 temperature: Float = GenerationDefaults.temperature,

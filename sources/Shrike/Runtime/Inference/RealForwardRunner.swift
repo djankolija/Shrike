@@ -1232,6 +1232,51 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
     }()
 
+    /// Set per request by the loop, which then never takes the boundary path,
+    /// so every row is read after the command that wrote it has completed.
+    public var hiddenSink: (any HiddenSink)?
+
+    private var hiddenStaging: MTLBuffer?
+
+    /// The prefill scratch is private storage, so the chunk's rows are blitted
+    /// to a shared staging buffer and the copy waited out before the read.
+    private func recordPrefillHidden(scratch: PrefillChunkScratchBuffers, tokenCount t: Int,
+                                     hiddenSize D: Int, startPosition: Int) throws {
+        guard let hiddenSink else { return }
+        let bytes = t * D * MemoryLayout<Float16>.stride
+        let staging: MTLBuffer
+        if let existing = hiddenStaging, existing.length >= bytes {
+            staging = existing
+        } else {
+            guard let made = ctx.device.makeBuffer(length: bytes, options: .storageModeShared) else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            made.label = "hidden.staging"
+            hiddenStaging = made
+            staging = made
+        }
+        guard let cb = ctx.queue.makeCommandBuffer(),
+              let blit = cb.makeBlitCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        blit.copy(from: scratch.hidden, sourceOffset: 0, to: staging, destinationOffset: 0, size: bytes)
+        blit.endEncoding()
+        cb.commit()
+        try waitForCompletion(cb)
+        let base = staging.contents().assumingMemoryBound(to: Float16.self)
+        for row in 0..<t {
+            hiddenSink.record(position: startPosition + row,
+                              hidden: UnsafeBufferPointer(start: base + row * D, count: D))
+        }
+    }
+
+    private func recordDecodeHidden(position: Int) {
+        guard let hiddenSink else { return }
+        let base = hidden.contents().assumingMemoryBound(to: Float16.self)
+        hiddenSink.record(position: position,
+                          hidden: UnsafeBufferPointer(start: base, count: cfg.hiddenSize))
+    }
+
     /// JSONL trace for the v4.3 predictive-prefetch qualification probe.
     /// It deliberately records only exact routing and authoritative cache
     /// residency before planning; enabling it cannot submit I/O or alter cache
@@ -2030,6 +2075,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                     tokenCount t: Int, hiddenSize D: Int, rmsEps eps: Float,
                                     outputMode: PrefillOutputMode,
                                     aneChunk: ANEPrefillAttention?, startPosition: Int) throws {
+        try recordPrefillHidden(scratch: scratch, tokenCount: t, hiddenSize: D,
+                                startPosition: startPosition)
         if writeFinalHead {
             try encodeFinalHead(logits: logits, scratch: scratch,
                                 tokenCount: t, hiddenSize: D, rmsEps: eps,
@@ -2373,6 +2420,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             recordKernelGPU(role: "token", current.cb)
             runningToken = nil
             wordClock.endToken()
+            recordDecodeHidden(position: position)
             if fusedHead { lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self) }
         }
     }

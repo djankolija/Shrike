@@ -117,8 +117,11 @@ public func run(args: Args,
         }
         defer { try? dump?.finish() }
         config.logitsSink = dump
+        let hiddenDump = try args.dumpHiddenPath.map { try FileHiddenSink(path: $0) }
+        defer { try? hiddenDump?.finish() }
+        config.hiddenSink = hiddenDump
         let logitsHead = !config.isPureGreedy || args.logitsHead
-            || config.forcedTokens != nil || dump != nil
+            || config.forcedTokens != nil || dump != nil || hiddenDump != nil
         let loaded: LoadedRuntime
         switch try buildRuntime(args: args,
                                 modelURL: modelURL,
@@ -149,6 +152,7 @@ public func run(args: Args,
                 }
             }
         try dump?.finish()
+        try hiddenDump?.finish()
 
         if !args.quiet {
             writeFooter(stats: stats, stderr: stderr)

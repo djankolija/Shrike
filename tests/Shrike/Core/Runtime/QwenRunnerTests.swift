@@ -272,6 +272,62 @@ import ShrikeValidationSupport
         #expect(runner.continuationPosition == 1)
     }
 
+    final class CollectingHiddenSink: HiddenSink, @unchecked Sendable {
+        var rows: [(position: Int, row: [Float16])] = []
+
+        func record(position: Int, hidden: UnsafeBufferPointer<Float16>) {
+            rows.append((position, Array(hidden)))
+        }
+    }
+
+    private func cosine(_ a: [Float16], _ b: [Float16]) -> Float {
+        var dot: Float = 0
+        var na: Float = 0
+        var nb: Float = 0
+        for i in a.indices {
+            let x = Float(a[i])
+            let y = Float(b[i])
+            dot += x * y
+            na += x * x
+            nb += y * y
+        }
+        return dot / (na.squareRoot() * nb.squareRoot())
+    }
+
+    @Test func theHiddenSinkSeesEveryPositionsResidualInOrder() async throws {
+        let (dir, ctx, runner) = try makeRunner()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logits = try makeLogits(ctx, vocab: 1024)
+        let tokens: [Int32] = [11, 7, 3, 5, 2]
+
+        let decoded = CollectingHiddenSink()
+        runner.hiddenSink = decoded
+        for (position, token) in tokens.enumerated() {
+            try await runner.produce(token: token, position: position, into: logits)
+        }
+
+        runner.reset()
+        let prefilled = CollectingHiddenSink()
+        runner.hiddenSink = prefilled
+        _ = try await runner.prefillChunked(
+            tokens: tokens[...],
+            startPosition: 0,
+            outputMode: .greedyIfAvailable,
+            config: .production(chunkTokens: 32),
+            into: logits,
+            onProgress: { _ in })
+        try await runner.produce(token: 9, position: 5, into: logits)
+        try await runner.produce(token: 4, position: 6, into: logits)
+
+        #expect(decoded.rows.map(\.position) == [0, 1, 2, 3, 4])
+        #expect(prefilled.rows.map(\.position) == [0, 1, 2, 3, 4, 5, 6])
+        #expect(prefilled.rows.allSatisfy { $0.row.count == ArchConfig.qwenToy().hiddenSize })
+        #expect(prefilled.rows.allSatisfy { $0.row.allSatisfy(\.isFinite) })
+        for (a, b) in zip(decoded.rows, prefilled.rows) {
+            #expect(cosine(a.row, b.row) > 0.99, "position \(a.position)")
+        }
+    }
+
     @Test func corruptInferenceStateSnapshotFailsClosedAndResets() async throws {
         let (dir, ctx, runner) = try makeRunner()
         defer { try? FileManager.default.removeItem(at: dir) }

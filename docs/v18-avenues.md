@@ -388,6 +388,57 @@ lands) hides 30 µs of compute per expert and nothing else.
     zero GPU cost, strong on code, which is what the box serves), or a small dense
     model on the ANE or CPU. A draft on the GPU costs the token what it saves; the GPU
     is 69 % busy and is the bottleneck when it is.
+  - **Q3 priced 2026-09-18 (measured, one lifetime per shape on the M4 Pro, the
+    routes deterministic and golden-identical across the boxes; the instrument is
+    the CLI's `--dump-hidden` with `tools/q3-drafter-routes.py`, the run and its
+    artefacts at `~/.claude/handoffs/archive/shrike-q3-drafter-routes/`).** Davor's
+    premise from the v18 close, carried as the first call before v21: the drafter's
+    hidden state routed through the forty main routers as the next pass's routes, a
+    pass of lead for every layer. The drafter replayed in fp32 from the sidecar's
+    own `.gturbo` over every position of the card, the 300, the 1k and the 7k
+    (2,125 / 289 / 1,069 / 7,463 prompt tokens, 227 / 281 / 319 / 393 answered):
+    its input the main model's final residual at p beside the embedding of the id
+    fed at p+1, through the two norms and `fc`; its block the runtime's
+    full-attention layer (the gated attention, the q and k norms, NeoX RoPE on 64
+    dims, the shared expert under its scalar gate, the top-8 of its 256 private
+    experts weighted by the softmax of the selected). Two validations held: the
+    main head over the dumped residuals reproduced the dumped logits' argmax at 64
+    of 64 on every shape, and the drafter's own token guess hit the next-next token
+    on 83.7 / 85.8 / 82.1 / 81.7 % of the answers' positions, above P17's 75.6 % on
+    the tool-call continuation (these prompts copy a ledger; a broken block would
+    sit near zero). Top-8 overlap with the actual route, the card, per layer group
+    0-3 / 10-19 / 30-39 / all (the other shapes' cells in the JSON; the ranges over
+    the four shapes for the `all` column follow each): the drafter's output through
+    layer L's post-attention norm and router 0.043 / 0.133 / 0.215 / 0.136 (0.10 to
+    0.14); its input, the `fc` projection, 0.033 / 0.050 / 0.082 / 0.056 (0.05 to
+    0.06); the main model's own final residual at q-1 0.040 / 0.112 / 0.100 / 0.098
+    (0.08 to 0.10); the raw embedding of the id fed at q 0.253 / 0.153 / 0.136 /
+    0.157 (0.14 to 0.16); the id table, the last occurrence, 0.341 / 0.264 / 0.249 /
+    0.266 (0.25 to 0.29); the route at q-1 0.151 / 0.356 / 0.353 / 0.329 (0.30 to
+    0.33); the layer's eight most frequent experts over the prompt 0.053 / 0.105 /
+    0.036 / 0.067 (0.06 to 0.09). The diagnostic that reads it: the main model's
+    **own true final residual at q itself**, which exists only once the pass has
+    run, through the same norms and routers scores 0.045 / 0.117 / 0.209 / 0.132
+    (0.10 to 0.14), the drafter's number. The routers read their own layer's
+    features; an end-of-network vector, drafted or real, does not carry them at
+    any depth, and the drafter is not the weak link. Through the pool replay (the
+    bare pool, aging-LFU at 128 slots, fills in the ring at budget 8 as v20's table
+    arms were priced): the drafter's fills issue 116 to 128 reads per position at
+    precision 0.02 and save 1.9 to 2.8 of 29 to 31 misses; the id table saves 2.2
+    to 2.7 at 14 to 19 reads (precision 0.13 to 0.15, v20's number); the drive's
+    ceiling is about 120 reads per token in all. **Closed.** The one door the
+    numbers leave is a learned map per layer from the final residual to that
+    layer's router input (a linear probe fitted on dumped per-layer states), which
+    is training, a different premise, and unpriced. Davor's reading at the close
+    (2026-09-18): the premise had assumed a drafter with forty layers of its own,
+    one per main layer; with the one-block sidecar there is nothing further to
+    investigate, and the per-layer form would be a trained predictor, not this
+    sidecar. The instrument stays:
+    `--dump-hidden` beside `--dump-logits`, a `HiddenSink` fed on the plain pass
+    (the prefill chunk's rows blitted out of the private scratch, each decode
+    pass's row after its command completes), and the replica as
+    `tools/q3-drafter-routes.py`, whose fills feed `tools/expert-pool-replay.py`
+    as `--speculative-fills`.
   - **The economics** (modelled): 26 non-resident experts per token at precision p
     means 26 / p reads; the drive's headroom is about 120 reads per token, so p above
     roughly 0.3 fits. The ring's cells are 9 per layer, 360 in all, enough for a

@@ -105,10 +105,13 @@ public func runRawCompletion(producer: any LogitProducer,
         throw PrefillError.unsupportedPrefillSeed(
             "the fused-head producer cannot serve this sampling configuration; use a logits head")
     }
-    guard !fusedGreedy || (config.forcedTokens == nil && config.logitsSink == nil) else {
+    guard !fusedGreedy || (config.forcedTokens == nil && config.logitsSink == nil
+                           && config.hiddenSink == nil) else {
         throw PrefillError.unsupportedPrefillSeed(
-            "forced tokens and the logits sink need the logits on the host; construct the runner with forceLogitsHead: true")
+            "forced tokens and the sinks need the logits on the host; construct the runner with forceLogitsHead: true")
     }
+    fusedRunner?.hiddenSink = config.hiddenSink
+    defer { fusedRunner?.hiddenSink = nil }
 
     let cachedPromptTokens: Int
     switch start {
@@ -282,6 +285,7 @@ private func runDecodeLoop(producer: any LogitProducer,
     var uncommittedBoundaryTokenIDs: [Int32] = []
     let boundaryProducer = producer as? any BoundaryLogitProducer
     let instrumented = config.forcedTokens != nil || config.logitsSink != nil
+        || config.hiddenSink != nil
     let useBoundary = boundaryProducer != nil && !fusedGreedy
         && config.repetitionPenalty == 1.0 && !instrumented
     var boundaryPending = false

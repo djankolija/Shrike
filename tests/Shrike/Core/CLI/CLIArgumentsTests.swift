@@ -145,8 +145,8 @@ import Testing
             "--seed", "--stop", "--quiet", "--help",
             "--expert-cache-slots", "--prefill-chunk", "--concise",
             "--kv-bits", "--rope-scaling", "--thinking",
-            "--logits-head", "--force-tokens", "--dump-logits", "--tokenize",
-            "--follow-up",
+            "--logits-head", "--force-tokens", "--dump-logits", "--dump-hidden",
+            "--tokenize", "--follow-up",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })

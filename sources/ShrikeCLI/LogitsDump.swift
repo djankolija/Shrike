@@ -74,7 +74,7 @@ final class FileLogitsSink: LogitsSink, @unchecked Sendable {
     /// The executable and every Metal source beside it: the kernels compile from
     /// those at run time, so a stale bundle changes the build without changing the
     /// binary.
-    private static func buildHash() -> String {
+    static func buildHash() -> String {
         guard let executable = Bundle.main.executableURL,
               let binary = try? Data(contentsOf: executable) else { return "unknown" }
         var hasher = SHA256()
@@ -107,4 +107,48 @@ func readForcedTokens(path: String) throws -> [Int32] {
     }
     guard !ids.isEmpty else { throw InstrumentError.noTokens(path) }
     return ids
+}
+
+/// unchecked-invariant: as `FileLogitsSink`, one generation loop writes at a
+/// time and `finish()` reads only after the loop returns.
+final class FileHiddenSink: HiddenSink, @unchecked Sendable {
+    private let path: String
+    private let handle: FileHandle
+    private var positions: [Int] = []
+    private var width = 0
+    private var firstWriteError: Error?
+    private var finished = false
+
+    init(path: String) throws {
+        guard FileManager.default.createFile(atPath: path, contents: nil) else {
+            throw InstrumentError.cannotCreate(path)
+        }
+        self.path = path
+        self.handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+    }
+
+    func record(position: Int, hidden: UnsafeBufferPointer<Float16>) {
+        guard firstWriteError == nil else { return }
+        do {
+            try handle.write(contentsOf: Data(buffer: hidden))
+            positions.append(position)
+            width = hidden.count
+        } catch {
+            firstWriteError = error
+        }
+    }
+
+    func finish() throws {
+        guard !finished else { return }
+        finished = true
+        try handle.close()
+        let sidecar: [String: Any] = [
+            "hidden": width,
+            "positions": positions,
+            "binary_sha256": FileLogitsSink.buildHash(),
+        ]
+        let data = try JSONSerialization.data(withJSONObject: sidecar, options: [.sortedKeys])
+        try data.write(to: URL(fileURLWithPath: path + ".json"))
+        if let firstWriteError { throw firstWriteError }
+    }
 }

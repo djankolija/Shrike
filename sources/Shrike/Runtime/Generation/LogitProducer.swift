@@ -40,6 +40,12 @@ public protocol LogitsSink: AnyObject, Sendable {
     func chose(position: Int, token: Int32)
 }
 
+/// Every position's residual before the final norm, the prefill rows then the
+/// decode rows, in position order (the drafter-routes instrument, A9's Q3).
+public protocol HiddenSink: AnyObject, Sendable {
+    func record(position: Int, hidden: UnsafeBufferPointer<Float16>)
+}
+
 public protocol ContinuableLogitProducer: LogitProducer {
     var continuationPosition: Int { get }
     func prepareForContinuation(expectedPosition: Int) throws
