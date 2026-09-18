@@ -79,8 +79,11 @@ tools/golden-baseline.sh --check
 It counts as a model run, so the process rules above apply first. Baselines are stored
 in `baselines/`, tagged per machine (`short` and `long` ≈2k-token profiles); `--check`
 compares only against files whose machine tag matches the box it runs on — capture on
-the machine you intend to check. On the mini, run the script with its four env
-overrides (header comment) since that box has no checkout.
+the machine you intend to check. On the mini, run the script with its five env
+overrides (header comment) since that box has no checkout. The fifth,
+`CLI_EXTRA_ARGS="--expert-cache-slots 160"`, is what makes the run exercise the
+two-chunk arena production serves at; without it the golden runs the CLI's default
+64 slots, one chunk, and a regression at the chunk boundary passes unseen.
 
 A baseline is valid for one (machine, build, model) triple; re-capture only for a
 deliberate numerics change, never to make a mismatch go away.
@@ -117,19 +120,29 @@ usually serving one model on port 8081. Turbo (a separate project) serves on
 
 **Since v20 Task 1 (2026-09-17) the production launch carries two variables**, the
 pool's per-layer slot allocation and its eviction policy (measured +4.4 to +7.8 % tok/s
-on the four shapes, the record in `docs/v20-ssd-mechanism.md`):
+on the four shapes, the record in `docs/v20-ssd-mechanism.md`), and **since v22
+Task 3 (2026-09-18) the budget is 160 slots per layer** (the arena in two Metal
+buffers, the prefill scratch released between requests, oMLX's models unloaded;
+measured +9.9 to +15.6 % tok/s and 40 to 52 % fewer misses on the four shapes, the
+record in `docs/v22-pool-capacity.md`):
 
 ```bash
-SHRIKE_EXPERT_SLOT_TABLE=240,204,195,166,152,136,135,129,136,118,130,134,123,114,109,107,106,104,105,103,115,106,112,113,109,109,103,109,109,113,108,107,125,125,129,127,132,128,141,154 \
+SHRIKE_EXPERT_SLOT_TABLE=256,256,246,209,191,171,171,162,171,149,164,169,155,144,137,135,133,131,132,130,145,133,141,142,137,137,130,137,137,142,137,135,157,157,162,160,166,161,178,194 \
 SHRIKE_EXPERT_POLICY=slru \
-nohup ./bin/ShrikeServer --model ./models/ornith15.gturbo --model-id ornith15 --port 8081 --max-context 32768 --ram-budget 8G --thinking off > /tmp/shrike-server.log 2>&1 &
+nohup ./bin/ShrikeServer --model ./models/ornith15.gturbo --model-id ornith15 --port 8081 --max-context 32768 --ram-budget 11324620800 --thinking off > /tmp/shrike-server.log 2>&1 &
 ```
 
-The table is ornith15's (blend 0.3 of its production miss profile, forty counts
-totalling the budget's 5,120); a bare launch without the variables runs the uniform
-128 and aging-LFU, which is what the rig's `base` arm measures. A table that does not
-match the model's layers or the budget's total is refused at launch, loudly. The
-server's load line names what it runs (`expert_slots=103..240 policy=slru:0.5`).
+The table is ornith15's (blend 0.3 of its production miss profile scaled to the
+budget's 6,400, no layer above its 256 experts; the v20 table of 5,120 is
+`~/.claude/handoffs/archive/shrike-v22-t3/v22-arms.sh`'s `base` arm); the budget is
+given in bytes because `--ram-budget` snaps to the nearest allowed slot count (8, 16,
+24, 32, 64, 96, 128, 160, 192, 224, 256 per layer) and 8G snapped to 128. A bare launch
+without the variables runs the uniform 128 and aging-LFU. A table that does not match
+the model's layers or the budget's total is refused at launch, loudly. The server's
+load line names what it runs (`expert_slots=130..256 policy=slru:0.5`). **oMLX (port
+8000, a LaunchDaemon `local.omlx`) must not hold models while Shrike serves at this
+budget**: its reranker and embedder took 2.9 GB resident plus swap; a `kill` of its
+`omlx-server` process respawns it empty.
 
 Configuration is `SHRIKE_*` env vars only. A resurrected old command or script
 carrying `NVMAI_*` or `TURBO_FIELDFARE_*` names fails **silently** — nothing
@@ -146,10 +159,12 @@ selected their losers (`SHRIKE_DECODE_EXPERT_EXECUTION`, `SHRIKE_EXPERT_IO_SYNC`
 (`docs/v17-consolidation.md`). Add
 `SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1` when measuring with
 `tools/decode-measure.sh` and the `tools/parse-*-stats.py` parsers.
-**`--ram-budget 8G` is the measured optimum on the 16 GB mini** (snaps to 128
-expert slots ≈ 9.06 GB actually allocated; leaves ~11 % free, watch pressure).
-If the pool slab allocation ever fails at startup, the error is loud; the pool
-is the only layout since v17 (per-slot was v9's measured loss).
+**The mini's budget is 160 slots per layer since v22** (11.33 GB of cells; the
+arena in two Metal buffers since the device caps one at 8.88 GiB; the box at 82
+to 85 % free under load with oMLX empty and the prefill scratch released between
+requests). `--ram-budget 8G`, 128 slots, was the optimum only while the arena
+was one buffer. If the pool's allocation ever fails at startup, the error is
+loud; the pool is the only layout since v17 (per-slot was v9's measured loss).
 
 ## Where documents go
 

@@ -30,10 +30,14 @@ at the close.
       binding offsets; the allowed slot counts to 256; the tests; the four
       gates green (1,297 tests in 176 suites); the golden byte-identical on
       this box. The mini's golden at two chunks is Task 3's.
-- [ ] **Task 3 The mini's configuration.** oMLX restarted; the budget raised
-      to the headroom's slot count with the table scaled; the arms against
-      today's production; production relaunched at the winning configuration;
-      the working instructions' launch line updated.
+- [x] **Task 3 The mini's configuration.** DONE 2026-09-18: oMLX restarted
+      empty; the arms at 160 slots per layer against today's production, two
+      lifetimes per shape: +9.9 to +15.6 % tok/s, 40 to 52 % fewer misses, the
+      io 10.5 to 13.0 → 5.8 to 6.8 ms per token, the box at 82 to 85 % free
+      throughout; the golden byte-identical on the mini at two arena chunks;
+      production relaunched at the configuration and the working instructions'
+      launch line updated. Scripts, logs, rows and traces at
+      `~/.claude/handoffs/archive/shrike-v22-t3/`.
 
 ## The close
 

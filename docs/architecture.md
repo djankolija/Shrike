@@ -383,18 +383,28 @@ expert into the pool and the landing is dropped at the ring's reclaim (v16's rev
 
 ### The arena and the ring
 
-`ExpertCellArena` (`Infrastructure/Streaming/ExpertCellArena.swift`) is one allocation
-and one Metal buffer for every expert cell the classifier can name: each routed layer's
-slots, the uniform count by default or the per-layer table (`SHRIKE_EXPERT_SLOT_TABLE`,
-v20 Task 1: prefix-sum cell ranges, a table refused at load unless its count, its floor
-of 8, its dense zeros and its total against the budget hold; the served model's table is
-blend 0.3 of its production miss profile, 103 to 240 slots by layer), plus the ring's
-nine, at the page-rounded expert stride. The pool's eviction is the aging-LFU with chunk
-protection by default and segmented LRU under `SHRIKE_EXPERT_POLICY=slru` (the protected
-share 0.5), the served model's production configuration. On the mini the 8G budget snaps to 128 slots, 8.45 GiB with the ring, under the
-device's 8.88 GiB `maxBufferLength` with 0.43 to spare (v16); a larger budget there needs
-the kernels given a second base (v16's candidate). A cell changes owner at a swap without
-a byte moving; that is the whole reason for one address space.
+`ExpertCellArena` (`Infrastructure/Streaming/ExpertCellArena.swift`) holds every expert
+cell the classifier can name, numbered globally: each routed layer's slots, the uniform
+count by default or the per-layer table (`SHRIKE_EXPERT_SLOT_TABLE`, v20 Task 1:
+prefix-sum cell ranges, a table refused at load unless its count, its floor of 8, its
+dense zeros and its total against the budget hold; the served model's table is blend
+0.3 of its production miss profile scaled to 6,400, 130 to 256 slots by layer), plus the
+ring's nine, at the page-rounded expert stride. Since v22 Task 2 the cells live in as
+many Metal buffers as the device's `maxBufferLength` needs (chunks of equal cell
+count except the last, which takes the remainder,
+at most eight; one on the M4 Pro, two on the mini, whose limit is 8.88 GiB), and the
+arena publishes `PoolBases`, the chunks' GPU addresses and the cells per chunk, which the
+two speculative kernels take at buffer 0 and address a cell through (`pool_cell_base` in
+moe.metal); every other path names a cell by its global index and reaches its bytes
+through the arena's `buffer(cell:)` and `bufferOffset(cell:)`, the streamer keeping the
+global offset as a slot's identity. A cell changes owner at a swap without a byte moving,
+across chunks as within one; that is the whole reason for one numbering. The pool's
+eviction is the aging-LFU with chunk protection by default and segmented LRU under
+`SHRIKE_EXPERT_POLICY=slru` (the protected share 0.5), the served model's production
+configuration. On the mini the budget is 160 slots per layer since v22 (11.33 GB of
+cells; the allowed counts run to 256), with oMLX's models unloaded and the prefill
+scratch released between requests (v22 Task 1: the chunk's private buffers, about
+600 MB, held only while a prefill runs).
 
 `ExpertPrefetchRing` (`Runtime/Inference/ExpertPrefetchRing.swift:39`) owns the top-k plus
 one cells, nine on this model (`makePredictivePrefetch`, `RealForwardRunner.swift:449`),
@@ -508,12 +518,13 @@ in [multi-model-serving.md](multi-model-serving.md); the channel-faithful turn d
 1. **RAM budget is an input, not an outcome.** Still true. `--ram-budget`
    (`ServerArguments.swift:304`, `RuntimeConfiguration.parseBudgetBytes`) defaults to 8 GiB
    (`defaultExpertCacheBudgetBytes`, `RuntimeConfiguration.swift:104`); the slot count is
-   the ladder value (8 to 128) nearest budget over stride times routed layers
+   the ladder value (8 to 256 since v22) nearest budget over stride times routed layers
    (`expertCacheSlots`, `:137`, resolved at `ServerInference.swift:785`), or, under
    `SHRIKE_EXPERT_SLOT_TABLE`, the per-layer table whose total must equal that count
-   times the routed layers; the arena is sized from the sum plus the ring's nine. The
-   mini runs `--ram-budget 8G`, 128 slots as 5,120 cells split 103 to 240 by layer, about
-   9.06 GB allocated.
+   times the routed layers; the arena is sized from the sum plus the ring's nine, in as
+   many chunks as the device's `maxBufferLength` needs. The mini runs a budget of
+   11,324,620,800 bytes, 160 slots as 6,400 cells split 130 to 256 by layer, 11.33 GB in
+   two chunks (v22; 8G and 128 slots in one chunk before it).
 2. **Streaming that genuinely uses the disk.** Still true, with the figures replaced.
    The v4 rates (2.83 GB/s at prefill, 2.6 at decode against a 3.92 ceiling) were rig-era
    and described the old reader. Production's term is per read: 0.73 to 0.80 ms at p50 on
@@ -609,7 +620,9 @@ is [v17-consolidation.md](v17-consolidation.md)'s Task 4 table.
   the CLI's fused greedy head, their `-lh` twins on the server's logits head (v19), and
   `turns-lh`, a chat turn answered to its stop token then a follow-up generated from the
   state the stop left (the CLI's `--follow-up`, v20 T3.3: the pass committed ahead of a
-  stop and drained must leave that state exactly as a run without it).
+  stop and drained must leave that state exactly as a run without it). `CLI_EXTRA_ARGS`
+  appends to every run, e.g. `--expert-cache-slots 160` for the mini's two-chunk arena
+  (v22).
 - `ShrikeCLI --force-tokens <ids> --dump-logits <file>` with `tools/logit-compare.py`:
   the class-2 gate's instrument (v19): two builds decode the same forced tokens, every
   position's logits dumped, the comparison lists each argmax flip against the old
@@ -755,3 +768,13 @@ the status of record.
   (60.5 to 63.0 GB/s), the in-lane decoder 5.3 to 6.9× slower at bit-identical
   arithmetic, the bytes 4 % of the stride rather than 11. No runtime code changed;
   `ShrikeExpertBench` stays as the instrument.
+- v22 ([v22-pool-capacity.md](v22-pool-capacity.md)): the pool's capacity. The RAM
+  ledger of the mini under load found 0.6 GB of prefill scratch held for the process's
+  life and 2.9 GB in an idle oMLX; the replay priced a slot at twice its share in misses;
+  v16's device limit stood in the way. Task 1 the prefill scratch released after every
+  prefill; Task 2 the arena in chunks under `maxBufferLength` with `PoolBases` for the
+  two speculative kernels, cells numbered globally, the allowed counts to 256; Task 3
+  oMLX restarted empty and the mini at 160 slots per layer: +9.9 to +15.6 % tok/s and
+  40 to 52 % fewer misses on the four shapes (the io 10.5 to 13.0 → 5.8 to 6.8 ms per
+  token, the token 54.6 to 56.3 → 48.5 to 50.8 ms), the golden byte-identical on both
+  boxes, the mini's at two chunks.

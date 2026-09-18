@@ -27,11 +27,15 @@
 # Re-capture after a deliberate, signed-off numerics change; a diff at any
 # other time is a regression.
 #
-# Env overrides (the mini has no repo checkout — run with all four):
+# Env overrides (the mini has no repo checkout: run with all five):
 #   CLI=~/shrike-runtime/bin/ShrikeCLI
 #   MODEL=~/shrike-runtime/models/ornith15.gturbo
 #   OUT_DIR=~/shrike-runtime/baselines
 #   MACHINE_TAG=mini
+#   CLI_EXTRA_ARGS="--expert-cache-slots 160"
+# The fifth is not optional on the mini: the CLI's default 64 slots is one arena
+# chunk there, while production serves 160 slots across two, so without it the
+# golden never crosses a chunk boundary (v22 Task 2).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -41,6 +45,9 @@ OUT_DIR="${OUT_DIR:-$ROOT/baselines}"
 MACHINE_TAG="${MACHINE_TAG:-$(sysctl -n hw.model | tr -cd '[:alnum:]')}"
 MAX_NEW="${MAX_NEW:-96}"
 SEED="${SEED:-1234}"
+# CLI_EXTRA_ARGS (optional): appended to every CLI run, e.g. "--expert-cache-slots 160"
+# to run the golden at a pool the box splits across arena chunks (v22).
+CLI_EXTRA_ARGS="${CLI_EXTRA_ARGS:-}"
 
 if [ -z "${MODEL:-}" ]; then
   for candidate in /Volumes/BuildSSD/shrike/ornith15.gturbo \
@@ -117,7 +124,7 @@ for profile in "${profiles[@]}"; do
   # --quiet keeps the timing footer out of the compared text; only the
   # generated tokens are the contract. Timings vary run to run by design.
   "$CLI" --model "$MODEL" "${prompt_args[@]}" --max-new "$max_new" \
-         --temperature 0 --seed "$SEED" --quiet $head_flag > "$work" 2>"$work.err"
+         --temperature 0 --seed "$SEED" --quiet $head_flag $CLI_EXTRA_ARGS > "$work" 2>"$work.err"
   rc=$?
   [ "$profile" = turns-lh ] && rm -f "$messages"
   if [ $rc -ne 0 ]; then

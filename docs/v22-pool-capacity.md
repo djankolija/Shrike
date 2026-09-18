@@ -165,7 +165,42 @@ turn, about what the slots save.
   zero warnings, lint, links, 1,297 tests in 176 suites; the golden
   byte-identical on all five profiles on this box (one chunk here; the mini's
   two-chunk golden is Task 3's).
-- **Task 3** the mini's configuration and the arms: the record follows.
+- **Task 3** the mini's configuration and the arms (2026-09-18; the scripts,
+  logs, rows and traces at `~/.claude/handoffs/archive/shrike-v22-t3/`). The T2
+  build deployed; oMLX restarted (its two models unloaded, `loaded_count 0`; the
+  box went from 13 % free under load with 0.9 GB of swap in use to 43 % free
+  idle with 0.23 GB); then the arms through `tools/decode-rig.sh`, two arms
+  interleaved per shape, two lifetimes each: `base`, today's production
+  configuration (8G, the v20 table of 5,120 with SLRU, one arena chunk), and
+  `big`, 160 slots per layer (`--ram-budget 11324620800`, which snaps to 160;
+  the table scaled to 6,400 with layers 0 and 1 at their 256 experts; SLRU;
+  the arena in two chunks on the mini). Measured, the cold 512-token answer of
+  each shape, both lifetimes:
+
+  | shape | tok/s base → big | misses per token | io ms per token | the token ms | prefill s |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | the card | 18.23 to 18.25 → 20.17 to 20.18 (+10.6 %) | 15.6 → 8.7 (−44 %) | 11.6 → 6.7 | 54.8 → 49.6 | 11.2 → 11.3 |
+  | the 300 | 17.75 to 17.96 → 20.63 to 20.64 (+15.6 %) | 16.5 → 8.0 (−52 %) | 12.2 to 13.0 → 6.1 | 55.7 to 56.3 → 48.5 | 5.5 to 5.7 → 5.6 |
+  | the 1k | 18.18 to 18.30 → 19.93 to 20.28 (+10.2 %) | 15.0 → 9.0 (−40 %) | 11.1 → 6.8 | 54.6 to 55.0 → 49.3 to 50.2 | 8.0 → 8.1 |
+  | the 7k | 17.89 to 17.92 → 19.67 to 19.70 (+9.9 %) | 14.2 → 7.6 (−46 %) | 10.6 → 5.8 | 55.8 to 55.9 → 50.8 | 37.8 → 37.9 to 38.0 |
+
+  The two lifetimes of every arm agree to the tenth. The hit rate 0.948 to
+  0.956 → 0.972 to 0.976; the word clock's layers sum 49 to 50 → 43 to 45 ms
+  per token, the boundary 5.5 → 5.3; memory free 82 to 85 % after every arm,
+  the swap untouched at 0.23 GB. The replay had priced 6,400 slots at 35 to
+  44 % fewer misses; the box gave 40 to 52 (the replay holds no ring and no
+  landings, so its cut was the conservative one). Prefill moved by 0.05 to
+  0.2 s per request, the scratch's reallocation and first touch, 0.5 to 2 % of
+  a cold prefill; a short warm turn pays a larger share, noted as a follow-on
+  (keep the scratch across a short idle window). The `base` arm on the T2
+  build sits 1 to 3 % under the v20 close's arms, the box's drift; the
+  one-chunk arena's indirection is not visible in the layers' sum.
+
+  The golden on the mini at the two-chunk arena (`--expert-cache-slots 160`
+  through the golden script's new `CLI_EXTRA_ARGS`, 6,400 cells plus the ring's
+  nine over the device's 8.88 GiB limit): byte-identical on all five profiles.
+  Production relaunched at the `big` configuration (the launch line in the
+  repo's working instructions updated; the box at 93 % free idle).
 
 ## Method
 
