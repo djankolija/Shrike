@@ -275,7 +275,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// zeros buffer for families without one. The selector always reads it.
     private var routerLogitBias: [(buffer: MTLBuffer, offset: Int)] = []
     private var prefillChunkState = PrefillChunkCommitState()
+    /// Held only while a prefill runs: the chunk's private buffers are about
+    /// 600 MB at the production chunk, and decode never reads them, so they go
+    /// back to the box between requests where the expert pool can have them.
     private var prefillScratch: PrefillChunkScratchBuffers?
+    var holdsPrefillScratch: Bool { prefillScratch != nil }
     /// Reusable UInt32 token-ID buffer for chunked prefill (R23): sized to the
     /// largest chunk seen so far and grown on demand, so the prefill hot path
     /// never allocates an MTLBuffer per chunk.
@@ -1800,6 +1804,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         let scratch = try ensurePrefillScratch(config: config)
+        defer { prefillScratch = nil }
         let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count,
                                               startPosition: startPosition,
                                               config: config)

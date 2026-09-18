@@ -328,6 +328,34 @@ import ShrikeValidationSupport
         }
     }
 
+    @Test func thePrefillScratchIsReleasedAfterEveryPrefillAndComesBack() async throws {
+        let (dir, ctx, runner) = try makeRunner()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logits = try makeLogits(ctx, vocab: 1024)
+        let tokens: [Int32] = [11, 7, 3]
+
+        try await runner.produce(token: 11, position: 0, into: logits)
+        try await runner.produce(token: 7, position: 1, into: logits)
+        try await runner.produce(token: 3, position: 2, into: logits)
+        try await runner.produce(token: 5, position: 3, into: logits)
+        let reference = runner.lastGreedyToken
+        #expect(!runner.holdsPrefillScratch)
+
+        for _ in 0..<2 {
+            runner.reset()
+            _ = try await runner.prefillChunked(
+                tokens: tokens[...],
+                startPosition: 0,
+                outputMode: .greedyIfAvailable,
+                config: .production(chunkTokens: 32),
+                into: logits,
+                onProgress: { _ in })
+            #expect(!runner.holdsPrefillScratch)
+            try await runner.produce(token: 5, position: 3, into: logits)
+            #expect(runner.lastGreedyToken == reference)
+        }
+    }
+
     @Test func corruptInferenceStateSnapshotFailsClosedAndResets() async throws {
         let (dir, ctx, runner) = try makeRunner()
         defer { try? FileManager.default.removeItem(at: dir) }
