@@ -14,12 +14,13 @@ extension PreadExpertStreamerTests {
     }
 
     private static func makeLanded(slotCount: Int = 4, cellRange: Range<Int>? = nil,
-                                   arenaCells: Int? = nil,
+                                   arenaCells: Int? = nil, chunkBytes: Int? = nil,
                                    withCoordinator: Bool = false) throws -> Landed {
         let url = try writeSyntheticLayer()
         let device = try MetalContext().device
         let cells = arenaCells ?? slotCount + 2
-        let arena = try ExpertCellArena(device: device, cellCount: cells, stride: expertStride)
+        let arena = try ExpertCellArena(device: device, cellCount: cells, stride: expertStride,
+                                        chunkBytes: chunkBytes)
         let range = cellRange ?? 0..<slotCount
         let coordinator = withCoordinator ? ExpertIOEventCoordinator(device: device) : nil
         let streamer = try PreadExpertStreamer(
@@ -35,8 +36,10 @@ extension PreadExpertStreamerTests {
     }
 
     private static func cell(of plan: ExpertCachePlan, index: Int, in fixture: Landed) -> Int {
-        let buffers = fixture.streamer.expertCachePlanBuffers(plan)
-        return fixture.arena.cell(atOffset: buffers[index].offset)
+        // The plan binds a chunk-relative offset, not the cell's global identity.
+        let view = fixture.streamer.expertCachePlanBuffers(plan)[index]
+        let chunk = fixture.arena.chunkBuffers.firstIndex { $0 === view.buffer } ?? 0
+        return chunk * fixture.arena.cellsPerChunk + Int(view.offset) / fixture.arena.stride
     }
 
     private static func table(of fixture: Landed) -> [ExpertResidencyEntry] {
@@ -134,7 +137,7 @@ extension PreadExpertStreamerTests {
         #expect(fixture.streamer.residentExperts().contains(2))
         #expect(!fixture.streamer.residentExperts().contains(3))
         for (expert, cell) in [(3, ringCell), (2, poolCell)] {
-            let bytes = Self.bytes(of: fixture.arena.buffer, offset: fixture.arena.offset(cell: cell),
+            let bytes = Self.bytes(of: fixture.arena.buffer(cell: cell), offset: fixture.arena.bufferOffset(cell: cell),
                                    count: Self.expertStride)
             #expect(bytes.allSatisfy { $0 == Self.tagByte(expert) })
         }
@@ -196,7 +199,7 @@ extension PreadExpertStreamerTests {
         #expect(landed.state == ExpertResidencyEntry.resident)
         #expect(landed.slot == UInt32(ringCell))
         #expect(fixture.streamer.residentExperts() == [0, 2])
-        let bytes = Self.bytes(of: fixture.arena.buffer, offset: fixture.arena.offset(cell: ringCell),
+        let bytes = Self.bytes(of: fixture.arena.buffer(cell: ringCell), offset: fixture.arena.bufferOffset(cell: ringCell),
                                count: Self.expertStride)
         #expect(bytes.allSatisfy { $0 == Self.tagByte(1) })
 
@@ -236,6 +239,25 @@ extension PreadExpertStreamerTests {
         #expect(plan.adopted == [1])
         #expect(Self.cell(of: plan, index: 1, in: fixture) == ringCell)
         #expect(plan.freedCells[1] != nil)
+    }
+
+    @Test func aLandingSwappedAcrossAnArenaChunkRebindsItsSlotsBuffer() throws {
+        let fixture = try Self.makeLanded(chunkBytes: 4 * Self.expertStride)
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        #expect(fixture.arena.chunkBuffers.count == 2)
+        let ringCell = fixture.ringCells[0]
+        #expect(fixture.arena.buffer(cell: ringCell) !== fixture.arena.buffer(cell: 0))
+
+        _ = try fixture.streamer.loadExpertsCached(experts: [0, 2])
+        try Self.land(fixture, expert: 1, cell: ringCell)
+
+        let plan = try fixture.streamer.planExpertsCached(experts: [0, 1, 2], leasedLandings: [1])
+        #expect(plan.hits == 3)
+        #expect(Self.cell(of: plan, index: 1, in: fixture) == ringCell)
+
+        let view = fixture.streamer.expertCachePlanBuffers(plan)[1]
+        #expect(view.buffer === fixture.arena.buffer(cell: ringCell))
+        #expect(view.offset == fixture.arena.bufferOffset(cell: ringCell))
     }
 
     @Test func theSwapEvictsTheLeastUsedResidentWhenThePoolIsFull() throws {
@@ -355,7 +377,8 @@ extension PreadExpertStreamerTests {
         #expect((4..<8).contains(Int(entry.slot)))
         let plan = try fixture.streamer.planExpertsCached(experts: [2])
         #expect(Int(entry.slot) == Self.cell(of: plan, index: 0, in: fixture))
-        #expect(fixture.streamer.expertResidencyResources().expertPool === fixture.arena.buffer)
+        #expect(fixture.streamer.expertResidencyResources().poolBases === fixture.arena.bases)
+        #expect(fixture.streamer.expertResidencyResources().poolChunks.count == fixture.arena.chunkBuffers.count)
     }
 
     @Test func theFreedCellIsTheRingsNextLanding() throws {
@@ -371,7 +394,7 @@ extension PreadExpertStreamerTests {
         let landed = fixture.streamer.residencyEntry(expert: 3)
         #expect(landed.state == ExpertResidencyEntry.resident)
         #expect(landed.slot == UInt32(freed))
-        let bytes = Self.bytes(of: fixture.arena.buffer, offset: fixture.arena.offset(cell: freed),
+        let bytes = Self.bytes(of: fixture.arena.buffer(cell: freed), offset: fixture.arena.bufferOffset(cell: freed),
                                count: Self.expertStride)
         #expect(bytes.allSatisfy { $0 == Self.tagByte(3) })
         #expect(fixture.streamer.residentExperts() == [0, 1, 2])
@@ -429,7 +452,7 @@ extension PreadExpertStreamerTests {
         _ = try fixture.streamer.executeExpertCachePlan(current)
         #expect(fixture.arena.cellGeneration(0) == 2)
         #expect(Self.table(of: fixture) == [Self.empty, Self.empty, Self.resident(0), Self.empty])
-        let bytes = Self.bytes(of: fixture.arena.buffer, offset: fixture.arena.offset(cell: 0),
+        let bytes = Self.bytes(of: fixture.arena.buffer(cell: 0), offset: fixture.arena.bufferOffset(cell: 0),
                                count: Self.expertStride)
         #expect(bytes.allSatisfy { $0 == Self.tagByte(2) })
     }

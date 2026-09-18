@@ -104,6 +104,7 @@ public struct Model {
         /// One arena for every layer's pool cells and the ring's, allocated
         /// at the first layer's opening.
         var arena: ExpertCellArena?
+        var arenaChunkBytes: Int?
         var prefetchCellCount = 0
         var prefetchCells: [Int] = []
         init(numLayers: Int) {
@@ -466,7 +467,8 @@ public struct Model {
             streamersBox.arena = try ExpertCellArena(
                 device: device,
                 cellCount: poolCells + streamersBox.prefetchCellCount,
-                stride: stride)
+                stride: stride,
+                chunkBytes: streamersBox.arenaChunkBytes)
             streamersBox.prefetchCells = Array(poolCells..<(poolCells + streamersBox.prefetchCellCount))
         }
         let ordinal = routedLayers.firstIndex(of: L) ?? 0

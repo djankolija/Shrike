@@ -74,7 +74,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public static let supportedYaRNContextTokens = [524_288, 1_048_576]
     public static let defaultYaRNContextTokens = 1_048_576
     public static let maximumContextTokens = 1_048_576
-    public static let allowedExpertCacheSlots = [8, 16, 24, 32, 64, 96, 128]
+    public static let allowedExpertCacheSlots = [8, 16, 24, 32, 64, 96, 128, 160, 192, 224, 256]
 
     /// Target bytes for the routed-expert slot cache when no count is given.
     ///
@@ -162,6 +162,9 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let yarnContextTokens: Int
     /// Off in production: a Qwen-family model outside the streaming scan's shape is refused, not served slower.
     public let attentionFallbackAllowed: Bool
+    /// Bytes per chunk of the expert cell arena; nil takes the device's
+    /// `maxBufferLength`. Tests set it small to run the pool across chunks.
+    public let expertArenaChunkBytes: Int?
 
     public init(expertCacheSlots: Int = 64,
                 prefillEnabled: Bool = true,
@@ -171,7 +174,8 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 kvCachePrecision: KVCachePrecision = .int8,
                 ropeScalingMode: RuntimeRoPEScalingMode = .none,
                 yarnContextTokens: Int = RuntimeConfiguration.defaultYaRNContextTokens,
-                attentionFallbackAllowed: Bool = false) throws {
+                attentionFallbackAllowed: Bool = false,
+                expertArenaChunkBytes: Int? = nil) throws {
         guard Self.allowedExpertCacheSlots.contains(expertCacheSlots) else {
             throw RuntimeConfigurationError.invalidExpertCacheSlots(expertCacheSlots)
         }
@@ -190,6 +194,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.ropeScalingMode = ropeScalingMode
         self.yarnContextTokens = yarnContextTokens
         self.attentionFallbackAllowed = attentionFallbackAllowed
+        self.expertArenaChunkBytes = expertArenaChunkBytes
     }
 
     public static func environmentPrefetchTracePath(

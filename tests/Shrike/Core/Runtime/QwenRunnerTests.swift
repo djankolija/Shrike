@@ -356,6 +356,48 @@ import ShrikeValidationSupport
         }
     }
 
+    @Test func thePoolAcrossArenaChunksDecodesAsThePoolInOne() async throws {
+        let (dir, ctx, reference) = try makeRunner()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logits = try makeLogits(ctx, vocab: 1024)
+        let tokens: [Int32] = [11, 7, 3, 5, 2, 9]
+        var expected: [UInt32] = []
+        for (position, token) in tokens.enumerated() {
+            try await reference.produce(token: token, position: position, into: logits)
+            expected.append(reference.lastGreedyToken)
+        }
+
+        let model = try Model.load(directoryURL: dir, device: ctx.device, expecting: .qwenToy())
+        let stride = Int(model.packedExpertsLayout.expertStride)
+        let poolCells = (0..<model.config.numLayers).reduce(0) {
+            $0 + (model.routedExpertCacheSlotCount(layer: $1) ?? 0)
+        }
+        let runner = try RealForwardRunner(model: model,
+                                           context: ctx,
+                                           maxContext: 64,
+                                           runtimeConfiguration: RuntimeConfiguration(
+                                               attentionFallbackAllowed: true,
+                                               expertArenaChunkBytes: (poolCells / 3 + 1) * stride))
+        var produced: [UInt32] = []
+        for (position, token) in tokens.enumerated() {
+            try await runner.produce(token: token, position: position, into: logits)
+            produced.append(runner.lastGreedyToken)
+        }
+        #expect(produced == expected)
+        #expect(try model.routedExpertResidency(layer: 0).poolChunks.count > 1)
+
+        runner.reset()
+        _ = try await runner.prefillChunked(
+            tokens: tokens[..<5],
+            startPosition: 0,
+            outputMode: .greedyIfAvailable,
+            config: .production(chunkTokens: 32),
+            into: logits,
+            onProgress: { _ in })
+        try await runner.produce(token: 9, position: 5, into: logits)
+        #expect(runner.lastGreedyToken == expected[5])
+    }
+
     @Test func corruptInferenceStateSnapshotFailsClosedAndResets() async throws {
         let (dir, ctx, runner) = try makeRunner()
         defer { try? FileManager.default.removeItem(at: dir) }

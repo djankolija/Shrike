@@ -291,6 +291,19 @@ struct RoutedBlobs {
     device const uint8_t* blob[kMaxStreamedExperts];
 };
 
+// The expert cell arena's chunks: a cell named globally by the classifier
+// lives at `base[cell / cells_per_chunk] + (cell % cells_per_chunk) * stride`.
+// Mirrored by `ExpertCellArena.bases` in Swift.
+struct PoolBases {
+    device const uint8_t* base[8];
+    uint cells_per_chunk;
+};
+
+static inline device const uint8_t* pool_cell_base(constant PoolBases& pool, uint cell,
+                                                   ulong stride) {
+    return pool.base[cell / pool.cells_per_chunk] + ulong(cell % pool.cells_per_chunk) * stride;
+}
+
 constant uint FC_ROUTER_BITS [[function_constant(44)]];
 
 static inline uint router_affine_bits() {
@@ -935,7 +948,7 @@ kernel void moe_phase2_down_reduce_k8(
 /// host's cell array, the sentinel at the hits, gated by the batch's status
 /// word; the speculative dispatch binds an always-ready word.
 kernel void moe_phase1_gate_up_act_spec_u16load(
-    device const uint8_t* expert_pool [[buffer(0)]],
+    constant PoolBases& expert_pool [[buffer(0)]],
     constant ExpertOffsets& routed_offsets [[buffer(1)]],
     device const half* x [[buffer(2)]],
     device half* acts [[buffer(3)]],
@@ -972,8 +985,7 @@ kernel void moe_phase1_gate_up_act_spec_u16load(
     const uint f = rowg % moe_fc_f(F);
     if (resolved_slots[k] == 0xffffffffu) return;
 
-    device const uint8_t* base =
-        expert_pool + ulong(resolved_slots[k]) * pool_slot_stride;
+    device const uint8_t* base = pool_cell_base(expert_pool, resolved_slots[k], pool_slot_stride);
     const ExpertOffsets re = routed_offsets;
     const float2 gu = moe_int4_gate_up_rows_simd_tgmem_u16load(
         xt, xsum, base + re.gate_W_off,
@@ -994,7 +1006,7 @@ kernel void moe_phase1_gate_up_act_spec_u16load(
 /// speculative dispatch binds the classifier's array twice and an always-ready
 /// word.
 kernel void moe_phase2_down_reduce_spec_k8(
-    device const uint8_t* expert_pool [[buffer(0)]],
+    constant PoolBases& expert_pool [[buffer(0)]],
     constant ExpertOffsets& routed_offsets [[buffer(1)]],
     device const half* acts [[buffer(2)]],
     device const half* routing_w [[buffer(3)]],
@@ -1024,7 +1036,7 @@ kernel void moe_phase2_down_reduce_spec_k8(
 
     uint cell = resolved_slots[sg_idx];
     if (cell == 0xffffffffu) cell = fallback_cells[sg_idx];
-    device const uint8_t* base = expert_pool + ulong(cell) * pool_slot_stride;
+    device const uint8_t* base = pool_cell_base(expert_pool, cell, pool_slot_stride);
     const ExpertOffsets re = routed_offsets;
     device const uint8_t* dW = base + re.down_W_off;
     device const bfloat* dS = (device const bfloat*)(base + re.down_s_off);

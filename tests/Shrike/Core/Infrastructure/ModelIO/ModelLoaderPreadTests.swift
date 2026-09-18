@@ -26,7 +26,7 @@ import Metal
         // The view is a cache cell of the shared arena, not the expert's file offset:
         // layer 1's first slot is its first cell, one layer's worth of cells in.
         let residency = try model.routedExpertResidency(layer: 1)
-        #expect(view.buffer === residency.expertPool)
+        #expect(residency.poolChunks.contains { $0 === view.buffer })
         #expect(view.offset == UInt64(2) * residency.poolSlotStride)
 
         // Same tagged-byte contract as ModelLoaderTests.routedExpertBytesRoundTrip.
@@ -97,7 +97,7 @@ import Metal
 
         let view = try await model.fetchRoutedExperts(layer: 1, experts: [4])[0]
         let residency = try model.routedExpertResidency(layer: 1)
-        #expect(view.buffer === residency.expertPool)
+        #expect(residency.poolChunks.contains { $0 === view.buffer })
         #expect(view.offset == UInt64(3) * residency.poolSlotStride)
         let first = try await model.fetchRoutedExperts(layer: 0, experts: [4])[0]
         #expect(first.offset < UInt64(3) * residency.poolSlotStride)

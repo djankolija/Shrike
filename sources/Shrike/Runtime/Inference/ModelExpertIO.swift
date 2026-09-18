@@ -169,6 +169,18 @@ extension Model {
         }
     }
 
+    /// The arena's chunk size, like the ring's cell count known before the
+    /// arena exists; nil is the device's `maxBufferLength`.
+    public func configureExpertArena(chunkBytes: Int?) throws {
+        try streamersQueue.sync {
+            if streamersBox.arena != nil, streamersBox.arenaChunkBytes != chunkBytes {
+                throw ModelError.internalInconsistency(
+                    detail: "the expert cell arena was allocated before its chunk size was set")
+            }
+            streamersBox.arenaChunkBytes = chunkBytes
+        }
+    }
+
     /// The ring's cells in the arena.
     public func prefetchCells() throws -> [Int] {
         try ensureLayerOpened(firstRoutedLayer())

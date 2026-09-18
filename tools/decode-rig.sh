@@ -26,7 +26,8 @@
 # Env: SERVER_ENV (prepended to the server launch, e.g.
 # SERVER_ENV="SHRIKE_PREFILL_ANE=on" for an A/B arm; every launch also carries
 # SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 and SHRIKE_ROUTE_TRACE);
-# PREFETCH_TRACE=1 adds SHRIKE_PREFETCH_TRACE (the next-layer router probe's
+# RAM_BUDGET (the launch's --ram-budget, default 8G; the slot table in SERVER_ENV
+# must sum to what it snaps to); PREFETCH_TRACE=1 adds SHRIKE_PREFETCH_TRACE (the next-layer router probe's
 # top-8 is logged per decode layer); NO_TURNS=1 skips the follow-up requests;
 # MAX_TOKENS (default 512) the cold request's answer length; MODEL / MODEL_ID
 # (default ./models/ornith15.gturbo / ornith15, matching tools/mini-deploy.sh);
@@ -40,7 +41,7 @@ if [ $# -lt 6 ]; then
 fi
 HOST=$1; PORT=$2; PROMPTS=$3; OUT=$4; TAG=$5; shift 5
 MODEL=${MODEL:-./models/ornith15.gturbo}; MODEL_ID=${MODEL_ID:-ornith15}
-SERVER_ENV=${SERVER_ENV:-}; MAX_TOKENS=${MAX_TOKENS:-512}
+SERVER_ENV=${SERVER_ENV:-}; MAX_TOKENS=${MAX_TOKENS:-512}; RAM_BUDGET=${RAM_BUDGET:-8G}
 PREFETCH_TRACE=${PREFETCH_TRACE:-0}; NO_TURNS=${NO_TURNS:-0}; REUSE=${REUSE:-}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$OUT"
@@ -57,7 +58,7 @@ relaunch() {  # $1 = extra env assignments for this shape (traces)
     if pgrep -x ShrikeServer > /dev/null; then echo 'server still running' >&2; exit 1; fi
     cd ~/shrike-runtime
     [ -f /tmp/ornith.log ] && mv -f /tmp/ornith.log \"/tmp/ornith.log.\$(date +%Y%m%d-%H%M%S)\"
-    env $SERVER_ENV $1 SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/ShrikeServer --model $MODEL --model-id $MODEL_ID --port $PORT --max-context 32768 --ram-budget 8G --thinking off > /tmp/ornith.log 2>&1 &
+    env $SERVER_ENV $1 SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/ShrikeServer --model $MODEL --model-id $MODEL_ID --port $PORT --max-context 32768 --ram-budget $RAM_BUDGET --thinking off > /tmp/ornith.log 2>&1 &
     exit 0
   " || exit 1
   tries=0

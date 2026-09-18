@@ -873,7 +873,8 @@ final class MoE {
 
     func encodeSpecPhase1U16Load(
         commandBuffer: MTLCommandBuffer,
-        expertPool: MTLBuffer,
+        poolBases: MTLBuffer,
+        poolChunks: [MTLBuffer],
         poolSlotStride: UInt64,
         resolvedSlots: MTLBuffer,
         routedOffsets: MoEExpertOffsets,
@@ -890,7 +891,8 @@ final class MoE {
         }
         encodeSpecPhase1U16Load(
             encoder: encoder,
-            expertPool: expertPool,
+            poolBases: poolBases,
+            poolChunks: poolChunks,
             poolSlotStride: poolSlotStride,
             resolvedSlots: resolvedSlots,
             routedOffsets: routedOffsets,
@@ -903,7 +905,8 @@ final class MoE {
 
     func encodeSpecPhase1U16Load(
         encoder: MTLComputeCommandEncoder,
-        expertPool: MTLBuffer,
+        poolBases: MTLBuffer,
+        poolChunks: [MTLBuffer],
         poolSlotStride: UInt64,
         resolvedSlots: MTLBuffer,
         resolvedSlotsOffset: Int = 0,
@@ -928,7 +931,8 @@ final class MoE {
             useRealDecodeConstants(d: d, f: f, topK: topK)
                 ? specPhase1SpecializedPSO
                 : specPhase1PSO)
-        encoder.setBuffer(expertPool, offset: 0, index: 0)
+        encoder.setBuffer(poolBases, offset: 0, index: 0)
+        for chunk in poolChunks { encoder.useResource(chunk, usage: .read) }
         var offsets = routedOffsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         encoder.setBuffer(x, offset: 0, index: 2)
@@ -948,7 +952,8 @@ final class MoE {
 
     func encodeSpecPhase2Reduce(
         commandBuffer: MTLCommandBuffer,
-        expertPool: MTLBuffer,
+        poolBases: MTLBuffer,
+        poolChunks: [MTLBuffer],
         poolSlotStride: UInt64,
         resolvedSlots: MTLBuffer,
         routedOffsets: MoEExpertOffsets,
@@ -968,7 +973,8 @@ final class MoE {
         }
         encodeSpecPhase2Reduce(
             encoder: encoder,
-            expertPool: expertPool,
+            poolBases: poolBases,
+            poolChunks: poolChunks,
             poolSlotStride: poolSlotStride,
             resolvedSlots: resolvedSlots,
             routedOffsets: routedOffsets,
@@ -985,7 +991,8 @@ final class MoE {
 
     func encodeSpecPhase2Reduce(
         encoder: MTLComputeCommandEncoder,
-        expertPool: MTLBuffer,
+        poolBases: MTLBuffer,
+        poolChunks: [MTLBuffer],
         poolSlotStride: UInt64,
         resolvedSlots: MTLBuffer,
         resolvedSlotsOffset: Int = 0,
@@ -1014,7 +1021,8 @@ final class MoE {
             useRealDecodeConstants(d: d, f: f, topK: topK)
                 ? specPhase2SpecializedPSO
                 : specPhase2PSO)
-        encoder.setBuffer(expertPool, offset: 0, index: 0)
+        encoder.setBuffer(poolBases, offset: 0, index: 0)
+        for chunk in poolChunks { encoder.useResource(chunk, usage: .read) }
         var offsets = routedOffsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         encoder.setBuffer(acts, offset: 0, index: 2)

@@ -187,7 +187,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private let eventCoordinator: ExpertIOEventCoordinator?
     private var slotPointers: [UnsafeMutableRawPointer]
     private var slotBuffers: [MTLBuffer]
+    /// The cell's global offset, the slot's identity; `slotChunkOffsets` is
+    /// the offset inside `slotBuffers[slot]`, what the GPU is handed.
     private var slotBufferOffsets: [UInt64]
+    private var slotChunkOffsets: [UInt64]
     private let arena: ExpertCellArena
     private let residencyTable: MTLBuffer
     private let residencyWords: UnsafeMutablePointer<UInt64>
@@ -318,10 +321,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             range = 0..<slotCount
         }
         self.arena = cells
+        var chunkOffsets: [UInt64] = []
+        chunkOffsets.reserveCapacity(slotCount)
         for cell in range {
             pointers.append(cells.pointer(cell: cell))
-            buffers.append(cells.buffer)
+            buffers.append(cells.buffer(cell: cell))
             bufferOffsets.append(cells.offset(cell: cell))
+            chunkOffsets.append(cells.bufferOffset(cell: cell))
         }
 
         self.boundedReader = try ParallelExpertReader(
@@ -333,6 +339,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.slotPointers = pointers
         self.slotBuffers = buffers
         self.slotBufferOffsets = bufferOffsets
+        self.slotChunkOffsets = chunkOffsets
         self.slotExpert = [Int](repeating: -1, count: slotCount)
         self.slotLastUse = [Int](repeating: 0, count: slotCount)
         self.slotState = [SlotState](repeating: .empty, count: slotCount)
@@ -494,7 +501,9 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 landings[experts[index]] = nil
                 freedCells[experts[index]] = cell
                 slotPointers[slot] = arena.pointer(cell: landing.cell)
+                slotBuffers[slot] = arena.buffer(cell: landing.cell)
                 slotBufferOffsets[slot] = arena.offset(cell: landing.cell)
+                slotChunkOffsets[slot] = arena.bufferOffset(cell: landing.cell)
                 slotExpert[slot] = experts[index]
                 slotLastUse[slot] = clock
                 slotState[slot] = .resident
@@ -631,14 +640,15 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         precondition(plan.assignedSlots.count == plan.experts.count,
                      "expert cache plan slot count mismatch")
         return plan.assignedSlots.map { slot in
-            (slotBuffers[slot], slotBufferOffsets[slot], layout.expertStride)
+            (slotBuffers[slot], slotChunkOffsets[slot], layout.expertStride)
         }
     }
 
     public func expertResidencyResources() -> ExpertResidencyResources {
         ExpertResidencyResources(
             table: residencyTable,
-            expertPool: arena.buffer,
+            poolBases: arena.bases,
+            poolChunks: arena.chunkBuffers,
             poolSlotStride: UInt64(poolSlotStride),
             expertStride: layout.expertStride,
             expertCount: layout.expertsPerLayer)

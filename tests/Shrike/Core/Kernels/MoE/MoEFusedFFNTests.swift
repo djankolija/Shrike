@@ -191,7 +191,7 @@ import ShrikeValidationSupport
         let specCommand = context.queue.makeCommandBuffer()!
         try kernel.encodeSpecPhase1U16Load(
             commandBuffer: specCommand,
-            expertPool: pool,
+            poolBases: Self.poolBases(context.device, pool), poolChunks: [pool],
             poolSlotStride: UInt64(poolSlotStride),
             resolvedSlots: resolvedSlots,
             routedOffsets: blobs[0].offsets,
@@ -370,7 +370,7 @@ import ShrikeValidationSupport
             let command = context.queue.makeCommandBuffer()!
             try kernel.encodeSpecPhase1U16Load(
                 commandBuffer: command,
-                expertPool: pool,
+                poolBases: Self.poolBases(context.device, pool), poolChunks: [pool],
                 poolSlotStride: UInt64(poolSlotStride),
                 resolvedSlots: resolvedSlots,
                 routedOffsets: blobs[0].offsets,
@@ -382,7 +382,7 @@ import ShrikeValidationSupport
                 indirectArguments: indirectArgs)
             try kernel.encodeSpecPhase2Reduce(
                 commandBuffer: command,
-                expertPool: pool,
+                poolBases: Self.poolBases(context.device, pool), poolChunks: [pool],
                 poolSlotStride: UInt64(poolSlotStride),
                 resolvedSlots: resolvedSlots,
                 routedOffsets: blobs[0].offsets,
@@ -632,6 +632,7 @@ import ShrikeValidationSupport
         let routedBuffers: [MTLBuffer]
         let argumentBuffer: MTLBuffer
         let pool: MTLBuffer
+        let poolBases: MTLBuffer
         let poolSlotStride: Int
         let resolvedSlots: MTLBuffer
         let missSlots: MTLBuffer
@@ -706,7 +707,7 @@ import ShrikeValidationSupport
         return OneEncoderFixture(
             context: context, kernel: kernel, elementwise: elementwise,
             routedBuffers: routedBuffers, argumentBuffer: argumentBuffer,
-            pool: pool, poolSlotStride: poolSlotStride,
+            pool: pool, poolBases: Self.poolBases(context.device, pool), poolSlotStride: poolSlotStride,
             resolvedSlots: resolvedSlots, missSlots: missSlots, missPositions: missPositions,
             indirectArgs: indirectArgs, xBuffer: xBuffer, routingBuffer: routingBuffer,
             zeroResidual: zeroResidual, residual: residual, offsets: blobs[0].offsets)
@@ -719,7 +720,7 @@ import ShrikeValidationSupport
         let hidden = try #require(Fp16Buffer.make(fixture.context.device, values: fixture.residual))
         let command = fixture.context.queue.makeCommandBuffer()!
         try fixture.kernel.encodeSpecPhase1U16Load(
-            commandBuffer: command, expertPool: fixture.pool,
+            commandBuffer: command, poolBases: fixture.poolBases, poolChunks: [fixture.pool],
             poolSlotStride: UInt64(fixture.poolSlotStride), resolvedSlots: fixture.resolvedSlots,
             routedOffsets: fixture.offsets, x: fixture.xBuffer, acts: acts,
             d: UInt32(Self.dimension), f: UInt32(Self.intermediate), topK: UInt32(Self.topK),
@@ -751,7 +752,7 @@ import ShrikeValidationSupport
         let command = fixture.context.queue.makeCommandBuffer()!
         let encoder = try #require(command.makeComputeCommandEncoder())
         fixture.kernel.encodeSpecPhase1U16Load(
-            encoder: encoder, expertPool: fixture.pool,
+            encoder: encoder, poolBases: fixture.poolBases, poolChunks: [fixture.pool],
             poolSlotStride: UInt64(fixture.poolSlotStride), resolvedSlots: fixture.resolvedSlots,
             routedOffsets: fixture.offsets, x: fixture.xBuffer, acts: acts,
             d: UInt32(Self.dimension), f: UInt32(Self.intermediate), topK: UInt32(Self.topK),
@@ -815,20 +816,20 @@ import ShrikeValidationSupport
         let command = fixture.context.queue.makeCommandBuffer()!
         let encoder = try #require(command.makeComputeCommandEncoder())
         fixture.kernel.encodeSpecPhase1U16Load(
-            encoder: encoder, expertPool: fixture.pool,
+            encoder: encoder, poolBases: fixture.poolBases, poolChunks: [fixture.pool],
             poolSlotStride: UInt64(fixture.poolSlotStride), resolvedSlots: fixture.resolvedSlots,
             routedOffsets: fixture.offsets, x: fixture.xBuffer, acts: acts,
             d: UInt32(Self.dimension), f: UInt32(Self.intermediate), topK: UInt32(Self.topK),
             indirectArguments: args)
         fixture.kernel.encodeSpecPhase1U16Load(
-            encoder: encoder, expertPool: fixture.pool,
+            encoder: encoder, poolBases: fixture.poolBases, poolChunks: [fixture.pool],
             poolSlotStride: UInt64(fixture.poolSlotStride), resolvedSlots: agreed,
             routedOffsets: fixture.offsets, x: fixture.xBuffer, acts: acts,
             d: UInt32(Self.dimension), f: UInt32(Self.intermediate), topK: UInt32(Self.topK),
             indirectArguments: args, indirectOffset: MoE.fixupPhase1ArgsOffset,
             ioStatus: status)
         fixture.kernel.encodeSpecPhase2Reduce(
-            encoder: encoder, expertPool: fixture.pool,
+            encoder: encoder, poolBases: fixture.poolBases, poolChunks: [fixture.pool],
             poolSlotStride: UInt64(fixture.poolSlotStride), resolvedSlots: fixture.resolvedSlots,
             fallbackCells: agreed,
             routedOffsets: fixture.offsets, acts: acts, routingWeights: fixture.routingBuffer,

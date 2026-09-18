@@ -126,9 +126,10 @@ extension Args {
       --repetition-penalty <f>  Repetition penalty (default 1.0).
       --seed <uint64>           Deterministic sampling seed (default off).
       --stop <string>           Stop substring (repeatable).
-      --expert-cache-slots <n>  Routed-expert cache slots per layer: 8, 16,
-                                24, 32, 64, 96, or 128 (default 64). More
-                                slots raise the hit rate but use more memory.
+      --expert-cache-slots <n>  Routed-expert cache slots per layer: 8, 16, 24,
+                                32, 64, 96, 128, 160, 192, 224 or 256
+                                (default 64). More slots raise the hit rate but
+                                use more memory.
       --prefill-chunk <n|auto>  Prefill chunk tokens. Larger chunks reduce
                                 routed-expert file sweeps but use more GPU
                                 scratch. Allowed: 32, 64, 128, 256, 512,

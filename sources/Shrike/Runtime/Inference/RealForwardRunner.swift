@@ -357,6 +357,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let residency = Self.makePoolResidency(context: context)
         self.poolResidency = residency.holder
         self.poolResidencyUnavailableReason = residency.unavailableReason
+        try model.configureExpertArena(chunkBytes: runtimeConfiguration.expertArenaChunkBytes)
         self.predictivePrefetch = try Self.makePredictivePrefetch(model: model)
         self.prefetchTraceFD = try Self.openPrefetchTrace(runtimeConfiguration.prefetchTracePath)
         self.anePrefill = try Self.makeANEPrefill(
@@ -4564,7 +4565,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 detail: "routed-MoE prefill on layer \(L) without a router view")
         }
         if let poolResidency {
-            poolResidency.include(try model.routedExpertResidency(layer: L).expertPool)
+            for chunk in try model.routedExpertResidency(layer: L).poolChunks {
+                poolResidency.include(chunk)
+            }
         }
         try prefillRouter.encodeBlock(
                     commandBuffer: cb,
@@ -5131,7 +5134,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let topK = UInt32(cfg.topKExperts)
         moe.encodeSpecPhase1U16Load(
             encoder: encoder,
-            expertPool: residency.expertPool,
+            poolBases: residency.poolBases,
+            poolChunks: residency.poolChunks,
             poolSlotStride: residency.poolSlotStride,
             resolvedSlots: agreedCells, resolvedSlotsOffset: cellsOffset,
             routedOffsets: offsets,
@@ -5142,7 +5146,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ioStatus: token.status, ioStatusOffset: token.statusOffset)
         moe.encodeSpecPhase2Reduce(
             encoder: encoder,
-            expertPool: residency.expertPool,
+            poolBases: residency.poolBases,
+            poolChunks: residency.poolChunks,
             poolSlotStride: residency.poolSlotStride,
             resolvedSlots: residencyResolvedSlots,
             fallbackCells: agreedCells, fallbackCellsOffset: cellsOffset,
@@ -5518,7 +5523,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         residency: ExpertResidencyResources,
         arguments: MoE.SpeculativeDispatchArguments
     ) throws {
-        let pool = residency.expertPool
         if !cfg.hasSharedExpert {
             try encodeSharedExpertZeroFill(into: cb)
         }
@@ -5536,7 +5540,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         moe.encodeSpecPhase1U16Load(
             encoder: encoder,
-            expertPool: pool,
+            poolBases: residency.poolBases,
+            poolChunks: residency.poolChunks,
             poolSlotStride: residency.poolSlotStride,
             resolvedSlots: residencyResolvedSlots,
             routedOffsets: offsets,
@@ -5548,7 +5553,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             indirectArguments: arguments.arguments)
         moe.encodeSpecPhase2Reduce(
             encoder: encoder,
-            expertPool: pool,
+            poolBases: residency.poolBases,
+            poolChunks: residency.poolChunks,
             poolSlotStride: residency.poolSlotStride,
             resolvedSlots: residencyResolvedSlots,
             routedOffsets: offsets,
