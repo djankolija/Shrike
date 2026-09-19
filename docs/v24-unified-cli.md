@@ -10,7 +10,7 @@ nothing here should move a token.
 ## Why
 
 Three changes, one argv break. All three are argv-visible, and argv here is a
-production contract: the mini's launch line lives in this repo's CLAUDE.md, eight
+production contract: the mini's launch line lives in this repo's CLAUDE.md, seven
 tools shell out to these binaries, and every consumer is in this repo, which is
 what makes changing it tractable at all. Done apart, they would move that launch
 line three times.
@@ -85,8 +85,9 @@ answers is therefore *can this value be changed on the dev box alone?*
 The rule that is **not** applied: moving settled values to configuration keys.
 An earlier draft proposed it; the owner's ruling is that a value tweaked rarely
 during development belongs in source, since a dev-only CLI flag buys no
-flexibility that the `SHRIKE_*` environment layer (15 names, tripwired since
-v17) does not already provide better. Configuration stays small: `models_dir`,
+flexibility that the `SHRIKE_*` environment layer (15 names when this was
+written, 13 after T4b, tripwired since v17) does not already provide better.
+Configuration stays small: `models_dir`,
 the default model, and the three keys it already has.
 
 **generate** (24): 21 keep, 3 delete
@@ -345,11 +346,12 @@ The root declares no options at all.
 Two costs of the resolution, both taken deliberately. `shrike --help` lists
 subcommands with `generate (default)` rather than generation's flags, so
 discovering them needs `shrike generate --help`; the alternative was the silent
-break above. And a bare `shrike` is currently a **usage error at exit 64**,
-printing `Error: Missing expected argument '--model <dir>'` above the root's
-help, because generate's `--model` is still required. Task 3 makes it optional so
-it can resolve from configuration, which is what turns a bare invocation into
-something useful.
+break above. And a bare `shrike` was, **as Task 2 left it**, a usage error at
+exit 64 printing `Error: Missing expected argument '--model <dir>'` above the
+root's help, because generate's `--model` was still required. Task 3 made it
+optional so it can resolve from configuration: a bare `shrike` is still a usage
+error at exit 64, but it now names `one of --prompt or --messages-file is
+required`, the one thing that genuinely cannot be resolved.
 
 ## The shape
 
@@ -379,10 +381,12 @@ bench children were settled at step zero.
 3. The models directory's only servable bundle, when it holds exactly one.
 4. Otherwise an error naming the ids it found.
 
-Rules 1 and 2 already exist for the server: `ModelRoster.defaultID` is set only
-by an override carrying `default: true`, which is why v23 had to fix `--preload`
-exiting 64 when no default was configured. Rule 3 is the one new rule, and it
-means a machine with one model installed needs no configuration file at all.
+Rules 2 and 3 already exist for the server: `ModelRoster.defaultID` is set by an
+override carrying `default: true`, which is why v23 had to fix `--preload`
+exiting 64 when no default was configured, and it already falls back to the sole
+entry. **No rule here is new** — an earlier draft called rule 3 the one new rule
+and that was wrong (see "Two findings that are not flags"). What this chapter
+adds is not a rule but a caller: generate never invoked the chain at all.
 
 A second piece follows from it: **generate's** `--model` accepts an id as well as
 a path. A value naming an existing directory is taken as a path; anything else is
@@ -415,7 +419,7 @@ either machine today, so nothing on disk migrates.
 `ModelResolver` joins them, split so the half that matters is testable without
 touching the filesystem: `resolve(requested:in:)` takes a roster and is pure,
 while `resolve(requested:configPath:modelsDir:)` loads the config and scans
-around it. Rules 1 and 3 turn out to need no new code at all, since
+around it. Rules 2 and 3 turn out to need no new code at all, since
 `ModelRoster.resolve` already sets `defaultID` from a `default: true` override
 and already falls back to the sole entry.
 
@@ -507,7 +511,7 @@ and already falls back to the sole entry.
 
 **Per-model sampling defaults.** `GenerationDefaults` (`Sampler.swift:6`) is one
 global set, temperature 0.6, top-k 20, top-p 0.95, read both by generate for its
-flag defaults (`ShrikeCLICommand.swift:82,86,90`) and by the server as its
+flag defaults (`ShrikeGenerateCommand.swift:70,74,78`) and by the server as its
 per-request fallback (`OpenAIModels.swift:361`). Those are Qwen3's recommended
 values and they are applied to all six installed bundles, `gpt-oss-20b` and
 `kimi-linear-48b` included, so this is a correctness gap rather than a tidiness
@@ -518,7 +522,7 @@ overriding for one invocation: **not** a replacement for the flags, since
 runs on a box with no checkout. Deferred to its own chapter because it breaks no
 argv and so does not need this chapter's break (owner's ruling, 2026-09-19). Two
 smaller drifts belong with it: `--repetition-penalty` defaults to an inline `1.0`
-at `ShrikeCLICommand.swift:93` where its three siblings come from
+at `ShrikeGenerateCommand.swift:81` where its three siblings come from
 `GenerationDefaults`, and `GenerationDefaults.presencePenalty` is exposed by no
 flag at all.
 
@@ -553,3 +557,90 @@ running, and the file was confirmed present at that path. But it hardcodes a
 string encoding both the package name and a target name, and it would fail at
 runtime rather than at compile time if either moved. Recorded here as a known
 bound, not fixed in this chapter.
+
+## The close
+
+Five executables became one `shrike` with a verb tree, the model resolves from
+configuration, and the flag surface lost 16 distinct flags across 19 slots.
+Sources net **−206 lines over 31 files**; with the tests and the documents the
+branch is +1,776/−804 over 67. No runtime or kernel code changed, and
+`tools/golden-baseline.sh --check` was byte-identical on all five profiles at
+every task, not only at the close.
+
+### What this chapter got wrong about itself
+
+Eight of its own claims were false when written, and **every one died on a
+command rather than on a reading**. That is the chapter's own rule from the plan —
+a claim about what a binary does costs one run of the binary — earning its keep a
+second time, after v23 recorded it having killed four claims at that close.
+
+- **`bench` is compiled out of release builds.** Asserted three times, and the
+  justification for excluding seven flags from the shipped surface. It was never
+  implemented: `shrike --help` from the release binary lists `bench` and
+  `ShrikeRootCommand.swift` has no `#if DEBUG`. It must not be implemented
+  either, because the benches run on the mini and the mini has no toolchain, so
+  they reach it only inside the one deployed binary. Declared change 5 is
+  withdrawn on measurement and the shipped surface is the whole 36.
+- **Seventeen flags deleted.** Sixteen. `--model-id` was classified *delete* on
+  serve while it survives on `repack import-snapshot`, so it is a declaration
+  removed from a surviving flag, not a flag deleted.
+- **The result table's per-command rows.** Stale from before the
+  `--rope-scaling` correction, and contradicting the section headers directly
+  above them. `--help` agrees with the headers: generate 21, serve 10.
+- **"Rule 3 is the one new rule."** No rule was new; `ModelRoster` already had
+  all four. What this chapter added was a caller, since generate never invoked
+  the chain. The document contradicted itself about this in three places.
+- **"Rules 1 and 3 need no new code."** Rules 2 and 3.
+- **The bare-`shrike` paragraph** still described Task 2's exit-64 message after
+  Task 3 had replaced it.
+- **"Eight tools shell out to these binaries."** Seven; T2 found one of the eight
+  unrunnable and the correction never left its commit message.
+- **"27 in the shipped surface"** in the plan, against 28 in the spec, against an
+  actual 36 — three numbers for one quantity.
+
+### What the review caught that the gates could not
+
+The four gates and 1,153 passing tests were green on a branch that would have
+**silently downgraded production on its next deploy**. `tools/mini-deploy.sh's`
+`--restart` launched `--ram-budget 8G` with neither `SHRIKE_EXPERT_SLOT_TABLE`
+nor `SHRIKE_EXPERT_POLICY`, while its own header called that "the production
+launch command": the uniform pool instead of the per-layer table, aging-LFU
+instead of SLRU, and 128 slots instead of 160. The launch line was last touched
+at v17; v20 T1 added the two variables and v22 T3 raised the budget, and neither
+chapter updated the script. Nothing could have caught it but a reader diffing
+the script against CLAUDE.md, because a bare launch takes the built-in defaults
+and starts perfectly happily — the exact quiet loss CLAUDE.md records for
+`NVMAI_*`. It is fixed here, and `architecture.md` now says the two must stay
+byte-for-byte identical.
+
+The review also found five living sections of `architecture.md` and one runnable
+instruction in `ane-prefill.md` still naming retired binaries, four stale line
+citations beyond the seven T4b had already corrected, and a docstring this
+chapter itself wrote whose two halves disagreed about whether `forced` is absent
+or null in a dump sidecar.
+
+### What the gates caught that a reader would not
+
+The traffic ran both ways, which is the argument for keeping both.
+
+- **`RepackCLITests` failed on argv the compiler could not see.** It spawns the
+  built binary with arguments as a Swift array, so two cases using `--resume`
+  compiled cleanly and failed at run time. v23 recorded this exact shape.
+- **A SIGBUS crash from stale build products.** Removing seven stored properties
+  changed `ShrikeServerCommand`'s layout; one edited test file recompiled while
+  its untouched siblings kept old-layout `outlined destroy` helpers. The trap
+  has two faces: a link error when a symbol disappears, a crash when a layout
+  changes and every symbol still resolves. Touching files fixes only the first.
+  v19's lesson already prescribed the remedy, clean the build after a struct's
+  layout change.
+
+### The lesson worth carrying
+
+A consumer count by flag spelling is not a consumer count. `--force-tokens` read
+as zero consumers because `tools/logit-compare.py` names the capability in prose
+and never the flag, and deleting it cost the only way to hold two builds on one
+token sequence past an argmax flip. The disposition still stands and the runtime
+field remains, but the cost is now recorded beside it, and a second sweep by
+*concept* rather than by spelling found both the second instance
+(`restore_fidelity_probe.py`) and a defect that was not a flag at all:
+`SHRIKE_MODEL` sitting in an allow-list with no reader.

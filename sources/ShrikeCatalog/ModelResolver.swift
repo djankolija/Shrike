@@ -49,9 +49,13 @@ public enum ModelResolver {
         let config = try loadConfig(path: configPath)
         let directory = modelsDirectory(flag: modelsDir, config: config)
         let scan = try ModelRoster.scanBundles(in: directory)
-        let roster = try ModelRoster.resolve(candidates: scan.candidates,
+        let roster: ModelRoster
+        do {
+            roster = try ModelRoster.resolve(candidates: scan.candidates,
                                              overrides: config.models)
-        guard !roster.ids.isEmpty else {
+        } catch ModelRosterError.emptyRoster {
+            // The roster's own "no servable model bundles found" cannot name the
+            // directory it scanned, which is the one thing a first run needs.
             throw ModelResolutionError.emptyCatalog(directory: directory.path)
         }
         return try resolve(requested: requested, in: roster)

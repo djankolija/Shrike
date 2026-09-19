@@ -693,7 +693,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             tokenizer.dialect == .harmony ? .stripped : (reasoningRetention ?? .asGenerated)
         if tokenizer.dialect == .harmony, reasoningRetention == .asGenerated {
             FileHandle.standardError.write(Data(
-                "warning: --reasoning-retention as-generated is structural on Harmony; forcing stripped\n".utf8))
+                "warning: reasoning retention as-generated is structural on Harmony; forcing stripped\n".utf8))
         }
         // A caller managing model residency supplies its own context so one
         // MTLCommandQueue and one compiled shader library survive across

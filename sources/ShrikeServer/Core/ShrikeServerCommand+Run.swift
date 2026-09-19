@@ -87,6 +87,6 @@ extension ShrikeServerCommand {
     private func announce(registry: ModelRegistry,
                           effective: ShrikeServerCommand,
                           roster: ModelRoster) {
-        print("ShrikeServer ready at http://127.0.0.1:\(effective.port) models=\(registry.ids.joined(separator: ",")) default=\(roster.defaultID ?? "none") context=\(effective.maxContext) thinking=\(effective.thinkingMode.rawValue) reasoning_effort=\(effective.reasoningEffort?.rawValue ?? "auto")")
+        print("shrike serve ready at http://127.0.0.1:\(effective.port) models=\(registry.ids.joined(separator: ",")) default=\(roster.defaultID ?? "none") context=\(effective.maxContext) thinking=\(effective.thinkingMode.rawValue) reasoning_effort=\(effective.reasoningEffort?.rawValue ?? "auto")")
     }
 }

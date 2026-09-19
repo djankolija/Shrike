@@ -13,7 +13,8 @@ Five commits. The checkboxes here are the status of record.
 - The four gates before any task is called done: `swift build -c release` (zero
   warnings), `swiftlint lint --strict`, `python3 tools/check-md-links.py`,
   `swift test --no-parallel`. ThreadSanitizer once at the close.
-- No new `SHRIKE_*` variable. Fifteen distinct names exist in `sources/` today.
+- No new `SHRIKE_*` variable. Fifteen distinct names existed in `sources/` when
+  this was written; T4b took two away and left thirteen.
 - Never `git add docs/` wholesale.
 - Commit subjects in the repo's style, ending `(v24 Tn)`. No `Co-Authored-By`.
 - Comments only for a non-obvious why. Not for narrating the migration.
@@ -67,10 +68,10 @@ onto the root that Task 4 then deletes.
       flag declared by more than one command is checked for one contract. One
       instance is already found: `--max-context` is enforced against
       `RuntimeConfiguration.supportedContextTokens` by the server
-      (`ShrikeServerCommand.swift:272`, help and error rendered from the same
-      constant, which was v23's fix) and against a **range** by generate,
-      `1...nativeMaximumContextTokens` in `validateContext()`
-      (`ShrikeCLICommand.swift:227`). Both validate; they disagree on the
+      (`ShrikeServerCommand.swift:151`, help and error rendered from the same
+      constant at `:106`, which was v23's fix) and against a **range** by
+      generate, `1...nativeMaximumContextTokens` in `validateContext()`
+      (`ShrikeGenerateCommand.swift:201`). Both validate; they disagree on the
       contract. The defaults differ too, 4096 against 262144. Under one root
       these become siblings in one help tree, so the drift is resolved rather
       than inherited.
@@ -79,7 +80,7 @@ onto the root that Task 4 then deletes.
 - [x] Link check, commit. Text only. (`b6dee21`, the link check clean at 84 files.)
 
 The count is not a target. The aim discussed at the outset was roughly a dozen;
-the evidence supports 27 in the shipped surface, and going below that would mean
+the evidence supports 36 in the shipped surface, and going below that would mean
 deleting working behaviour rather than removing cost. The owner's reservation
 that several survivors still are not worth their cost is recorded in the spec's
 Out of scope, so a later chapter can reopen it from rule 3 rather than from
@@ -241,18 +242,32 @@ Sixteen distinct flags across nineteen slots. `--rope-scaling` is a keep, and
 
 ### Task 5: the close
 
-- [ ] ThreadSanitizer over the suite:
+- [x] ThreadSanitizer over the suite:
       `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test --no-parallel --sanitize=thread`.
-- [ ] Fresh-reader review of the whole branch against `main`, pointed at the
+      **Clean**: zero reports, 1,153 tests in 152 suites, 854 s. The suppressions
+      file was not touched and no report matched its shape.
+- [x] Fresh-reader review of the whole branch against `main`, pointed at the
       documents as well as the code. At v23's close this found two argv
-      regressions that four green gates and 1,332 tests had not.
-- [ ] Fold the findings in one labelled commit, naming the owning commit per
+      regressions that four green gates and 1,332 tests had not. **At this close
+      it found no severity-1 defect in the code and 27 findings between the two
+      passes**, the worst of them not in this branch at all: `mini-deploy.sh`'s
+      `--restart` had relaunched the pre-v22 configuration since v20 T1, while
+      its own header called it the production launch command.
+- [x] Fold the findings in one labelled commit, naming the owning commit per
       finding. Record the deviation, as v23 did.
-- [ ] `docs/architecture.md`: the v24 history entry, and every stale reference to
-      five binaries or to the retired spellings.
-- [ ] `README.md`: the product list becomes one binary.
-- [ ] The design doc's close: what this chapter got wrong about itself, and what
-      the review caught that the gates could not.
+- [x] `docs/architecture.md`: the v24 history entry, and every stale reference to
+      five binaries or to the retired spellings. The close review found five
+      living sections still naming them (`## The serving layer` twice, the
+      `--dump-hidden` instrument bullet, both bench instrument bullets, and the
+      `mini-deploy.sh` tooling line) plus one runnable instruction in
+      `docs/ane-prefill.md`; historical chapter records keep theirs.
+- [x] `README.md`: the product list becomes one binary. **Already done by T2**
+      (`a8a12d6`): "One binary lands in `.build/release/`: `shrike`". Verified at
+      the close rather than repeated; the close review found no retired spelling
+      and no deleted flag anywhere in it.
+- [x] The design doc's close: what this chapter got wrong about itself, and what
+      the review caught that the gates could not — and, since the traffic ran
+      both ways, what the gates caught that a reader would not.
 - [ ] Final four gates on the final state, plus `tools/golden-baseline.sh --check`
       byte-identical on all five profiles against a release build of that state.
 - [ ] **Owner's go required:** deploy to the mini, relaunch production on the new

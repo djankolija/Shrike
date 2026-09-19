@@ -295,7 +295,7 @@ load (`RealForwardRunner.swift:577`) rather than serve it slower without a word;
 tests load their toy shape.
 
 **Kept by:** v19 ([v19-scan-rewrite.md](v19-scan-rewrite.md)). The chapter's ladder on
-the mini, through the `ShrikeAttnBench` executable, found the shipped kernel bound by
+the mini, through what is now `shrike bench attention`, found the shipped kernel bound by
 its loop form, not by memory: a static trip count with the explicit fused multiply was
 2.7× on the kernel and bit for bit the shipped output (Task 2, class 1; the slope 2.23
 to 0.72 ms per 1,000 context tokens per decoded token); the streaming structure a
@@ -503,24 +503,24 @@ before any tensor check (`Model.swift:676`, `:858`).
 
 ## The serving layer
 
-`ShrikeServer` serves an OpenAI-compatible API on loopback over `ServerModelSession`
+`shrike serve` serves an OpenAI-compatible API on loopback over `ServerModelSession`
 (`ServerInference.swift`): the tokenizer and its dialect (ChatML, Harmony), the prompt
 cache, the structured decoders for thinking and tool calls
 ([v7-reasoning-effort.md](v7-reasoning-effort.md),
 [v8-emission-form-tool-calls.md](v8-emission-form-tool-calls.md)), the runner counters on
-the runner line. `ShrikeCLI` drives one generation for the golden baseline. Multi-model
-serving is recorded
+the runner line. `shrike generate` drives one generation for the golden baseline.
+Multi-model serving is recorded
 in [multi-model-serving.md](multi-model-serving.md); the channel-faithful turn design in
 [channel-faithful-turns.md](channel-faithful-turns.md).
 
 ## The four invariants of v4, re-verified at v17's close
 
 1. **RAM budget is an input, not an outcome.** Still true. `--ram-budget`
-   (`ShrikeServerCommand.swift:200`, the option's own transform over
+   (`ShrikeServerCommand.swift:89`, the option's own transform over
    `RuntimeConfiguration.parseBudgetBytes`) defaults to 8 GiB
    (`defaultExpertCacheBudgetBytes`, `RuntimeConfiguration.swift:104`); the slot count is
    the ladder value (8 to 256 since v22) nearest budget over stride times routed layers
-   (`expertCacheSlots`, `:137`, resolved at `ServerInference.swift:785`), or, under
+   (`expertCacheSlots`, `:137`, resolved at `ServerInference.swift:786`), or, under
    `SHRIKE_EXPERT_SLOT_TABLE`, the per-layer table whose total must equal that count
    times the routed layers; the arena is sized from the sum plus the ring's nine, in as
    many chunks as the device's `maxBufferLength` needs. The mini runs a budget of
@@ -633,17 +633,18 @@ is [v17-consolidation.md](v17-consolidation.md)'s Task 4 table.
   token sequence by construction; `--temperature 0 --seed <n>` holds them on one
   sequence as long as they agree, and `GenerationConfig.forcedTokens` remains for a
   chapter that needs the stronger form back.
-- `ShrikeCLI --dump-hidden <file>`: every position's fp16 residual before the final
+- `shrike generate --dump-hidden <file>`: every position's fp16 residual before the final
   norm, the prompt's rows then the answer's, with a JSON sidecar of the positions; a
   `HiddenSink` beside the logits sink that forces the plain pass, fed from the prefill
   chunk (a blit out of the private scratch) and from each decode pass after its command
   completes (the Q3 close, 2026-09-18). With `tools/q3-drafter-routes.py` it replays the
   MTP drafter over a run and scores route predictors against the route trace.
-- `ShrikeAttnBench`: the decode attention scan on synthetic rows at the served shape,
-  the production pipeline through the wrapper, the shipped kernel's copy with one switch
-  per function constant, and the streaming prototype; deployed to the mini beside the
-  CLI (v19).
-- `ShrikeExpertBench`: the decode phase-1 gate/up kernel on eight real experts of a
+- `shrike bench attention`: the decode attention scan on synthetic rows at the served
+  shape, the production pipeline through the wrapper, the shipped kernel's copy with one
+  switch per function constant, and the streaming prototype. It runs on the mini, which
+  has no toolchain, so it reaches that box only inside the one deployed binary — which
+  is why v24 withdrew its plan to compile the `bench` verb out of release (v19).
+- `shrike bench expert`: the decode phase-1 gate/up kernel on eight real experts of a
   layer read from the `.gturbo`, the production pipeline itself as the plain arm and any
   variant held to bit-identity against it, timed with the GPU kept busy by a batch of
   dispatches per command buffer (v21's step zero, which closed the lossless-compression
@@ -679,8 +680,9 @@ is [v17-consolidation.md](v17-consolidation.md)'s Task 4 table.
   submission that waited them out; `cb2_ms`, `io_hidden_pct`, `io_fixup_wake_ms`,
   `path_pin_ms`, `path_fixup_build_ms`, `path_fixup_commit_to_kernel_ms`,
   `io_host_waits_avoided` and `path_router_wake_ms` went with the paths they measured.
-- `tools/mini-deploy.sh`: the release binaries and their bundles to the mini, optionally
-  a restart at the production launch.
+- `tools/mini-deploy.sh`: the one release binary and its bundles to the mini, optionally
+  a restart at the production launch, whose env and flags must stay byte-for-byte
+  CLAUDE.md's line (v24's close found they had not been since v20 T1).
 
 ## History
 
@@ -805,3 +807,27 @@ the status of record.
   reached only three of the five; and Repack could exit 2 with nothing on stderr. Argv is
   a production contract, so the invocations that exist were pinned first, before any
   parser changed, and they still parse unedited. No runtime or kernel code changed.
+- v24 ([v24-unified-cli.md](v24-unified-cli.md)): one shrike, one verb tree. The Mac app
+  and its decode service went first as a leaf island (five targets, 12,248 lines), then
+  the five remaining executables became one `shrike` over `ShrikeRootCore`, with
+  generation reached bare through ArgumentParser's `defaultSubcommand` and `serve`,
+  `repack` and `bench` as verbs. Three designs died on measured behaviour before that
+  one: a root carrying a required option refuses to dispatch, a root's `validate()` runs
+  for every subcommand, and a flag name shared between root and subcommand binds to the
+  **root**, so `shrike serve --model X` reached serve with `model` nil and silently
+  ignored six flags including the mini's launch line. The model resolves from
+  `~/.shrike/config.json` instead of being named on every invocation, `ServerConfig`
+  becoming `ShrikeConfig` in a new `ShrikeCatalog` target that both the server and the
+  CLI depend on. The flag surface was trimmed against a three-rule test (a launch line,
+  gate or rig that runs on the mini; naming what to operate on; a per-invocation
+  product choice): **16 distinct flags across 19 slots**, leaving generate 21, serve 10,
+  repack 5, bench 7, 36 in all. Where a flag was the only way to reach working code the
+  argument went and the code stayed, as a defaulted parameter the call site stops
+  passing, so the prompt cache's modes, the disk cache, the prefill chunk and reasoning
+  retention are all still constructible and are now pinned by a test where none existed
+  before. Two environment names left the registry with them, 15 to 13, one of them
+  `SHRIKE_MODEL`, whose reader had died with the Mac app: `refuseUnknownEnvironment`
+  reads the registry as an allow-list, so a stale entry is silently accepted rather than
+  refused, which is the one way that tripwire can fail quietly. No runtime or kernel
+  code changed, and the golden baseline was byte-identical on all five profiles at every
+  task.

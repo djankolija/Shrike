@@ -6,7 +6,13 @@ v24's trim: `--model-id`, `--models-dir`, `--preload`, `--idle-unload-seconds`,
 machinery and the prompt cache they selected did not, and the cache's settled
 values are `ModelSessionPlan` defaults now. Its open question about the disk cache
 rehydrating across a swap is therefore still open and now costs an edit to ask.
-See [v24-unified-cli.md](v24-unified-cli.md).
+
+Two lines of the **config format** below were corrected rather than left as the
+record, because this is the only place that format is documented and a reader
+following it would have been misled rather than merely dated: the file is
+`~/.shrike/config.json`, not `server.json`, and `idle_unload_seconds` is no
+longer a key — `ShrikeConfig` does not reject unknown keys, so it would have been
+accepted and silently discarded. See [v24-unified-cli.md](v24-unified-cli.md).
 
 ## Objective
 
@@ -101,7 +107,7 @@ filesystem already guarantees unique bundle names within a directory.
 ```json
 {
   "models_dir": "~/shrike-runtime/models",
-  "defaults": { "max_context": 32768, "ram_budget": "6G", "idle_unload_seconds": 0 },
+  "defaults": { "max_context": 32768, "ram_budget": "6G" },
   "models": [
     { "dir": "kimi-linear-48b-a3b-4bit.gturbo", "id": "kimi-linear-48b-a3b" },
     { "dir": "gpt-oss-20b-mlx-4bit.gturbo",     "id": "gpt-oss-20b", "default": true },
@@ -119,7 +125,7 @@ today, the two carrying HF repo paths.
 entry and more than one model in the roster, an omitted `model` is an error naming the
 valid ids — the same error an unknown id produces.
 
-Default location `~/.shrike/server.json`, selected with `--config`. Precedence is
+Default location `~/.shrike/config.json`, selected with `--config`. Precedence is
 flag > config > built-in default, resolved in memory. **A flag never writes back into the
 config file**: a launch argument that becomes a permanent setting defeats the purpose of
 being an argument, and makes a value fixed live revert on the next restart.

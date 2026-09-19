@@ -6,7 +6,7 @@ compared position by position: the KL divergence old to new, the largest logit
 difference, and every argmax flip with the old build's top-2 margin. Give both
 runs `--temperature 0 --seed <n>` so they decode one sequence for as long as they
 agree; v24 retired `--force-tokens`, which held them on one sequence by
-construction, so `forced` is absent from sidecars written since. The band is a multiple of the median over positions of the largest
+construction, so `forced` is null in every sidecar written since. The band is a multiple of the median over positions of the largest
 logit difference (the median, so one bad position cannot widen the band and
 hide the rest); a flip inside the band is variance, a flip outside it is a
 defect, a position whose largest difference is far above the median is a defect

@@ -67,6 +67,11 @@ def build_prompt() -> str:
 
 def launch(quant: str, ane: bool, log_name: str) -> None:
     binary = ROOT / ".build/arm64-apple-macosx/release/shrike"
+    # Two things must change if shrike_profile is ever restored: server_command
+    # has to emit the `serve` verb, which the one-binary tree needs, and
+    # cache_mode has no argv spelling at all since v24 retired
+    # --prompt-cache-mode, so "off" must be reached by constructing the
+    # ModelSessionPlan rather than by a flag.
     cmd = server_command(binary, PORT, model=MODELS[quant], cache_mode="off")
     env = server_environment()
     env["SHRIKE_PREFILL_ANE"] = "on" if ane else "off"

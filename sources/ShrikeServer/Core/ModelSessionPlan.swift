@@ -112,7 +112,7 @@ public struct ModelSessionPlan: Sendable {
     public func previewFacts(modelID: String) throws -> ModelSessionFacts {
         let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
         // Mirrors the precedence in ServerModelSession.load: an explicit
-        // --prefill-chunk wins, otherwise qwen36 takes the long-prefill chunk
+        // prefillChunkTokens wins, otherwise qwen36 takes the long-prefill chunk
         // and anything else takes the runtime default. Family is the only
         // input, and family comes from the manifest.
         let resolvedChunk = prefillChunkTokens

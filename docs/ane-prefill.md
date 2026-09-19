@@ -40,7 +40,7 @@ numbers are in [Research](#research) below.
 ~/.venvs/coreml-py311/bin/python tools/export_ane_prefill.py \
     --model models/ornith-1.5_35B_A3B_4Bit --max-history 12288
 
-SHRIKE_PREFILL_ANE=on .build/release/ShrikeServer --model ... # or ShrikeCLI
+SHRIKE_PREFILL_ANE=on .build/release/shrike serve --model ...   # or: shrike generate
 ```
 
 `SHRIKE_PREFILL_ANE` accepts `off|on` and fails closed on anything else. With
