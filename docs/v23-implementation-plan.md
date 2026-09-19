@@ -1,0 +1,135 @@
+# v23 the argument surface: implementation plan
+
+**Goal:** five hand-rolled parsers and their `main.swift` plumbing replaced by
+`ParsableCommand`s that own their own entry points.
+
+**Spec:** [v23-argument-parsing.md](v23-argument-parsing.md).
+
+Six commits. The checkboxes here are the status of record.
+
+## Constraints
+
+- The four gates before any task is called done: `swift build -c release` (zero
+  warnings), `swiftlint lint --strict`, `python3 tools/check-md-links.py`,
+  `swift test --no-parallel`. ThreadSanitizer once at the close.
+- No new `SHRIKE_*` variable. The registry holds 15 names and a test pins the
+  count.
+- `docs/v10-implementation-plan.md` is a peer's uncommitted edit. Never `git add`
+  it, and never `git add docs/` wholesale.
+- Commit subjects in the repo's style, ending `(v23 Tn)`. No `Co-Authored-By`.
+- Comments only for a non-obvious why. Not for narrating the migration.
+
+---
+
+### Task 1: pin the invocations that exist
+
+Before changing any parser, assert that the command lines actually in use parse.
+Not a generated corpus: the real ones.
+
+- [x] Collect every invocation from `tools/decode-rig.sh`, `tools/turn-rig.sh`,
+      `tools/golden-baseline.sh`, `tools/mini-deploy.sh`,
+      `tools/expert-pool-replay.py`, `tools/prefill-ledger.py`,
+      `tools/logit-compare.py`, `tools/ane-probes/shrike_ane_prefill_ab.py`, plus
+      the mini's launch line in `CLAUDE.md`.
+- [x] Add them as cases in `tests/Shrike/Core/CLI/CLIArgumentsTests.swift` and a
+      new `tests/ShrikeServer/ServerArgumentsTests.swift`, asserting each parses
+      and that the values land where expected.
+- [x] Gates, commit.
+
+Repack and the two benches are executable targets, so their invocations cannot be
+tested until their own tasks move the parsing into a command type. Pin them there.
+
+---
+
+### Task 2: ShrikeCLI
+
+- [ ] Add `swift-argument-parser` to `Package.swift` and to `ShrikeCLICore`.
+- [ ] `Args` becomes a `ParsableCommand` with `@main`: flags as declared
+      properties, the cross-flag rules in `validate()`, `run()` calling the
+      existing `run(args:)` in `Run.swift`.
+- [ ] `--top-k`'s "0 means off" and `--prefill-chunk`'s `auto` are expressed as
+      the option's own type, not as sentinel values checked after the fact.
+- [ ] Delete `Args.usage`, `ParseContext`, `makeArgs`, `takeValue`, `takeInt`,
+      `takeRawValue`.
+- [ ] `sources/ShrikeCLI/Command/main.swift` keeps only the SIGINT cancellation
+      bridge (`RunBox`, `drive`); its parse-and-exit block goes.
+- [ ] Task 1's tests still pass, unchanged. If one needs editing, the migration
+      is wrong.
+- [ ] Look at `swift run ShrikeCLI --help` once. The allowed slot counts must end
+      at 256 and nothing may run past the margin.
+- [ ] Gates, commit.
+
+Watch: `Run.swift:60` declares a free `func run(args:)` and `ParsableCommand`
+requires `run()`. Different labels, so no clash, but qualify if the compiler
+disagrees.
+
+---
+
+### Task 3: ShrikeServer
+
+- [ ] `ServerArguments` becomes a `ParsableCommand` with `@main`; its `run()`
+      takes the body currently in `sources/ShrikeServer/Command/main.swift` (87
+      lines after the parse block goes, so under the 120-line lint ceiling, but
+      decompose into stage methods if it grows).
+- [ ] `SHRIKE_REASONING_EFFORT` and `SHRIKE_REASONING_RETENTION` move out of
+      parsing to where the server assembles its config. `parse` takes argv only.
+- [ ] `--max-context`'s declared range becomes the one the code enforces. The
+      help says `4096...262144` and the parse accepts `1`; the type states it once
+      and the help follows. Keep the 262144 default: it is the native maximum and
+      is correct for a server.
+- [ ] An unknown flag reports as unknown. Today the value guard fires first, so
+      `ShrikeServer --bogus` claims a missing value.
+- [ ] Task 1's server tests still pass. The mini's launch line is the one that
+      matters.
+- [ ] Gates, commit.
+
+---
+
+### Task 4: ShrikeRepack, as four subcommands
+
+- [ ] Move parsing out of `sources/ShrikeRepack/Command/main.swift` into
+      `ShrikeRepackCore`, which `ShrikeRepackTests` already depends on.
+- [ ] A root command with `subcommands: [Install, ImportSnapshot, VerifyInstall,
+      DiscardPartial]`, each holding only the flags it needs and its own `run()`.
+      The mode-validation block and the silent `return 2` both disappear.
+- [ ] `--model` keeps its name inside `Install`, where a catalog name is the only
+      thing it could mean.
+- [ ] Update the three sites citing the old spelling: `CLAUDE.md:35`,
+      `README.md:41`, `VerifiedInstallReceipt.swift:171`.
+- [ ] Note Repack alone passes unstripped `CommandLine.arguments` today and skips
+      element 0 itself. `@main` removes that entirely; make sure nothing else
+      relies on it.
+- [ ] Add its invocation tests.
+- [ ] Gates, commit.
+
+---
+
+### Task 5: the two benches
+
+- [ ] `ShrikeExpertBench` and `ShrikeAttnBench` each get a `ParsableCommand` with
+      `@main`. Split a core library out of each executable target so the
+      arguments are testable; leave `resources: [.copy("Metal")]` and the
+      `Bundle.module` users in the executable.
+- [ ] `--seed` parses the same way in both. AttnBench's hex form wins, since the
+      defaults in both are written as hex literals. Neither help documents a
+      format today, so this is tidying, not a fix.
+- [ ] `--arms` and `--positions` stay comma-split single values, not repeated
+      flags: an arm name cannot contain a comma and this is the existing surface.
+- [ ] AttnBench's `--list` becomes a subcommand, since it makes the binary do
+      something else and ignore everything.
+- [ ] Add their invocation tests.
+- [ ] Gates, commit.
+
+---
+
+### Task 6: the close
+
+- [ ] `docs/architecture.md`: a v23 entry in History, and correct anything about
+      how the binaries parse arguments.
+- [ ] Tick this plan's boxes; record the close in the design doc.
+- [ ] ThreadSanitizer once:
+      `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test --no-parallel --sanitize=thread`
+- [ ] `tools/golden-baseline.sh --check`. No kernel or runtime code changed, so it
+      should be identical; run it anyway since it is the only check that
+      exercises real inference. Counts as a model run, so `pgrep` first.
+- [ ] Merge on Davor's go, delete the branch, update memory.
