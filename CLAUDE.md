@@ -10,11 +10,11 @@ What the project is, which models it supports and how to use it belong in
 
 ## Never run two model processes
 
-Before anything that loads a model — a server, the app, the CLI, a benchmark, or the golden
+Before anything that loads a model — a server, the CLI, a benchmark, or the golden
 baseline — check:
 
 ```bash
-pgrep -fl 'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI|ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
+pgrep -fl 'ShrikeServer|ShrikeCLI|ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 ```
 
 If something is already running, **stop and say so**. Never terminate a process you did not

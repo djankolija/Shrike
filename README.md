@@ -4,8 +4,8 @@ An inference engine for mixture-of-experts models that are larger than the machi
 RAM. Routed experts stay on SSD and are read per token into a bounded cache, so the
 memory ceiling is a number you declare rather than one you discover.
 
-It serves an OpenAI-compatible HTTP API on loopback, and also ships a CLI, a native
-Mac app, and a repacking tool.
+It serves an OpenAI-compatible HTTP API on loopback, and also ships a CLI and a
+repacking tool.
 
 ## Requirements
 
@@ -20,9 +20,8 @@ Mac app, and a repacking tool.
 swift build -c release
 ```
 
-Products land in `.build/release/`: `ShrikeServer`, `ShrikeCLI`, `ShrikeRepack`,
-`ShrikeMac`, and `ShrikeDecodeService` (an out-of-process decode
-helper the Mac app spawns; not run directly).
+Products land in `.build/release/`: `ShrikeServer`, `ShrikeCLI`, `ShrikeRepack`, and the
+two benchmarks, `ShrikeAttnBench` and `ShrikeExpertBench`.
 
 ## Install a model
 

@@ -508,8 +508,8 @@ before any tensor check (`Model.swift:676`, `:858`).
 cache, the structured decoders for thinking and tool calls
 ([v7-reasoning-effort.md](v7-reasoning-effort.md),
 [v8-emission-form-tool-calls.md](v8-emission-form-tool-calls.md)), the runner counters on
-the runner line. `ShrikeCLI` drives one generation for the golden baseline; `ShrikeMac`
-spawns `ShrikeDecodeService` out of process over a socket. Multi-model serving is recorded
+the runner line. `ShrikeCLI` drives one generation for the golden baseline. Multi-model
+serving is recorded
 in [multi-model-serving.md](multi-model-serving.md); the channel-faithful turn design in
 [channel-faithful-turns.md](channel-faithful-turns.md).
 

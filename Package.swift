@@ -13,8 +13,6 @@ let package = Package(
         .executable(name: "ShrikeCLI", targets: ["ShrikeCLI"]),
         .executable(name: "ShrikeAttnBench", targets: ["ShrikeAttnBench"]),
         .executable(name: "ShrikeExpertBench", targets: ["ShrikeExpertBench"]),
-        .executable(name: "ShrikeMac", targets: ["ShrikeMac"]),
-        .executable(name: "ShrikeDecodeService", targets: ["ShrikeDecodeService"]),
         .executable(name: "ShrikeServer", targets: ["ShrikeServer"]),
     ],
     dependencies: [
@@ -126,28 +124,6 @@ let package = Package(
             path: "sources/ShrikeExpertBench/Command"
         ),
         .target(
-            name: "ShrikeAppCore",
-            dependencies: ["Shrike", "ShrikeRepackCore", "ShrikeDecodeProtocol"],
-            path: "sources/ShrikeApp/Core",
-            resources: [
-                .copy("Resources/app-prompts.json"),
-            ]
-        ),
-        .target(
-            name: "ShrikeMacPresentation",
-            dependencies: ["ShrikeAppCore"],
-            path: "sources/ShrikeApp/MacPresentation"
-        ),
-        .target(
-            name: "ShrikeDecodeProtocol",
-            path: "sources/ShrikeDecodeProtocol"
-        ),
-        .executableTarget(
-            name: "ShrikeDecodeService",
-            dependencies: ["ShrikeAppCore", "ShrikeDecodeProtocol"],
-            path: "sources/ShrikeDecodeService"
-        ),
-        .target(
             name: "ShrikeServerCore",
             dependencies: [
                 "Shrike",
@@ -163,14 +139,6 @@ let package = Package(
             name: "ShrikeServer",
             dependencies: ["ShrikeServerCore"],
             path: "sources/ShrikeServer/Command"
-        ),
-        .executableTarget(
-            name: "ShrikeMac",
-            dependencies: ["ShrikeAppCore", "ShrikeMacPresentation"],
-            path: "sources/ShrikeApp/Mac",
-            resources: [
-                .copy("Resources/shrike-app-icon.png"),
-            ]
         ),
         .target(
             name: "ShrikeValidationSupport",
@@ -193,21 +161,6 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "tests/ShrikeRepack/Core"
-        ),
-        .testTarget(
-            name: "ShrikeAppCoreTests",
-            dependencies: ["ShrikeAppCore", "Shrike", "ShrikeRepackCore", "ShrikeDecodeProtocol"],
-            path: "tests/ShrikeApp/Core"
-        ),
-        .testTarget(
-            name: "ShrikeDecodeServiceTests",
-            dependencies: ["ShrikeDecodeService", "ShrikeAppCore", "ShrikeDecodeProtocol"],
-            path: "tests/ShrikeDecodeService"
-        ),
-        .testTarget(
-            name: "ShrikeMacPresentationTests",
-            dependencies: ["ShrikeAppCore", "ShrikeMacPresentation"],
-            path: "tests/ShrikeApp/MacPresentation"
         ),
         .testTarget(
             name: "ShrikeBenchTests",

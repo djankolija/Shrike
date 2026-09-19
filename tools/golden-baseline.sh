@@ -91,7 +91,7 @@ fi
 
 # CLAUDE.md: never run alongside another model process, and never terminate one
 # we did not start. Refuse rather than race.
-if pgrep -f 'ShrikeServer|ShrikeMac|ShrikeDecodeService|ShrikeCLI|ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' >/dev/null 2>&1; then
+if pgrep -f 'ShrikeServer|ShrikeCLI|ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' >/dev/null 2>&1; then
   echo "a model process is already running; stop it yourself, then re-run" >&2
   exit 3
 fi
