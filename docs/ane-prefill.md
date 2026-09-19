@@ -1,5 +1,27 @@
 # Shrike ANE prefill (experimental, opt-in)
 
+> ⚠ **Inherited document, not a Shrike record. Take every number here with a grain
+> of salt.** This file came in with the fork from the turbo-fieldfare lineage and
+> predates every chapter in this directory. It does not follow the
+> `vN-<subject>.md` plus implementation-plan convention the real chapters use, no
+> chapter's checkboxes cover it, and **nothing in it was measured on either of this
+> project's boxes** — the result below is an M3 with 24 GB, while the deploy target
+> is the M1 mini with 16 GB and this box is an M4 Pro.
+>
+> Read it as a list of hazards to re-measure, not as findings. Specifically
+> unverified here: the 2.31x end-to-end and 26.7x offloadable-block speedups, the
+> per-layer-kind time split, the one-resident arena policy with its decode-collapse
+> figure, and the per-layer-chunk reload cost. The hazards themselves are still
+> worth knowing: fixed enumerated shapes with chunk-aligned history, the Core ML
+> arena's RAM cost, per-layer model reload, fp16 divergence from the GPU path, and
+> the fused SDPA op's NaN/inf above sequence 2048.
+>
+> Any re-measurement has to account for v22
+> ([v22-pool-capacity.md](v22-pool-capacity.md)): the mini now runs an 11.33 GB
+> expert pool on a 16 GB box at 15 to 17 % free, so a ~1 GB Core ML arena comes
+> straight out of expert slots. The trade that doc never had to price — attention
+> time saved against pool slots lost — is the first thing an ANE chapter would owe.
+
 Routes the prefill attention block of every full-attention layer through the
 Neural Engine via a Core ML sidecar. GDN layers, the MoE, the `.gturbo`
 format, the KV cache, the server API, and all of decode are untouched. Off by
