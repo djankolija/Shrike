@@ -89,8 +89,9 @@ import Testing
             "SHRIKE_EXPERT_CACHE_SLOTS",
             "SHRIKE_LAYER_TRACE", "SHRIKE_GPU_CAPTURE_DIR", "SHRIKE_CACHE_DIAG",
             "SHRIKE_GEN_DIAG", "SHRIKE_PHASES",
+            "SHRIKE_REASONING_RETENTION", "SHRIKE_MODEL",
         ]
-        #expect(deleted.count == 53)
+        #expect(deleted.count == 55)
         var environment = Dictionary(uniqueKeysWithValues: deleted.map { ($0, "1") })
         environment["PATH"] = "/usr/bin"
         #expect(throws: RuntimeConfigurationError.unknownEnvironment(deleted.sorted())) {
@@ -98,9 +99,9 @@ import Testing
         }
     }
 
-    @Test func theSurvivingFifteenPass() throws {
+    @Test func theSurvivingThirteenPass() throws {
         let names = RuntimeConfiguration.knownEnvironmentNames
-        #expect(names.count == 15)
+        #expect(names.count == 13)
         try RuntimeConfiguration.refuseUnknownEnvironment(
             Dictionary(uniqueKeysWithValues: names.map { ($0, "1") }))
     }

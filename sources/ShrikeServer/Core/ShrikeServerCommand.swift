@@ -4,8 +4,6 @@ import Shrike
 import ShrikeArgumentSupport
 import ShrikeCatalog
 
-extension ServerPromptCacheMode: ExpressibleByArgument {}
-
 public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
     public static let configuration = CommandConfiguration(
         commandName: "serve",
@@ -45,34 +43,6 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
             help: ArgumentHelp("Context scaling: none or yarn.", valueName: "mode"))
     public var ropeScalingMode: RuntimeRoPEScalingMode = .none
 
-    @Option(name: .customLong("prompt-cache-mode"),
-            help: ArgumentHelp("Prompt KV reuse mode.", valueName: "mode"))
-    public var promptCacheMode: ServerPromptCacheMode = .multiPrefix
-
-    @Option(name: .customLong("prompt-cache-entries"),
-            help: ArgumentHelp("Maximum retained prefixes, 1...64.", valueName: "count"))
-    public var promptCacheMaximumEntries = 4
-
-    @Option(name: .customLong("prompt-cache-memory-mib"),
-            help: ArgumentHelp("RAM snapshot budget, 0...4096.", valueName: "MiB"))
-    public var promptCacheMemoryMiB = 256
-
-    @Option(name: .customLong("prompt-cache-disk"),
-            help: ArgumentHelp("Optional persistent SSD cache directory.", valueName: "dir"))
-    public var promptCacheDiskDirectory: String?
-
-    @Option(name: .customLong("prompt-cache-disk-mib"),
-            help: ArgumentHelp("SSD snapshot budget, 0...65536.", valueName: "MiB"))
-    public var promptCacheDiskMiB = 8_192
-
-    @Option(name: .customLong("prefill-chunk"),
-            help: ArgumentHelp("""
-                Prefill chunk size: 32, 64, 128, 256, 512, 1024, 2048 or 4096 \
-                (default 4096 for supported 35B-A3B text models).
-                """,
-                valueName: "tokens"))
-    public var prefillChunkTokens: Int?
-
     @Option(name: .customLong("kv-bits"),
             help: ArgumentHelp("KV-cache storage precision: 4, 8 or 16.", valueName: "bits"))
     public var kvCachePrecision: KVCachePrecision = .int8
@@ -94,16 +64,6 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
                 """,
                 valueName: "level"))
     public var reasoningEffort: ReasoningEffort?
-
-    @Option(name: .customLong("reasoning-retention"),
-            help: ArgumentHelp("""
-                History-turn render form: as-generated or stripped (default \
-                as-generated, or SHRIKE_REASONING_RETENTION). as-generated renders \
-                turns as the model produced them (no settle rewrites); stripped \
-                keeps the v6 canonical re-render. Harmony always strips.
-                """,
-                valueName: "form"))
-    public var reasoningRetention: ReasoningRetention?
 
     @Option(name: .customLong("expert-cache-slots"),
             help: ArgumentHelp("""
@@ -164,37 +124,19 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
         guard (1...65_535).contains(port) else {
             throw ValidationError("--port must be between 1 and 65535")
         }
-        guard (1...64).contains(promptCacheMaximumEntries) else {
-            throw ValidationError("--prompt-cache-entries must be between 1 and 64")
-        }
-        guard (0...4_096).contains(promptCacheMemoryMiB) else {
-            throw ValidationError("--prompt-cache-memory-mib must be between 0 and 4096")
-        }
-        guard (0...65_536).contains(promptCacheDiskMiB) else {
-            throw ValidationError("--prompt-cache-disk-mib must be between 0 and 65536")
-        }
         try validateOptionalMemberships()
         try Self.validateMaxContext(maxContext, ropeScalingMode: ropeScalingMode)
     }
 
     private func validateOptionalMemberships() throws {
-        if let prefillChunkTokens,
-           !RuntimeConfiguration.allowedPrefillChunkTokens.contains(prefillChunkTokens) {
-            throw ValidationError("--prefill-chunk must be one of "
-                + RuntimeConfiguration.allowedPrefillChunkTokens.map(String.init)
-                    .joined(separator: ", "))
-        }
         if let expertCacheSlots,
            !RuntimeConfiguration.allowedExpertCacheSlots.contains(expertCacheSlots) {
             throw ValidationError("--expert-cache-slots must be one of "
                 + RuntimeConfiguration.allowedExpertCacheSlots.map(String.init)
                     .joined(separator: ", "))
         }
-        for (value, flag) in [(configPath, "--config"),
-                              (promptCacheDiskDirectory, "--prompt-cache-disk")] {
-            if let value, value.isEmpty {
-                throw ValidationError("\(flag) must not be empty")
-            }
+        if let configPath, configPath.isEmpty {
+            throw ValidationError("--config must not be empty")
         }
     }
 
@@ -214,7 +156,7 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
     }
 
     /// Resolved in memory: a flag beats a config default (`max_context`,
-    /// `ram_budget`) and beats an environment setting (the three `SHRIKE_*`
+    /// `ram_budget`) and beats an environment setting (the two `SHRIKE_*`
     /// below); no setting has both layers. A flag never writes back into the
     /// config file, and parsing itself reads neither.
     public func merging(
@@ -241,10 +183,6 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
            ReasoningEffort(rawValue: raw.lowercased()) == nil {
             throw ValidationError("SHRIKE_REASONING_EFFORT must be low, medium or high")
         }
-        if let raw = environment["SHRIKE_REASONING_RETENTION"],
-           ReasoningRetention(rawValue: raw.lowercased()) == nil {
-            throw ValidationError("SHRIKE_REASONING_RETENTION must be as-generated or stripped")
-        }
     }
 
     private mutating func resolveFromEnvironment(_ environment: [String: String]) throws {
@@ -254,9 +192,6 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
         }
         if reasoningEffort == nil {
             reasoningEffort = ReasoningEffort.resolved(environment: environment)
-        }
-        if reasoningRetention == nil {
-            reasoningRetention = ReasoningRetention.resolved(environment: environment)
         }
     }
 }

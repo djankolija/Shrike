@@ -379,19 +379,10 @@ public actor ModelRegistry {
             let plan = ModelSessionPlan(
                 modelDirectory: entry.directory,
                 maxContext: arguments.maxContext,
-                promptCacheMode: arguments.promptCacheMode,
-                promptCacheMaximumEntries: arguments.promptCacheMaximumEntries,
-                promptCacheMemoryLimitBytes: arguments.promptCacheMemoryMiB * 1_048_576,
-                promptCacheDiskDirectory: arguments.promptCacheDiskDirectory.map {
-                    URL(fileURLWithPath: $0).standardizedFileURL
-                },
-                promptCacheDiskLimitBytes: arguments.promptCacheDiskMiB * 1_048_576,
-                prefillChunkTokens: arguments.prefillChunkTokens,
                 kvCachePrecision: arguments.kvCachePrecision,
                 ropeScalingMode: arguments.ropeScalingMode,
                 thinkingMode: arguments.thinkingMode,
                 reasoningEffort: arguments.reasoningEffort,
-                reasoningRetention: arguments.reasoningRetention,
                 expertCacheSlots: arguments.expertCacheSlots,
                 expertCacheBudgetBytes: arguments.expertCacheBudgetBytes)
             let facts = try plan.previewFacts(modelID: entry.id)

@@ -79,14 +79,6 @@ public enum ReasoningEffort: String, Codable, CaseIterable, Sendable {
 public enum ReasoningRetention: String, Codable, CaseIterable, Sendable {
     case asGenerated = "as-generated"
     case stripped
-
-    public static func resolved(
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> ReasoningRetention? {
-        environment["SHRIKE_REASONING_RETENTION"].flatMap {
-            ReasoningRetention(rawValue: $0.lowercased())
-        }
-    }
 }
 
 /// Tokenizer wrapper for the compatible Qwen3.5-MoE ChatML model family.

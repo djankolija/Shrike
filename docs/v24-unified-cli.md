@@ -132,7 +132,7 @@ the default model, and the three keys it already has.
 | `--expert-cache-slots` | slots per layer | 3 | keep |
 | `--ram-budget` | bytes the expert cache may use | 8 | keep, launch line |
 | `--rope-scaling` | none or yarn | 0 | keep, selects a live path |
-| `--model-id` | API model identifier | 4 | **delete**, proven redundant |
+| `--model-id` | API model identifier | 4 | **delete from serve**, proven redundant; the flag itself stays on `repack import-snapshot` |
 | `--models-dir` | directory scanned for bundles | 0 | **delete** |
 | `--preload` | load the default model at startup | 0 | **delete** |
 | `--queue-limit` | maximum queued requests | 0 | **delete**, no test either |
@@ -153,13 +153,25 @@ takes its behaviour with it in the better direction: a partial download is
 already saved, so resuming becomes automatic and `discard-partial` is how you
 say "start over".
 
-**bench** (7 distinct): all keep, **behind a debug-only verb**. `--arms`,
-`--positions`, `--repeats`, `--warmup`, `--layer`, `--experts`, `--batch` have no
-external consumer once the three false positives above are removed, but a bench
-with hardcoded arms is not a bench. `mini-deploy.sh` already copies only
-`ShrikeServer`, `ShrikeCLI` and `ShrikeRepack`, so the benches are already not
-deployed; `bench` is compiled out of release builds and its flags stop counting
-against the shipped surface.
+**bench** (7 distinct): all keep, **and they count against the shipped surface**.
+`--arms`, `--positions`, `--repeats`, `--warmup`, `--layer`, `--experts` and
+`--batch` have no external consumer once the three false positives above are
+removed, but a bench with hardcoded arms is not a bench.
+
+An earlier draft of this section said `bench` would be compiled out of release
+builds, on the reasoning that `mini-deploy.sh` copied only `ShrikeServer`,
+`ShrikeCLI` and `ShrikeRepack`, so the benches were already not deployed. **Both
+halves of that are now wrong, and T4b killed the claim by running the binary**
+(the plan's rule: a claim about what a binary does costs one run of it).
+`shrike --help` from `.build/arm64-apple-macosx/release/shrike` lists `bench`
+among its subcommands, and `ShrikeRootCommand.swift` carries no `#if DEBUG`, so
+nothing was ever compiled out. It must not be, either: unification left one
+binary, `mini-deploy.sh` copies it whole, and **the benches are run on the mini**,
+which `v19-scan-rewrite.md:119` records as having no toolchain
+(`v19-scan-rewrite.md:181`, `:571`, `:936`, `:984` and
+`v21-compression.md:187`, `:272`). Their flags therefore survive rule 1 on the
+same evidence as any launch line, rather than by exemption, and the shipped
+surface is the whole 36.
 
 ### Two findings that are not flags
 
@@ -182,17 +194,34 @@ calls it.
 
 ### The result
 
+Counted from `--help` on the built binary at T4b, not from the tables above:
+
 | command | before | after |
 | --- | ---: | ---: |
-| generate | 24 | 20 |
-| serve | 23 | 9 |
-| repack | 7 | 5 |
-| bench | 7 | 7, behind a debug verb |
+| generate | 24 | 21 |
+| serve | 23 | 10 |
+| repack | 7 distinct, 10 slots | 5 distinct, 7 slots |
+| bench | 7 | 7 |
 
-Seventeen flags deleted, 35 distinct remaining, 28 in the shipped surface. Six of
-serve's nine are in the mini's launch line today. The count is an output of the
-test above, not a target: the aim discussed was roughly a dozen, and the evidence
-did not support going below this without deleting working behaviour.
+**Sixteen distinct flags deleted, 36 distinct remaining**, all 36 in the shipped
+surface. Five of serve's ten are in the mini's launch line. The count is an
+output of the test above, not a target: the aim discussed was roughly a dozen,
+and the evidence did not support going below this without deleting working
+behaviour.
+
+Three earlier counts in this document were wrong, and all three are corrected
+here rather than left for the close:
+
+- **Sixteen, not seventeen.** The classification's basis is distinct flags, which
+  is what makes T1's "18 delete, 34 keep" sum to 52. But `--model-id` was
+  classified *delete* on serve and *keep* on repack, and it genuinely survives on
+  `repack import-snapshot`, so it is one declaration removed from a surviving
+  flag rather than a flag deleted. Nineteen slots go; sixteen distinct flags do.
+- **The per-command rows were stale.** They carried the pre-`--rope-scaling`
+  numbers while the section headers above had already been corrected to "21 keep,
+  3 delete" and "10 keep, 13 delete". The binary agrees with the headers.
+- **The shipped surface is 36, not 28.** It excluded bench's seven on the
+  strength of a compile-out that does not exist; see the bench paragraph.
 
 **The one dead flag.** `--lazy-load` documents itself as "This is the default;
 the flag remains accepted for compatibility", and the code agrees: `lazyLoad`
@@ -428,7 +457,8 @@ and already falls back to the sole entry.
    `--prompt` alone now parses with `model == nil`. A resolution failure surfaces
    at run rather than at parse, and exits 1 rather than 64, matching v23's ruling
    that a config failure is not a usage error.
-5. **The flag trim: 17 flags deleted**, per the inventory's disposition.
+5. **The flag trim: 16 distinct flags deleted** across 19 slots, per the
+   inventory's disposition and its corrections.
    `--rope-scaling` came off the list: it has no consumer, but it fails the other
    half of v17's rule, since YaRN is 131 occurrences across 17 files including
    `rope.metal` and `prefill.metal` and is the only way to reach the documented
@@ -452,8 +482,11 @@ and already falls back to the sole entry.
    startup warning, and `--resume` is replaced by resuming automatically when a
    partial exists, with `discard-partial` becoming how you start over.
 
-   `bench` is compiled out of release builds, taking seven more flags off the
-   shipped surface without deleting them.
+   `bench` was to be compiled out of release builds, taking seven more flags off
+   the shipped surface without deleting them. **Withdrawn in T4b on measurement:**
+   it never was compiled out, and it must not be, since the benches run on the
+   mini and the mini has no toolchain. Its seven flags are rule-1 keeps like any
+   other.
 6. **The process name collapses**, and the tooling that identifies a Shrike
    process by name must move with it. `tools/decode-rig.sh:58` and
    `tools/turn-rig.sh:66` use `pgrep -x ShrikeServer` as their "did the old

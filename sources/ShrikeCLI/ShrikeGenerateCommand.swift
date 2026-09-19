@@ -3,23 +3,6 @@ import Shrike
 import ShrikeCatalog
 import ShrikeArgumentSupport
 
-public enum PrefillChunkChoice: Equatable, Sendable {
-    case fixed(Int)
-    case auto
-}
-
-extension PrefillChunkChoice: ExpressibleByArgument {
-    public init?(argument: String) {
-        if argument == "auto" {
-            self = .auto
-            return
-        }
-        guard let parsed = Int(argument),
-              RuntimeConfiguration.allowedPrefillChunkTokens.contains(parsed) else { return nil }
-        self = .fixed(parsed)
-    }
-}
-
 public enum TopKChoice: Equatable, Sendable {
     case off
     case limit(Int)
@@ -110,14 +93,6 @@ public struct ShrikeGenerateCommand: ParsableCommand, Sendable {
         """,
         valueName: "n"))
     public var expertCacheSlots = 64
-
-    @Option(help: ArgumentHelp("""
-        Prefill chunk tokens: 32, 64, 128, 256, 512, 1024, 2048 or 4096; auto \
-        covers the prompt with the smallest allowed chunk. Larger chunks reduce \
-        routed-expert file sweeps but use more GPU scratch.
-        """,
-        valueName: "n|auto"))
-    public var prefillChunk: PrefillChunkChoice?
 
     @Option(name: .customLong("kv-bits"),
             help: ArgumentHelp("KV-cache storage precision: 4, 8 or 16.", valueName: "bits"))

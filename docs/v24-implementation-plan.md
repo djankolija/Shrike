@@ -40,8 +40,17 @@ onto the root that Task 4 then deletes.
       **70 slots, 52 distinct**, 14 flags declared by more than one command.
       Ambiguous consumer hits are opened, not counted: three of four checked were
       the consuming script's own `parser.add_argument`, not an invocation.
-- [x] Classify each against the test in the spec. **Result: 18 delete, 34 keep,
-      7 of the keeps behind a debug-only `bench` verb.**
+- [x] Classify each against the test in the spec. **Result as classified: 18
+      delete, 34 keep, 7 of the keeps behind a debug-only `bench` verb. Result as
+      built, counted from `--help` in T4b: 16 distinct flags deleted across 19
+      slots, 36 keep, none behind a debug verb.** Three counts in the
+      classification were wrong and the spec's inventory now records each with
+      its correction: `--model-id` was counted as a distinct deletion while it
+      survives on `repack import-snapshot`, the per-command rows were stale from
+      before the `--rope-scaling` correction, and the shipped surface excluded
+      bench's seven on the strength of a compile-out that was never implemented
+      and must not be, since the benches run on the mini and the mini has no
+      toolchain.
 - [ ] For every deletion candidate, name the code path that goes with it. v17's
       rule: the honest removal deletes a flag together with the path it selected.
       A flag with no path to delete is a suspicious deletion, not a free one.
@@ -178,7 +187,8 @@ here can only mean the harness moved.
 
 ### Task 4: the trim
 
-Seventeen flags, not eighteen: `--rope-scaling` is a keep, see the spec.
+Sixteen distinct flags across nineteen slots. `--rope-scaling` is a keep, and
+`--model-id` is a slot removed from a flag that survives elsewhere; see the spec.
 
 - [x] **T4a, the ten self-contained flags.** `--lazy-load`, `--preload`,
       `--models-dir`, `--queue-limit`, `--model-id` (serve only; it stays on
@@ -198,18 +208,34 @@ Seventeen flags, not eighteen: `--rope-scaling` is a keep, see the spec.
       which is the one hole in that tripwire. It leaves with
       `SHRIKE_REASONING_RETENTION` in T4b, since both are one edit to one `Set`
       and one count.
-- [ ] **T4b, the seven that reach `ModelSessionPlan`.** Per the owner's ruling
+- [x] **T4b, the seven that reach `ModelSessionPlan`.** Per the owner's ruling
       the argument goes and the code stays: give the `ModelSessionPlan` parameter
       a default and stop passing it from `ModelRegistry`, rather than freezing it
-      into a constant. Nothing follows into `ServerInference`.
-- [ ] Delete each flag's declaration, its `validate()` rule, and any path that
-      exists only to serve it.
-- [ ] Remove their help text, their tests, and every mention in `docs/` that
+      into a constant. Nothing follows into `ServerInference`. The ruling's shape
+      held for all six; `reasoningRetention` already carried a default, so
+      `ModelRegistry` only had to stop passing it.
+- [x] Delete each flag's declaration, its `validate()` rule, and any path that
+      exists only to serve it. Their parsing machinery went too:
+      `PrefillChunkChoice` with its `ExpressibleByArgument`, the
+      `ServerPromptCacheMode` conformance, the `ReasoningRetention` conformance
+      in `ShrikeArgumentSupport`, and `ReasoningRetention.resolved`, which had no
+      caller left once the flag and the environment name were both gone.
+- [x] Remove their help text, their tests, and every mention in `docs/` that
       describes them as live. Historical implementation plans keep theirs, as the
-      record of their own chapters.
-- [ ] Re-run Task 1's consumer sweep against the trimmed surface to confirm no
-      consumer names a deleted flag.
-- [ ] Four gates, golden `--check` byte-identical, commit.
+      record of their own chapters, and so does `multi-model-serving.md`, which is
+      a design doc but is equally the record of its own chapter; it carries a
+      dated pointer instead.
+- [x] Re-run Task 1's consumer sweep against the trimmed surface to confirm no
+      consumer names a deleted flag. **Done twice, and the second pass is the one
+      that mattered.** A sweep for flag spellings is not enough: `--force-tokens`
+      counted 0 consumers because `tools/logit-compare.py` names the capability in
+      prose and never the flag. The second pass swept each deletion's *concept*
+      across `tools/` and the living documents and found one more of the same
+      shape, `restore_fidelity_probe.py`'s two-pass A/B, plus a defect that is not
+      a flag at all: `SHRIKE_MODEL` in the environment registry with no reader.
+      Everything else was a false positive and is named in `ca5374f`'s message so
+      nobody re-checks it.
+- [x] Four gates, golden `--check` byte-identical, commit.
 
 ---
 

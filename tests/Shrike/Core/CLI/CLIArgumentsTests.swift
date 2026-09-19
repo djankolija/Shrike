@@ -24,7 +24,6 @@ import Testing
         #expect(arguments.seed == nil)
         #expect(arguments.stops.isEmpty)
         #expect(!arguments.quiet)
-        #expect(arguments.prefillChunk == nil)
         #expect(arguments.kvCachePrecision == .int8)
         #expect(arguments.ropeScalingMode == .none)
         #expect(arguments.thinkingMode == .off)
@@ -47,22 +46,6 @@ import Testing
             "--model", "m.gturbo", "--prompt", "hi",
             "--rope-scaling", "yarn", "--max-context", "262144",
         ]).contains("--max-context"))
-    }
-
-    @Test func prefillChunkParsesFixedAndAutoValues() throws {
-        let fixed = try ShrikeGenerateCommand.parse([
-            "--model", "m.gturbo", "--prompt", "hi", "--prefill-chunk", "4096",
-        ])
-        #expect(fixed.prefillChunk == .fixed(4_096))
-
-        let automatic = try ShrikeGenerateCommand.parse([
-            "--model", "m.gturbo", "--prompt", "hi", "--prefill-chunk", "auto",
-        ])
-        #expect(automatic.prefillChunk == .auto)
-
-        #expect(try rejection([
-            "--model", "m.gturbo", "--prompt", "hi", "--prefill-chunk", "8192",
-        ]).contains("--prefill-chunk"))
     }
 
     @Test func generationOptionsParseAndStopsRepeat() throws {
@@ -120,7 +103,8 @@ import Testing
     }
 
     @Test func theTrimmedGenerateFlagsNoLongerParse() {
-        for argv in [["--concise"], ["--force-tokens", "/tmp/ids.txt"]] {
+        for argv in [["--concise"], ["--force-tokens", "/tmp/ids.txt"],
+                     ["--prefill-chunk", "4096"], ["--prefill-chunk", "auto"]] {
             #expect(throws: (any Error).self) {
                 _ = try ShrikeGenerateCommand.parse(
                     ["--model", "m.gturbo", "--prompt", "hi"] + argv)
@@ -143,7 +127,7 @@ import Testing
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--help",
-            "--expert-cache-slots", "--prefill-chunk",
+            "--expert-cache-slots",
             "--kv-bits", "--rope-scaling", "--thinking",
             "--logits-head", "--dump-logits", "--dump-hidden",
             "--tokenize", "--follow-up",

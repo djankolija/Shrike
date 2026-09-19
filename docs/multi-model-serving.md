@@ -1,9 +1,12 @@
 # Multi-model serving — design
 
-The record of its own chapter, kept as written. Four of the flags it names went in
-v24's trim: `--model-id`, `--models-dir`, `--preload` and `--idle-unload-seconds`
-left argv, the roster and idle machinery they selected did not. See
-[v24-unified-cli.md](v24-unified-cli.md).
+The record of its own chapter, kept as written. Six of the flags it names went in
+v24's trim: `--model-id`, `--models-dir`, `--preload`, `--idle-unload-seconds`,
+`--prompt-cache-mode` and `--prompt-cache-disk` left argv; the roster, the idle
+machinery and the prompt cache they selected did not, and the cache's settled
+values are `ModelSessionPlan` defaults now. Its open question about the disk cache
+rehydrating across a swap is therefore still open and now costs an edit to ask.
+See [v24-unified-cli.md](v24-unified-cli.md).
 
 ## Objective
 

@@ -20,9 +20,15 @@ the 2026-08-27 tool-loop probe produced a byte-identical turn 1 (114 completion
 tokens, identical arguments_raw) across two different server binaries.
 
 RUN AS: two passes against two server configurations, then --compare.
-  pass 1:  server with --prompt-cache-mode off      -> restore_fidelity_off.json
-  pass 2:  server with --prompt-cache-mode multi-prefix -> restore_fidelity_on.json
+  pass 1:  server with the prompt cache OFF  -> restore_fidelity_off.json
+  pass 2:  server with the prompt cache ON   -> restore_fidelity_on.json
   then:    restore_fidelity_probe.py --compare
+
+v24 retired --prompt-cache-mode, so pass 1 is no longer reachable from argv. The
+mode is a ModelSessionPlan parameter defaulted to multi-prefix, which is pass 2;
+to run pass 1, build a server that constructs the plan with .off. The capability
+is intact and only the argument is gone, but this probe is a two-pass A/B and one
+of its passes now costs an edit rather than a flag.
 """
 import json
 import os

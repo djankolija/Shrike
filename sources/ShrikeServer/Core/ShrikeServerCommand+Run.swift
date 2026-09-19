@@ -87,10 +87,6 @@ extension ShrikeServerCommand {
     private func announce(registry: ModelRegistry,
                           effective: ShrikeServerCommand,
                           roster: ModelRoster) {
-        let diskCache = effective.promptCacheMode == .off
-            ? "off" : effective.promptCacheDiskDirectory ?? "off"
-        let cacheMemoryMiB = effective.promptCacheMode == .off
-            ? 0 : effective.promptCacheMemoryMiB
-        print("ShrikeServer ready at http://127.0.0.1:\(effective.port) models=\(registry.ids.joined(separator: ",")) default=\(roster.defaultID ?? "none") context=\(effective.maxContext) prompt_cache=\(effective.promptCacheMode.rawValue) prompt_cache_memory_mib=\(cacheMemoryMiB) prompt_cache_disk=\(diskCache) thinking=\(effective.thinkingMode.rawValue) reasoning_effort=\(effective.reasoningEffort?.rawValue ?? "auto") reasoning_retention=\(effective.reasoningRetention?.rawValue ?? "as-generated")")
+        print("ShrikeServer ready at http://127.0.0.1:\(effective.port) models=\(registry.ids.joined(separator: ",")) default=\(roster.defaultID ?? "none") context=\(effective.maxContext) thinking=\(effective.thinkingMode.rawValue) reasoning_effort=\(effective.reasoningEffort?.rawValue ?? "auto")")
     }
 }

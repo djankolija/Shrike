@@ -548,7 +548,7 @@ in [multi-model-serving.md](multi-model-serving.md); the channel-faithful turn d
 
 ## The knobs
 
-Fifteen `SHRIKE_*` names are read under `sources/`, counted from the tree: ten product
+Thirteen `SHRIKE_*` names are read under `sources/`, counted from the tree: eight product
 settings, four instruments and the ANE prefill switch. Nothing else selects a code path.
 Every performance choice the chapters measured is a constant at its winner, and the losing
 arm is deleted; git history and each chapter's design doc are the record of what the arms
@@ -557,19 +557,17 @@ were.
 | knob | read at | what it does |
 | --- | --- | --- |
 | `SHRIKE_THINKING_MODE` | `Tokenizer.swift:50` | off, on or `adaptive` thinking for a dialect that has it |
-| `SHRIKE_REASONING_EFFORT` | `Tokenizer.swift:68` (the server validates at `ShrikeServerCommand.swift:305`, at launch and again when it assembles its config, not while parsing) | low, medium or high, the default medium ([v7-reasoning-effort.md](v7-reasoning-effort.md)) |
-| `SHRIKE_REASONING_RETENTION` | `Tokenizer.swift:86` (validated at `ShrikeServerCommand.swift:309`, same two places) | `as-generated` or `stripped` reasoning in the turn's history ([v6.1-reasoning-retention.md](v6.1-reasoning-retention.md)) |
-| `SHRIKE_TOKENIZER_DIR` | `Tokenizer.swift:184` | an override tokenizer folder, unset by default |
-| `SHRIKE_MODEL` | `AppModelInstallDescriptor.swift:120` | the app's model selector, one of the roster's names |
+| `SHRIKE_REASONING_EFFORT` | `Tokenizer.swift:68` (the server validates at `ShrikeServerCommand.swift:182`, at launch and again when it assembles its config, not while parsing) | low, medium or high, the default medium ([v7-reasoning-effort.md](v7-reasoning-effort.md)) |
+| `SHRIKE_TOKENIZER_DIR` | `Tokenizer.swift:176` | an override tokenizer folder, unset by default |
 | `SHRIKE_STRIP_CLI_PROMPT` | `CLIStrip.swift:34` | drop a coding CLI's system and developer boilerplate from the prompt |
 | `SHRIKE_STRIP_TAGS` | `CLIStrip.swift:44` | the block tags that strip removes, `system-reminder` by default |
-| `SHRIKE_CONCISE_MODE` | `ServerInference.swift:934` | the per-quant concise instruction, off by default |
-| `SHRIKE_EXPERT_SLOT_TABLE` | `RuntimeConfiguration.swift:204` (the server and the CLI pass it at load) | a comma list or a JSON path of expert cache slots per layer, refused unless the count, the floor of 8, the dense layers' zeros and the budget's total hold; the uniform pool by default (v20 Task 1) |
-| `SHRIKE_EXPERT_POLICY` | `RuntimeConfiguration.swift:237` | `aging-lfu` (the default), `slru` or `slru:<share>`: the pool's eviction policy (v20 Task 1) |
-| `SHRIKE_RUNNER_STATS` | `ServerInference.swift:1936` (the runner's counters are always kept) | the runner line: the per-stage split every chapter's rows are read from |
-| `SHRIKE_KERNEL_STATS` | `RealForwardRunner.swift:1218` (the footer at `ServerInference.swift:1940`) | the per-kernel GPU timeline |
-| `SHRIKE_ROUTE_TRACE` | `RealForwardRunner.swift:1226` | a path: every layer's top-k, what the replay and the coverage tool read |
-| `SHRIKE_PREFETCH_TRACE` | `RuntimeConfiguration.swift:198` | a JSONL path: the ring's predictions, landings and misses per layer |
+| `SHRIKE_CONCISE_MODE` | `ServerInference.swift:935` | the per-quant concise instruction, off by default |
+| `SHRIKE_EXPERT_SLOT_TABLE` | `RuntimeConfiguration.swift:213` (the server and the CLI pass it at load) | a comma list or a JSON path of expert cache slots per layer, refused unless the count, the floor of 8, the dense layers' zeros and the budget's total hold; the uniform pool by default (v20 Task 1) |
+| `SHRIKE_EXPERT_POLICY` | `RuntimeConfiguration.swift:245` | `aging-lfu` (the default), `slru` or `slru:<share>`: the pool's eviction policy (v20 Task 1) |
+| `SHRIKE_RUNNER_STATS` | `ServerInference.swift:1937` (the runner's counters are always kept) | the runner line: the per-stage split every chapter's rows are read from |
+| `SHRIKE_KERNEL_STATS` | `RealForwardRunner.swift:1227` (the footer at `ServerInference.swift:1941`) | the per-kernel GPU timeline |
+| `SHRIKE_ROUTE_TRACE` | `RealForwardRunner.swift:1235` | a path: every layer's top-k, what the replay and the coverage tool read |
+| `SHRIKE_PREFETCH_TRACE` | `RuntimeConfiguration.swift:203` | a JSONL path: the ring's predictions, landings and misses per layer |
 | `SHRIKE_PREFILL_ANE` | `ANEPrefillAttention.swift:21` | `off` or `on`: the ANE prefill attention experiment ([ane-prefill.md](ane-prefill.md)) |
 
 The two pool names are what the mini's production launch sets (the launch line is in
@@ -578,17 +576,21 @@ The two stats names are what `tools/mini-deploy.sh` sets at the production launc
 `tools/decode-rig.sh` and `tools/turn-rig.sh` set on every launch of theirs, the rig adding
 the route trace and, under `PREFETCH_TRACE=1`, the prefetch trace.
 
-One tripwire guards the set. `RuntimeConfiguration.refuseUnknownEnvironment`
-(`RuntimeConfiguration.swift:289`) scans the environment for any `SHRIKE_*` name outside
-`knownEnvironmentNames` (`:280`) and fails the launch by name, listing the offenders
-sorted and naming the chapter that removed them (`:56`). It runs first at the server's
-launch (`ShrikeServerCommand+Run.swift:13`, the first line of the server's `run()`) and
-again in the session's load
-(`ServerInference.swift:672`), in the CLI's run (`ShrikeCLI/Run.swift:64`) and in the app
-client's load (`RealInferenceClient.swift:76`), all before any model load, so a stale
-launch script fails loudly instead of quietly taking a default. The 53 names v17 removed,
-each with the measurement that closed it, are in
-[v17-consolidation.md](v17-consolidation.md).
+One tripwire guards the set, and it is an **allow**-list, which is the one way it can
+fail quietly: a name left in `knownEnvironmentNames` after its reader is deleted is
+silently accepted and ignored rather than refused. v24 found exactly that and fixed it —
+`SHRIKE_MODEL`'s reader went with the Mac app in `8e50806` and the entry stayed, so
+removing it is what makes the tripwire cover it.
+`RuntimeConfiguration.refuseUnknownEnvironment` scans the environment for any `SHRIKE_*`
+name outside `knownEnvironmentNames` and fails the launch by name, listing the offenders
+sorted and naming the chapter that removed them. It runs first at the server's launch
+(the first line of `ShrikeServerCommand+Run.swift`'s `run()`) and again in the session's
+load (`ServerInference.swift`) and in the CLI's run (`ShrikeCLI/Run.swift`), all before
+any model load, so a stale launch script fails loudly instead of quietly taking a
+default. The 53 names v17 removed, each with the measurement that closed it, are in
+[v17-consolidation.md](v17-consolidation.md); v24 removed two more,
+`SHRIKE_REASONING_RETENTION` with its flag and `SHRIKE_MODEL` with the app that read
+it, and the suite refuses all 55 by name.
 
 ## The long functions
 

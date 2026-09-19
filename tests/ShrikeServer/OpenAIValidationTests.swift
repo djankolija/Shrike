@@ -298,12 +298,6 @@ struct ServerArgumentTests {
             ["--model", "model.gturbo"])
         #expect(arguments.port == 8080)
         #expect(arguments.maxContext == 262_144)
-        #expect(arguments.promptCacheMode == .multiPrefix)
-        #expect(arguments.promptCacheMaximumEntries == 4)
-        #expect(arguments.promptCacheMemoryMiB == 256)
-        #expect(arguments.promptCacheDiskDirectory == nil)
-        #expect(arguments.promptCacheDiskMiB == 8_192)
-        #expect(arguments.prefillChunkTokens == nil)
         #expect(arguments.kvCachePrecision == .int8)
         #expect(arguments.ropeScalingMode == .none)
         #expect(arguments.thinkingMode == .off)
@@ -329,7 +323,11 @@ struct ServerArgumentTests {
     @Test func theTrimmedServeFlagsNoLongerParse() {
         for argv in [["--model-id", "nice-name"], ["--models-dir", "/models"],
                      ["--preload"], ["--lazy-load"], ["--queue-limit", "8"],
-                     ["--idle-unload-seconds", "300"]] {
+                     ["--idle-unload-seconds", "300"],
+                     ["--prompt-cache-mode", "off"], ["--prompt-cache-entries", "8"],
+                     ["--prompt-cache-memory-mib", "512"],
+                     ["--prompt-cache-disk", "/tmp/c"], ["--prompt-cache-disk-mib", "16384"],
+                     ["--prefill-chunk", "4096"], ["--reasoning-retention", "stripped"]] {
             #expect(throws: (any Error).self) {
                 _ = try ShrikeServerCommand.parse(["--model", "m.gturbo"] + argv)
             }
@@ -422,17 +420,17 @@ struct ServerArgumentTests {
         let parsed = try ShrikeServerCommand.parse(
             ["--model", "m.gturbo"])
         #expect(parsed.reasoningEffort == nil)
-        #expect(parsed.reasoningRetention == nil)
+        #expect(parsed.thinkingMode == .off)
         #expect(throws: (any Error).self) {
             _ = try parsed.merging(configDefaults: .init(),
-                                   environment: ["SHRIKE_REASONING_RETENTION": "sometimes"])
+                                   environment: ["SHRIKE_REASONING_EFFORT": "sometimes"])
         }
         let resolved = try parsed.merging(
             configDefaults: .init(),
             environment: ["SHRIKE_THINKING_MODE": "true",
-                          "SHRIKE_REASONING_RETENTION": "STRIPPED"])
+                          "SHRIKE_REASONING_EFFORT": "HIGH"])
         #expect(resolved.thinkingMode == .on)
-        #expect(resolved.reasoningRetention == .stripped)
+        #expect(resolved.reasoningEffort == .high)
     }
 
     @Test func parsesKVPrecisionAndYaRNContexts() throws {
@@ -455,62 +453,17 @@ struct ServerArgumentTests {
         }
     }
 
-    @Test func acceptsPublicPrefillChunksAndRejectsUnsupportedValues() throws {
-        let arguments = try ShrikeServerCommand.parse([
-            "--model", "model.gturbo",
-            "--prefill-chunk", "4096",
-        ])
-        #expect(arguments.prefillChunkTokens == 4_096)
-        #expect(throws: (any Error).self) {
-            try ShrikeServerCommand.parse([
-                "--model", "model.gturbo",
-                "--prefill-chunk", "8192",
-            ])
-        }
-    }
-
-    @Test func parsesSinglePrefixModeAndRejectsUnknownMode() throws {
-        let arguments = try ShrikeServerCommand.parse([
-            "--model", "model.gturbo",
-            "--prompt-cache-mode", "single-prefix",
-        ])
-        #expect(arguments.promptCacheMode == .singlePrefix)
-        let multi = try ShrikeServerCommand.parse([
-            "--model", "model.gturbo",
-            "--prompt-cache-mode", "multi-prefix",
-            "--prompt-cache-entries", "8",
-            "--prompt-cache-memory-mib", "512",
-            "--prompt-cache-disk", "/tmp/shrike-cache",
-            "--prompt-cache-disk-mib", "16384",
-        ])
-        #expect(multi.promptCacheMode == .multiPrefix)
-        #expect(multi.promptCacheMaximumEntries == 8)
-        #expect(multi.promptCacheMemoryMiB == 512)
-        #expect(multi.promptCacheDiskDirectory == "/tmp/shrike-cache")
-        #expect(multi.promptCacheDiskMiB == 16_384)
-        let rollback = try ShrikeServerCommand.parse([
-            "--model", "model.gturbo",
-            "--prompt-cache-mode", "off",
-        ])
-        #expect(rollback.promptCacheMode == .off)
-        #expect(throws: (any Error).self) {
-            try ShrikeServerCommand.parse([
-                "--model", "model.gturbo",
-                "--prompt-cache-mode", "many",
-            ])
-        }
-        #expect(throws: (any Error).self) {
-            try ShrikeServerCommand.parse([
-                "--model", "model.gturbo",
-                "--prompt-cache-entries", "0",
-            ])
-        }
-        #expect(throws: (any Error).self) {
-            try ShrikeServerCommand.parse([
-                "--model", "model.gturbo",
-                "--prompt-cache-memory-mib", "4097",
-            ])
-        }
+    @Test func theSessionPlanCarriesTheSettledCacheAndPrefillValues() throws {
+        let plan = ModelSessionPlan(modelDirectory: URL(fileURLWithPath: "/m.gturbo"),
+                                   maxContext: 32_768,
+                                   expertCacheSlots: nil)
+        #expect(plan.promptCacheMode == .multiPrefix)
+        #expect(plan.promptCacheMaximumEntries == 4)
+        #expect(plan.promptCacheMemoryLimitBytes == 256 * 1_048_576)
+        #expect(plan.promptCacheDiskDirectory == nil)
+        #expect(plan.promptCacheDiskLimitBytes == 8_192 * 1_048_576)
+        #expect(plan.prefillChunkTokens == nil)
+        #expect(plan.reasoningRetention == nil)
     }
 
     @Test func accepts256KContextAndRejectsUnsupportedValues() throws {

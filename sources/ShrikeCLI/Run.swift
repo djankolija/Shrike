@@ -109,7 +109,6 @@ public func run(args: ShrikeGenerateCommand,
                                 modelURL: modelURL,
                                 expectedArch: expectedArch,
                                 logitsHead: logitsHead,
-                                promptIds: promptIds,
                                 stderr: stderr) {
         case .value(let value):
             loaded = value
@@ -249,7 +248,6 @@ private func buildRuntime(args: ShrikeGenerateCommand,
                           modelURL: URL,
                           expectedArch: ArchConfig,
                           logitsHead: Bool,
-                          promptIds: [Int32],
                           stderr: FileHandle) throws -> StageOutcome<LoadedRuntime> {
     let loadRuntime = try RuntimeConfiguration(
         expertCacheSlots: args.expertCacheSlots,
@@ -271,19 +269,9 @@ private func buildRuntime(args: ShrikeGenerateCommand,
                 leadingDenseLayers: expectedArch.numLeadingDenseLayers),
             policy: try RuntimeConfiguration.environmentExpertPolicy()),
         integrityPolicy: .resolved(directoryURL: modelURL))
-    let prefillChunkTokens: Int
-    switch args.prefillChunk {
-    case .fixed(let tokens):
-        prefillChunkTokens = tokens
-    case .auto:
-        prefillChunkTokens = RuntimeConfiguration.allowedPrefillChunkTokens
-            .first(where: { $0 >= promptIds.count })
-            ?? PrefillRuntimeConfig.maxChunkTokens
-    case nil:
-        prefillChunkTokens = model.config.family == .qwen36
-            ? RuntimeConfiguration.qwenLongPrefillChunkTokens
-            : loadRuntime.prefillChunkTokens
-    }
+    let prefillChunkTokens = model.config.family == .qwen36
+        ? RuntimeConfiguration.qwenLongPrefillChunkTokens
+        : loadRuntime.prefillChunkTokens
     let runtime = try RuntimeConfiguration(
         expertCacheSlots: loadRuntime.expertCacheSlots,
         prefillChunkTokens: prefillChunkTokens,
