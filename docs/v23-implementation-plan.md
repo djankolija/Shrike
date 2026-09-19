@@ -155,19 +155,30 @@ disagrees.
 
 ### Task 5: the two benches
 
-- [ ] `ShrikeExpertBench` and `ShrikeAttnBench` each get a `ParsableCommand` with
-      `@main`, named `ExpertBenchCommand` and `AttnBenchCommand`. Split a core library out of each executable target so the
-      arguments are testable; leave `resources: [.copy("Metal")]` and the
-      `Bundle.module` users in the executable.
-- [ ] `--seed` parses the same way in both. AttnBench's hex form wins, since the
-      defaults in both are written as hex literals. Neither help documents a
-      format today, so this is tidying, not a fix.
-- [ ] `--arms` and `--positions` stay comma-split single values, not repeated
-      flags: an arm name cannot contain a comma and this is the existing surface.
-- [ ] AttnBench's `--list` becomes a subcommand, since it makes the binary do
-      something else and ignore everything.
-- [ ] Add their invocation tests.
-- [ ] Gates, commit.
+- [x] `ShrikeExpertBench` and `ShrikeAttnBench` each get a `ParsableCommand` with
+      `@main`, named `ExpertBenchCommand` and `AttnBenchCommand`, with a core library
+      split out of each so the arguments are testable. The resources do **not** stay
+      in the executable as this bullet asked: `Bundle.module` resolves to its own
+      module's bundle, so leaving `Metal/` behind would strand the three files that
+      load it, and the command's `run()` could not reach the runner anyway. Both take
+      the ShrikeCLI shape instead, the core holding everything and the executable a
+      one-line `@main` shim, which is the correction T2 already made for `drive`.
+- [x] `--seed` parses the same way in both, through one `BenchSeed` in
+      `ShrikeArgumentSupport`: hex or decimal, and its `defaultValueDescription`
+      renders the default back as `0x5EED0019`, the spelling the source writes.
+- [x] `--arms` and `--positions` stay comma-split single values, not repeated
+      flags, as `CommaSeparatedNames` and `CommaSeparatedCounts` beside `BenchSeed`,
+      so the split is the option type's business rather than the runner's.
+- [x] AttnBench's `--list` becomes the `list` subcommand. A root may carry both
+      subcommands and its own `run()`: a bare invocation still runs the bench, which
+      a test pins.
+- [x] Add their invocation tests, in a new `ShrikeBenchTests` target over both
+      cores. Nine cases; there was nothing to inherit, since the sweep found no
+      script, tool or test that invokes either bench, and no tool parses their
+      stdout either (the spec's out-of-scope note is corrected on that point).
+- [x] `BenchError.help` dropped from both benches. Its only thrower was the
+      `main.swift` this task deletes, so it was parsing plumbing left standing.
+- [x] Gates, commit.
 
 ---
 

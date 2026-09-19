@@ -4,7 +4,7 @@ import Shrike
 import ShrikeValidationSupport
 
 final class BenchRunner {
-    private let args: BenchArgs
+    private let args: AttnBenchCommand
     private let arms: [Arm]
     private let context: MetalContext
     private let rows: SyntheticRows
@@ -15,12 +15,12 @@ final class BenchRunner {
     private let productionStream: Attention
     private var productionOut: [Int: [Float]] = [:]
 
-    init(args: BenchArgs) throws {
+    init(args: AttnBenchCommand) throws {
         self.args = args
-        self.arms = try args.arms.map(Arm.parse)
+        self.arms = try args.arms.names.map(Arm.parse)
         self.context = try MetalContext()
-        let maxSeq = args.positions.max() ?? 1024
-        self.rows = try SyntheticRows(context: context, maxSeq: maxSeq, seed: args.seed)
+        let maxSeq = args.positions.counts.max() ?? 1024
+        self.rows = try SyntheticRows(context: context, maxSeq: maxSeq, seed: args.seed.value)
         self.ladder = try LadderKernel(device: context.device, numQHeads: rows.numQHeads,
                                        headDim: rows.headDim)
         self.stream = try StreamKernel(device: context.device, scratch: ladder)
@@ -37,7 +37,7 @@ final class BenchRunner {
                      "arm", "positions", "gpu_us", "us/pos", "ns/KB", "GB/s", "partials", "maxd_prod"))
         try spinUp()
         for arm in arms {
-            for seqLen in args.positions {
+            for seqLen in args.positions.counts {
                 try runOne(arm, seqLen: seqLen)
             }
         }

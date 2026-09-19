@@ -88,21 +88,42 @@ let package = Package(
             dependencies: ["ShrikeCLICore"],
             path: "sources/ShrikeCLI/Command"
         ),
+        .target(
+            name: "ShrikeAttnBenchCore",
+            dependencies: [
+                "Shrike",
+                "ShrikeValidationSupport",
+                "ShrikeArgumentSupport",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "sources/ShrikeAttnBench",
+            exclude: ["Command"],
+            resources: [
+                .copy("Metal"),
+            ]
+        ),
         .executableTarget(
             name: "ShrikeAttnBench",
-            dependencies: ["Shrike", "ShrikeValidationSupport"],
-            path: "sources/ShrikeAttnBench",
+            dependencies: ["ShrikeAttnBenchCore"],
+            path: "sources/ShrikeAttnBench/Command"
+        ),
+        .target(
+            name: "ShrikeExpertBenchCore",
+            dependencies: [
+                "Shrike",
+                "ShrikeArgumentSupport",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "sources/ShrikeExpertBench",
+            exclude: ["Command"],
             resources: [
                 .copy("Metal"),
             ]
         ),
         .executableTarget(
             name: "ShrikeExpertBench",
-            dependencies: ["Shrike"],
-            path: "sources/ShrikeExpertBench",
-            resources: [
-                .copy("Metal"),
-            ]
+            dependencies: ["ShrikeExpertBenchCore"],
+            path: "sources/ShrikeExpertBench/Command"
         ),
         .target(
             name: "ShrikeAppCore",
@@ -187,6 +208,15 @@ let package = Package(
             name: "ShrikeMacPresentationTests",
             dependencies: ["ShrikeAppCore", "ShrikeMacPresentation"],
             path: "tests/ShrikeApp/MacPresentation"
+        ),
+        .testTarget(
+            name: "ShrikeBenchTests",
+            dependencies: [
+                "ShrikeAttnBenchCore",
+                "ShrikeExpertBenchCore",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "tests/ShrikeBench"
         ),
         .testTarget(
             name: "ShrikeServerTests",

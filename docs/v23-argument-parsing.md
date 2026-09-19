@@ -126,7 +126,9 @@ removal takes a flag together with the path it selected.
 
 The benches' table output. `ShrikeExpertBench/Runner.swift:123` and `:152` pair a
 header format string with a row format string that must agree column for column
-by eye, which is the same shape as the help text. It stays out because three
-tools parse that stdout and a misaligned column is visible the moment the bench
-runs, unlike help text that lies silently. The fix, when it is wanted, is a
+by eye, which is the same shape as the help text. It stays out, but not for the reason
+first given here: **no tool parses that stdout**, checked at T5 across the whole
+repo, and neither bench is invoked by any script, tool or test. It stays out
+because a misaligned column is visible the moment the bench runs and nothing
+automated depends on it, so unlike help text it cannot lie silently. The fix, when it is wanted, is a
 column-spec type from which both the header and the row derive.

@@ -1,5 +1,4 @@
 enum BenchError: Error, CustomStringConvertible {
-    case help
     case usage(String)
     case model(String)
     case coder(String)
@@ -11,7 +10,6 @@ enum BenchError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
-        case .help: return "help"
         case .usage(let text): return text
         case .model(let text): return "model: \(text)"
         case .coder(let text): return "coder: \(text)"

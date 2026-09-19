@@ -3,7 +3,7 @@ import Metal
 import Shrike
 
 final class BenchRunner {
-    private let args: BenchArgs
+    private let args: ExpertBenchCommand
     private let context: MetalContext
     private let kernels: ExpertKernels
     private let stride: Int
@@ -30,7 +30,7 @@ final class BenchRunner {
     private let acts: MTLBuffer
     private let reference: MTLBuffer
 
-    init(args: BenchArgs) throws {
+    init(args: ExpertBenchCommand) throws {
         self.args = args
         self.context = try MetalContext()
         self.kernels = try ExpertKernels(context: context)
@@ -91,7 +91,7 @@ final class BenchRunner {
                                     label: "aux tables")
 
         let d = Int(ExpertKernels.hidden)
-        var state = args.seed
+        var state = args.seed.value
         var halves = [UInt16](repeating: 0, count: d)
         for i in 0..<d {
             state = state &* 6364136223846793005 &+ 1442695040888963407
@@ -125,7 +125,7 @@ final class BenchRunner {
         try spinUp()
         try encodeOnce { cb in try self.encodePlain(cb, into: self.reference) }
         var plainSeconds: Double?
-        for arm in args.arms {
+        for arm in args.arms.names {
             let bytesPerExpert: Int
             let encode: (MTLCommandBuffer) throws -> Void
             switch arm {
