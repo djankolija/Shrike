@@ -12,13 +12,8 @@
 # still an explicit act: pass it to also kill the running server, relaunch it
 # with the production launch command, and poll for readiness.
 #
-# The launch below must stay byte-for-byte the launch line in CLAUDE.md. It
-# drifted once and silently: written at v17, it was never updated when v20 T1
-# added SHRIKE_EXPERT_SLOT_TABLE and SHRIKE_EXPERT_POLICY or when v22 T3 raised
-# the budget to 11324620800 (160 slots per layer), so --restart relaunched the
-# uniform pool, aging-LFU and 128 slots while this header claimed it was
-# production. Found by v24's close review; a bare launch takes the built-in
-# defaults, which is exactly the quiet loss CLAUDE.md warns about for NVMAI_*.
+# The env and flags in the launch below must stay byte-for-byte CLAUDE.md's
+# production launch line; they drifted from it silently between v17 and v22.
 #
 # Run from the repo root after `swift build -c release`.
 set -euo pipefail
@@ -35,14 +30,19 @@ done
 if [ "$RESTART" -eq 1 ]; then
   ssh macmini '
     pkill -f "bin/shrike serve --model ./models/ornith15.gturbo" || true
+    # A server predating v24 is still named ShrikeServer; -fi below for the same reason.
+    pkill -f "bin/ShrikeServer --model ./models/ornith15.gturbo" || true
     sleep 3
-    if pgrep -f "bin/shrike" > /dev/null; then echo "server still running" >&2; exit 1; fi
+    if pgrep -fi "bin/shrike" > /dev/null; then echo "server still running" >&2; exit 1; fi
   '
 fi
 
 for f in shrike; do
   scp -q "$BIN/$f" "macmini:shrike-runtime/bin/$f.staging"
 done
+# The mini runs the golden from its own copy; deploy it with the binary so its
+# process guard cannot go stale against a renamed binary.
+scp -q tools/golden-baseline.sh "macmini:shrike-runtime/golden-baseline.sh"
 for bundle in "$BIN"/*.bundle; do
   name=$(basename "$bundle")
   scp -q -r "$bundle" "macmini:shrike-runtime/bin/$name.staging"
@@ -77,13 +77,21 @@ ssh macmini '
     nohup ./bin/shrike serve \
     --model ./models/ornith15.gturbo --port 8081 \
     --max-context 32768 --ram-budget 11324620800 --thinking off > /tmp/ornith.log 2>&1 &
+  server_pid=$!
+  # Keyed to the pid, never to a log line: the banner goes through `print`, which
+  # is block-buffered to a file and may never flush while the server runs fine.
   tries=0
   until curl -sf -m 3 http://127.0.0.1:8081/v1/models > /dev/null 2>&1; do
+    kill -0 "$server_pid" 2>/dev/null || {
+      echo "the server this script launched exited" >&2; tail -n 5 /tmp/ornith.log; exit 1; }
     tries=$((tries + 1))
-    if [ "$tries" -gt 200 ]; then echo "server never became ready" >&2; tail -n 5 /tmp/ornith.log; exit 1; fi
+    if [ "$tries" -gt 60 ]; then echo "server never became ready" >&2; tail -n 5 /tmp/ornith.log; exit 1; fi
     sleep 3
   done
-  echo "server ready after $((tries * 3))s"
+  kill -0 "$server_pid" 2>/dev/null || {
+    echo "/v1/models answered but the launched server is gone: something else holds 8081" >&2
+    exit 1; }
+  echo "server ready after $((tries * 3))s (pid $server_pid)"
   logged_bits=""
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     logged_bits=$(grep -a -o "prefill_router_bits=[0-9]*" /tmp/ornith.log | head -n 1)
