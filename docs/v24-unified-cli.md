@@ -89,7 +89,7 @@ flexibility that the `SHRIKE_*` environment layer (15 names, tripwired since
 v17) does not already provide better. Configuration stays small: `models_dir`,
 the default model, and the three keys it already has.
 
-**generate** (24): 20 keep, 4 delete
+**generate** (24): 21 keep, 3 delete
 
 | flag | what it does | consumers | disposition |
 | --- | --- | --- | --- |
@@ -113,12 +113,12 @@ the default model, and the three keys it already has.
 | `--dump-hidden` | fp16 residual before the final norm | 2 | keep, `q3-drafter-routes.py` |
 | `--tokenize` | render the prompt and exit, no model load | 4 | keep, two tools |
 | `--follow-up` | a second turn from the held state | 1 | keep, gate |
-| `--rope-scaling` | none or yarn | 0 | **delete** |
+| `--rope-scaling` | none or yarn; the only way to reach YaRN | 0 | keep, selects a live path |
 | `--prefill-chunk` | prefill chunk tokens | 0 | **delete** |
 | `--concise` | injects the concise-mode system prompt | 0 | **delete** |
 | `--force-tokens` | feed fixed ids in place of the sampler | 0 | **delete** |
 
-**serve** (23): 9 keep, 14 delete
+**serve** (23): 10 keep, 13 delete
 
 | flag | what it does | consumers | disposition |
 | --- | --- | --- | --- |
@@ -131,10 +131,10 @@ the default model, and the three keys it already has.
 | `--reasoning-effort` | Harmony deliberation level | 1 | keep, owner's ruling |
 | `--expert-cache-slots` | slots per layer | 3 | keep |
 | `--ram-budget` | bytes the expert cache may use | 8 | keep, launch line |
+| `--rope-scaling` | none or yarn | 0 | keep, selects a live path |
 | `--model-id` | API model identifier | 4 | **delete**, proven redundant |
 | `--models-dir` | directory scanned for bundles | 0 | **delete** |
 | `--preload` | load the default model at startup | 0 | **delete** |
-| `--rope-scaling` | none or yarn | 0 | **delete** |
 | `--queue-limit` | maximum queued requests | 0 | **delete**, no test either |
 | `--prompt-cache-mode` | prefix reuse mode | 1 | **delete**, settled |
 | `--prompt-cache-entries` | retained prefixes | 0 | **delete** |
@@ -189,7 +189,7 @@ calls it.
 | repack | 7 | 5 |
 | bench | 7 | 7, behind a debug verb |
 
-Eighteen flags deleted, 34 distinct remaining, 27 in the shipped surface. Six of
+Seventeen flags deleted, 35 distinct remaining, 28 in the shipped surface. Six of
 serve's nine are in the mini's launch line today. The count is an output of the
 test above, not a target: the aim discussed was roughly a dozen, and the evidence
 did not support going below this without deleting working behaviour.
@@ -428,13 +428,32 @@ and already falls back to the sole entry.
    `--prompt` alone now parses with `model == nil`. A resolution failure surfaces
    at run rather than at parse, and exits 1 rather than 64, matching v23's ruling
    that a config failure is not a usage error.
-5. **The flag trim: 18 flags deleted**, per the inventory's disposition. v17's
-   rule holds throughout: the honest removal deletes a flag together with the
-   code path it selected, so `--prompt-cache-disk` takes the disk snapshot path,
-   `--concise` takes the prompt injection, `--rope-scaling` takes YaRN's
-   reachability, and `--resume` is replaced by resuming automatically when a
-   partial exists. `bench` is compiled out of release builds, taking seven more
-   flags off the shipped surface without deleting them.
+5. **The flag trim: 17 flags deleted**, per the inventory's disposition.
+   `--rope-scaling` came off the list: it has no consumer, but it fails the other
+   half of v17's rule, since YaRN is 131 occurrences across 17 files including
+   `rope.metal` and `prefill.metal` and is the only way to reach the documented
+   512K/1M ceiling. A flag selecting between two very live paths is not dead.
+
+   **Where a flag is the only way to reach working code, the argument goes and
+   the code stays** (owner's ruling, 2026-09-19). Rather than freezing the value
+   into a constant, the `ModelSessionPlan` parameter keeps it with a default and
+   the call site stops passing it, so `promptCacheMode`, `promptCacheDiskDirectory`,
+   `prefillChunkTokens` and `reasoningRetention` stay constructible and testable
+   from code while leaving argv. This departs from v17's rule deliberately: v17
+   deleted losing arms of concluded A/B experiments, where the loser was measured
+   and the code was proven worse. Nothing here has been measured at all. The
+   `.off` and `.singlePrefix` cache modes and the persistent SSD prompt cache are
+   reached by nothing today, not even a test, but "never exercised" is not
+   "known worse", and the cost of keeping a defaulted parameter is one line.
+
+   The removals that do take a path with them are the ones where the path exists
+   only to serve the flag: `--lazy-load` takes the branch that rejects it beside
+   `--preload`, `--idle-unload-seconds` takes `unloadDiscardsWarmCache` and its
+   startup warning, and `--resume` is replaced by resuming automatically when a
+   partial exists, with `discard-partial` becoming how you start over.
+
+   `bench` is compiled out of release builds, taking seven more flags off the
+   shipped surface without deleting them.
 6. **The process name collapses**, and the tooling that identifies a Shrike
    process by name must move with it. `tools/decode-rig.sh:58` and
    `tools/turn-rig.sh:66` use `pgrep -x ShrikeServer` as their "did the old

@@ -173,7 +173,24 @@ here can only mean the harness moved.
 
 ### Task 4: the trim
 
-- [ ] Delete each flag Task 1 condemned, together with the code path it selected.
+Seventeen flags, not eighteen: `--rope-scaling` is a keep, see the spec.
+
+- [ ] **T4a, the ten self-contained flags.** `--lazy-load`, `--preload`,
+      `--models-dir`, `--queue-limit`, `--model-id` (serve only; it stays on
+      `repack import-snapshot`) and `--idle-unload-seconds` on the server;
+      `--overwrite` and `--resume` on repack; `--concise` and `--force-tokens`
+      on generate. Three knock-on deletions the inventory did not name:
+      `unloadDiscardsWarmCache` and its startup warning die with
+      `--idle-unload-seconds`, so does `ShrikeConfig.Defaults.idleUnloadSeconds`,
+      and `SHRIKE_REASONING_RETENTION` must leave the environment registry when
+      `--reasoning-retention` goes or it becomes the silent no-op CLAUDE.md
+      warns about for `NVMAI_*` (15 names to 14; a test pins the count).
+- [ ] **T4b, the seven that reach `ModelSessionPlan`.** Per the owner's ruling
+      the argument goes and the code stays: give the `ModelSessionPlan` parameter
+      a default and stop passing it from `ModelRegistry`, rather than freezing it
+      into a constant. Nothing follows into `ServerInference`.
+- [ ] Delete each flag's declaration, its `validate()` rule, and any path that
+      exists only to serve it.
 - [ ] Remove their help text, their tests, and every mention in `docs/` that
       describes them as live. Historical implementation plans keep theirs, as the
       record of their own chapters.
