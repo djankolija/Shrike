@@ -5,13 +5,13 @@ import Testing
 @Suite struct CLIArgumentsTests {
     private func rejection(_ argv: [String]) throws -> String {
         let error = #expect(throws: (any Error).self) {
-            _ = try ShrikeCLICommand.parse(argv)
+            _ = try ShrikeGenerateCommand.parse(argv)
         }
-        return ShrikeCLICommand.message(for: try #require(error))
+        return ShrikeGenerateCommand.message(for: try #require(error))
     }
 
     @Test func defaultsUseProductionGenerationValues() throws {
-        let arguments = try ShrikeCLICommand.parse(["--model", "m.gturbo", "--prompt", "hi"])
+        let arguments = try ShrikeGenerateCommand.parse(["--model", "m.gturbo", "--prompt", "hi"])
         #expect(arguments.model == "m.gturbo")
         #expect(arguments.prompt == "hi")
         #expect(arguments.messagesFile == nil)
@@ -31,14 +31,14 @@ import Testing
     }
 
     @Test func kvPrecisionAndYaRNOptionsParse() throws {
-        let yarn = try ShrikeCLICommand.parse([
+        let yarn = try ShrikeGenerateCommand.parse([
             "--model", "m.gturbo", "--prompt", "hi",
             "--kv-bits", "4", "--rope-scaling", "yarn",
         ])
         #expect(yarn.kvCachePrecision == .int4)
         #expect(yarn.ropeScalingMode == .yarn)
         #expect(yarn.maxContext == 1_048_576)
-        let halfMillion = try ShrikeCLICommand.parse([
+        let halfMillion = try ShrikeGenerateCommand.parse([
             "--model", "m.gturbo", "--prompt", "hi",
             "--rope-scaling", "yarn", "--max-context", "524288",
         ])
@@ -50,12 +50,12 @@ import Testing
     }
 
     @Test func prefillChunkParsesFixedAndAutoValues() throws {
-        let fixed = try ShrikeCLICommand.parse([
+        let fixed = try ShrikeGenerateCommand.parse([
             "--model", "m.gturbo", "--prompt", "hi", "--prefill-chunk", "4096",
         ])
         #expect(fixed.prefillChunk == .fixed(4_096))
 
-        let automatic = try ShrikeCLICommand.parse([
+        let automatic = try ShrikeGenerateCommand.parse([
             "--model", "m.gturbo", "--prompt", "hi", "--prefill-chunk", "auto",
         ])
         #expect(automatic.prefillChunk == .auto)
@@ -66,7 +66,7 @@ import Testing
     }
 
     @Test func generationOptionsParseAndStopsRepeat() throws {
-        let arguments = try ShrikeCLICommand.parse([
+        let arguments = try ShrikeGenerateCommand.parse([
             "--model", "m.gturbo", "--prompt", "hi",
             "--max-new", "32", "--max-context", "512",
             "--temperature", "0", "--top-k", "40", "--top-p", "0.95",
@@ -85,13 +85,13 @@ import Testing
     }
 
     @Test func contextArgumentAcceptsQwenMaximumAndRejectsLargerValues() throws {
-        let maximum = try ShrikeCLICommand.parse([
+        let maximum = try ShrikeGenerateCommand.parse([
             "--model", "m.gturbo", "--prompt", "hi",
             "--max-context", "262144",
         ])
         #expect(maximum.maxContext == 262_144)
         #expect(throws: (any Error).self) {
-            _ = try ShrikeCLICommand.parse([
+            _ = try ShrikeGenerateCommand.parse([
                 "--model", "m.gturbo", "--prompt", "hi",
                 "--max-context", "262145",
             ])
@@ -99,7 +99,7 @@ import Testing
     }
 
     @Test func topKZeroRequiresTopPToBeDisabled() throws {
-        let disabled = try ShrikeCLICommand.parse([
+        let disabled = try ShrikeGenerateCommand.parse([
             "--model", "m.gturbo", "--prompt", "hi",
             "--top-k", "0", "--top-p", "1",
         ])
@@ -107,7 +107,7 @@ import Testing
         #expect(disabled.topP == 1)
 
         #expect(throws: (any Error).self) {
-            _ = try ShrikeCLICommand.parse([
+            _ = try ShrikeGenerateCommand.parse([
                 "--model", "m.gturbo", "--prompt", "hi", "--top-k", "0",
             ])
         }
@@ -120,16 +120,16 @@ import Testing
     }
 
     @Test func conciseFlagParsesAndDefaultsOff() throws {
-        let on = try ShrikeCLICommand.parse([
+        let on = try ShrikeGenerateCommand.parse([
             "--model", "m.gturbo", "--prompt", "hi", "--concise",
         ])
         #expect(on.concise)
-        let off = try ShrikeCLICommand.parse(["--model", "m.gturbo", "--prompt", "hi"])
+        let off = try ShrikeGenerateCommand.parse(["--model", "m.gturbo", "--prompt", "hi"])
         #expect(!off.concise)
     }
 
     @Test func thinkingModeParsesOnlyTheOfficialBinaryValues() throws {
-        let on = try ShrikeCLICommand.parse([
+        let on = try ShrikeGenerateCommand.parse([
             "--model", "m.gturbo", "--prompt", "hi", "--thinking", "on",
         ])
         #expect(on.thinkingMode == .on)
@@ -148,7 +148,7 @@ import Testing
             "--logits-head", "--force-tokens", "--dump-logits", "--dump-hidden",
             "--tokenize", "--follow-up",
         ]
-        let words = ShrikeCLICommand.helpMessage()
+        let words = ShrikeGenerateCommand.helpMessage()
             .split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })
         #expect(options == expected)
@@ -157,32 +157,32 @@ import Testing
     @Test func bothHelpSpellingsExitZero() throws {
         for flag in ["--help", "-h"] {
             let error = #expect(throws: (any Error).self) {
-                _ = try ShrikeCLICommand.parse([flag])
+                _ = try ShrikeGenerateCommand.parse([flag])
             }
-            #expect(ShrikeCLICommand.exitCode(for: try #require(error)) == .success)
+            #expect(ShrikeGenerateCommand.exitCode(for: try #require(error)) == .success)
         }
     }
 
     @Test func unsupportedSelectorsAreRejectedWithANonZeroExit() throws {
         for flag in ["--runtime-profile", "--experiment-id"] {
             let error = #expect(throws: (any Error).self) {
-                _ = try ShrikeCLICommand.parse(["--model", "m.gturbo", "--prompt", "hi", flag])
+                _ = try ShrikeGenerateCommand.parse(["--model", "m.gturbo", "--prompt", "hi", flag])
             }
-            #expect(ShrikeCLICommand.exitCode(for: try #require(error)) != .success)
+            #expect(ShrikeGenerateCommand.exitCode(for: try #require(error)) != .success)
         }
     }
 
     @Test func modelAndPromptAreRequired() {
         #expect(throws: (any Error).self) {
-            _ = try ShrikeCLICommand.parse(["--prompt", "hi"])
+            _ = try ShrikeGenerateCommand.parse(["--prompt", "hi"])
         }
         #expect(throws: (any Error).self) {
-            _ = try ShrikeCLICommand.parse(["--model", "m.gturbo"])
+            _ = try ShrikeGenerateCommand.parse(["--model", "m.gturbo"])
         }
     }
 
     @Test func anOptionValueMayBeginWithADash() throws {
-        let arguments = try ShrikeCLICommand.parse([
+        let arguments = try ShrikeGenerateCommand.parse([
             "--model", "m.gturbo", "--prompt", "-- explain this",
             "--stop", "-->", "--follow-up", "-- and again",
         ])
@@ -192,7 +192,7 @@ import Testing
     }
 
     @Test func messagesFileSelectsChatMode() throws {
-        let arguments = try ShrikeCLICommand.parse([
+        let arguments = try ShrikeGenerateCommand.parse([
             "--model", "m.gturbo", "--messages-file", "chat.json",
         ])
         #expect(arguments.prompt == nil)
@@ -201,7 +201,7 @@ import Testing
 
     @Test func promptAndMessagesFileAreMutuallyExclusive() {
         #expect(throws: (any Error).self) {
-            _ = try ShrikeCLICommand.parse([
+            _ = try ShrikeGenerateCommand.parse([
                 "--model", "m.gturbo", "--prompt", "hi",
                 "--messages-file", "chat.json",
             ])

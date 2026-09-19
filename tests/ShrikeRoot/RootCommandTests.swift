@@ -1,0 +1,100 @@
+import ArgumentParser
+import Testing
+
+import ShrikeAttnBenchCore
+import ShrikeCLICore
+import ShrikeExpertBenchCore
+import ShrikeRepackCore
+import ShrikeRootCore
+import ShrikeServerCore
+
+@Suite struct RootCommandTests {
+    private func parse(_ arguments: [String]) throws -> any ParsableCommand {
+        try ShrikeRootCommand.parseAsRoot(arguments)
+    }
+
+    /// Task 3 changes this: `--model` becomes optional so it can resolve from
+    /// configuration, and a bare invocation stops being a usage error.
+    @Test func aBareInvocationIsAUsageErrorNamingTheModel() throws {
+        do {
+            _ = try ShrikeRootCommand.parseAsRoot([])
+            Issue.record("a bare invocation should not parse to a runnable command")
+        } catch {
+            #expect(ShrikeRootCommand.exitCode(for: error) == ExitCode.validationFailure)
+            #expect(ShrikeRootCommand.message(for: error).contains("--model"))
+        }
+    }
+
+    @Test func generationNeedsNoVerb() throws {
+        let command = try parse(["--model", "m.gturbo", "--prompt", "hi"])
+        let generate = try #require(command as? ShrikeGenerateCommand)
+        #expect(generate.model == "m.gturbo")
+        #expect(generate.prompt == "hi")
+    }
+
+    @Test func generateIsAlsoReachableByName() throws {
+        let command = try parse(["generate", "--model", "m.gturbo", "--prompt", "hi"])
+        #expect(command is ShrikeGenerateCommand)
+    }
+
+    @Test func serveKeepsItsOwnModel() throws {
+        let command = try parse(["serve", "--model", "m.gturbo"])
+        let serve = try #require(command as? ShrikeServerCommand)
+        #expect(serve.model == "m.gturbo")
+    }
+
+    @Test func serveKeepsEveryFlagItSharesWithGenerate() throws {
+        let command = try parse([
+            "serve", "--model", "m.gturbo", "--max-context", "32768",
+            "--thinking", "off", "--kv-bits", "4", "--expert-cache-slots", "160",
+        ])
+        let serve = try #require(command as? ShrikeServerCommand)
+        #expect(serve.model == "m.gturbo")
+        #expect(serve.maxContext == 32768)
+        #expect(serve.thinkingMode == .off)
+        #expect(serve.kvCachePrecision == .int4)
+        #expect(serve.expertCacheSlots == 160)
+    }
+
+    @Test func serveStillRefusesAnUnsupportedContext() throws {
+        #expect(throws: (any Error).self) {
+            var command = try ShrikeRootCommand.parseAsRoot(
+                ["serve", "--model", "m.gturbo", "--max-context", "50000"])
+            try command.validate()
+        }
+    }
+
+    @Test func theMinisProductionLaunchLineParses() throws {
+        let command = try parse([
+            "serve",
+            "--model", "./models/ornith15.gturbo",
+            "--model-id", "ornith15",
+            "--port", "8081",
+            "--max-context", "32768",
+            "--ram-budget", "11324620800",
+            "--thinking", "off",
+        ])
+        let serve = try #require(command as? ShrikeServerCommand)
+        #expect(serve.model == "./models/ornith15.gturbo")
+        #expect(serve.modelIDOverride == "ornith15")
+        #expect(serve.port == 8081)
+        #expect(serve.maxContext == 32768)
+        #expect(serve.thinkingMode == .off)
+    }
+
+    @Test func repackResolvesTwoLevelsDeep() throws {
+        let command = try parse(["repack", "verify-install", "--input-gturbo", "m.gturbo"])
+        #expect(command is ShrikeRepackCommand.VerifyInstall)
+    }
+
+    @Test func benchResolvesEitherChild() throws {
+        #expect(try parse(["bench", "attention"]) is AttnBenchCommand)
+        #expect(try parse(["bench", "expert", "--model", "m.gturbo"]) is ExpertBenchCommand)
+    }
+
+    @Test func anUnknownVerbIsRejected() throws {
+        #expect(throws: (any Error).self) {
+            try ShrikeRootCommand.parseAsRoot(["srve"])
+        }
+    }
+}

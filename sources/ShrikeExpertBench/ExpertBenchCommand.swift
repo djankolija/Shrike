@@ -4,7 +4,7 @@ import ShrikeArgumentSupport
 
 public struct ExpertBenchCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "ShrikeExpertBench",
+        commandName: "expert",
         abstract: "The decode phase-1 gate/up kernel over real experts, plain and coded.")
 
     @Option(help: ArgumentHelp("The .gturbo directory.", valueName: "dir"))

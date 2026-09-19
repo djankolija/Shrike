@@ -28,7 +28,7 @@
 # other time is a regression.
 #
 # Env overrides (the mini has no repo checkout: run with all five):
-#   CLI=~/shrike-runtime/bin/ShrikeCLI
+#   CLI=~/shrike-runtime/bin/shrike
 #   MODEL=~/shrike-runtime/models/ornith15.gturbo
 #   OUT_DIR=~/shrike-runtime/baselines
 #   MACHINE_TAG=mini
@@ -40,12 +40,12 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CLI="${CLI:-$ROOT/.build/arm64-apple-macosx/release/ShrikeCLI}"
+CLI="${CLI:-$ROOT/.build/arm64-apple-macosx/release/shrike}"
 OUT_DIR="${OUT_DIR:-$ROOT/baselines}"
 MACHINE_TAG="${MACHINE_TAG:-$(sysctl -n hw.model | tr -cd '[:alnum:]')}"
 MAX_NEW="${MAX_NEW:-96}"
 SEED="${SEED:-1234}"
-# CLI_EXTRA_ARGS (optional): appended to every CLI run, e.g. "--expert-cache-slots 160"
+# CLI_EXTRA_ARGS (optional): appended to every generate run, e.g. "--expert-cache-slots 160"
 # to run the golden at a pool the box splits across arena chunks (v22).
 CLI_EXTRA_ARGS="${CLI_EXTRA_ARGS:-}"
 
@@ -91,7 +91,7 @@ fi
 
 # CLAUDE.md: never run alongside another model process, and never terminate one
 # we did not start. Refuse rather than race.
-if pgrep -f 'ShrikeServer|ShrikeCLI|ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' >/dev/null 2>&1; then
+if pgrep -f 'shrike serve|shrike generate|ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' >/dev/null 2>&1; then
   echo "a model process is already running; stop it yourself, then re-run" >&2
   exit 3
 fi
@@ -123,7 +123,7 @@ for profile in "${profiles[@]}"; do
   echo "== $profile =="
   # --quiet keeps the timing footer out of the compared text; only the
   # generated tokens are the contract. Timings vary run to run by design.
-  "$CLI" --model "$MODEL" "${prompt_args[@]}" --max-new "$max_new" \
+  "$CLI" generate --model "$MODEL" "${prompt_args[@]}" --max-new "$max_new" \
          --temperature 0 --seed "$SEED" --quiet $head_flag $CLI_EXTRA_ARGS > "$work" 2>"$work.err"
   rc=$?
   [ "$profile" = turns-lh ] && rm -f "$messages"

@@ -2396,7 +2396,7 @@ def main():
                         help="with --draft: the layers keyed by the draft (default 0)")
     parser.add_argument("--prompt-pieces", default=None, metavar="TOKENIZE_JSON",
                         help="with --draft or --table-seed: the prompt's pieces from "
-                             "`ShrikeCLI --tokenize`, so the draft matches into the prompt")
+                             "`shrike generate --tokenize`, so the draft matches into the prompt")
     parser.add_argument("--table-seed", choices=["none", "prefill"], default="none",
                         help="with --table-fills and --prompt-pieces: seed the table from the "
                              "capture's q lines (the prefill's per-token routes; v20 S0.5)")

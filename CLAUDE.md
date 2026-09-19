@@ -14,7 +14,7 @@ Before anything that loads a model — a server, the CLI, a benchmark, or the go
 baseline — check:
 
 ```bash
-pgrep -fl 'ShrikeServer|ShrikeCLI|ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
+pgrep -fl 'shrike serve|shrike generate|ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 ```
 
 If something is already running, **stop and say so**. Never terminate a process you did not
@@ -32,7 +32,7 @@ installed to, so **moving or renaming an installed model makes it fail to load**
 need a re-download. Re-issue the receipt in place:
 
 ```bash
-swift run -c release ShrikeRepack verify-install --input-gturbo <model.gturbo>
+swift run -c release shrike repack verify-install --input-gturbo <model.gturbo>
 ```
 
 **Never hand-edit the receipt to match a new path.** The path binding is what detects a
@@ -104,8 +104,8 @@ only and fails ssh with a misleading `Host key verification failed`. `sudo` ther
 
 ### The mini's layout (rename landed 2026-08-30)
 
-The runtime is `~/shrike-runtime/` — `bin/` holds `ShrikeServer`, `ShrikeCLI`,
-`ShrikeRepack` plus their resource bundles (a deploy copies the `*.bundle`
+The runtime is `~/shrike-runtime/` — `bin/` holds the single `shrike` binary
+plus its resource bundles (a deploy copies the `*.bundle`
 directories from `.build/release/` alongside the binaries, or resource lookups
 fail at runtime); `models/` holds the six `.gturbo`s, receipts bound to the
 `shrike-runtime` path; `baselines/` holds the mini's golden-baseline files.
@@ -114,7 +114,7 @@ artifacts; git history and a fresh deploy are the rollback path (owner's
 ruling, 2026-09-01).
 
 There is **no launchd service** — the server is launched manually
-(`cd ~/shrike-runtime && nohup ./bin/ShrikeServer … > /tmp/shrike-server.log 2>&1 &`),
+(`cd ~/shrike-runtime && nohup ./bin/shrike serve … > /tmp/shrike-server.log 2>&1 &`),
 usually serving one model on port 8081. Turbo (a separate project) serves on
 8080; never touch it.
 
@@ -129,7 +129,7 @@ record in `docs/v22-pool-capacity.md`):
 ```bash
 SHRIKE_EXPERT_SLOT_TABLE=256,256,246,209,191,171,171,162,171,149,164,169,155,144,137,135,133,131,132,130,145,133,141,142,137,137,130,137,137,142,137,135,157,157,162,160,166,161,178,194 \
 SHRIKE_EXPERT_POLICY=slru \
-nohup ./bin/ShrikeServer --model ./models/ornith15.gturbo --model-id ornith15 --port 8081 --max-context 32768 --ram-budget 11324620800 --thinking off > /tmp/shrike-server.log 2>&1 &
+nohup ./bin/shrike serve --model ./models/ornith15.gturbo --model-id ornith15 --port 8081 --max-context 32768 --ram-budget 11324620800 --thinking off > /tmp/shrike-server.log 2>&1 &
 ```
 
 The table is ornith15's (blend 0.3 of its production miss profile scaled to the

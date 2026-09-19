@@ -204,11 +204,19 @@ branch, which is v17's rule exactly.
 **The drift.** `--max-context` is one flag with two contracts. The server
 enforces membership in `RuntimeConfiguration.supportedContextTokens` and renders
 both its help and its error from that constant (`ShrikeServerCommand.swift:272`),
-which was v23's fix. `ShrikeCLICore` never references the constant, so generate
-performs no argument-time validation at all and advertises `1...262144`;
-`--max-context 1` parses. The defaults differ too, 4096 against 262144. Under one
-root these are siblings in one help tree, so this is resolved rather than
-inherited.
+which was v23's fix. Generate enforces a **range** instead,
+`1...nativeMaximumContextTokens`, in `validateContext()`
+(`ShrikeCLICommand.swift:227`), with the YaRN set when scaling is on. The
+defaults differ too, 4096 against 262144.
+
+A first draft of this section said generate "performs no argument-time validation
+at all", inferred from `--max-context 1` parsing. That was wrong, and wrong in an
+instructive way: the value parsed because it is legal under generate's own rule,
+not because no rule ran. `ShrikeCLICore` genuinely never references
+`supportedContextTokens`, but the conclusion drawn from that did not follow.
+Generate's help is accurate about generate. The defect is that two siblings
+enforce different contracts for one flag, and under one root they sit in one help
+tree, so it is resolved rather than inherited.
 
 ### Who names these binaries
 
@@ -264,6 +272,55 @@ and enforced in the root's own `run()`, every case behaves:
 
 This is the constraint the whole shape rests on, and it has a cost recorded under
 Declared changes below.
+
+**The root's `validate()` runs even when a subcommand runs.** ArgumentParser
+validates the whole command chain from root to leaf, so a probe invoked as
+`probe serve --port 9000` executed the root's `validate()` *and* the `validate()`
+of its `@OptionGroup` before serve's own `run()`. Both fire; the group's fires
+first.
+
+That is fatal to the obvious design, because `ShrikeCLICommand.validate()` throws
+`"one of --prompt or --messages-file is required"` when both are absent
+(`ShrikeCLICommand.swift:200`). Hung on the root as-is, it would fail every
+`shrike serve`, every `shrike repack` and every `shrike bench`. So it is not only
+`--model` that leaves ArgumentParser's hands: **all ten of generate's cross-flag
+rules move into the root's `run()`**, and neither the root nor its option group
+may declare a `validate()` at all.
+
+The diagnostic contract survives that move intact, which was measured rather than
+assumed. A `ValidationError` thrown from `run()` prints the same
+`Error: <message>` line, the same usage block and the same footer, and exits 64,
+identically to one thrown from `validate()`.
+
+**And then a third finding killed that design outright.** Built for real, the
+root carrying generation's options collided with its subcommands: a flag name
+declared by both binds to the **root**, in either position, and the subcommand
+never sees it. `shrike serve --model X` reached serve with `model` nil, so it
+scanned the models directory instead, and `--max-context`, `--thinking`,
+`--kv-bits`, `--expert-cache-slots`, `--rope-scaling` and `--prefill-chunk` were
+all silently ignored on serve. That is the mini's production launch line failing
+quietly, which is the exact failure mode this chapter exists to avoid.
+
+**The resolution is `defaultSubcommand`.** Generation stays a leaf command,
+`ShrikeGenerateCommand` with `commandName: "generate"`, and the root declares it
+as the default so it is reached without being typed. Each command then owns its
+own flags. Verified: `serve --model m.gturbo --max-context 32768 --thinking off
+--kv-bits 4 --expert-cache-slots 160` lands every value on serve, pinned by
+`serveKeepsEveryFlagItSharesWithGenerate`.
+
+This supersedes the two findings above rather than building on them. Because
+generation is no longer the root, its `validate()` stays exactly where v23 put
+it, all ten cross-flag rules stay in it, and `drive()` and `run()` are unchanged.
+The root declares no options at all.
+
+Two costs of the resolution, both taken deliberately. `shrike --help` lists
+subcommands with `generate (default)` rather than generation's flags, so
+discovering them needs `shrike generate --help`; the alternative was the silent
+break above. And a bare `shrike` is currently a **usage error at exit 64**,
+printing `Error: Missing expected argument '--model <dir>'` above the root's
+help, because generate's `--model` is still required. Task 3 makes it optional so
+it can resolve from configuration, which is what turns a bare invocation into
+something useful.
 
 ## The shape
 
@@ -339,14 +396,14 @@ either machine today, so nothing on disk migrates.
    subcommand trees. The five old executable targets and their `@main` shims are
    deleted. Clean break: no forwarding shims, so anything still naming
    `./bin/ShrikeServer` fails loudly with file-not-found rather than quietly.
-2. **The root's options become optional**, enforced in its own `run()`, because
-   a required option on the root breaks subcommand dispatch (measured above).
-   This moves the "missing `--model`" diagnostic out of ArgumentParser and into
-   our code, a step back toward what v23 spent a chapter deleting. It is confined
-   to the root's own options and is pinned by a test on the message, because a
-   silently weakened diagnostic is exactly the class v23's close caught twice.
-3. **`shrike` bare prints help at exit 0** via `CleanExit.helpRequest`, rather
-   than erroring on a missing argument.
+2. **The root declares no options.** Generation is `ShrikeGenerateCommand`, a
+   leaf reached without typing via `defaultSubcommand`, because a flag shared
+   between the root and a subcommand binds to the root and the subcommand never
+   sees it (measured above). Nothing moves out of ArgumentParser's hands:
+   generate keeps its `validate()` and all ten of its cross-flag rules.
+3. **A bare `shrike` is a usage error at exit 64** until Task 3, naming
+   `--model`. Pinned as such rather than aspirationally, with the pin carrying a
+   note that Task 3 changes it.
 4. **Model resolution** as above, with `ServerConfig` moved to a shared home and
    the file renamed to `config.json`.
 5. **The flag trim: 18 flags deleted**, per the inventory's disposition. v17's

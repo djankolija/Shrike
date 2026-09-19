@@ -66,7 +66,7 @@ def build_prompt() -> str:
 
 
 def launch(quant: str, ane: bool, log_name: str) -> None:
-    binary = ROOT / ".build/arm64-apple-macosx/release/ShrikeServer"
+    binary = ROOT / ".build/arm64-apple-macosx/release/shrike"
     cmd = server_command(binary, PORT, model=MODELS[quant], cache_mode="off")
     env = server_environment()
     env["SHRIKE_PREFILL_ANE"] = "on" if ane else "off"

@@ -57,7 +57,7 @@ private struct LoadedRuntime {
 }
 
 /// The CLI driver: parse messages, load the model, run one completion, print the timing footer.
-public func run(args: ShrikeCLICommand,
+public func run(args: ShrikeGenerateCommand,
                 stdout: FileHandle = .standardOutput,
                 stderr: FileHandle = .standardError) async -> RunResult {
     do {
@@ -176,7 +176,7 @@ public func run(args: ShrikeCLICommand,
 
 /// The boundary token the first answer sampled but never fed is re-fed here, as the server's cached continuation does.
 private func runFollowUp(_ followUp: String,
-                         args: ShrikeCLICommand,
+                         args: ShrikeGenerateCommand,
                          tokenizer: GFTokenizer,
                          loaded: LoadedRuntime,
                          config: GenerationConfig,
@@ -232,7 +232,7 @@ private func resolveExpectedArch(modelURL: URL,
     }
 }
 
-private func buildPrompt(args: ShrikeCLICommand,
+private func buildPrompt(args: ShrikeGenerateCommand,
                          modelURL: URL,
                          tokenizer: GFTokenizer,
                          expectedArch: ArchConfig,
@@ -285,7 +285,7 @@ private func buildPrompt(args: ShrikeCLICommand,
     return .value(promptIds)
 }
 
-private func buildRuntime(args: ShrikeCLICommand,
+private func buildRuntime(args: ShrikeGenerateCommand,
                           modelURL: URL,
                           expectedArch: ArchConfig,
                           logitsHead: Bool,

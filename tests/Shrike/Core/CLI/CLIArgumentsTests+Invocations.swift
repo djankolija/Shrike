@@ -11,7 +11,7 @@ extension CLIArgumentsTests {
         """
 
     @Test func goldenBaselineShortProfileParses() throws {
-        let arguments = try ShrikeCLICommand.parse([
+        let arguments = try ShrikeGenerateCommand.parse([
             "--model", "/models/ornith15.gturbo", "--prompt", "Explain what a mutex is and when you would use one.",
             "--max-new", "96", "--temperature", "0", "--seed", "1234", "--quiet",
         ])
@@ -25,7 +25,7 @@ extension CLIArgumentsTests {
     }
 
     @Test func goldenBaselineLogitsHeadProfileParses() throws {
-        let arguments = try ShrikeCLICommand.parse([
+        let arguments = try ShrikeGenerateCommand.parse([
             "--model", "/models/ornith15.gturbo", "--prompt", "Explain what a mutex is and when you would use one.",
             "--max-new", "128", "--temperature", "0", "--seed", "1234", "--quiet",
             "--logits-head",
@@ -35,7 +35,7 @@ extension CLIArgumentsTests {
     }
 
     @Test func goldenBaselineTurnsProfileParses() throws {
-        let arguments = try ShrikeCLICommand.parse([
+        let arguments = try ShrikeGenerateCommand.parse([
             "--model", "/models/ornith15.gturbo", "--messages-file", "/tmp/golden-turns.json",
             "--follow-up", Self.turnsFollowUp,
             "--max-new", "128", "--temperature", "0", "--seed", "1234", "--quiet",
@@ -48,7 +48,7 @@ extension CLIArgumentsTests {
     }
 
     @Test func goldenBaselineExtraArgumentsParse() throws {
-        let arguments = try ShrikeCLICommand.parse([
+        let arguments = try ShrikeGenerateCommand.parse([
             "--model", "/models/ornith15.gturbo", "--prompt", "Explain what a mutex is and when you would use one.",
             "--max-new", "96", "--temperature", "0", "--seed", "1234", "--quiet",
             "--expert-cache-slots", "160",
@@ -57,7 +57,7 @@ extension CLIArgumentsTests {
     }
 
     @Test func classTwoGateInstrumentParses() throws {
-        let arguments = try ShrikeCLICommand.parse([
+        let arguments = try ShrikeGenerateCommand.parse([
             "--model", "/models/ornith15.gturbo", "--prompt", "Explain what a mutex is and when you would use one.",
             "--force-tokens", "/tmp/ids.txt", "--dump-logits", "/tmp/out.f16",
         ])
@@ -66,7 +66,7 @@ extension CLIArgumentsTests {
     }
 
     @Test func hiddenStateInstrumentParses() throws {
-        let arguments = try ShrikeCLICommand.parse([
+        let arguments = try ShrikeGenerateCommand.parse([
             "--model", "/models/ornith15.gturbo", "--prompt", "Explain what a mutex is and when you would use one.",
             "--dump-hidden", "/tmp/hidden.f16",
         ])
@@ -74,7 +74,7 @@ extension CLIArgumentsTests {
     }
 
     @Test func tokenizerOnlyInvocationParses() throws {
-        let arguments = try ShrikeCLICommand.parse([
+        let arguments = try ShrikeGenerateCommand.parse([
             "--model", "/models/ornith15.gturbo", "--prompt", "Explain what a mutex is and when you would use one.",
             "--tokenize", "/tmp/pieces.json",
         ])

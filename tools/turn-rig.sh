@@ -57,13 +57,13 @@ HOST="$1"; PORT="$2"; PDIR="$3"; ODIR="$4"; TAG="$5"; phase="$6"; arg="${7:-}"
 MODEL="${MODEL:-./models/ornith15.gturbo}"
 MODEL_ID="${MODEL_ID:-ornith15}"
 mkdir -p "$ODIR"
-LAUNCH="env ${SERVER_ENV:-} SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/ShrikeServer --model $MODEL --model-id $MODEL_ID --port $PORT --max-context 32768 --ram-budget 8G --thinking off > /tmp/ornith.log 2>&1 &"
+LAUNCH="env ${SERVER_ENV:-} SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/shrike serve --model $MODEL --model-id $MODEL_ID --port $PORT --max-context 32768 --ram-budget 8G --thinking off > /tmp/ornith.log 2>&1 &"
 
 relaunch() {
   ssh macmini "
-    pkill -f 'bin/ShrikeServer --model $MODEL' || true
+    pkill -f 'bin/shrike serve --model $MODEL' || true
     sleep 3
-    if pgrep -x ShrikeServer > /dev/null; then echo 'server still running' >&2; exit 1; fi
+    if pgrep -f 'shrike serve' > /dev/null; then echo 'server still running' >&2; exit 1; fi
     cd ~/shrike-runtime
     [ -f /tmp/ornith.log ] && mv -f /tmp/ornith.log \"/tmp/ornith.log.\$(date +%Y%m%d-%H%M%S)\"
     $LAUNCH

@@ -4,7 +4,7 @@ import ShrikeArgumentSupport
 
 public struct AttnBenchCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "ShrikeAttnBench",
+        commandName: "attention",
         abstract: "The decode attention scan on synthetic rows at the served shape.",
         discussion: "A composite arm joins switches with '+', e.g. qregs+dbuf+load8.",
         subcommands: [ListArms.self])

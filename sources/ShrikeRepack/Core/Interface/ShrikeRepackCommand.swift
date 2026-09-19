@@ -14,7 +14,7 @@ extension SupportedModelSource: ExpressibleByArgument {
 
 public struct ShrikeRepackCommand: AsyncParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "ShrikeRepack",
+        commandName: "repack",
         abstract: "Repackage a checkpoint into the .gturbo format, and verify an install.",
         discussion: """
             The .gturbo format stores routed experts in a layout that can be read \

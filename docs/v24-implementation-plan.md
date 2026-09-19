@@ -58,10 +58,12 @@ onto the root that Task 4 then deletes.
       instance is already found: `--max-context` is enforced against
       `RuntimeConfiguration.supportedContextTokens` by the server
       (`ShrikeServerCommand.swift:272`, help and error rendered from the same
-      constant, which was v23's fix) and not validated at all by the CLI, whose
-      help advertises `1...262144`. `--max-context 1` parses. The defaults differ
-      too, 4096 against 262144. Under one root these become siblings in one help
-      tree, so the drift has to be resolved rather than inherited.
+      constant, which was v23's fix) and against a **range** by generate,
+      `1...nativeMaximumContextTokens` in `validateContext()`
+      (`ShrikeCLICommand.swift:227`). Both validate; they disagree on the
+      contract. The defaults differ too, 4096 against 262144. Under one root
+      these become siblings in one help tree, so the drift is resolved rather
+      than inherited.
 - [x] Write the table into `v24-unified-cli.md` as an inventory section, with the
       resulting count stated as an output of the classification.
 - [ ] Link check, commit. Text only.
@@ -80,40 +82,52 @@ scratch.
 The structural change, with flags otherwise untouched, so that a golden mismatch
 here can only mean the harness moved.
 
-- [ ] Extract `ShrikeCLICommand`'s options into a `public ParsableArguments`
-      struct in `ShrikeCLICore`, so both the root and the tests can reach them
-      without the root's module owning generation.
-- [ ] New `ShrikeRootCore` library holding `ShrikeRootCommand`: an
-      `AsyncParsableCommand` carrying that option group, `subcommands: [serve,
-      repack, bench]`, and its own `run()` that dispatches into `ShrikeCLICore`'s
-      runner. New `sources/ShrikeRoot/Command` executable target holding the
-      three-line `@main extension`, product `shrike`.
-- [ ] A `bench` parent command with `attention` and `expert` children;
+- [x] ~~Extract `ShrikeCLICommand`'s options into a `ParsableArguments` struct~~
+      **Not done, and not needed.** It was the option-group design the collision
+      finding killed; generation stays one leaf command.
+- [x] New `ShrikeRootCore` library holding `ShrikeRootCommand`, an
+      `AsyncParsableCommand` (serve's `run()` is async, so the root must be)
+      over `subcommands: [generate, serve, repack, bench]` with
+      `defaultSubcommand: ShrikeGenerateCommand.self` and no options of its own.
+      New `sources/ShrikeRoot/Command` executable target holding the three-line
+      `@main extension`, product `shrike`.
+- [x] A `bench` parent command with `attention` and `expert` children;
       `AttnBenchCommand`'s existing `list` subcommand nests under `attention`.
-- [ ] Set each command's `commandName` to its verb: `serve`, `repack`, `bench`.
-      They are currently the legacy binary names.
-- [ ] **The root's options are declared optional** and enforced in `run()`. A
-      required option on the root breaks subcommand dispatch at exit 64, measured
-      at step zero. At this task the enforcement is a plain check with a clear
-      message; Task 3 replaces it with resolution.
-- [ ] Delete the five executable targets, their `@main` shims and their products.
-- [ ] Move every consumer in the table under "Who names these binaries" in the
+- [x] Set each command's `commandName` to its verb: `generate`, `serve`,
+      `repack`, `attention`, `expert`.
+- [x] **The root declares no options at all**, and generation is reached through
+      `defaultSubcommand`. The two designs this replaced both failed on measured
+      behaviour: a required option on the root breaks subcommand dispatch at exit
+      64, and the root's `validate()` runs even when a subcommand runs. Worse,
+      a flag shared between the root and a subcommand binds to the **root**, so
+      `shrike serve --model X` reached serve with `model` nil and scanned the
+      models directory instead. `ShrikeCLICommand` becomes
+      `ShrikeGenerateCommand`, a leaf with `commandName: "generate"`, keeping its
+      `validate()` and all ten cross-flag rules unchanged.
+- [x] Delete the five executable targets, their `@main` shims and their products.
+- [x] Move every consumer in the table under "Who names these binaries" in the
       spec: `tools/golden-baseline.sh`, `tools/mini-deploy.sh` (one binary, three
       bundles), `tools/decode-rig.sh`, `tools/turn-rig.sh`,
       `tools/ane-probes/shrike_ane_prefill_ab.py`, `CLAUDE.md`, and the receipt
       strings in `VerifiedInstallTool.swift` and `VerifiedInstallReceipt.swift`.
-- [ ] **Rewrite the process-name checks.** `tools/decode-rig.sh:58` and
+- [x] **Rewrite the process-name checks.** `tools/decode-rig.sh:58` and
       `tools/turn-rig.sh:66` use `pgrep -x ShrikeServer`, which never matches
       again once every process is named `shrike`, and fails by reporting "not
       running" rather than by erroring. The `pgrep -f` guards in `CLAUDE.md` and
       `tools/golden-baseline.sh:94` keep working but need new patterns.
-- [ ] Rewrite v23's argv pins against the new spelling, re-probing each message
-      and exit code from the binary rather than assuming them.
-- [ ] New pins, each of which would otherwise break silently: a bare `shrike`
-      prints help at exit 0; `shrike serve` does not demand the root's options;
-      `shrike repack verify-install` resolves two levels deep; an unknown
-      subcommand errors with `Unexpected argument` at exit 64; the mini's
-      production launch line parses.
+- [x] Rewrite v23's argv pins against the new spelling. `ShrikeCLICommand`
+      renamed across three test files; `RepackCLITests` now spawns
+      `.build/debug/shrike` with `repack` prepended, keeping every case's argv.
+- [x] New pins in `tests/ShrikeRoot`, ten cases. The load-bearing one is
+      `serveKeepsEveryFlagItSharesWithGenerate`, which is the collision
+      regression. Also: generation needs no verb and is reachable by name, the
+      mini's production launch line parses to the right values, serve still
+      refuses an unsupported `--max-context`, `repack verify-install` resolves
+      two levels, `bench` resolves either child, an unknown verb is rejected.
+      **Corrected against the binary:** a bare `shrike` is a usage error at exit
+      64 naming `--model`, not help at exit 0 as this plan first claimed. The 0
+      was measured on a probe whose options were all optional. Task 3 changes
+      it.
 - [ ] Four gates, `tools/golden-baseline.sh --check` byte-identical, commit.
 
 ---

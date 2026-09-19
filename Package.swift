@@ -9,11 +9,7 @@ let package = Package(
     products: [
         .library(name: "Shrike", targets: ["Shrike"]),
         .library(name: "ShrikeFormat", targets: ["ShrikeFormat"]),
-        .executable(name: "ShrikeRepack", targets: ["ShrikeRepack"]),
-        .executable(name: "ShrikeCLI", targets: ["ShrikeCLI"]),
-        .executable(name: "ShrikeAttnBench", targets: ["ShrikeAttnBench"]),
-        .executable(name: "ShrikeExpertBench", targets: ["ShrikeExpertBench"]),
-        .executable(name: "ShrikeServer", targets: ["ShrikeServer"]),
+        .executable(name: "shrike", targets: ["ShrikeRoot"]),
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
@@ -66,11 +62,6 @@ let package = Package(
             ],
             path: "sources/ShrikeRepack/Core"
         ),
-        .executableTarget(
-            name: "ShrikeRepack",
-            dependencies: ["ShrikeRepackCore"],
-            path: "sources/ShrikeRepack/Command"
-        ),
         .target(
             name: "ShrikeCLICore",
             dependencies: [
@@ -78,13 +69,7 @@ let package = Package(
                 "ShrikeArgumentSupport",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
-            path: "sources/ShrikeCLI",
-            exclude: ["Command"]
-        ),
-        .executableTarget(
-            name: "ShrikeCLI",
-            dependencies: ["ShrikeCLICore"],
-            path: "sources/ShrikeCLI/Command"
+            path: "sources/ShrikeCLI"
         ),
         .target(
             name: "ShrikeAttnBenchCore",
@@ -95,15 +80,9 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "sources/ShrikeAttnBench",
-            exclude: ["Command"],
             resources: [
                 .copy("Metal"),
             ]
-        ),
-        .executableTarget(
-            name: "ShrikeAttnBench",
-            dependencies: ["ShrikeAttnBenchCore"],
-            path: "sources/ShrikeAttnBench/Command"
         ),
         .target(
             name: "ShrikeExpertBenchCore",
@@ -113,15 +92,9 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "sources/ShrikeExpertBench",
-            exclude: ["Command"],
             resources: [
                 .copy("Metal"),
             ]
-        ),
-        .executableTarget(
-            name: "ShrikeExpertBench",
-            dependencies: ["ShrikeExpertBenchCore"],
-            path: "sources/ShrikeExpertBench/Command"
         ),
         .target(
             name: "ShrikeServerCore",
@@ -135,10 +108,22 @@ let package = Package(
             ],
             path: "sources/ShrikeServer/Core"
         ),
+        .target(
+            name: "ShrikeRootCore",
+            dependencies: [
+                "ShrikeCLICore",
+                "ShrikeServerCore",
+                "ShrikeRepackCore",
+                "ShrikeAttnBenchCore",
+                "ShrikeExpertBenchCore",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "sources/ShrikeRoot/Core"
+        ),
         .executableTarget(
-            name: "ShrikeServer",
-            dependencies: ["ShrikeServerCore"],
-            path: "sources/ShrikeServer/Command"
+            name: "ShrikeRoot",
+            dependencies: ["ShrikeRootCore"],
+            path: "sources/ShrikeRoot/Command"
         ),
         .target(
             name: "ShrikeValidationSupport",
@@ -170,6 +155,14 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "tests/ShrikeBench"
+        ),
+        .testTarget(
+            name: "ShrikeRootTests",
+            dependencies: [
+                "ShrikeRootCore",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "tests/ShrikeRoot"
         ),
         .testTarget(
             name: "ShrikeServerTests",

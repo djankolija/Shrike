@@ -47,9 +47,9 @@ extension TopKChoice: ExpressibleByArgument {
     }
 }
 
-public struct ShrikeCLICommand: ParsableCommand, Sendable {
+public struct ShrikeGenerateCommand: ParsableCommand, Sendable {
     public static let configuration = CommandConfiguration(
-        commandName: "ShrikeCLI",
+        commandName: "generate",
         abstract: "Qwen3.5-MoE 35B-A3B text generation.")
 
     @Option(help: ArgumentHelp("Path to a .gturbo model directory.", valueName: "dir"))

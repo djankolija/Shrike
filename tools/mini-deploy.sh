@@ -21,19 +21,19 @@ if [ "${1:-}" = "--restart" ]; then
   RESTART=1
 fi
 
-for f in ShrikeServer ShrikeCLI ShrikeRepack; do
+for f in shrike; do
   [ -x "$BIN/$f" ] || { echo "missing $BIN/$f — build release first" >&2; exit 1; }
 done
 
 if [ "$RESTART" -eq 1 ]; then
   ssh macmini '
-    pkill -f "bin/ShrikeServer --model ./models/ornith15.gturbo" || true
+    pkill -f "bin/shrike serve --model ./models/ornith15.gturbo" || true
     sleep 3
-    if pgrep -f "bin/ShrikeServer" > /dev/null; then echo "server still running" >&2; exit 1; fi
+    if pgrep -f "bin/shrike" > /dev/null; then echo "server still running" >&2; exit 1; fi
   '
 fi
 
-for f in ShrikeServer ShrikeCLI ShrikeRepack; do
+for f in shrike; do
   scp -q "$BIN/$f" "macmini:shrike-runtime/bin/$f.staging"
 done
 for bundle in "$BIN"/*.bundle; do
@@ -44,7 +44,7 @@ done
 ssh macmini '
   set -eu
   cd ~/shrike-runtime/bin
-  for f in ShrikeServer ShrikeCLI ShrikeRepack; do
+  for f in shrike; do
     mv -f "$f.staging" "$f"
   done
   for staged in *.bundle.staging; do
@@ -64,7 +64,7 @@ ssh macmini '
   set -eu
   cd ~/shrike-runtime
   [ -f /tmp/ornith.log ] && mv -f /tmp/ornith.log "/tmp/ornith.log.$(date +%Y%m%d-%H%M%S)"
-  env SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/ShrikeServer \
+  env SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/shrike serve \
     --model ./models/ornith15.gturbo --model-id ornith15 --port 8081 \
     --max-context 32768 --ram-budget 8G --thinking off > /tmp/ornith.log 2>&1 &
   tries=0

@@ -20,8 +20,8 @@ repacking tool.
 swift build -c release
 ```
 
-Products land in `.build/release/`: `ShrikeServer`, `ShrikeCLI`, `ShrikeRepack`, and the
-two benchmarks, `ShrikeAttnBench` and `ShrikeExpertBench`.
+One binary lands in `.build/release/`: `shrike`. Run it with a prompt to generate
+once; `shrike serve`, `shrike repack` and `shrike bench` are the other verbs.
 
 ## Install a model
 
@@ -29,7 +29,7 @@ Models are converted into the `.gturbo` format, which stores routed experts in a
 layout that can be read a single expert at a time.
 
 ```bash
-swift run -c release ShrikeRepack --help
+swift run -c release shrike repack --help
 ```
 
 An install writes a `verified-install.json` receipt bound to the absolute path it was
@@ -37,7 +37,7 @@ installed to. Moving or renaming an installed model therefore makes it fail to l
 re-issue the receipt in place rather than editing it:
 
 ```bash
-swift run -c release ShrikeRepack verify-install --input-gturbo <model.gturbo>
+swift run -c release shrike repack verify-install --input-gturbo <model.gturbo>
 ```
 
 ## Serve
@@ -47,13 +47,13 @@ and serves everything it finds, reading `~/.shrike/server.json` unless given
 `--config`:
 
 ```bash
-.build/release/ShrikeServer
+.build/release/shrike serve
 ```
 
 To serve exactly one model and ignore any config or roster:
 
 ```bash
-.build/release/ShrikeServer --model models/<name>.gturbo
+.build/release/shrike serve --model models/<name>.gturbo
 ```
 
 `--help` lists the full flag set. The two worth knowing first:
@@ -88,9 +88,9 @@ add, since the parser, repacker, and inference path are shared.
 - **Long context.** Native RoPE to 262K tokens; optional YaRN extends to 512K or 1M.
 - **Compressed KV cache.** 16-, 8-, or 4-bit, independent of model quantization.
 - **Thinking mode.** Off/on/adaptive for the Qwen-family templates. gpt-oss
-  cannot disable thinking; its knob is ShrikeServer's `--reasoning-effort
+  cannot disable thinking; its knob is `shrike serve`'s `--reasoning-effort
   low|medium|high` (per-request via the OpenAI `reasoning_effort` field;
-  ShrikeCLI has no such flag), and `--thinking off` on a Harmony model warns
+  `shrike generate` has no such flag), and `--thinking off` on a Harmony model warns
   and maps to effort `low`.
 - **No speculative decoding.** MTP was removed in v17 after measured runs showed no
   benefit. The `.gturbo` format still recognizes an MTP sidecar, but the loader

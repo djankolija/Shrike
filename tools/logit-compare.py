@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The forced-token logit comparison (docs/v19-scan-rewrite.md, Task 1).
 
-Two dumps from `ShrikeCLI --dump-logits`, the same prompt and the same forced
+Two dumps from `shrike generate --dump-logits`, the same prompt and the same forced
 tokens on two builds, compared position by position: the KL divergence old to
 new, the largest logit difference, and every argmax flip with the old build's
 top-2 margin. The band is a multiple of the median over positions of the largest

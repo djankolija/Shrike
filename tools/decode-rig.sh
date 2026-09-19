@@ -53,12 +53,12 @@ need_payload() {
 
 relaunch() {  # $1 = extra env assignments for this shape (traces)
   ssh macmini "
-    pkill -f 'bin/ShrikeServer --model $MODEL' || true
+    pkill -f 'bin/shrike serve --model $MODEL' || true
     sleep 3
-    if pgrep -x ShrikeServer > /dev/null; then echo 'server still running' >&2; exit 1; fi
+    if pgrep -f 'shrike serve' > /dev/null; then echo 'server still running' >&2; exit 1; fi
     cd ~/shrike-runtime
     [ -f /tmp/ornith.log ] && mv -f /tmp/ornith.log \"/tmp/ornith.log.\$(date +%Y%m%d-%H%M%S)\"
-    env $SERVER_ENV $1 SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/ShrikeServer --model $MODEL --model-id $MODEL_ID --port $PORT --max-context 32768 --ram-budget $RAM_BUDGET --thinking off > /tmp/ornith.log 2>&1 &
+    env $SERVER_ENV $1 SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/shrike serve --model $MODEL --model-id $MODEL_ID --port $PORT --max-context 32768 --ram-budget $RAM_BUDGET --thinking off > /tmp/ornith.log 2>&1 &
     exit 0
   " || exit 1
   tries=0

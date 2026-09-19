@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-request prefill ledger from a ShrikeServer log with SHRIKE_KERNEL_STATS.
+"""Per-request prefill ledger from a `shrike serve` log with SHRIKE_KERNEL_STATS.
 
 Splits the log into per-request blocks at the 'Shrike kernel busy_ms' line
 (the block terminator), takes the generated count from the request's

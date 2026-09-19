@@ -91,12 +91,12 @@ struct RepackCLITests {
     private func run(_ arguments: [String]) throws
         -> (status: Int32, stdout: String, stderr: String) {
         let executable = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent(".build/debug/ShrikeRepack")
+            .appendingPathComponent(".build/debug/shrike")
         let process = Process()
         let stdout = Pipe()
         let stderr = Pipe()
         process.executableURL = executable
-        process.arguments = arguments
+        process.arguments = ["repack"] + arguments
         process.standardOutput = stdout
         process.standardError = stderr
         try process.run()

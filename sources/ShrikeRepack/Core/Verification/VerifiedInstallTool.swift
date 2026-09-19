@@ -78,7 +78,7 @@ public enum VerifiedInstallTool {
             manifestSize: manifestSize,
             sourceRepoID: nil,
             sourceRevision: manifest.sourceSnapshotHash,
-            toolVersion: "ShrikeRepack verify-install",
+            toolVersion: "shrike repack verify-install",
             files: files)
         let receiptPath = access.rootPath
             + "/" + VerifiedInstallReceiptWriter.fileName

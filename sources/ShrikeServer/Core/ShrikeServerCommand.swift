@@ -7,7 +7,7 @@ extension ServerPromptCacheMode: ExpressibleByArgument {}
 
 public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
     public static let configuration = CommandConfiguration(
-        commandName: "ShrikeServer",
+        commandName: "serve",
         abstract: "Serve one or many .gturbo models over an OpenAI-compatible HTTP API.")
 
     /// Serve exactly this model, ignoring any config or roster. nil selects
