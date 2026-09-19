@@ -39,6 +39,13 @@ Not a generated corpus: the real ones.
 Repack and the two benches are executable targets, so their invocations cannot be
 tested until their own tasks move the parsing into a command type. Pin them there.
 
+Corrected at T4: half wrong. `RepackCLITests` already tested Repack's argv
+end-to-end by spawning the binary and asserting on its exit code and stderr, so
+that surface *was* pinned, in a file a search for the literal string
+`ShrikeRepack ` could not find because it builds argv as an array. Task 1 should
+have found it. When T4 changed the spelling, those five tests failed, which is
+the pin working; they are rewritten against the new surface in the same commit.
+
 ---
 
 ### Task 2: ShrikeCLI
@@ -112,20 +119,37 @@ disagrees.
 
 ### Task 4: ShrikeRepack, as four subcommands
 
-- [ ] Move parsing out of `sources/ShrikeRepack/Command/main.swift` into
+- [x] Move parsing out of `sources/ShrikeRepack/Command/main.swift` into
       `ShrikeRepackCore`, which `ShrikeRepackTests` already depends on.
-- [ ] A root command with `subcommands: [Install, ImportSnapshot, VerifyInstall,
+- [x] A root command with `subcommands: [Install, ImportSnapshot, VerifyInstall,
       DiscardPartial]`, each holding only the flags it needs and its own `run()`.
-      The mode-validation block and the silent `return 2` both disappear.
-- [ ] `--model` keeps its name inside `Install`, where a catalog name is the only
-      thing it could mean.
-- [ ] Update the three sites citing the old spelling: `CLAUDE.md:35`,
-      `README.md:41`, `VerifiedInstallReceipt.swift:171`.
-- [ ] Note Repack alone passes unstripped `CommandLine.arguments` today and skips
-      element 0 itself. `@main` removes that entirely; make sure nothing else
-      relies on it.
-- [ ] Add its invocation tests.
-- [ ] Gates, commit.
+      The mode-validation block and the silent `return 2` both disappear, and with
+      them the per-mode `guard` chains that existed only to reject another mode's
+      flags: a subcommand cannot see them. No `defaultSubcommand`, so `install` is
+      typed like the rest; see the spec's declared change 1 for why.
+- [x] `--model` keeps its name inside `Install`, where a catalog name is the only
+      thing it could mean. (An early design memo said it became `--model-name`;
+      the spec and this plan both kept `--model`, and that memo is stale.)
+- [x] Four sites, not three: `CLAUDE.md:35`, `README.md:41`,
+      `VerifiedInstallReceipt.swift:171` and, unlisted,
+      `RepackModelInstallerClient.swift:138`. `VerifiedInstallTool.swift:81`
+      already wrote `ShrikeRepack verify-install` into every receipt it issued,
+      so that string was ahead of the surface and is now correct.
+- [x] Repack alone passed unstripped `CommandLine.arguments` and skipped element 0
+      inside `parse` via `var index = 1`. `@main` removes both; nothing else read
+      that array.
+- [x] Add its invocation tests. Ten cases, including that the retired flag
+      spelling no longer parses and that one subcommand refuses another's options.
+      Note a root with subcommands *returns* ArgumentParser's help command where a
+      leaf command throws; both exit zero, and the test asserts the real shape.
+- [x] `RepackCLITests`, the pre-existing end-to-end suite, rewritten against the
+      new spelling: every message and exit code re-probed from the binary first
+      rather than assumed. Operational failures still exit 1; a parse failure
+      moved from 2 to ArgumentParser's `validationFailure`, named as such in the
+      test rather than written as a bare 64. One case lost its subject, since
+      `--resume` and `--discard-partial` can no longer be combined to be rejected;
+      it now asserts that unreachability instead.
+- [x] Gates, commit.
 
 ---
 

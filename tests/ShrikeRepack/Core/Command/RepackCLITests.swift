@@ -1,30 +1,35 @@
+import ArgumentParser
 import Foundation
 import Testing
 
 @Suite(.serialized)
 struct RepackCLITests {
-    @Test func resumeAndDiscardAreMutuallyExclusive() throws {
+    private let parseFailure = ExitCode.validationFailure.rawValue
+    private let operationalFailure = ExitCode.failure.rawValue
+
+    @Test func discardPartialIsNotReachableFromInstall() throws {
         let output = temporaryOutput("exclusive")
         defer { clean(output) }
         let result = try run([
+            "install",
             "--output", output,
-            "--resume",
             "--discard-partial",
         ])
 
-        #expect(result.status == 2)
-        #expect(result.stderr.contains("mutually exclusive"))
+        #expect(result.status == parseFailure)
+        #expect(result.stderr.contains("Unknown option '--discard-partial'"))
     }
 
     @Test func resumeWithoutStateFailsBeforeNetwork() throws {
         let output = temporaryOutput("missing-resume")
         defer { clean(output) }
         let result = try run([
+            "install",
             "--output", output,
             "--resume",
         ])
 
-        #expect(result.status == 1)
+        #expect(result.status == operationalFailure)
         #expect(result.stderr.contains("no resumable install state exists"))
     }
 
@@ -32,25 +37,27 @@ struct RepackCLITests {
         let output = temporaryOutput("missing-discard")
         defer { clean(output) }
         let result = try run([
-            "--discard-partial",
+            "discard-partial",
             "--output", output,
         ])
 
-        #expect(result.status == 1)
+        #expect(result.status == operationalFailure)
         #expect(result.stderr.contains("no resumable install state exists"))
     }
 
-    @Test func unknownModelSelectorIsRejected() throws {
+    @Test func unknownModelSelectorIsRejectedAndNamesTheSupportedOnes() throws {
         let output = temporaryOutput("bad-model")
         defer { clean(output) }
         let result = try run([
+            "install",
             "--model", "bogus",
             "--output", output,
         ])
 
-        #expect(result.status == 2)
-        #expect(result.stderr.contains("unknown model"))
+        #expect(result.status == parseFailure)
+        #expect(result.stderr.contains("invalid for '--model"))
         #expect(result.stderr.contains("qwen36"))
+        #expect(result.stderr.contains("ornith15"))
     }
 
     @Test func qwenModelSelectorIsAccepted() throws {
@@ -59,13 +66,26 @@ struct RepackCLITests {
         // --resume without saved state fails fast after argument parsing,
         // proving the selector itself is accepted without touching the network.
         let result = try run([
+            "install",
             "--model", "qwen36",
             "--output", output,
             "--resume",
         ])
 
-        #expect(result.status == 1)
+        #expect(result.status == operationalFailure)
         #expect(result.stderr.contains("no resumable install state exists"))
+    }
+
+    @Test func theRetiredFlagSpellingIsRejectedByTheBinary() throws {
+        let output = temporaryOutput("retired")
+        defer { clean(output) }
+        let result = try run([
+            "--discard-partial",
+            "--output", output,
+        ])
+
+        #expect(result.status == parseFailure)
+        #expect(result.stderr.contains("--discard-partial"))
     }
 
     private func run(_ arguments: [String]) throws

@@ -93,8 +93,16 @@ roughly fifteen cases written by hand.
 
 1. **Repack's modes become subcommands.** `ShrikeRepack --verify-install
    --input-gturbo X` becomes `ShrikeRepack verify-install --input-gturbo X`.
-   Three in-repo sites cite the old form (`CLAUDE.md`, `README.md`,
-   `VerifiedInstallReceipt.swift`) and are updated in the same task.
+   All four modes move, not only that one, and there is no `defaultSubcommand`,
+   so the bare install form becomes `ShrikeRepack install --output X` as well.
+   The one in-repo issuer of Repack's argv is `RepackCLITests`, which spawns the
+   binary; it exists to test that surface rather than to depend on it, and no
+   script, tool or production path installs through the binary (the Mac app
+   calls `ShrikeRepackCore` directly). So the choice is between a bare form kept
+   alive for muscle memory and a `SUBCOMMANDS:` listing that names all four, and
+   the listing wins. **Four** in-repo sites cite the old form, one more than this
+   document first said: `CLAUDE.md`, `README.md`, `VerifiedInstallReceipt.swift`
+   and `RepackModelInstallerClient.swift`. All four are updated in the task.
 2. **`-h` gains the CLI and Repack.** The server and both benches already accept
    it; ArgumentParser supplies it everywhere.
 3. **Error message text becomes ArgumentParser's.** Exit codes stay: 0 on help,

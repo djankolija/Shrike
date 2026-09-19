@@ -32,7 +32,7 @@ installed to, so **moving or renaming an installed model makes it fail to load**
 need a re-download. Re-issue the receipt in place:
 
 ```bash
-swift run -c release ShrikeRepack --verify-install --input-gturbo <model.gturbo>
+swift run -c release ShrikeRepack verify-install --input-gturbo <model.gturbo>
 ```
 
 **Never hand-edit the receipt to match a new path.** The path binding is what detects a

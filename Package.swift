@@ -62,7 +62,10 @@ let package = Package(
         ),
         .target(
             name: "ShrikeRepackCore",
-            dependencies: ["ShrikeFormat"],
+            dependencies: [
+                "ShrikeFormat",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
             path: "sources/ShrikeRepack/Core"
         ),
         .executableTarget(
@@ -164,7 +167,10 @@ let package = Package(
         ),
         .testTarget(
             name: "ShrikeRepackTests",
-            dependencies: ["ShrikeRepackCore"],
+            dependencies: [
+                "ShrikeRepackCore",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
             path: "tests/ShrikeRepack/Core"
         ),
         .testTarget(

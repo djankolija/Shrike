@@ -135,7 +135,7 @@ public final class RepackModelInstallerClient: AppModelInstallerClient, Sendable
     public func reattestInstall(outputDirectory: URL) async throws {
         let directory = outputDirectory.standardizedFileURL
         try await Task.detached(priority: .utility) {
-            // Same work as `ShrikeRepack --verify-install`: re-hash every file
+            // Same work as `ShrikeRepack verify-install`: re-hash every file
             // against the manifest and write a receipt bound to this path. The
             // hashing is the point — the receipt is only re-issued if the
             // payload still matches what it claims to be.

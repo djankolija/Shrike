@@ -38,7 +38,7 @@ installed to. Moving or renaming an installed model therefore makes it fail to l
 re-issue the receipt in place rather than editing it:
 
 ```bash
-swift run -c release ShrikeRepack --verify-install --input-gturbo <model.gturbo>
+swift run -c release ShrikeRepack verify-install --input-gturbo <model.gturbo>
 ```
 
 ## Serve

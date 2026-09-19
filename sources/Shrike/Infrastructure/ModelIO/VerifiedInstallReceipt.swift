@@ -168,7 +168,7 @@ public enum VerifiedInstallReceiptReader {
                     \(actualPath). Moving or renaming an installed model \
                     invalidates its receipt. Re-issue it in place (re-hashes \
                     the payload, no re-download) with:
-                      swift run -c release ShrikeRepack --verify-install \
+                      swift run -c release ShrikeRepack verify-install \
                     --input-gturbo \(actualPath)
                     """)
         }
