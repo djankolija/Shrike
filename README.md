@@ -43,7 +43,7 @@ swift run -c release shrike repack verify-install --input-gturbo <model.gturbo>
 ## Serve
 
 Config mode is the default. With no `--model`, the server scans a models directory
-and serves everything it finds, reading `~/.shrike/server.json` unless given
+and serves everything it finds, reading `~/.shrike/config.json` unless given
 `--config`:
 
 ```bash

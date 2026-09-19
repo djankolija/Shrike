@@ -13,15 +13,15 @@ import ShrikeServerCore
         try ShrikeRootCommand.parseAsRoot(arguments)
     }
 
-    /// Task 3 changes this: `--model` becomes optional so it can resolve from
-    /// configuration, and a bare invocation stops being a usage error.
-    @Test func aBareInvocationIsAUsageErrorNamingTheModel() throws {
+    @Test func aBareInvocationAsksForTheOneThingItCannotResolve() throws {
         do {
             _ = try ShrikeRootCommand.parseAsRoot([])
             Issue.record("a bare invocation should not parse to a runnable command")
         } catch {
             #expect(ShrikeRootCommand.exitCode(for: error) == ExitCode.validationFailure)
-            #expect(ShrikeRootCommand.message(for: error).contains("--model"))
+            let message = ShrikeRootCommand.message(for: error)
+            #expect(message == "one of --prompt or --messages-file is required")
+            #expect(!message.contains("--model"))
         }
     }
 

@@ -58,11 +58,12 @@ private struct LoadedRuntime {
 
 /// The CLI driver: parse messages, load the model, run one completion, print the timing footer.
 public func run(args: ShrikeGenerateCommand,
+                modelPath: String,
                 stdout: FileHandle = .standardOutput,
                 stderr: FileHandle = .standardError) async -> RunResult {
     do {
         try RuntimeConfiguration.refuseUnknownEnvironment()
-        let modelURL = URL(fileURLWithPath: args.model)
+        let modelURL = URL(fileURLWithPath: modelPath)
         let tokenizer = try await GFTokenizer.load(
             forModelDirectory: modelURL,
             thinkingMode: args.thinkingMode)

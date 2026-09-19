@@ -83,11 +83,11 @@ public struct ModelRoster: Sendable, Equatable {
     static func isServable(_ family: ModelFamily) -> Bool { family != .qwen36MTP }
 
     public static func resolve(candidates: [RosterCandidate],
-                               overrides: [ServerConfig.ModelOverride]) throws -> ModelRoster {
+                               overrides: [ShrikeConfig.ModelOverride]) throws -> ModelRoster {
         let servable = candidates.filter { isServable($0.family) }
         let dropped = candidates.filter { !isServable($0.family) }.map(\.bundleName).sorted()
 
-        var overrideByBundle: [String: ServerConfig.ModelOverride] = [:]
+        var overrideByBundle: [String: ShrikeConfig.ModelOverride] = [:]
         for override in overrides {
             let bundleName = override.dir.hasSuffix(".gturbo")
                 ? String(override.dir.dropLast(".gturbo".count))
@@ -192,7 +192,7 @@ extension ModelRoster {
                                         manifestModelID: identity.modelID,
                                         family: identity.family)
         let overrides = overrideID.map {
-            [ServerConfig.ModelOverride(dir: bundleName, id: $0, isDefault: true)]
+            [ShrikeConfig.ModelOverride(dir: bundleName, id: $0, isDefault: true)]
         } ?? []
         return try resolve(candidates: [candidate], overrides: overrides)
     }

@@ -1,8 +1,8 @@
 import Foundation
 import Testing
 
-@testable import Shrike
-@testable import ShrikeServerCore
+import Shrike
+import ShrikeCatalog
 
 private func candidate(_ bundleName: String,
                        manifest: String = "unknown/snapshot",

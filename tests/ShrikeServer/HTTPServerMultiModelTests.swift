@@ -1,3 +1,4 @@
+import ShrikeCatalog
 import Foundation
 import Testing
 
@@ -49,7 +50,7 @@ struct HTTPServerMultiModelTests {
 
     private func makeServer(
         _ names: [String],
-        overrides: [ServerConfig.ModelOverride] = [],
+        overrides: [ShrikeConfig.ModelOverride] = [],
         recorder: MultiModelRecorder
     ) throws -> (ShrikeHTTPServer, ModelRegistry) {
         let roster = try ModelRoster.resolve(

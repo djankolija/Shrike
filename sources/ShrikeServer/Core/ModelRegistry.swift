@@ -1,5 +1,6 @@
 import Foundation
 import Shrike
+import ShrikeCatalog
 
 /// One slot, many plans: serves every roster model through a single resident
 /// session, swapping on demand. A swap is drain → unload returns → load, in

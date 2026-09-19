@@ -172,13 +172,12 @@ import Testing
         }
     }
 
-    @Test func modelAndPromptAreRequired() {
-        #expect(throws: (any Error).self) {
-            _ = try ShrikeGenerateCommand.parse(["--prompt", "hi"])
-        }
+    @Test func aPromptIsRequiredButTheModelNeedNotBeNamed() throws {
         #expect(throws: (any Error).self) {
             _ = try ShrikeGenerateCommand.parse(["--model", "m.gturbo"])
         }
+        let arguments = try ShrikeGenerateCommand.parse(["--prompt", "hi"])
+        #expect(arguments.model == nil)
     }
 
     @Test func anOptionValueMayBeginWithADash() throws {

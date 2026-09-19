@@ -2,6 +2,7 @@ import ArgumentParser
 import Foundation
 import Shrike
 import ShrikeArgumentSupport
+import ShrikeCatalog
 
 extension ServerPromptCacheMode: ExpressibleByArgument {}
 
@@ -22,7 +23,7 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
 
     @Option(name: .customLong("config"),
             help: ArgumentHelp("""
-                Multi-model config file (default ~/.shrike/server.json when it \
+                Multi-model config file (default ~/.shrike/config.json when it \
                 exists). Names, defaults and the default model. Cannot be \
                 combined with --model.
                 """,
@@ -281,7 +282,7 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
     /// three `SHRIKE_*` below); no setting has both layers. A flag never writes
     /// back into the config file, and parsing itself reads neither.
     public func merging(
-        configDefaults defaults: ServerConfig.Defaults,
+        configDefaults defaults: ShrikeConfig.Defaults,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> ShrikeServerCommand {
         var effective = self

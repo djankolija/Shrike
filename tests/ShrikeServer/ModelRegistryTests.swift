@@ -1,3 +1,4 @@
+import ShrikeCatalog
 import Foundation
 import Testing
 

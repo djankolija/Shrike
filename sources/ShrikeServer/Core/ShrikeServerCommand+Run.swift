@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import Shrike
+import ShrikeCatalog
 
 /// Thrown for a launch that parsed cleanly and then failed: ArgumentParser exits
 /// 1 on a plain error, where a `ValidationError` would exit 64 and print the usage.
@@ -12,7 +13,7 @@ struct ServerLaunchError: Error, CustomStringConvertible {
 
 extension ShrikeServerCommand {
     struct ResolvedRoster {
-        let config: ServerConfig
+        let config: ShrikeConfig
         let roster: ModelRoster
         let skipped: [ModelRoster.SkippedBundle]
     }
@@ -34,20 +35,20 @@ extension ShrikeServerCommand {
         // --model serves exactly this one; no config file is read at all.
         if let modelPath = model {
             return ResolvedRoster(
-                config: ServerConfig(),
+                config: ShrikeConfig(),
                 roster: try ModelRoster.single(
                     directory: URL(fileURLWithPath: modelPath).standardizedFileURL,
                     overrideID: modelIDOverride),
                 skipped: [])
         }
-        let config: ServerConfig
+        let config: ShrikeConfig
         if let path = configPath {
-            config = try ServerConfig.load(path: path)
+            config = try ShrikeConfig.load(path: path)
         } else {
-            let defaultPath = ("~/.shrike/server.json" as NSString).expandingTildeInPath
+            let defaultPath = ("~/.shrike/config.json" as NSString).expandingTildeInPath
             config = FileManager.default.fileExists(atPath: defaultPath)
-                ? try ServerConfig.load(path: defaultPath)
-                : ServerConfig()
+                ? try ShrikeConfig.load(path: defaultPath)
+                : ShrikeConfig()
         }
         let directory = URL(fileURLWithPath:
             ((modelsDir ?? config.modelsDir ?? "~/shrike-runtime/models") as NSString)

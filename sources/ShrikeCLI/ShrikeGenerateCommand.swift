@@ -1,5 +1,6 @@
 import ArgumentParser
 import Shrike
+import ShrikeCatalog
 import ShrikeArgumentSupport
 
 public enum PrefillChunkChoice: Equatable, Sendable {
@@ -52,8 +53,12 @@ public struct ShrikeGenerateCommand: ParsableCommand, Sendable {
         commandName: "generate",
         abstract: "Qwen3.5-MoE 35B-A3B text generation.")
 
-    @Option(help: ArgumentHelp("Path to a .gturbo model directory.", valueName: "dir"))
-    public var model: String
+    @Option(help: ArgumentHelp("""
+        A .gturbo directory, or the id of one in the models directory. Without \
+        it, the configured default model is used, or the only installed one.
+        """,
+        valueName: "dir|id"))
+    public var model: String?
 
     @Option(parsing: .unconditional,
             help: ArgumentHelp("Raw-completion prompt.", valueName: "string"))
@@ -240,7 +245,8 @@ public struct ShrikeGenerateCommand: ParsableCommand, Sendable {
     }
 
     public func run() throws {
-        let code = drive(self)
+        let modelURL = try ModelResolver.resolve(requested: model)
+        let code = drive(self, modelPath: modelURL.path)
         if code != 0 { throw ExitCode(code) }
     }
 }

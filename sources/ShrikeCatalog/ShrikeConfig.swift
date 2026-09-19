@@ -1,14 +1,14 @@
 import Foundation
 import Shrike
 
-/// The multi-model configuration file (`--config`, default `~/.shrike/server.json`).
+/// The configuration file (`--config`, default `~/.shrike/config.json`).
 ///
 /// `models` is a list of overrides, not the roster: a bundle with no entry is
 /// still served, under its bundle name. Config is written only for models whose
 /// name needs fixing, plus at most one `default` marking the model served when
 /// a request omits `model`. The file is read once at startup and never written
 /// back.
-public struct ServerConfig: Sendable, Equatable {
+public struct ShrikeConfig: Sendable, Equatable {
     public struct Defaults: Sendable, Equatable, Decodable {
         public let maxContext: Int?
         public let ramBudget: String?
@@ -67,7 +67,7 @@ public struct ServerConfig: Sendable, Equatable {
     }
 }
 
-extension ServerConfig: Decodable {
+extension ShrikeConfig: Decodable {
     enum CodingKeys: String, CodingKey {
         case modelsDir = "models_dir"
         case defaults
@@ -82,7 +82,7 @@ extension ServerConfig: Decodable {
     }
 }
 
-public enum ServerConfigError: Error, Equatable, CustomStringConvertible {
+public enum ShrikeConfigError: Error, Equatable, CustomStringConvertible {
     case unreadable(path: String, reason: String)
     case invalid(String)
 
@@ -96,24 +96,24 @@ public enum ServerConfigError: Error, Equatable, CustomStringConvertible {
     }
 }
 
-extension ServerConfig {
-    public static func load(path: String) throws -> ServerConfig {
+extension ShrikeConfig {
+    public static func load(path: String) throws -> ShrikeConfig {
         let expanded = (path as NSString).expandingTildeInPath
         let data: Data
         do {
             data = try Data(contentsOf: URL(fileURLWithPath: expanded))
         } catch {
-            throw ServerConfigError.unreadable(path: expanded, reason: error.localizedDescription)
+            throw ShrikeConfigError.unreadable(path: expanded, reason: error.localizedDescription)
         }
         return try parse(data)
     }
 
-    public static func parse(_ data: Data) throws -> ServerConfig {
-        let config: ServerConfig
+    public static func parse(_ data: Data) throws -> ShrikeConfig {
+        let config: ShrikeConfig
         do {
-            config = try JSONDecoder().decode(ServerConfig.self, from: data)
+            config = try JSONDecoder().decode(ShrikeConfig.self, from: data)
         } catch {
-            throw ServerConfigError.invalid(String(describing: error))
+            throw ShrikeConfigError.invalid(String(describing: error))
         }
         try config.validate()
         return config
@@ -124,29 +124,29 @@ extension ServerConfig {
         var defaultDirs: [String] = []
         for model in models {
             guard !model.dir.isEmpty else {
-                throw ServerConfigError.invalid("a models entry has an empty dir")
+                throw ShrikeConfigError.invalid("a models entry has an empty dir")
             }
             if let id = model.id, id.isEmpty {
-                throw ServerConfigError.invalid("model \(model.dir) has an empty id")
+                throw ShrikeConfigError.invalid("model \(model.dir) has an empty id")
             }
             guard seenDirs.insert(model.dir).inserted else {
-                throw ServerConfigError.invalid("model \(model.dir) appears twice")
+                throw ShrikeConfigError.invalid("model \(model.dir) appears twice")
             }
             if model.isDefault { defaultDirs.append(model.dir) }
         }
         if defaultDirs.count > 1 {
-            throw ServerConfigError.invalid(
+            throw ShrikeConfigError.invalid(
                 "more than one default: \(defaultDirs.joined(separator: ", "))")
         }
         if let budget = defaults.ramBudget, RuntimeConfiguration.parseBudgetBytes(budget) == nil {
-            throw ServerConfigError.invalid(
+            throw ShrikeConfigError.invalid(
                 "ram_budget must be a positive size such as 2G, 512M or a byte count")
         }
         if let context = defaults.maxContext, context < 1 {
-            throw ServerConfigError.invalid("max_context must be positive")
+            throw ShrikeConfigError.invalid("max_context must be positive")
         }
         if let idle = defaults.idleUnloadSeconds, !(0...86_400).contains(idle) {
-            throw ServerConfigError.invalid("idle_unload_seconds must be within 0...86400")
+            throw ShrikeConfigError.invalid("idle_unload_seconds must be within 0...86400")
         }
     }
 }

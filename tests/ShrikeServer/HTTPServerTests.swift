@@ -1,3 +1,4 @@
+import ShrikeCatalog
 import Darwin
 import Foundation
 import NIOCore

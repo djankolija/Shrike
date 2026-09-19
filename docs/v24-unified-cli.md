@@ -355,25 +355,40 @@ by an override carrying `default: true`, which is why v23 had to fix `--preload`
 exiting 64 when no default was configured. Rule 3 is the one new rule, and it
 means a machine with one model installed needs no configuration file at all.
 
-A second piece follows from it: `--model` accepts **an id as well as a path**,
-resolved against the models directory through the same roster. That is what lets
-`tools/golden-baseline.sh:52` drop its hardcoded candidate list, which walks
+A second piece follows from it: **generate's** `--model` accepts an id as well as
+a path. A value naming an existing directory is taken as a path; anything else is
+an id resolved against the models directory. Serve's `--model` deliberately stays
+a path, because it pins one bundle and ignores any config or roster by design.
+
+An earlier draft went further and had this replace the hardcoded candidate list
+at `tools/golden-baseline.sh:52`, which walks
 `/Volumes/BuildSSD/shrike/ornith15.gturbo` then
 `$HOME/shrike-runtime/models/ornith15.gturbo` and takes the first holding a
-`verified-install.json`.
+`verified-install.json`. **That is reversed.** Id resolution reads the models
+directory, which defaults to `~/shrike-runtime/models` and is otherwise set in
+the config file. On the mini the models are there and `--model ornith15` would
+work; on the dev box they are on `/Volumes/BuildSSD/shrike`, so the same
+invocation would need a `~/.shrike/config.json` that is not in the repository. A
+gate that passes only on a configured machine is worse than the loop it replaced.
 
-Worth being precise about why, because the obvious reading is wrong and
-dangerous. That loop is not choosing a default; it is locating one specific
-model across two possible roots. A baseline is valid for one (machine, build,
-model) triple, so the script must keep naming `ornith15` explicitly, and
-resolving it from whatever the configured default happens to be would silently
-unbind the baseline from its model. Id resolution replaces the path search while
-the script keeps naming its model.
+That is the second correction this document has needed about
+`golden-baseline.sh`, both for one reason: the baseline's bindings are not the
+CLI's conveniences. A baseline is valid for one (machine, build, model) triple,
+so the script names its own model and finds it its own way.
 
-`ServerConfig` stops being server configuration the moment the bare form reads
-it, so it moves out of `ShrikeServerCore` into a home both can reach, and
-`~/.shrike/server.json` becomes `~/.shrike/config.json`. No such file exists on
+`ServerConfig` stops being server configuration the moment generate reads it, so
+it moves out of `ShrikeServerCore` into a new `ShrikeCatalog` target that both
+cores depend on, together with `ModelRoster`: 385 lines in two files. The type
+follows the file, `ServerConfig` becoming `ShrikeConfig`, and
+`~/.shrike/server.json` becoming `~/.shrike/config.json`. No such file exists on
 either machine today, so nothing on disk migrates.
+
+`ModelResolver` joins them, split so the half that matters is testable without
+touching the filesystem: `resolve(requested:in:)` takes a roster and is pure,
+while `resolve(requested:configPath:modelsDir:)` loads the config and scans
+around it. Rules 1 and 3 turn out to need no new code at all, since
+`ModelRoster.resolve` already sets `defaultID` from a `default: true` override
+and already falls back to the sole entry.
 
 ## What is protected, and how
 
@@ -404,8 +419,15 @@ either machine today, so nothing on disk migrates.
 3. **A bare `shrike` is a usage error at exit 64** until Task 3, naming
    `--model`. Pinned as such rather than aspirationally, with the pin carrying a
    note that Task 3 changes it.
-4. **Model resolution** as above, with `ServerConfig` moved to a shared home and
-   the file renamed to `config.json`.
+4. **Model resolution** as above. `ShrikeConfig` and `ModelRoster` move to a new
+   `ShrikeCatalog` target with `ModelResolver`, and the file becomes
+   `config.json`. **`--model` stops being required on generate**, which changes a
+   v23 pin rather than breaking one: `modelAndPromptAreRequired` asserted both
+   halves, and only the prompt half survives, so it becomes
+   `aPromptIsRequiredButTheModelNeedNotBeNamed` and additionally asserts that
+   `--prompt` alone now parses with `model == nil`. A resolution failure surfaces
+   at run rather than at parse, and exits 1 rather than 64, matching v23's ruling
+   that a config failure is not a usage error.
 5. **The flag trim: 18 flags deleted**, per the inventory's disposition. v17's
    rule holds throughout: the honest removal deletes a flag together with the
    code path it selected, so `--prompt-cache-disk` takes the disk snapshot path,

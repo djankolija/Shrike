@@ -11,11 +11,11 @@ final class RunBox: @unchecked Sendable {
 
 // Keep the cancellable task off the top-level executor so the blocking signal
 // bridge cannot prevent it from starting.
-func drive(_ command: ShrikeGenerateCommand) -> Int32 {
+func drive(_ command: ShrikeGenerateCommand, modelPath: String) -> Int32 {
     let box = RunBox()
     let sem = DispatchSemaphore(value: 0)
     box.task = Task {
-        let result = await run(args: command)
+        let result = await run(args: command, modelPath: modelPath)
         box.code = result.exitCode
         sem.signal()
     }

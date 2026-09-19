@@ -47,6 +47,11 @@ let package = Package(
             ]
         ),
         .target(
+            name: "ShrikeCatalog",
+            dependencies: ["Shrike"],
+            path: "sources/ShrikeCatalog"
+        ),
+        .target(
             name: "ShrikeArgumentSupport",
             dependencies: [
                 "Shrike",
@@ -66,6 +71,7 @@ let package = Package(
             name: "ShrikeCLICore",
             dependencies: [
                 "Shrike",
+                "ShrikeCatalog",
                 "ShrikeArgumentSupport",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
@@ -100,6 +106,7 @@ let package = Package(
             name: "ShrikeServerCore",
             dependencies: [
                 "Shrike",
+                "ShrikeCatalog",
                 "ShrikeArgumentSupport",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "NIOCore", package: "swift-nio"),
@@ -157,6 +164,11 @@ let package = Package(
             path: "tests/ShrikeBench"
         ),
         .testTarget(
+            name: "ShrikeCatalogTests",
+            dependencies: ["ShrikeCatalog", "Shrike"],
+            path: "tests/ShrikeCatalog"
+        ),
+        .testTarget(
             name: "ShrikeRootTests",
             dependencies: [
                 "ShrikeRootCore",
@@ -168,6 +180,7 @@ let package = Package(
             name: "ShrikeServerTests",
             dependencies: [
                 "ShrikeServerCore",
+                "ShrikeCatalog",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],

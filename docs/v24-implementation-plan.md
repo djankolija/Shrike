@@ -134,24 +134,39 @@ here can only mean the harness moved.
 
 ### Task 3: model resolution
 
-- [ ] Move `ServerConfig` and the roster's default selection out of
-      `ShrikeServerCore` into a target both it and `ShrikeCLICore` can depend on.
-      It stops being server configuration the moment the bare form reads it.
-- [ ] Default config path becomes `~/.shrike/config.json`. No file exists on
+- [x] Move `ServerConfig` and the roster out of `ShrikeServerCore` into a new
+      `ShrikeCatalog` target that both it and `ShrikeCLICore` depend on, 385
+      lines in two files. The type follows the file: `ServerConfig` becomes
+      `ShrikeConfig`, since it stops being server configuration the moment
+      generate reads it. `ModelRosterTests` and `ServerConfigTests` move with
+      them into a new `ShrikeCatalogTests`.
+- [x] Default config path becomes `~/.shrike/config.json`. No file exists on
       either machine, so nothing on disk migrates and `server.json` is not read.
-- [ ] `--model` accepts **an id as well as a path**, resolved against the models
-      directory through the roster.
-- [ ] Implement the chain: explicit `--model` wins; else the config entry marked
-      `default: true`; else the models directory's only servable bundle when it
-      holds exactly one; else an error naming the ids it found.
-- [ ] Replace Task 2's plain check with the chain. Pin the error's message: a
-      weakened diagnostic is the class v23's close caught twice.
-- [ ] Replace `tools/golden-baseline.sh:52`'s hardcoded candidate loop with
-      `--model ornith15`, resolved by id. **The baseline stays bound to
-      ornith15**: a baseline is valid for one (machine, build, model) triple, so
-      the script must keep naming its model. What the loop was doing was locating
-      that model across two possible roots, and that is what id resolution
-      replaces.
+- [x] `--model` on **generate** accepts an id as well as a path: a value naming
+      an existing directory is taken as a path, anything else as an id. Serve's
+      `--model` deliberately stays a path, because it pins one bundle and
+      ignores any config or roster by design.
+- [x] Implement the chain in `ModelResolver`, split so the roster-dependent
+      half is testable without the filesystem: `resolve(requested:in:)` is pure,
+      `resolve(requested:configPath:modelsDir:)` loads and scans around it.
+      Eight cases in `ModelResolverTests` cover path-wins, id, configured
+      default, sole bundle, several-with-no-default, unknown id, and a bundle
+      name staying an alias for a configured id.
+- [x] Replace Task 2's plain check with the chain. A bare `shrike` is still a
+      usage error at exit 64, but the message improved from `--model` to `one of
+      --prompt or --messages-file is required`, which is the thing that genuinely
+      cannot be resolved. Pinned on the exact string, and on the absence of
+      `--model` in it.
+- [x] **REVERSED: the candidate loop stays.** Id resolution reads the models
+      directory, which defaults to `~/shrike-runtime/models` and is otherwise set
+      in the config file. On the mini the models are there and `--model ornith15`
+      would work; on the dev box they are on `/Volumes/BuildSSD/shrike`, so the
+      same invocation would need a `~/.shrike/config.json` that is not in the
+      repository. A gate that only passes on a configured machine is worse than
+      the loop it replaced, so `golden-baseline.sh` keeps locating ornith15 by
+      path across both roots. This is the second time a plan step about
+      golden-baseline needed correcting, both times for the same reason: the
+      baseline's bindings are not the CLI's conveniences.
 - [ ] Four gates, golden `--check` byte-identical, commit.
 
 ---
