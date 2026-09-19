@@ -82,7 +82,7 @@ import Testing
     }
 
     @Test func outOfRangeValuesAreRejected() {
-        for argv in [["--experts", "9"], ["--experts", "0"], ["--layer", "-1"],
+        for argv in [["--experts", "9"], ["--experts", "0"], ["--layer=-1"],
                      ["--repeats", "0"], ["--batch", "0"]] {
             #expect(throws: (any Error).self) {
                 _ = try ExpertBenchCommand.parse(["--model", "/m.gturbo"] + argv)

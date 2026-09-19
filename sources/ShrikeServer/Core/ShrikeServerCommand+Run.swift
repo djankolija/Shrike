@@ -2,6 +2,14 @@ import ArgumentParser
 import Foundation
 import Shrike
 
+/// Thrown for a launch that parsed cleanly and then failed: ArgumentParser exits
+/// 1 on a plain error, where a `ValidationError` would exit 64 and print the usage.
+struct ServerLaunchError: Error, CustomStringConvertible {
+    let description: String
+
+    init(_ description: String) { self.description = description }
+}
+
 extension ShrikeServerCommand {
     struct ResolvedRoster {
         let config: ServerConfig
@@ -77,7 +85,7 @@ extension ShrikeServerCommand {
 
     private func preloadDefault(in registry: ModelRegistry) async throws {
         guard let defaultModel = registry.model(for: nil) else {
-            throw ValidationError(
+            throw ServerLaunchError(
                 "--preload needs a default model; mark one with \"default\": true in the config")
         }
         try await registry.preload(defaultModel)

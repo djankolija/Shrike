@@ -3,6 +3,13 @@ import Testing
 @testable import ShrikeCLICore
 
 @Suite struct CLIArgumentsTests {
+    private func rejection(_ argv: [String]) throws -> String {
+        let error = #expect(throws: (any Error).self) {
+            _ = try ShrikeCLICommand.parse(argv)
+        }
+        return ShrikeCLICommand.message(for: try #require(error))
+    }
+
     @Test func defaultsUseProductionGenerationValues() throws {
         let arguments = try ShrikeCLICommand.parse(["--model", "m.gturbo", "--prompt", "hi"])
         #expect(arguments.model == "m.gturbo")
@@ -36,12 +43,10 @@ import Testing
             "--rope-scaling", "yarn", "--max-context", "524288",
         ])
         #expect(halfMillion.maxContext == 524_288)
-        #expect(throws: (any Error).self) {
-            _ = try ShrikeCLICommand.parse([
-                "--model", "m.gturbo", "--prompt", "hi",
-                "--rope-scaling", "yarn", "--max-context", "262144",
-            ])
-        }
+        #expect(try rejection([
+            "--model", "m.gturbo", "--prompt", "hi",
+            "--rope-scaling", "yarn", "--max-context", "262144",
+        ]).contains("--max-context"))
     }
 
     @Test func prefillChunkParsesFixedAndAutoValues() throws {
@@ -55,11 +60,9 @@ import Testing
         ])
         #expect(automatic.prefillChunk == .auto)
 
-        #expect(throws: (any Error).self) {
-            _ = try ShrikeCLICommand.parse([
-                "--model", "m.gturbo", "--prompt", "hi", "--prefill-chunk", "8192",
-            ])
-        }
+        #expect(try rejection([
+            "--model", "m.gturbo", "--prompt", "hi", "--prefill-chunk", "8192",
+        ]).contains("--prefill-chunk"))
     }
 
     @Test func generationOptionsParseAndStopsRepeat() throws {
@@ -110,12 +113,10 @@ import Testing
         }
     }
 
-    @Test func topKAboveKernelLimitRejected() {
-        #expect(throws: (any Error).self) {
-            _ = try ShrikeCLICommand.parse([
-                "--model", "m.gturbo", "--prompt", "hi", "--top-k", "257",
-            ])
-        }
+    @Test func topKAboveKernelLimitRejected() throws {
+        #expect(try rejection([
+            "--model", "m.gturbo", "--prompt", "hi", "--top-k", "257",
+        ]).contains("--top-k"))
     }
 
     @Test func conciseFlagParsesAndDefaultsOff() throws {
@@ -132,11 +133,9 @@ import Testing
             "--model", "m.gturbo", "--prompt", "hi", "--thinking", "on",
         ])
         #expect(on.thinkingMode == .on)
-        #expect(throws: (any Error).self) {
-            _ = try ShrikeCLICommand.parse([
-                "--model", "m.gturbo", "--prompt", "hi", "--thinking", "medium",
-            ])
-        }
+        #expect(try rejection([
+            "--model", "m.gturbo", "--prompt", "hi", "--thinking", "medium",
+        ]).contains("medium"))
     }
 
     @Test func helpListsExactlyThePublicOptions() {
@@ -180,6 +179,16 @@ import Testing
         #expect(throws: (any Error).self) {
             _ = try ShrikeCLICommand.parse(["--model", "m.gturbo"])
         }
+    }
+
+    @Test func anOptionValueMayBeginWithADash() throws {
+        let arguments = try ShrikeCLICommand.parse([
+            "--model", "m.gturbo", "--prompt", "-- explain this",
+            "--stop", "-->", "--follow-up", "-- and again",
+        ])
+        #expect(arguments.prompt == "-- explain this")
+        #expect(arguments.stops == ["-->"])
+        #expect(arguments.followUp == "-- and again")
     }
 
     @Test func messagesFileSelectsChatMode() throws {

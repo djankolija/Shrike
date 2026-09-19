@@ -77,7 +77,7 @@ extension ShrikeRepackCommand {
                 help: ArgumentHelp("Snapshot to import.", valueName: "affine-safetensors-dir"))
         public var inputSnapshot: String
 
-        @Option(name: .customLong("model-id"),
+        @Option(name: .customLong("model-id"), parsing: .unconditional,
                 help: ArgumentHelp("Identifier recorded in the bundle.", valueName: "id"))
         public var modelID: String
 

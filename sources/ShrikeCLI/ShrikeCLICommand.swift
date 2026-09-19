@@ -55,7 +55,8 @@ public struct ShrikeCLICommand: ParsableCommand, Sendable {
     @Option(help: ArgumentHelp("Path to a .gturbo model directory.", valueName: "dir"))
     public var model: String
 
-    @Option(help: ArgumentHelp("Raw-completion prompt.", valueName: "string"))
+    @Option(parsing: .unconditional,
+            help: ArgumentHelp("Raw-completion prompt.", valueName: "string"))
     public var prompt: String?
 
     @Option(help: ArgumentHelp("JSON chat messages with role and content fields.",
@@ -94,7 +95,7 @@ public struct ShrikeCLICommand: ParsableCommand, Sendable {
     @Option(help: ArgumentHelp("Deterministic sampling seed (default off).", valueName: "uint64"))
     public var seed: UInt64?
 
-    @Option(name: .customLong("stop"),
+    @Option(name: .customLong("stop"), parsing: .unconditionalSingleValue,
             help: ArgumentHelp("Stop substring (repeatable).", valueName: "string"))
     public var stops: [String] = []
 
@@ -174,7 +175,8 @@ public struct ShrikeCLICommand: ParsableCommand, Sendable {
                 valueName: "path"))
     public var tokenizePath: String?
 
-    @Option(help: ArgumentHelp("""
+    @Option(parsing: .unconditional,
+            help: ArgumentHelp("""
         After the first answer stops, append this text (encoded verbatim) to the \
         tokens the run holds and generate once more from that state; the second \
         answer follows a separator line. The two-turn continuation gate.

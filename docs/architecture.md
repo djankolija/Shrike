@@ -516,7 +516,8 @@ in [multi-model-serving.md](multi-model-serving.md); the channel-faithful turn d
 ## The four invariants of v4, re-verified at v17's close
 
 1. **RAM budget is an input, not an outcome.** Still true. `--ram-budget`
-   (`ServerArguments.swift:304`, `RuntimeConfiguration.parseBudgetBytes`) defaults to 8 GiB
+   (`ShrikeServerCommand.swift:200`, the option's own transform over
+   `RuntimeConfiguration.parseBudgetBytes`) defaults to 8 GiB
    (`defaultExpertCacheBudgetBytes`, `RuntimeConfiguration.swift:104`); the slot count is
    the ladder value (8 to 256 since v22) nearest budget over stride times routed layers
    (`expertCacheSlots`, `:137`, resolved at `ServerInference.swift:785`), or, under
@@ -556,8 +557,8 @@ were.
 | knob | read at | what it does |
 | --- | --- | --- |
 | `SHRIKE_THINKING_MODE` | `Tokenizer.swift:50` | off, on or `adaptive` thinking for a dialect that has it |
-| `SHRIKE_REASONING_EFFORT` | `Tokenizer.swift:68` (the server validates at `ServerArguments.swift:172`) | low, medium or high, the default medium ([v7-reasoning-effort.md](v7-reasoning-effort.md)) |
-| `SHRIKE_REASONING_RETENTION` | `Tokenizer.swift:86` (validated at `ServerArguments.swift:178`) | `as-generated` or `stripped` reasoning in the turn's history ([v6.1-reasoning-retention.md](v6.1-reasoning-retention.md)) |
+| `SHRIKE_REASONING_EFFORT` | `Tokenizer.swift:68` (the server validates at `ShrikeServerCommand.swift:305`, at launch and again when it assembles its config, not while parsing) | low, medium or high, the default medium ([v7-reasoning-effort.md](v7-reasoning-effort.md)) |
+| `SHRIKE_REASONING_RETENTION` | `Tokenizer.swift:86` (validated at `ShrikeServerCommand.swift:309`, same two places) | `as-generated` or `stripped` reasoning in the turn's history ([v6.1-reasoning-retention.md](v6.1-reasoning-retention.md)) |
 | `SHRIKE_TOKENIZER_DIR` | `Tokenizer.swift:184` | an override tokenizer folder, unset by default |
 | `SHRIKE_MODEL` | `AppModelInstallDescriptor.swift:120` | the app's model selector, one of the roster's names |
 | `SHRIKE_STRIP_CLI_PROMPT` | `CLIStrip.swift:34` | drop a coding CLI's system and developer boilerplate from the prompt |
@@ -581,7 +582,8 @@ One tripwire guards the set. `RuntimeConfiguration.refuseUnknownEnvironment`
 (`RuntimeConfiguration.swift:289`) scans the environment for any `SHRIKE_*` name outside
 `knownEnvironmentNames` (`:280`) and fails the launch by name, listing the offenders
 sorted and naming the chapter that removed them (`:56`). It runs first at the server's
-launch (`ShrikeServer/Command/main.swift:18`) and again in the session's load
+launch (`ShrikeServerCommand+Run.swift:13`, the first line of the server's `run()`) and
+again in the session's load
 (`ServerInference.swift:672`), in the CLI's run (`ShrikeCLI/Run.swift:64`) and in the app
 client's load (`RealInferenceClient.swift:76`), all before any model load, so a stale
 launch script fails loudly instead of quietly taking a default. The 53 names v17 removed,
@@ -604,7 +606,6 @@ Where the headroom is thin, so a reader knows what a new branch costs:
 | --- | ---: |
 | `Attention.encodeSplit` (`Attention.swift:506`) | 113 |
 | `PreadExpertStreamer.makeExpertCachePlan` (`PreadExpertStreamer.swift:395`) | 112, SLRU's promotion beside the aging-LFU's victim (v20 Task 1) |
-| `ServerArguments.ParseContext.apply(flag:value:)` (`ServerArguments.swift:213`) | 110, an exhaustive flag switch; the next two or three flags put it over, and the honest split then is by option group |
 | `OpenAIChatRequest.validate` (`OpenAIModels.swift:328`) | 109 |
 | `MoE.init` (`MoE.swift:94`) | 108, the pipelines by variant (v20 T3.1 added the event gate to the generic speculative pair) |
 | `runDecodeLoop` (`RawCompletion.swift:263`) | 106 |
@@ -778,3 +779,24 @@ the status of record.
   40 to 52 % fewer misses on the four shapes (the io 10.5 to 13.0 → 5.8 to 6.8 ms per
   token, the token 54.6 to 56.3 → 48.5 to 50.8 ms), the golden byte-identical on both
   boxes, the mini's at two chunks.
+- v23 ([v23-argument-parsing.md](v23-argument-parsing.md)): the argument surface. Five
+  hand-rolled parsers, 1,212 lines of `switch` over `case "--flag":` beside a `usage`
+  string wrapped by hand to 80 columns beside a `main.swift` that caught the parse error
+  and picked an exit code, retired for `swift-argument-parser`. Each binary's argument
+  type is now a `ParsableCommand` in a library target under a three-line
+  `@main extension` shim; help is generated and wrapped to the terminal and `-h` works
+  everywhere. `ShrikeRepack`'s four mutually exclusive mode flags became four
+  subcommands (`install`, `import-snapshot`, `verify-install`, `discard-partial`), which
+  deleted the mode-validation block, its silent `return 2`, and the per-mode guard chains
+  that existed only to reject another mode's flags. Sentinels became types: `--top-k`'s
+  `0`, `--prefill-chunk`'s `auto`, `--seed`'s hex-or-decimal across the two benches, and
+  the three `WasSet` booleans that told "unset" from "typed". Conformances shared by more
+  than one parser live in `ShrikeArgumentSupport`, since two modules conforming the same
+  type collide the moment anything links both. Five drifts fixed, each now pinned by a
+  test: the server's `--max-context` help described a contiguous range where the code
+  enforces a seven-value set, so `50000` read as legal and was refused naming nothing;
+  `ShrikeServer --bogus` reported a missing value because the value guard ran before the
+  unknown-flag check; `--seed` took hex in one bench and decimal in the other; `-h`
+  reached only three of the five; and Repack could exit 2 with nothing on stderr. Argv is
+  a production contract, so the invocations that exist were pinned first, before any
+  parser changed, and they still parse unedited. No runtime or kernel code changed.

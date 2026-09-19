@@ -44,7 +44,7 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
 
     /// Explicit --model-id value; nil derives the API ID from the installed
     /// manifest (for example qwen3.6-35b-a3b or ornith-1.5-35b-a3b).
-    @Option(name: .customLong("model-id"),
+    @Option(name: .customLong("model-id"), parsing: .unconditional,
             help: ArgumentHelp("API model identifier (default derived from the "
                 + "installed model manifest).", valueName: "id"))
     public var modelIDOverride: String?
@@ -276,9 +276,10 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
         }
     }
 
-    /// Config defaults and the environment merge under flag > config > env >
-    /// built-in, resolved in memory. A flag never writes back into the config
-    /// file, and parsing itself reads neither.
+    /// Resolved in memory: a flag beats a config default (`max_context`,
+    /// `ram_budget`, `idle_unload_seconds`) and beats an environment setting (the
+    /// three `SHRIKE_*` below); no setting has both layers. A flag never writes
+    /// back into the config file, and parsing itself reads neither.
     public func merging(
         configDefaults defaults: ServerConfig.Defaults,
         environment: [String: String] = ProcessInfo.processInfo.environment

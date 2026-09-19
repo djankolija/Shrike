@@ -58,7 +58,7 @@ public struct CommaSeparatedNames: Equatable, Sendable {
 extension CommaSeparatedNames: ExpressibleByArgument {
     public init?(argument: String) {
         let parts = argument.split(separator: ",").map(String.init)
-        guard !parts.isEmpty, !parts.contains(where: \.isEmpty) else { return nil }
+        guard !parts.isEmpty else { return nil }
         self.init(parts)
     }
 

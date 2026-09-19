@@ -184,17 +184,43 @@ disagrees.
 
 ### Task 6: the close
 
-- [ ] `docs/architecture.md`: a v23 entry in History, and correct anything about
-      how the binaries parse arguments.
-- [ ] Tick this plan's boxes; record the close in the design doc.
-- [ ] ThreadSanitizer once:
-      `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test --no-parallel --sanitize=thread`
-- [ ] `tools/golden-baseline.sh --check`. No kernel or runtime code changed, so it
-      should be identical; run it anyway since it is the only check that
-      exercises real inference. Counts as a model run, so `pgrep` first.
-- [ ] A fresh-reader review of the whole branch against `main` before the merge.
-      v20's close folded two real bugs out of its review and v22's five findings;
-      a chapter that rewrites all five entry points does not skip it. Fold each
-      finding into the commit that owns it, located with `git log -S` rather than
-      the reviewer's attribution, then re-run the gates.
+- [x] `docs/architecture.md`: a v23 entry in History, and five stale references
+      corrected: the RAM-budget invariant's parse site, the two reasoning knobs'
+      validation sites (doubly stale, since parsing no longer reads the environment
+      at all), the environment tripwire's first call site in a `main.swift` that no
+      longer exists, and the long-functions table's row for
+      `ServerArguments.ParseContext.apply(flag:value:)`, a 110-line flag switch the
+      table called three flags from breaching the ceiling. It is gone, not shortened.
+- [x] Tick this plan's boxes; record the close in the design doc.
+- [x] ThreadSanitizer once: clean, zero `WARNING: ThreadSanitizer`, 1,333 tests in
+      181 suites in 853 s. The suppressions file was not touched.
+- [x] `tools/golden-baseline.sh --check`: byte-identical on all five profiles on
+      this box (`short`, `long`, `short-lh`, `long-lh`, `turns-lh`), against a
+      release build of the final code. `pgrep` clear before it, nothing else on the
+      machine during it.
+- [x] A fresh-reader review of the whole branch against `main`. **No real bug**;
+      every validation in all five old parsers transfers, and the server's stage
+      methods preserve the order of operations. Fifteen findings, nine acted on:
+      two real regressions this chapter introduced, four wrong claims in the spec,
+      three weak tests, two dead or over-broad lines. The two that mattered:
+      - **An option value beginning with `-` was being refused.** ArgumentParser's
+        default strategy rejects a dash-prefixed next token where every old parser
+        took it unconditionally, so `--stop "-->"` broke. Verified against the
+        binary before and after. Restored with `parsing: .unconditional` on the
+        options whose value is user-supplied text (`--prompt`, `--stop`,
+        `--follow-up`, both `--model-id`s) and deliberately not on those taking a
+        path or a number, where a dash value was already invalid. Pinned by a test.
+      - **`--preload` with no default model exited 64 and dumped the usage block**,
+        because T3 threw `ValidationError` for what is a config failure while its
+        siblings on that path exit 1. Now a plain `ServerLaunchError`, exit 1.
+      The four spec corrections are in the design doc's declared changes, which grew
+      from four items to eight. The three weak tests: `--layer -1` never reached
+      `validate()` (the equals form does), the golden `turns-lh` pin carried a tidy
+      follow-up where the tool issues one opening on a newline and carrying
+      chat-template tokens, and four rejections that exist for a *reason* now assert
+      on `message(for:)` rather than on any error at all.
+- [x] **Deviation:** the findings are NOT folded into their owning commits. They
+      belong across all five task commits, and this harness does not support
+      `git rebase -i`, so an interactive fold is unavailable. They land as one
+      labelled review-fold commit naming the owning commit per finding.
 - [ ] Merge on Davor's go, delete the branch, update memory.
