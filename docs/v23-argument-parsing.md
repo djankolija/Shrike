@@ -47,8 +47,14 @@ promises, which harms nobody.
 Two real defects and one cosmetic one survive:
 
 - **The server's help promises `--max-context` is `4096...262144`; the code
-  accepts `1`.** Help asserting a constraint the code does not enforce, which is
-  the chapter's own defect class.
+  enforces membership in a seven-value set.** Corrected at T3 after probing the
+  binary: `--max-context 1` is *rejected*, not accepted, because `validate`
+  checks `RuntimeConfiguration.supportedContextTokens`, which the flag's own
+  `1...maximumContextTokens` guard hides on a first read. The defect is the
+  other direction, and worse for it: `--max-context 50000` reads as legal
+  against the help and is refused as "not supported", naming nothing. Help
+  describing a surface the code does not implement, which is the chapter's own
+  defect class.
 - **`ShrikeServer --bogus` reports that the flag requires a value**, because
   `applyFlags` runs its value guard before it ever checks whether the flag is
   known.

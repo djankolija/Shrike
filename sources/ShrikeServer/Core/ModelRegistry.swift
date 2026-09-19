@@ -373,7 +373,7 @@ public actor ModelRegistry {
     /// answer from each manifest alone, so a broken bundle fails here at
     /// launch, not on its first request.
     public static func models(for roster: ModelRoster,
-                              arguments: ServerArguments) throws -> [Model] {
+                              arguments: ShrikeServerCommand) throws -> [Model] {
         try roster.entries.map { entry in
             let plan = ModelSessionPlan(
                 modelDirectory: entry.directory,

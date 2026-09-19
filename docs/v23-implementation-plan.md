@@ -80,22 +80,33 @@ disagrees.
 
 ### Task 3: ShrikeServer
 
-- [ ] `ServerArguments` becomes `ShrikeServerCommand`, a `ParsableCommand` with
-      `@main`, taking its enum conformances from `ShrikeArgumentSupport`; its `run()`
-      takes the body currently in `sources/ShrikeServer/Command/main.swift` (87
-      lines after the parse block goes, so under the 120-line lint ceiling, but
-      decompose into stage methods if it grows).
-- [ ] `SHRIKE_REASONING_EFFORT` and `SHRIKE_REASONING_RETENTION` move out of
-      parsing to where the server assembles its config. `parse` takes argv only.
-- [ ] `--max-context`'s declared range becomes the one the code enforces. The
-      help says `4096...262144` and the parse accepts `1`; the type states it once
-      and the help follows. Keep the 262144 default: it is the native maximum and
-      is correct for a server.
-- [ ] An unknown flag reports as unknown. Today the value guard fires first, so
-      `ShrikeServer --bogus` claims a missing value.
-- [ ] Task 1's server tests still pass. The mini's launch line is the one that
-      matters.
-- [ ] Gates, commit.
+- [x] `ServerArguments` becomes `ShrikeServerCommand`, an `AsyncParsableCommand`
+      (its `run()` awaits) with `@main`, taking its enum conformances from
+      `ShrikeArgumentSupport`; the 86-line body of
+      `sources/ShrikeServer/Command/main.swift` moves into it as six stage methods
+      over a `ResolvedRoster` context, per CLAUDE.md, rather than one long `run()`.
+- [x] **Three** env vars, not two: parsing also read `SHRIKE_THINKING_MODE` via
+      `ModelThinkingMode.resolved(environment:)`, so leaving it would have kept the
+      environment parameter alive. All three move to `merging(configDefaults:
+      environment:)`; `parse` takes argv only. A malformed value is still rejected
+      before any config load or models scan, via `validateEnvironment` called at the
+      top of `run()`, so launch-time diagnostics keep their old ordering.
+- [x] `--max-context`'s help becomes the constraint the code enforces. The spec's
+      diagnosis was wrong and is corrected there: the code never accepted `1`, it
+      enforces membership in `supportedContextTokens`, so the help's range was
+      *wider* than the code and `--max-context 50000` was refused as "not
+      supported". Help and error now both render the set from the constant. The
+      262144 default stands: it is the native maximum and correct for a server.
+- [x] An unknown flag reports as unknown. Verified before and after against the
+      binary: `--bogus requires a value` became `Unknown option '--bogus'`.
+- [x] Task 1's server tests pass with only the type's name changed; every argv
+      string and asserted value is untouched, the mini's launch line included.
+- [x] Not in the plan but owed by it: both fixed defects are pinned, since a
+      declared behaviour change with no test is the drift this chapter exists to
+      stop. Three cases assert the unknown-flag message, that `--max-context`
+      names every value it accepts, and that parsing reads no environment while
+      `merging` resolves and rejects one.
+- [x] Gates, commit.
 
 ---
 

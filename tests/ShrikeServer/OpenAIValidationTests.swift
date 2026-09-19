@@ -294,8 +294,8 @@ struct StreamingStopMatcherTests {
 @Suite("Server arguments")
 struct ServerArgumentTests {
     @Test func defaults() throws {
-        let arguments = try ServerArguments.parse(
-            ["--model", "model.gturbo"], environment: [:])
+        let arguments = try ShrikeServerCommand.parse(
+            ["--model", "model.gturbo"])
         #expect(arguments.port == 8080)
         #expect(arguments.maxContext == 262_144)
         #expect(arguments.queueLimit == 4)
@@ -311,7 +311,7 @@ struct ServerArgumentTests {
     }
 
     @Test func configModeIsTheDefaultAndModelIsOptional() throws {
-        let arguments = try ServerArguments.parse([], environment: [:])
+        let arguments = try ShrikeServerCommand.parse([])
         #expect(arguments.model == nil)
         #expect(arguments.configPath == nil)
         #expect(arguments.modelsDir == nil)
@@ -319,46 +319,44 @@ struct ServerArgumentTests {
     }
 
     @Test func parsesConfigModelsDirAndPreload() throws {
-        let arguments = try ServerArguments.parse(
-            ["--config", "/tmp/server.json", "--models-dir", "/models", "--preload"],
-            environment: [:])
+        let arguments = try ShrikeServerCommand.parse(
+            ["--config", "/tmp/server.json", "--models-dir", "/models", "--preload"])
         #expect(arguments.configPath == "/tmp/server.json")
         #expect(arguments.modelsDir == "/models")
         #expect(arguments.preload)
     }
 
     @Test func modelExcludesConfigAndModelsDir() throws {
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse(["--model", "m.gturbo", "--config", "/tmp/c.json"])
+        #expect(throws: (any Error).self) {
+            try ShrikeServerCommand.parse(["--model", "m.gturbo", "--config", "/tmp/c.json"])
         }
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse(["--model", "m.gturbo", "--models-dir", "/models"])
+        #expect(throws: (any Error).self) {
+            try ShrikeServerCommand.parse(["--model", "m.gturbo", "--models-dir", "/models"])
         }
     }
 
     @Test func modelIDRequiresModel() throws {
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse(["--model-id", "nice-name"])
+        #expect(throws: (any Error).self) {
+            try ShrikeServerCommand.parse(["--model-id", "nice-name"])
         }
     }
 
     @Test func preloadContradictsLazyLoad() throws {
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse(["--preload", "--lazy-load"])
+        #expect(throws: (any Error).self) {
+            try ShrikeServerCommand.parse(["--preload", "--lazy-load"])
         }
     }
 
     @Test func configDefaultsMergeUnderFlagPrecedence() throws {
-        let bare = try ServerArguments.parse([], environment: [:])
+        let bare = try ShrikeServerCommand.parse([])
         let merged = try bare.merging(configDefaults: .init(
             maxContext: 32_768, ramBudget: "6G", idleUnloadSeconds: 300))
         #expect(merged.maxContext == 32_768)
         #expect(merged.expertCacheBudgetBytes == 6 << 30)
         #expect(merged.idleUnloadSeconds == 300)
 
-        let flagged = try ServerArguments.parse(
-            ["--max-context", "65536", "--ram-budget", "2G", "--idle-unload-seconds", "0"],
-            environment: [:])
+        let flagged = try ShrikeServerCommand.parse(
+            ["--max-context", "65536", "--ram-budget", "2G", "--idle-unload-seconds", "0"])
         let kept = try flagged.merging(configDefaults: .init(
             maxContext: 32_768, ramBudget: "6G", idleUnloadSeconds: 300))
         #expect(kept.maxContext == 65_536)
@@ -367,79 +365,117 @@ struct ServerArgumentTests {
     }
 
     @Test func aConfigContextOutsideTheSupportedSetFails() throws {
-        let bare = try ServerArguments.parse([], environment: [:])
-        #expect(throws: ServerArgumentError.self) {
+        let bare = try ShrikeServerCommand.parse([])
+        #expect(throws: (any Error).self) {
             _ = try bare.merging(configDefaults: .init(maxContext: 12_345))
         }
     }
 
     @Test func parsesOnlyBinaryThinkingModes() throws {
-        let on = try ServerArguments.parse([
+        let on = try ShrikeServerCommand.parse([
             "--model", "model.gturbo", "--thinking", "on",
         ])
         #expect(on.thinkingMode == .on)
-        let environmentOn = try ServerArguments.parse(
-            ["--model", "model.gturbo"],
-            environment: ["SHRIKE_THINKING_MODE": "true"])
+        let environmentOn = try ShrikeServerCommand.parse(["--model", "model.gturbo"])
+            .merging(configDefaults: .init(),
+                     environment: ["SHRIKE_THINKING_MODE": "true"])
         #expect(environmentOn.thinkingMode == .on)
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse([
+        #expect(throws: (any Error).self) {
+            try ShrikeServerCommand.parse([
                 "--model", "model.gturbo", "--thinking", "high",
             ])
         }
     }
 
     @Test func parsesReasoningEffortLevels() throws {
-        let parsed = try ServerArguments.parse(
-            ["--model", "m", "--reasoning-effort", "low"], environment: [:])
+        let parsed = try ShrikeServerCommand.parse(
+            ["--model", "m", "--reasoning-effort", "low"])
         #expect(parsed.reasoningEffort == .low)
-        #expect(try ServerArguments.parse(["--model", "m"], environment: [:])
+        #expect(try ShrikeServerCommand.parse(["--model", "m"])
             .reasoningEffort == nil)
-        #expect(try ServerArguments.parse(
-            ["--model", "m"],
-            environment: ["SHRIKE_REASONING_EFFORT": "HIGH"]).reasoningEffort == .high)
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse(
-                ["--model", "m", "--reasoning-effort", "max"], environment: [:])
+        #expect(try ShrikeServerCommand.parse(["--model", "m"])
+            .merging(configDefaults: .init(),
+                     environment: ["SHRIKE_REASONING_EFFORT": "HIGH"])
+            .reasoningEffort == .high)
+        #expect(throws: (any Error).self) {
+            try ShrikeServerCommand.parse(
+                ["--model", "m", "--reasoning-effort", "max"])
         }
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse(
-                ["--model", "m"],
-                environment: ["SHRIKE_REASONING_EFFORT": "max"])
+        #expect(throws: (any Error).self) {
+            try ShrikeServerCommand.parse(["--model", "m"])
+                .merging(configDefaults: .init(),
+                         environment: ["SHRIKE_REASONING_EFFORT": "max"])
         }
-        #expect(try ServerArguments.parse(
-            ["--model", "m"],
-            environment: ["SHRIKE_REASONING_EFFORT": "low"]).reasoningEffort == .low)
+        #expect(try ShrikeServerCommand.parse(["--model", "m"])
+            .merging(configDefaults: .init(),
+                     environment: ["SHRIKE_REASONING_EFFORT": "low"])
+            .reasoningEffort == .low)
+    }
+
+    @Test func anUnknownFlagReportsAsUnknownNotAsAMissingValue() throws {
+        let error = #expect(throws: (any Error).self) {
+            _ = try ShrikeServerCommand.parse(["--bogus"])
+        }
+        let message = ShrikeServerCommand.message(for: try #require(error))
+        #expect(message.contains("Unknown option"))
+        #expect(!message.contains("requires a value"))
+    }
+
+    @Test func maxContextRejectsAnOffSetValueAndNamesEveryAcceptedOne() throws {
+        let error = #expect(throws: (any Error).self) {
+            _ = try ShrikeServerCommand.parse(["--max-context", "50000"])
+        }
+        let message = ShrikeServerCommand.message(for: try #require(error))
+        for accepted in RuntimeConfiguration.supportedContextTokens {
+            #expect(message.contains(String(accepted)))
+        }
+    }
+
+    @Test func parsingReadsNoEnvironmentAndMergingResolvesIt() throws {
+        let parsed = try ShrikeServerCommand.parse(
+            ["--model", "m.gturbo"])
+        #expect(parsed.reasoningEffort == nil)
+        #expect(parsed.reasoningRetention == nil)
+        #expect(throws: (any Error).self) {
+            _ = try parsed.merging(configDefaults: .init(),
+                                   environment: ["SHRIKE_REASONING_RETENTION": "sometimes"])
+        }
+        let resolved = try parsed.merging(
+            configDefaults: .init(),
+            environment: ["SHRIKE_THINKING_MODE": "true",
+                          "SHRIKE_REASONING_RETENTION": "STRIPPED"])
+        #expect(resolved.thinkingMode == .on)
+        #expect(resolved.reasoningRetention == .stripped)
     }
 
     @Test func parsesKVPrecisionAndYaRNContexts() throws {
-        let defaults = try ServerArguments.parse([
+        let defaults = try ShrikeServerCommand.parse([
             "--model", "model.gturbo", "--kv-bits", "16",
             "--rope-scaling", "yarn",
         ])
         #expect(defaults.kvCachePrecision == .fp16)
         #expect(defaults.ropeScalingMode == .yarn)
         #expect(defaults.maxContext == 1_048_576)
-        let halfMillion = try ServerArguments.parse([
+        let halfMillion = try ShrikeServerCommand.parse([
             "--model", "model.gturbo", "--rope-scaling", "yarn",
             "--max-context", "524288",
         ])
         #expect(halfMillion.maxContext == 524_288)
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse([
+        #expect(throws: (any Error).self) {
+            try ShrikeServerCommand.parse([
                 "--model", "model.gturbo", "--max-context", "524288",
             ])
         }
     }
 
     @Test func acceptsPublicPrefillChunksAndRejectsUnsupportedValues() throws {
-        let arguments = try ServerArguments.parse([
+        let arguments = try ShrikeServerCommand.parse([
             "--model", "model.gturbo",
             "--prefill-chunk", "4096",
         ])
         #expect(arguments.prefillChunkTokens == 4_096)
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse([
+        #expect(throws: (any Error).self) {
+            try ShrikeServerCommand.parse([
                 "--model", "model.gturbo",
                 "--prefill-chunk", "8192",
             ])
@@ -447,12 +483,12 @@ struct ServerArgumentTests {
     }
 
     @Test func parsesSinglePrefixModeAndRejectsUnknownMode() throws {
-        let arguments = try ServerArguments.parse([
+        let arguments = try ShrikeServerCommand.parse([
             "--model", "model.gturbo",
             "--prompt-cache-mode", "single-prefix",
         ])
         #expect(arguments.promptCacheMode == .singlePrefix)
-        let multi = try ServerArguments.parse([
+        let multi = try ShrikeServerCommand.parse([
             "--model", "model.gturbo",
             "--prompt-cache-mode", "multi-prefix",
             "--prompt-cache-entries", "8",
@@ -465,25 +501,25 @@ struct ServerArgumentTests {
         #expect(multi.promptCacheMemoryMiB == 512)
         #expect(multi.promptCacheDiskDirectory == "/tmp/shrike-cache")
         #expect(multi.promptCacheDiskMiB == 16_384)
-        let rollback = try ServerArguments.parse([
+        let rollback = try ShrikeServerCommand.parse([
             "--model", "model.gturbo",
             "--prompt-cache-mode", "off",
         ])
         #expect(rollback.promptCacheMode == .off)
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse([
+        #expect(throws: (any Error).self) {
+            try ShrikeServerCommand.parse([
                 "--model", "model.gturbo",
                 "--prompt-cache-mode", "many",
             ])
         }
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse([
+        #expect(throws: (any Error).self) {
+            try ShrikeServerCommand.parse([
                 "--model", "model.gturbo",
                 "--prompt-cache-entries", "0",
             ])
         }
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse([
+        #expect(throws: (any Error).self) {
+            try ShrikeServerCommand.parse([
                 "--model", "model.gturbo",
                 "--prompt-cache-memory-mib", "4097",
             ])
@@ -491,13 +527,13 @@ struct ServerArgumentTests {
     }
 
     @Test func accepts256KContextAndRejectsUnsupportedValues() throws {
-        let arguments = try ServerArguments.parse([
+        let arguments = try ShrikeServerCommand.parse([
             "--model", "model.gturbo",
             "--max-context", "262144",
         ])
         #expect(arguments.maxContext == 262_144)
-        #expect(throws: ServerArgumentError.self) {
-            try ServerArguments.parse([
+        #expect(throws: (any Error).self) {
+            try ShrikeServerCommand.parse([
                 "--model", "model.gturbo",
                 "--max-context", "100000",
             ])

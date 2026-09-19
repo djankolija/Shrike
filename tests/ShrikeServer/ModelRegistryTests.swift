@@ -575,7 +575,7 @@ private let fixtureManifest = """
         let roster = try ModelRoster.resolve(
             candidates: scan.candidates,
             overrides: [.init(dir: "good.gturbo", id: "nice-name")])
-        let arguments = try ServerArguments.parse(["--max-context", "32768"], environment: [:])
+        let arguments = try ShrikeServerCommand.parse(["--max-context", "32768"])
         let models = try ModelRegistry.models(for: roster, arguments: arguments)
 
         #expect(models.map(\.id) == ["nice-name"])

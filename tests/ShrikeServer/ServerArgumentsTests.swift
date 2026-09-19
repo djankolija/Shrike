@@ -5,7 +5,7 @@ import Testing
 /// migration needing one of these edited has changed the contract, not the parser.
 @Suite struct ServerInvocationTests {
     @Test func rigLaunchLineParses() throws {
-        let arguments = try ServerArguments.parse([
+        let arguments = try ShrikeServerCommand.parse([
             "--model", "./models/ornith15.gturbo", "--model-id", "ornith15",
             "--port", "8081", "--max-context", "32768",
             "--ram-budget", "8G", "--thinking", "off",
@@ -20,7 +20,7 @@ import Testing
     }
 
     @Test func productionLaunchLineParses() throws {
-        let arguments = try ServerArguments.parse([
+        let arguments = try ShrikeServerCommand.parse([
             "--model", "./models/ornith15.gturbo", "--model-id", "ornith15",
             "--port", "8081", "--max-context", "32768",
             "--ram-budget", "11324620800", "--thinking", "off",
@@ -31,7 +31,7 @@ import Testing
     }
 
     @Test func readmeModelOnlyLaunchParses() throws {
-        let arguments = try ServerArguments.parse(["--model", "models/ornith15.gturbo"])
+        let arguments = try ShrikeServerCommand.parse(["--model", "models/ornith15.gturbo"])
         #expect(arguments.model == "models/ornith15.gturbo")
         #expect(arguments.port == 8080)
         #expect(arguments.modelIDOverride == nil)
