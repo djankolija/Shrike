@@ -74,8 +74,8 @@ The server's two environment-sourced settings (`SHRIKE_REASONING_EFFORT`,
 its configuration. Parsing takes argv and nothing else.
 
 `ShrikeCLI`'s `run()` calls the existing `run(args:)` in `Run.swift` rather than
-absorbing it. The SIGINT cancellation bridge in `main.swift` is not argument
-parsing and survives.
+absorbing it. The SIGINT cancellation bridge is not argument parsing and
+survives, beside the `run(args:)` it cancels rather than beside the entry point.
 
 ## What is protected, and how
 

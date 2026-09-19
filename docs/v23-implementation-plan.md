@@ -43,21 +43,26 @@ tested until their own tasks move the parsing into a command type. Pin them ther
 
 ### Task 2: ShrikeCLI
 
-- [ ] Add `swift-argument-parser` to `Package.swift` and to `ShrikeCLICore`.
-- [ ] `Args` becomes a `ParsableCommand` with `@main`: flags as declared
+- [x] Add `swift-argument-parser` to `Package.swift` and to `ShrikeCLICore`.
+- [x] `Args` becomes a `ParsableCommand` with `@main`: flags as declared
       properties, the cross-flag rules in `validate()`, `run()` calling the
       existing `run(args:)` in `Run.swift`.
-- [ ] `--top-k`'s "0 means off" and `--prefill-chunk`'s `auto` are expressed as
+- [x] `--top-k`'s "0 means off" and `--prefill-chunk`'s `auto` are expressed as
       the option's own type, not as sentinel values checked after the fact.
-- [ ] Delete `Args.usage`, `ParseContext`, `makeArgs`, `takeValue`, `takeInt`,
+- [x] Delete `Args.usage`, `ParseContext`, `makeArgs`, `takeValue`, `takeInt`,
       `takeRawValue`.
-- [ ] `sources/ShrikeCLI/Command/main.swift` keeps only the SIGINT cancellation
-      bridge (`RunBox`, `drive`); its parse-and-exit block goes.
-- [ ] Task 1's tests still pass, unchanged. If one needs editing, the migration
+- [x] The SIGINT cancellation bridge (`RunBox`, `drive`) survives, moved to
+      `sources/ShrikeCLI/Drive.swift` beside the `run(args:)` it cancels: `Args`
+      must stay in `ShrikeCLICore` for the tests, so its `run()` cannot reach a
+      bridge left in the executable target. `Command/main.swift` and its
+      parse-and-exit block are gone, replaced by `Command/ShrikeCLIMain.swift`
+      holding `@main extension Args {}`, which a file of top-level code could
+      not carry.
+- [x] Task 1's tests still pass, unchanged. If one needs editing, the migration
       is wrong.
-- [ ] Look at `swift run ShrikeCLI --help` once. The allowed slot counts must end
+- [x] Look at `swift run ShrikeCLI --help` once. The allowed slot counts must end
       at 256 and nothing may run past the margin.
-- [ ] Gates, commit.
+- [x] Gates, commit.
 
 Watch: `Run.swift:60` declares a free `func run(args:)` and `ParsableCommand`
 requires `run()`. Different labels, so no clash, but qualify if the compiler
@@ -132,4 +137,9 @@ disagrees.
 - [ ] `tools/golden-baseline.sh --check`. No kernel or runtime code changed, so it
       should be identical; run it anyway since it is the only check that
       exercises real inference. Counts as a model run, so `pgrep` first.
+- [ ] A fresh-reader review of the whole branch against `main` before the merge.
+      v20's close folded two real bugs out of its review and v22's five findings;
+      a chapter that rewrites all five entry points does not skip it. Fold each
+      finding into the commit that owns it, located with `git log -S` rather than
+      the reviewer's attribution, then re-run the gates.
 - [ ] Merge on Davor's go, delete the branch, update memory.

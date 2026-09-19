@@ -1,3 +1,4 @@
+import ArgumentParser
 import Shrike
 
 public enum PrefillChunkChoice: Equatable, Sendable {
@@ -5,385 +6,255 @@ public enum PrefillChunkChoice: Equatable, Sendable {
     case auto
 }
 
-public struct Args: Equatable, Sendable {
+extension PrefillChunkChoice: ExpressibleByArgument {
+    public init?(argument: String) {
+        if argument == "auto" {
+            self = .auto
+            return
+        }
+        guard let parsed = Int(argument),
+              RuntimeConfiguration.allowedPrefillChunkTokens.contains(parsed) else { return nil }
+        self = .fixed(parsed)
+    }
+}
+
+public enum TopKChoice: Equatable, Sendable {
+    case off
+    case limit(Int)
+
+    static let kernelLimit = 256
+
+    public var tokens: Int? {
+        switch self {
+        case .off: return nil
+        case .limit(let count): return count
+        }
+    }
+}
+
+extension TopKChoice: ExpressibleByArgument {
+    public init?(argument: String) {
+        guard let parsed = Int(argument), (0...Self.kernelLimit).contains(parsed) else { return nil }
+        self = parsed == 0 ? .off : .limit(parsed)
+    }
+
+    public var defaultValueDescription: String {
+        switch self {
+        case .off: return "0"
+        case .limit(let count): return String(count)
+        }
+    }
+}
+
+// ShrikeCLICore is the only module giving these Shrike enums a command-line
+// spelling; the server's parser carries its own.
+extension ModelThinkingMode: ExpressibleByArgument {}
+
+extension RuntimeRoPEScalingMode: ExpressibleByArgument {}
+
+extension KVCachePrecision: ExpressibleByArgument {
+    public init?(argument: String) {
+        guard let bits = Int(argument), let precision = KVCachePrecision(rawValue: bits) else {
+            return nil
+        }
+        self = precision
+    }
+}
+
+public struct Args: ParsableCommand, Sendable {
+    public static let configuration = CommandConfiguration(
+        commandName: "ShrikeCLI",
+        abstract: "Qwen3.5-MoE 35B-A3B text generation.")
+
+    @Option(help: ArgumentHelp("Path to a .gturbo model directory.", valueName: "dir"))
     public var model: String
+
+    @Option(help: ArgumentHelp("Raw-completion prompt.", valueName: "string"))
     public var prompt: String?
+
+    @Option(help: ArgumentHelp("JSON chat messages with role and content fields.",
+                               valueName: "path"))
     public var messagesFile: String?
-    public var maxNew: Int
-    public var maxContext: Int
-    public var temperature: Float
-    public var topK: Int?
-    public var topP: Float?
-    public var repetitionPenalty: Float
+
+    @Option(help: ArgumentHelp("Generated-token limit.", valueName: "int"))
+    public var maxNew = 1_024
+
+    @Option(name: .customLong("max-context"),
+            help: ArgumentHelp("""
+                Native context limit, 1...262144 (default 4096). With YaRN: \
+                524288 or 1048576 (default 1048576).
+                """,
+                valueName: "int"))
+    var maxContextOption: Int?
+
+    @Option(name: .customLong("rope-scaling"),
+            help: ArgumentHelp("Context scaling: none or yarn.", valueName: "mode"))
+    public var ropeScalingMode: RuntimeRoPEScalingMode = .none
+
+    @Option(help: ArgumentHelp("Sampling temperature; 0 is greedy.", valueName: "float"))
+    public var temperature: Float = GenerationDefaults.temperature
+
+    @Option(name: .customLong("top-k"),
+            help: ArgumentHelp("Top-k truncation, 1...256; 0 turns it off.", valueName: "int"))
+    var topKChoice: TopKChoice = .limit(GenerationDefaults.topK)
+
+    @Option(name: .customLong("top-p"),
+            help: ArgumentHelp("Nucleus truncation.", valueName: "float"))
+    public var topP: Float = GenerationDefaults.topP
+
+    @Option(help: ArgumentHelp("Repetition penalty.", valueName: "float"))
+    public var repetitionPenalty: Float = 1.0
+
+    @Option(help: ArgumentHelp("Deterministic sampling seed (default off).", valueName: "uint64"))
     public var seed: UInt64?
-    public var stops: [String]
-    public var quiet: Bool
-    public var concise: Bool
-    public var thinkingMode: ModelThinkingMode
-    public var expertCacheSlots: Int
+
+    @Option(name: .customLong("stop"),
+            help: ArgumentHelp("Stop substring (repeatable).", valueName: "string"))
+    public var stops: [String] = []
+
+    @Option(help: ArgumentHelp("""
+        Routed-expert cache slots per layer: 8, 16, 24, 32, 64, 96, 128, 160, \
+        192, 224 or 256. More slots raise the hit rate but use more memory.
+        """,
+        valueName: "n"))
+    public var expertCacheSlots = 64
+
+    @Option(help: ArgumentHelp("""
+        Prefill chunk tokens: 32, 64, 128, 256, 512, 1024, 2048 or 4096; auto \
+        covers the prompt with the smallest allowed chunk. Larger chunks reduce \
+        routed-expert file sweeps but use more GPU scratch.
+        """,
+        valueName: "n|auto"))
     public var prefillChunk: PrefillChunkChoice?
-    public var kvCachePrecision: KVCachePrecision
-    public var ropeScalingMode: RuntimeRoPEScalingMode
+
+    @Option(name: .customLong("kv-bits"),
+            help: ArgumentHelp("KV-cache storage precision: 4, 8 or 16.", valueName: "bits"))
+    public var kvCachePrecision: KVCachePrecision = .int8
+
+    @Flag(help: """
+        Inject the per-quantization concise-mode system prompt (answers without \
+        preamble, filler, or closing codas).
+        """)
+    public var concise = false
+
+    @Option(name: .customLong("thinking"),
+            help: ArgumentHelp("""
+                Ornith/Qwen reasoning mode: off, on or adaptive. Adaptive injects \
+                nothing and lets the model decide. These models do not define \
+                effort levels.
+                """,
+                valueName: "mode"))
+    public var thinkingMode: ModelThinkingMode = .off
+
+    @Flag(help: "Suppress the timing footer.")
+    public var quiet = false
+
+    @Flag(help: """
+        Run the server's logits head even at temperature 0 (the fused greedy head \
+        is the default there).
+        """)
+    public var logitsHead = false
+
+    @Option(name: .customLong("force-tokens"),
+            help: ArgumentHelp("""
+                Feed these ids (one per line) in place of the sampler's and stop \
+                when they run out; the class-2 gate's instrument.
+                """,
+                valueName: "path"))
     public var forceTokensPath: String?
+
+    @Option(name: .customLong("dump-logits"),
+            help: ArgumentHelp("""
+                Write every position's fp16 logits as raw rows to <path> and a \
+                JSON sidecar to <path>.json.
+                """,
+                valueName: "path"))
     public var dumpLogitsPath: String?
+
+    @Option(name: .customLong("dump-hidden"),
+            help: ArgumentHelp("""
+                Write every position's fp16 residual before the final norm, the \
+                prompt's rows then the answer's, as raw rows to <path> and a JSON \
+                sidecar to <path>.json.
+                """,
+                valueName: "path"))
     public var dumpHiddenPath: String?
-    public var logitsHead: Bool
+
+    @Option(name: .customLong("tokenize"),
+            help: ArgumentHelp("""
+                Render the prompt exactly as a run would, write its ids and their \
+                pieces as JSON to <path>, and exit without loading the model.
+                """,
+                valueName: "path"))
     public var tokenizePath: String?
+
+    @Option(help: ArgumentHelp("""
+        After the first answer stops, append this text (encoded verbatim) to the \
+        tokens the run holds and generate once more from that state; the second \
+        answer follows a separator line. The two-turn continuation gate.
+        """,
+        valueName: "string"))
     public var followUp: String?
 
-    public init(model: String,
-                prompt: String? = nil,
-                messagesFile: String? = nil,
-                maxNew: Int = 1_024,
-                maxContext: Int = 4096,
-                temperature: Float = GenerationDefaults.temperature,
-                topK: Int? = GenerationDefaults.topK,
-                topP: Float? = GenerationDefaults.topP,
-                repetitionPenalty: Float = 1.0,
-                seed: UInt64? = nil,
-                stops: [String] = [],
-                quiet: Bool = false,
-                concise: Bool = false,
-                thinkingMode: ModelThinkingMode = .off,
-                expertCacheSlots: Int = 64,
-                prefillChunk: PrefillChunkChoice? = nil,
-                kvCachePrecision: KVCachePrecision = .int8,
-                ropeScalingMode: RuntimeRoPEScalingMode = .none,
-                forceTokensPath: String? = nil,
-                dumpLogitsPath: String? = nil,
-                dumpHiddenPath: String? = nil,
-                logitsHead: Bool = false,
-                tokenizePath: String? = nil,
-                followUp: String? = nil) {
-        self.model = model
-        self.forceTokensPath = forceTokensPath
-        self.dumpLogitsPath = dumpLogitsPath
-        self.dumpHiddenPath = dumpHiddenPath
-        self.logitsHead = logitsHead
-        self.tokenizePath = tokenizePath
-        self.followUp = followUp
-        self.prompt = prompt
-        self.messagesFile = messagesFile
-        self.maxNew = maxNew
-        self.maxContext = maxContext
-        self.temperature = temperature
-        self.topK = topK
-        self.topP = topP
-        self.repetitionPenalty = repetitionPenalty
-        self.expertCacheSlots = expertCacheSlots
-        self.prefillChunk = prefillChunk
-        self.kvCachePrecision = kvCachePrecision
-        self.ropeScalingMode = ropeScalingMode
-        self.seed = seed
-        self.stops = stops
-        self.quiet = quiet
-        self.concise = concise
-        self.thinkingMode = thinkingMode
+    public init() {}
+
+    public var topK: Int? { topKChoice.tokens }
+
+    public var maxContext: Int {
+        if let maxContextOption { return maxContextOption }
+        return ropeScalingMode == .yarn
+            ? RuntimeConfiguration.defaultYaRNContextTokens
+            : 4096
     }
-}
 
-public enum ArgsError: Error, Equatable, CustomStringConvertible {
-    case helpRequested
-    case unknownFlag(String)
-    case missingValue(flag: String)
-    case invalidValue(flag: String, value: String)
-    case requiredMissing(String)
-    case mutuallyExclusive(String, String)
-    case modeMissing
-
-    public var description: String {
-        switch self {
-        case .helpRequested: return "help requested"
-        case .unknownFlag(let flag): return "unknown flag: \(flag)"
-        case .missingValue(let flag): return "missing value for \(flag)"
-        case .invalidValue(let flag, let value): return "invalid value for \(flag): \(value)"
-        case .requiredMissing(let flag): return "required flag missing: \(flag)"
-        case .mutuallyExclusive(let a, let b): return "\(a) and \(b) are mutually exclusive"
-        case .modeMissing: return "one of --prompt or --messages-file is required"
+    public func validate() throws {
+        if prompt != nil, messagesFile != nil {
+            throw ValidationError("--prompt and --messages-file are mutually exclusive")
         }
-    }
-}
-
-extension Args {
-    public static let usage = """
-    ShrikeCLI — Qwen3.5-MoE 35B-A3B text generation
-
-    usage: ShrikeCLI --model <dir> (--prompt <string> | --messages-file <path>) [options]
-
-    required:
-      --model <dir>             Path to a .gturbo model directory.
-      --prompt <string>         Raw-completion prompt.
-      --messages-file <path>    JSON chat messages with role and content fields.
-
-    options:
-      --max-new <int>           Generated-token limit (default 1024).
-      --max-context <int>       Native context limit, 1...262144 (default 4096).
-                                With YaRN: 524288 or 1048576 (default 1048576).
-      --rope-scaling <mode>     Context scaling: none or yarn (default none).
-      --temperature <float>     Sampling temperature (default 0.6; 0 = greedy).
-      --top-k <int>             Top-k truncation, 1...256 (default 20; 0 = off).
-      --top-p <float>           Nucleus truncation (default 0.95).
-      --repetition-penalty <f>  Repetition penalty (default 1.0).
-      --seed <uint64>           Deterministic sampling seed (default off).
-      --stop <string>           Stop substring (repeatable).
-      --expert-cache-slots <n>  Routed-expert cache slots per layer: 8, 16, 24,
-                                32, 64, 96, 128, 160, 192, 224 or 256
-                                (default 64). More slots raise the hit rate but
-                                use more memory.
-      --prefill-chunk <n|auto>  Prefill chunk tokens. Larger chunks reduce
-                                routed-expert file sweeps but use more GPU
-                                scratch. Allowed: 32, 64, 128, 256, 512,
-                                1024, 2048, 4096; auto covers the prompt with
-                                the smallest allowed chunk.
-      --kv-bits <4|8|16>        KV-cache storage precision (default 8).
-      --concise                 Inject the per-quantization concise-mode
-                                system prompt (answers without preamble,
-                                filler, or closing codas).
-      --thinking <off|on|adaptive>
-                                Ornith/Qwen reasoning mode (default off).
-                                Adaptive injects nothing and lets the model
-                                decide. These models do not define effort
-                                levels.
-      --quiet                   Suppress the timing footer.
-      --logits-head             Run the server's logits head even at
-                                temperature 0 (the fused greedy head is the
-                                default there).
-      --force-tokens <path>     Feed these ids (one per line) in place of the
-                                sampler's and stop when they run out; the
-                                class-2 gate's instrument.
-      --dump-logits <path>      Write every position's fp16 logits as raw rows
-                                to <path> and a JSON sidecar to <path>.json.
-      --dump-hidden <path>      Write every position's fp16 residual before the
-                                final norm, the prompt's rows then the answer's,
-                                as raw rows to <path> and a JSON sidecar to
-                                <path>.json.
-      --tokenize <path>         Render the prompt exactly as a run would, write
-                                its ids and their pieces as JSON to <path>, and
-                                exit without loading the model.
-      --follow-up <string>      After the first answer stops, append this text
-                                (encoded verbatim) to the tokens the run holds
-                                and generate once more from that state; the
-                                second answer follows a separator line. The
-                                two-turn continuation gate.
-      --help                    Show this message.
-    """
-
-    /// Same shape as ServerArguments.parse: a flag table.
-    public static func parse(_ argv: [String]) throws -> Args {
-        var context = ParseContext()
-        try context.applyFlags(argv)
-        guard let model = context.model else { throw ArgsError.requiredMissing("--model") }
-        try context.validate()
-        return context.makeArgs(model: model)
+        if prompt == nil, messagesFile == nil {
+            throw ValidationError("one of --prompt or --messages-file is required")
+        }
+        guard (1...RuntimeConfiguration.maximumContextTokens).contains(maxNew) else {
+            throw ValidationError("--max-new must be between 1 and "
+                + "\(RuntimeConfiguration.maximumContextTokens)")
+        }
+        guard (0...2).contains(temperature) else {
+            throw ValidationError("--temperature must be between 0 and 2")
+        }
+        guard topP > 0, topP <= 1 else {
+            throw ValidationError("--top-p must be above 0 and at most 1")
+        }
+        guard repetitionPenalty > 0 else {
+            throw ValidationError("--repetition-penalty must be above 0")
+        }
+        guard RuntimeConfiguration.allowedExpertCacheSlots.contains(expertCacheSlots) else {
+            throw ValidationError("--expert-cache-slots must be one of "
+                + RuntimeConfiguration.allowedExpertCacheSlots.map(String.init)
+                    .joined(separator: ", "))
+        }
+        if temperature > 0, topK == nil, topP < 1 {
+            throw ValidationError("--top-p \(topP) requires --top-k between 1 and 256")
+        }
+        try validateContext()
     }
 
-    private struct ParseContext {
-        var model: String?
-        var prompt: String?
-        var messagesFile: String?
-        var maxNew = 1_024
-        var maxContext = 4096
-        var maxContextWasSet = false
-        var temperature: Float = GenerationDefaults.temperature
-        var topK: Int? = GenerationDefaults.topK
-        var topP: Float? = GenerationDefaults.topP
-        var repetitionPenalty: Float = 1.0
-        var seed: UInt64?
-        var stops: [String] = []
-        var quiet = false
-        var concise = false
-        var thinkingMode: ModelThinkingMode = .off
-        var expertCacheSlots = 64
-        var prefillChunk: PrefillChunkChoice?
-        var kvCachePrecision: KVCachePrecision = .int8
-        var ropeScalingMode: RuntimeRoPEScalingMode = .none
-        var forceTokensPath: String?
-        var dumpLogitsPath: String?
-        var dumpHiddenPath: String?
-        var logitsHead = false
-        var tokenizePath: String?
-        var followUp: String?
-
-        mutating func applyFlags(_ argv: [String]) throws {
-            var index = 0
-            while index < argv.count {
-                let flag = argv[index]
-                switch flag {
-                case "--help":
-                    throw ArgsError.helpRequested
-                case "--quiet":
-                    quiet = true
-                    index += 1
-                case "--concise":
-                    concise = true
-                    index += 1
-                case "--thinking":
-                    thinkingMode = try takeRawValue(argv, &index, flag: flag)
-                case "--model":
-                    model = try takeValue(argv, &index, flag: flag)
-                case "--prompt":
-                    prompt = try takeValue(argv, &index, flag: flag)
-                case "--messages-file":
-                    messagesFile = try takeValue(argv, &index, flag: flag)
-                case "--max-new":
-                    maxNew = try takeInt(argv, &index, flag: flag,
-                                         in: 1...RuntimeConfiguration.maximumContextTokens)
-                case "--max-context":
-                    maxContext = try takeInt(argv, &index, flag: flag,
-                                             in: 1...RuntimeConfiguration.maximumContextTokens)
-                    maxContextWasSet = true
-                case "--rope-scaling":
-                    ropeScalingMode = try takeRawValue(argv, &index, flag: flag)
-                case "--temperature":
-                    let value = try takeValue(argv, &index, flag: flag)
-                    guard let parsed = Float(value), parsed >= 0, parsed <= 2 else {
-                        throw ArgsError.invalidValue(flag: flag, value: value)
-                    }
-                    temperature = parsed
-                case "--top-k":
-                    let parsed = try takeInt(argv, &index, flag: flag, in: 0...256)
-                    topK = parsed == 0 ? nil : parsed
-                case "--top-p":
-                    let value = try takeValue(argv, &index, flag: flag)
-                    guard let parsed = Float(value), parsed > 0, parsed <= 1 else {
-                        throw ArgsError.invalidValue(flag: flag, value: value)
-                    }
-                    topP = parsed
-                case "--repetition-penalty":
-                    let value = try takeValue(argv, &index, flag: flag)
-                    guard let parsed = Float(value), parsed > 0 else {
-                        throw ArgsError.invalidValue(flag: flag, value: value)
-                    }
-                    repetitionPenalty = parsed
-                case "--seed":
-                    let value = try takeValue(argv, &index, flag: flag)
-                    guard let parsed = UInt64(value) else {
-                        throw ArgsError.invalidValue(flag: flag, value: value)
-                    }
-                    seed = parsed
-                case "--expert-cache-slots":
-                    let value = try takeValue(argv, &index, flag: flag)
-                    guard let parsed = Int(value),
-                          RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) else {
-                        throw ArgsError.invalidValue(flag: flag, value: value)
-                    }
-                    expertCacheSlots = parsed
-                case "--prefill-chunk":
-                    let value = try takeValue(argv, &index, flag: flag)
-                    if value == "auto" {
-                        prefillChunk = .auto
-                    } else if let parsed = Int(value),
-                              RuntimeConfiguration.allowedPrefillChunkTokens.contains(parsed) {
-                        prefillChunk = .fixed(parsed)
-                    } else {
-                        throw ArgsError.invalidValue(flag: flag, value: value)
-                    }
-                case "--kv-bits":
-                    let value = try takeValue(argv, &index, flag: flag)
-                    guard let bits = Int(value),
-                          let parsed = KVCachePrecision(rawValue: bits) else {
-                        throw ArgsError.invalidValue(flag: flag, value: value)
-                    }
-                    kvCachePrecision = parsed
-                case "--stop":
-                    stops.append(try takeValue(argv, &index, flag: flag))
-                case "--force-tokens":
-                    forceTokensPath = try takeValue(argv, &index, flag: flag)
-                case "--dump-logits":
-                    dumpLogitsPath = try takeValue(argv, &index, flag: flag)
-                case "--dump-hidden":
-                    dumpHiddenPath = try takeValue(argv, &index, flag: flag)
-                case "--logits-head":
-                    logitsHead = true
-                    index += 1
-                case "--tokenize":
-                    tokenizePath = try takeValue(argv, &index, flag: flag)
-                case "--follow-up":
-                    followUp = try takeValue(argv, &index, flag: flag)
-                default:
-                    throw ArgsError.unknownFlag(flag)
-                }
+    private func validateContext() throws {
+        if ropeScalingMode == .yarn {
+            guard RuntimeConfiguration.supportedYaRNContextTokens.contains(maxContext) else {
+                throw ValidationError("--max-context with YaRN must be one of "
+                    + RuntimeConfiguration.supportedYaRNContextTokens.map(String.init)
+                        .joined(separator: ", "))
+            }
+        } else {
+            guard (1...RuntimeConfiguration.nativeMaximumContextTokens).contains(maxContext) else {
+                throw ValidationError("--max-context must be between 1 and "
+                    + "\(RuntimeConfiguration.nativeMaximumContextTokens)")
             }
         }
-
-        mutating func validate() throws {
-            if prompt != nil && messagesFile != nil {
-                throw ArgsError.mutuallyExclusive("--prompt", "--messages-file")
-            }
-            if prompt == nil && messagesFile == nil { throw ArgsError.modeMissing }
-            if temperature > 0, topK == nil, let topP, topP < 1 {
-                throw ArgsError.invalidValue(
-                    flag: "--top-p",
-                    value: "\(topP) requires --top-k between 1 and 256")
-            }
-            if ropeScalingMode == .yarn {
-                if !maxContextWasSet {
-                    maxContext = RuntimeConfiguration.defaultYaRNContextTokens
-                }
-                guard RuntimeConfiguration.supportedYaRNContextTokens.contains(maxContext) else {
-                    throw ArgsError.invalidValue(flag: "--max-context", value: String(maxContext))
-                }
-            } else if maxContext > RuntimeConfiguration.nativeMaximumContextTokens {
-                throw ArgsError.invalidValue(flag: "--max-context", value: String(maxContext))
-            }
-        }
-
-        func makeArgs(model: String) -> Args {
-            return Args(model: model,
-                        prompt: prompt,
-                        messagesFile: messagesFile,
-                        maxNew: maxNew,
-                        maxContext: maxContext,
-                        temperature: temperature,
-                        topK: topK,
-                        topP: topP,
-                        repetitionPenalty: repetitionPenalty,
-                        seed: seed,
-                        stops: stops,
-                        quiet: quiet,
-                        concise: concise,
-                        thinkingMode: thinkingMode,
-                        expertCacheSlots: expertCacheSlots,
-                        prefillChunk: prefillChunk,
-                        kvCachePrecision: kvCachePrecision,
-                        ropeScalingMode: ropeScalingMode,
-                        forceTokensPath: forceTokensPath,
-                        dumpLogitsPath: dumpLogitsPath,
-                        dumpHiddenPath: dumpHiddenPath,
-                        logitsHead: logitsHead,
-                        tokenizePath: tokenizePath,
-                        followUp: followUp)
-        }
     }
 
-    private static func takeValue(_ argv: [String],
-                                  _ index: inout Int,
-                                  flag: String) throws -> String {
-        guard index + 1 < argv.count else { throw ArgsError.missingValue(flag: flag) }
-        let value = argv[index + 1]
-        index += 2
-        return value
-    }
-
-    private static func takeInt(_ argv: [String],
-                                _ index: inout Int,
-                                flag: String,
-                                in range: ClosedRange<Int>) throws -> Int {
-        let value = try takeValue(argv, &index, flag: flag)
-        guard let parsed = Int(value), range.contains(parsed) else {
-            throw ArgsError.invalidValue(flag: flag, value: value)
-        }
-        return parsed
-    }
-
-    private static func takeRawValue<T: RawRepresentable>(_ argv: [String],
-                                                          _ index: inout Int,
-                                                          flag: String) throws -> T
-    where T.RawValue == String {
-        let value = try takeValue(argv, &index, flag: flag)
-        guard let parsed = T(rawValue: value) else {
-            throw ArgsError.invalidValue(flag: flag, value: value)
-        }
-        return parsed
+    public func run() throws {
+        let code = drive(self)
+        if code != 0 { throw ExitCode(code) }
     }
 }

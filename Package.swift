@@ -22,6 +22,7 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-jinja.git", from: "2.3.6"),
         .package(url: "https://github.com/apple/swift-collections.git", from: "1.5.1"),
         .package(url: "https://github.com/apple/swift-nio.git", exact: "2.99.0"),
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.2"),
     ],
     targets: [
         .target(
@@ -63,7 +64,10 @@ let package = Package(
         ),
         .target(
             name: "ShrikeCLICore",
-            dependencies: ["Shrike"],
+            dependencies: [
+                "Shrike",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
             path: "sources/ShrikeCLI",
             exclude: ["Command"]
         ),
@@ -142,6 +146,7 @@ let package = Package(
             name: "ShrikeTestsCore",
             dependencies: [
                 "Shrike", "ShrikeKernelsC", "ShrikeValidationSupport", "ShrikeRepackCore", "ShrikeCLICore",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "tests/Shrike/Core",
             resources: [.copy("Tokenization/Fixtures")]

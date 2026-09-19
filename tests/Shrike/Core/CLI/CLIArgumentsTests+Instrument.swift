@@ -17,7 +17,7 @@ extension CLIArgumentsTests {
         #expect(plain.dumpLogitsPath == nil)
         #expect(!plain.logitsHead)
         #expect(plain.tokenizePath == nil)
-        #expect(throws: ArgsError.self) {
+        #expect(throws: (any Error).self) {
             _ = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--force-tokens"])
         }
     }

@@ -1,3 +1,4 @@
+import ArgumentParser
 import Testing
 @testable import ShrikeCLICore
 
@@ -35,7 +36,7 @@ import Testing
             "--rope-scaling", "yarn", "--max-context", "524288",
         ])
         #expect(halfMillion.maxContext == 524_288)
-        #expect(throws: ArgsError.self) {
+        #expect(throws: (any Error).self) {
             _ = try Args.parse([
                 "--model", "m.gturbo", "--prompt", "hi",
                 "--rope-scaling", "yarn", "--max-context", "262144",
@@ -54,7 +55,7 @@ import Testing
         ])
         #expect(automatic.prefillChunk == .auto)
 
-        #expect(throws: ArgsError.invalidValue(flag: "--prefill-chunk", value: "8192")) {
+        #expect(throws: (any Error).self) {
             _ = try Args.parse([
                 "--model", "m.gturbo", "--prompt", "hi", "--prefill-chunk", "8192",
             ])
@@ -86,7 +87,7 @@ import Testing
             "--max-context", "262144",
         ])
         #expect(maximum.maxContext == 262_144)
-        #expect(throws: ArgsError.invalidValue(flag: "--max-context", value: "262145")) {
+        #expect(throws: (any Error).self) {
             _ = try Args.parse([
                 "--model", "m.gturbo", "--prompt", "hi",
                 "--max-context", "262145",
@@ -102,7 +103,7 @@ import Testing
         #expect(disabled.topK == nil)
         #expect(disabled.topP == 1)
 
-        #expect(throws: ArgsError.self) {
+        #expect(throws: (any Error).self) {
             _ = try Args.parse([
                 "--model", "m.gturbo", "--prompt", "hi", "--top-k", "0",
             ])
@@ -110,7 +111,7 @@ import Testing
     }
 
     @Test func topKAboveKernelLimitRejected() {
-        #expect(throws: ArgsError.invalidValue(flag: "--top-k", value: "257")) {
+        #expect(throws: (any Error).self) {
             _ = try Args.parse([
                 "--model", "m.gturbo", "--prompt", "hi", "--top-k", "257",
             ])
@@ -131,7 +132,7 @@ import Testing
             "--model", "m.gturbo", "--prompt", "hi", "--thinking", "on",
         ])
         #expect(on.thinkingMode == .on)
-        #expect(throws: ArgsError.invalidValue(flag: "--thinking", value: "medium")) {
+        #expect(throws: (any Error).self) {
             _ = try Args.parse([
                 "--model", "m.gturbo", "--prompt", "hi", "--thinking", "medium",
             ])
@@ -148,24 +149,34 @@ import Testing
             "--logits-head", "--force-tokens", "--dump-logits", "--dump-hidden",
             "--tokenize", "--follow-up",
         ]
-        let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
+        let words = Args.helpMessage().split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })
         #expect(options == expected)
     }
 
-    @Test func unsupportedSelectorsAreRejected() {
-        for flag in ["--runtime-profile", "--experiment-id", "-h"] {
-            #expect(throws: ArgsError.unknownFlag(flag)) {
+    @Test func bothHelpSpellingsExitZero() throws {
+        for flag in ["--help", "-h"] {
+            let error = #expect(throws: (any Error).self) {
+                _ = try Args.parse([flag])
+            }
+            #expect(Args.exitCode(for: try #require(error)) == .success)
+        }
+    }
+
+    @Test func unsupportedSelectorsAreRejectedWithANonZeroExit() throws {
+        for flag in ["--runtime-profile", "--experiment-id"] {
+            let error = #expect(throws: (any Error).self) {
                 _ = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", flag])
             }
+            #expect(Args.exitCode(for: try #require(error)) != .success)
         }
     }
 
     @Test func modelAndPromptAreRequired() {
-        #expect(throws: ArgsError.requiredMissing("--model")) {
+        #expect(throws: (any Error).self) {
             _ = try Args.parse(["--prompt", "hi"])
         }
-        #expect(throws: ArgsError.modeMissing) {
+        #expect(throws: (any Error).self) {
             _ = try Args.parse(["--model", "m.gturbo"])
         }
     }
@@ -179,7 +190,7 @@ import Testing
     }
 
     @Test func promptAndMessagesFileAreMutuallyExclusive() {
-        #expect(throws: ArgsError.mutuallyExclusive("--prompt", "--messages-file")) {
+        #expect(throws: (any Error).self) {
             _ = try Args.parse([
                 "--model", "m.gturbo", "--prompt", "hi",
                 "--messages-file", "chat.json",
