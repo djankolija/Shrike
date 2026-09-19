@@ -1,3 +1,3 @@
 import ShrikeCLICore
 
-@main extension Args {}
+@main extension ShrikeCLICommand {}

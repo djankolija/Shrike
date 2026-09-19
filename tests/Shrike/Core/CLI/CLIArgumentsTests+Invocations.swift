@@ -5,7 +5,7 @@ import Testing
 /// edited has changed the contract, not the parser.
 extension CLIArgumentsTests {
     @Test func goldenBaselineShortProfileParses() throws {
-        let arguments = try Args.parse([
+        let arguments = try ShrikeCLICommand.parse([
             "--model", "/models/ornith15.gturbo", "--prompt", "Explain quantization.",
             "--max-new", "96", "--temperature", "0", "--seed", "1234", "--quiet",
         ])
@@ -19,7 +19,7 @@ extension CLIArgumentsTests {
     }
 
     @Test func goldenBaselineLogitsHeadProfileParses() throws {
-        let arguments = try Args.parse([
+        let arguments = try ShrikeCLICommand.parse([
             "--model", "/models/ornith15.gturbo", "--prompt", "Explain quantization.",
             "--max-new", "128", "--temperature", "0", "--seed", "1234", "--quiet",
             "--logits-head",
@@ -29,7 +29,7 @@ extension CLIArgumentsTests {
     }
 
     @Test func goldenBaselineTurnsProfileParses() throws {
-        let arguments = try Args.parse([
+        let arguments = try ShrikeCLICommand.parse([
             "--model", "/models/ornith15.gturbo", "--messages-file", "/tmp/golden-turns.json",
             "--follow-up", "And in one sentence?",
             "--max-new", "128", "--temperature", "0", "--seed", "1234", "--quiet",
@@ -42,7 +42,7 @@ extension CLIArgumentsTests {
     }
 
     @Test func goldenBaselineExtraArgumentsParse() throws {
-        let arguments = try Args.parse([
+        let arguments = try ShrikeCLICommand.parse([
             "--model", "/models/ornith15.gturbo", "--prompt", "Explain quantization.",
             "--max-new", "96", "--temperature", "0", "--seed", "1234", "--quiet",
             "--expert-cache-slots", "160",
@@ -51,7 +51,7 @@ extension CLIArgumentsTests {
     }
 
     @Test func classTwoGateInstrumentParses() throws {
-        let arguments = try Args.parse([
+        let arguments = try ShrikeCLICommand.parse([
             "--model", "/models/ornith15.gturbo", "--prompt", "Explain quantization.",
             "--force-tokens", "/tmp/ids.txt", "--dump-logits", "/tmp/out.f16",
         ])
@@ -60,7 +60,7 @@ extension CLIArgumentsTests {
     }
 
     @Test func hiddenStateInstrumentParses() throws {
-        let arguments = try Args.parse([
+        let arguments = try ShrikeCLICommand.parse([
             "--model", "/models/ornith15.gturbo", "--prompt", "Explain quantization.",
             "--dump-hidden", "/tmp/hidden.f16",
         ])
@@ -68,7 +68,7 @@ extension CLIArgumentsTests {
     }
 
     @Test func tokenizerOnlyInvocationParses() throws {
-        let arguments = try Args.parse([
+        let arguments = try ShrikeCLICommand.parse([
             "--model", "/models/ornith15.gturbo", "--prompt", "Explain quantization.",
             "--tokenize", "/tmp/pieces.json",
         ])

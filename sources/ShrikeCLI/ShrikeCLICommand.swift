@@ -1,5 +1,6 @@
 import ArgumentParser
 import Shrike
+import ShrikeArgumentSupport
 
 public enum PrefillChunkChoice: Equatable, Sendable {
     case fixed(Int)
@@ -46,22 +47,7 @@ extension TopKChoice: ExpressibleByArgument {
     }
 }
 
-// ShrikeCLICore is the only module giving these Shrike enums a command-line
-// spelling; the server's parser carries its own.
-extension ModelThinkingMode: ExpressibleByArgument {}
-
-extension RuntimeRoPEScalingMode: ExpressibleByArgument {}
-
-extension KVCachePrecision: ExpressibleByArgument {
-    public init?(argument: String) {
-        guard let bits = Int(argument), let precision = KVCachePrecision(rawValue: bits) else {
-            return nil
-        }
-        self = precision
-    }
-}
-
-public struct Args: ParsableCommand, Sendable {
+public struct ShrikeCLICommand: ParsableCommand, Sendable {
     public static let configuration = CommandConfiguration(
         commandName: "ShrikeCLI",
         abstract: "Qwen3.5-MoE 35B-A3B text generation.")
@@ -96,7 +82,7 @@ public struct Args: ParsableCommand, Sendable {
 
     @Option(name: .customLong("top-k"),
             help: ArgumentHelp("Top-k truncation, 1...256; 0 turns it off.", valueName: "int"))
-    var topKChoice: TopKChoice = .limit(GenerationDefaults.topK)
+    public var topK: TopKChoice = .limit(GenerationDefaults.topK)
 
     @Option(name: .customLong("top-p"),
             help: ArgumentHelp("Nucleus truncation.", valueName: "float"))
@@ -198,8 +184,6 @@ public struct Args: ParsableCommand, Sendable {
 
     public init() {}
 
-    public var topK: Int? { topKChoice.tokens }
-
     public var maxContext: Int {
         if let maxContextOption { return maxContextOption }
         return ropeScalingMode == .yarn
@@ -232,7 +216,7 @@ public struct Args: ParsableCommand, Sendable {
                 + RuntimeConfiguration.allowedExpertCacheSlots.map(String.init)
                     .joined(separator: ", "))
         }
-        if temperature > 0, topK == nil, topP < 1 {
+        if temperature > 0, topK == .off, topP < 1 {
             throw ValidationError("--top-p \(topP) requires --top-k between 1 and 256")
         }
         try validateContext()

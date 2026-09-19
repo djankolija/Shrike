@@ -63,6 +63,14 @@ tested until their own tasks move the parsing into a command type. Pin them ther
 - [x] Look at `swift run ShrikeCLI --help` once. The allowed slot counts must end
       at 256 and nothing may run past the margin.
 - [x] Gates, commit.
+- [x] A second commit on this task, after the checkpoint above was recorded: the
+      command type is `ShrikeCLICommand`, not `Args`, which named an argument bag
+      it had stopped being; `--top-k` is a declared `TopKChoice` with no shadow
+      property behind it, the call site reading `args.topK.tokens`; and the three
+      `ExpressibleByArgument` conformances on Shrike's own enums move to a new
+      `ShrikeArgumentSupport` target, since two modules conforming the same type
+      collide the moment anything imports both. `<Binary>Command` is the naming
+      convention for the rest of the chapter.
 
 Watch: `Run.swift:60` declares a free `func run(args:)` and `ParsableCommand`
 requires `run()`. Different labels, so no clash, but qualify if the compiler
@@ -72,7 +80,8 @@ disagrees.
 
 ### Task 3: ShrikeServer
 
-- [ ] `ServerArguments` becomes a `ParsableCommand` with `@main`; its `run()`
+- [ ] `ServerArguments` becomes `ShrikeServerCommand`, a `ParsableCommand` with
+      `@main`, taking its enum conformances from `ShrikeArgumentSupport`; its `run()`
       takes the body currently in `sources/ShrikeServer/Command/main.swift` (87
       lines after the parse block goes, so under the 120-line lint ceiling, but
       decompose into stage methods if it grows).
@@ -112,7 +121,7 @@ disagrees.
 ### Task 5: the two benches
 
 - [ ] `ShrikeExpertBench` and `ShrikeAttnBench` each get a `ParsableCommand` with
-      `@main`. Split a core library out of each executable target so the
+      `@main`, named `ExpertBenchCommand` and `AttnBenchCommand`. Split a core library out of each executable target so the
       arguments are testable; leave `resources: [.copy("Metal")]` and the
       `Bundle.module` users in the executable.
 - [ ] `--seed` parses the same way in both. AttnBench's hex form wins, since the

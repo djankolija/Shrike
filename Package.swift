@@ -53,6 +53,14 @@ let package = Package(
             ]
         ),
         .target(
+            name: "ShrikeArgumentSupport",
+            dependencies: [
+                "Shrike",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "sources/ShrikeArgumentSupport"
+        ),
+        .target(
             name: "ShrikeRepackCore",
             dependencies: ["ShrikeFormat"],
             path: "sources/ShrikeRepack/Core"
@@ -66,6 +74,7 @@ let package = Package(
             name: "ShrikeCLICore",
             dependencies: [
                 "Shrike",
+                "ShrikeArgumentSupport",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "sources/ShrikeCLI",
