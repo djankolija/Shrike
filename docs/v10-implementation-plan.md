@@ -153,6 +153,56 @@ Each is "run once, record the verdict, close either way"; definitions in
       a scheduling-structure change, smaller and harder than the
       original ~3–4 ms batching estimate. MTLIO's +0.54 ms single-load
       overhead stands (probe-measured) but production never pays it.**
+      **P3 FOLLOW-ON RAN 2026-09-04 (Davor's SSD-fetch ideas, probed
+      to exhaustion, all NULL on the mini).** Five standalone C probes
+      on the mini's Apple-fabric SSD (APPLE SSD AP0512Q), 1.77 MB
+      experts, F_NOCACHE, mirroring expert_io.c; archived at
+      `~/.claude/handoffs/archive/shrike-ssd-split-probe/`.
+      (1) Split one expert across 2/4/8 concurrent preads: NULL
+      (0.77 ms p50 either way). The drive's rate is set by BYTES IN
+      FLIGHT, not request count. (2) Split into 2..16 separate files
+      read concurrently: NULL on the mini (flat ~0.64 ms). (3) Pad the
+      read so the drive streams faster, discard the pad: NULL and
+      worse. A page-tail watcher shows the payload's last page lands no
+      sooner (0.77 alone vs 0.90 / 0.95 / 1.00 padded to
+      3.5 / 7.1 / 14.2 MB) while occupancy balloons to 1.3 / 2.3 /
+      4.2 ms; a single blocking pread cannot release partial data and
+      macOS cannot cancel it. Concurrent pads and keep-hot background
+      streams only slow the payload (shared aggregate bandwidth); mmap
+      page-in is 2-3x worse. (4) Serial-ramp: serial small reads do NOT
+      speed up over a long run (per-read p50 flat across all deciles at
+      every size), confirming bytes-in-flight with no sustained-activity
+      ramp. (5) A real but separate effect on the mini: a 5 ms idle gap
+      doubles a 64 KB read (0.12 to 0.28 ms), with only a one-time
+      cold-start warm-up (first ~100-200 reads, 0.22 to 0.12), no
+      progressive ramp. The CPU-vs-drive discriminator (busy-spin gap
+      == usleep gap, so the cause is I/O idle, not CPU P-state) was run
+      on the external SN850X only (the mini arm was superseded by a
+      lookup); with `disksleep=0` on the mini and NVMeFix documenting
+      that Apple controllers use their own low-power path (LPSR) rather
+      than generic APST, the cause is drive / PCIe-link power
+      management, not OS disk sleep and not the kernel scheduler.
+      DRIVE-DEPENDENT: the dev MacBook's external WD_BLACK SN850X DOES
+      scale a single 1.77 MB read with concurrency (16-way =
+      0.44 ms / 3.96 GB/s vs 0.58 / 3.0, -24 %); the external nearly
+      saturates on one read, the mini needs many experts in flight. The
+      mini is the deploy target, so this is not a production lever.
+      **Verdict: the fetch-speed lever is shut on the deploy target.**
+      The single 1.77 MB miss is at its floor (~0.77 ms); the only
+      throughput lever is more experts in flight, which at decode
+      requires next-layer miss prediction. That prediction lever is
+      independently CLOSED (architecture.md distance experiment: the
+      hidden state drifts 20-27 % per layer, k>=3 catches at most a
+      third of misses at 8-28 wasted fetches each, cannot clear the
+      +10 % bar), and every wasted prefetch now measurably steals
+      bytes-in-flight from the real miss. So fetch-speed (shut) and
+      predict-ahead (shut) both dead-end into the hardware. Davor's
+      ruling 2026-09-04: not fighting the controller (no kext tweaking).
+      Surviving miss levers unchanged: cost-side (keep the miss path
+      warm to dodge the ~2x idle penalty, small) and policy-side (reduce
+      miss COUNT via residency / cache). Prefill already exploits
+      bytes-in-flight (batches whole tiles, near the aggregate ceiling);
+      decode has ~1 miss per layer, so nothing to batch.
 
 ## Queued after T5 (Davor, 2026-08-31 — sequenced behind the original tasks)
 
