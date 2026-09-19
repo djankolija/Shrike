@@ -3,14 +3,6 @@ import Foundation
 import Shrike
 import ShrikeCatalog
 
-/// Thrown for a launch that parsed cleanly and then failed: ArgumentParser exits
-/// 1 on a plain error, where a `ValidationError` would exit 64 and print the usage.
-struct ServerLaunchError: Error, CustomStringConvertible {
-    let description: String
-
-    init(_ description: String) { self.description = description }
-}
-
 extension ShrikeServerCommand {
     struct ResolvedRoster {
         let config: ShrikeConfig
@@ -26,7 +18,6 @@ extension ShrikeServerCommand {
         let effective = try merging(configDefaults: resolved.config.defaults)
         let registry = try makeRegistry(roster: resolved.roster, effective: effective)
         report(skipped: resolved.skipped, roster: resolved.roster)
-        if effective.preload { try await preloadDefault(in: registry) }
         try await serve(registry: registry, effective: effective,
                         roster: resolved.roster, signals: signals)
     }
@@ -37,8 +28,7 @@ extension ShrikeServerCommand {
             return ResolvedRoster(
                 config: ShrikeConfig(),
                 roster: try ModelRoster.single(
-                    directory: URL(fileURLWithPath: modelPath).standardizedFileURL,
-                    overrideID: modelIDOverride),
+                    directory: URL(fileURLWithPath: modelPath).standardizedFileURL),
                 skipped: [])
         }
         let config: ShrikeConfig
@@ -51,7 +41,7 @@ extension ShrikeServerCommand {
                 : ShrikeConfig()
         }
         let directory = URL(fileURLWithPath:
-            ((modelsDir ?? config.modelsDir ?? "~/shrike-runtime/models") as NSString)
+            ((config.modelsDir ?? "~/shrike-runtime/models") as NSString)
                 .expandingTildeInPath).standardizedFileURL
         let scan = try ModelRoster.scanBundles(in: directory)
         return ResolvedRoster(
@@ -66,11 +56,7 @@ extension ShrikeServerCommand {
         // Reads each manifest.json only; a broken bundle fails here at launch
         // rather than on its first request.
         let models = try ModelRegistry.models(for: roster, arguments: effective)
-        return ModelRegistry(
-            models: models,
-            roster: roster,
-            idleTimeout: effective.idleUnloadSeconds > 0
-                ? .seconds(effective.idleUnloadSeconds) : nil)
+        return ModelRegistry(models: models, roster: roster)
     }
 
     private func report(skipped: [ModelRoster.SkippedBundle], roster: ModelRoster) {
@@ -84,19 +70,11 @@ extension ShrikeServerCommand {
         }
     }
 
-    private func preloadDefault(in registry: ModelRegistry) async throws {
-        guard let defaultModel = registry.model(for: nil) else {
-            throw ServerLaunchError(
-                "--preload needs a default model; mark one with \"default\": true in the config")
-        }
-        try await registry.preload(defaultModel)
-    }
-
     private func serve(registry: ModelRegistry,
                        effective: ShrikeServerCommand,
                        roster: ModelRoster,
                        signals: ServerTerminationSignals) async throws {
-        let server = ShrikeHTTPServer(registry: registry, queueLimit: effective.queueLimit)
+        let server = ShrikeHTTPServer(registry: registry)
         _ = try await server.start(port: effective.port)
         announce(registry: registry, effective: effective, roster: roster)
         _ = await signals.wait()
@@ -113,14 +91,6 @@ extension ShrikeServerCommand {
             ? "off" : effective.promptCacheDiskDirectory ?? "off"
         let cacheMemoryMiB = effective.promptCacheMode == .off
             ? 0 : effective.promptCacheMemoryMiB
-        let idle = effective.idleUnloadSeconds > 0 ? "\(effective.idleUnloadSeconds)s" : "off"
-        print("ShrikeServer ready at http://127.0.0.1:\(effective.port) models=\(registry.ids.joined(separator: ",")) default=\(roster.defaultID ?? "none") context=\(effective.maxContext) prompt_cache=\(effective.promptCacheMode.rawValue) prompt_cache_memory_mib=\(cacheMemoryMiB) prompt_cache_disk=\(diskCache) thinking=\(effective.thinkingMode.rawValue) reasoning_effort=\(effective.reasoningEffort?.rawValue ?? "auto") reasoning_retention=\(effective.reasoningRetention?.rawValue ?? "as-generated") idle_unload=\(idle) preload=\(effective.preload ? "on" : "off")")
-        if effective.unloadDiscardsWarmCache {
-            FileHandle.standardError.write(Data(
-                ("warning: --idle-unload-seconds drops the in-memory prompt cache with "
-                    + "the model; add --prompt-cache-disk <dir> so entries survive an "
-                    + "unload, or the first request after each unload pays a full "
-                    + "cold prefill\n").utf8))
-        }
+        print("ShrikeServer ready at http://127.0.0.1:\(effective.port) models=\(registry.ids.joined(separator: ",")) default=\(roster.defaultID ?? "none") context=\(effective.maxContext) prompt_cache=\(effective.promptCacheMode.rawValue) prompt_cache_memory_mib=\(cacheMemoryMiB) prompt_cache_disk=\(diskCache) thinking=\(effective.thinkingMode.rawValue) reasoning_effort=\(effective.reasoningEffort?.rawValue ?? "auto") reasoning_retention=\(effective.reasoningRetention?.rawValue ?? "as-generated")")
     }
 }

@@ -123,12 +123,6 @@ public struct ShrikeGenerateCommand: ParsableCommand, Sendable {
             help: ArgumentHelp("KV-cache storage precision: 4, 8 or 16.", valueName: "bits"))
     public var kvCachePrecision: KVCachePrecision = .int8
 
-    @Flag(help: """
-        Inject the per-quantization concise-mode system prompt (answers without \
-        preamble, filler, or closing codas).
-        """)
-    public var concise = false
-
     @Option(name: .customLong("thinking"),
             help: ArgumentHelp("""
                 Ornith/Qwen reasoning mode: off, on or adaptive. Adaptive injects \
@@ -146,14 +140,6 @@ public struct ShrikeGenerateCommand: ParsableCommand, Sendable {
         is the default there).
         """)
     public var logitsHead = false
-
-    @Option(name: .customLong("force-tokens"),
-            help: ArgumentHelp("""
-                Feed these ids (one per line) in place of the sampler's and stop \
-                when they run out; the class-2 gate's instrument.
-                """,
-                valueName: "path"))
-    public var forceTokensPath: String?
 
     @Option(name: .customLong("dump-logits"),
             help: ArgumentHelp("""

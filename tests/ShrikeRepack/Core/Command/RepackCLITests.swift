@@ -20,17 +20,28 @@ struct RepackCLITests {
         #expect(result.stderr.contains("Unknown option '--discard-partial'"))
     }
 
-    @Test func resumeWithoutStateFailsBeforeNetwork() throws {
-        let output = temporaryOutput("missing-resume")
+    @Test func aHalfWrittenSavedDownloadIsRefusedBeforeNetwork() throws {
+        let output = temporaryOutput("half-written")
         defer { clean(output) }
+        try Data("{}".utf8).write(to: URL(fileURLWithPath: output + ".resume.json"))
         let result = try run([
             "install",
             "--output", output,
-            "--resume",
         ])
 
         #expect(result.status == operationalFailure)
-        #expect(result.stderr.contains("no resumable install state exists"))
+        #expect(result.stderr.contains(
+            "partial directory and checkpoint must exist together"))
+    }
+
+    @Test func theRetiredInstallFlagsAreRejectedByTheBinary() throws {
+        let output = temporaryOutput("retired-install")
+        defer { clean(output) }
+        for flag in ["--resume", "--overwrite"] {
+            let result = try run(["install", "--output", output, flag])
+            #expect(result.status == parseFailure)
+            #expect(result.stderr.contains("Unknown option '\(flag)'"))
+        }
     }
 
     @Test func discardWithoutStateReportsAnError() throws {
@@ -63,17 +74,18 @@ struct RepackCLITests {
     @Test func qwenModelSelectorIsAccepted() throws {
         let output = temporaryOutput("qwen-model")
         defer { clean(output) }
-        // --resume without saved state fails fast after argument parsing,
-        // proving the selector itself is accepted without touching the network.
+        // Reaching the existing-output refusal is what proves the selector parsed,
+        // since that check runs after parsing and before any network traffic.
+        try FileManager.default.createDirectory(atPath: output,
+                                                withIntermediateDirectories: true)
         let result = try run([
             "install",
             "--model", "qwen36",
             "--output", output,
-            "--resume",
         ])
 
         #expect(result.status == operationalFailure)
-        #expect(result.stderr.contains("no resumable install state exists"))
+        #expect(result.stderr.contains("output directory already exists"))
     }
 
     @Test func theRetiredFlagSpellingIsRejectedByTheBinary() throws {
@@ -118,8 +130,7 @@ struct RepackCLITests {
         for path in [
             output,
             output + ".partial",
-            output + ".install-state",
-            output + ".install-state.cleanup",
+            output + ".resume.json",
             output + ".install.lock",
         ] {
             try? FileManager.default.removeItem(atPath: path)

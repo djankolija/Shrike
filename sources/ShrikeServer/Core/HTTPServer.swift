@@ -26,7 +26,7 @@ public actor ShrikeHTTPServer {
     private var shutdownTask: Task<Void, any Error>?
 
     public init(registry: ModelRegistry,
-                queueLimit: Int,
+                queueLimit: Int = 4,
                 heartbeatInterval: TimeAmount = .seconds(5),
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
         self.group = group

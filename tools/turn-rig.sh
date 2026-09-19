@@ -31,9 +31,10 @@
 # aborts the phase with a non-zero exit rather than sending a row that would
 # read as valid.
 #
-# MODEL / MODEL_ID (optional env, default ./models/ornith15.gturbo /
-# ornith15, matching tools/mini-deploy.sh's launch): the model the relaunched
-# server serves. MAX_TOKENS (optional env): overrides the phase's cold
+# MODEL (optional env, default ./models/ornith15.gturbo, matching
+# tools/mini-deploy.sh's launch): the model the relaunched server serves.
+# MODEL_ID (optional env, default ornith15): the id the server derives from it,
+# used only to wait for readiness. MAX_TOKENS (optional env): overrides the phase's cold
 # request's max_tokens (the long-decode arm raises it to 512). TURN2_MAX_TOKENS
 # (optional env, `turns-live` only): overrides turn 2's max_tokens (default
 # 8; the long-answer follow-up arm sets it to 512, e.g. `TURN2_MAX_TOKENS=512`).
@@ -57,7 +58,7 @@ HOST="$1"; PORT="$2"; PDIR="$3"; ODIR="$4"; TAG="$5"; phase="$6"; arg="${7:-}"
 MODEL="${MODEL:-./models/ornith15.gturbo}"
 MODEL_ID="${MODEL_ID:-ornith15}"
 mkdir -p "$ODIR"
-LAUNCH="env ${SERVER_ENV:-} SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/shrike serve --model $MODEL --model-id $MODEL_ID --port $PORT --max-context 32768 --ram-budget 8G --thinking off > /tmp/ornith.log 2>&1 &"
+LAUNCH="env ${SERVER_ENV:-} SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/shrike serve --model $MODEL --port $PORT --max-context 32768 --ram-budget 8G --thinking off > /tmp/ornith.log 2>&1 &"
 
 relaunch() {
   ssh macmini "

@@ -82,7 +82,7 @@ public actor ModelRegistry {
 
     public init(models: [Model],
                 roster: ModelRoster,
-                idleTimeout: Duration?,
+                idleTimeout: Duration? = nil,
                 loader: @escaping Loader = { plan, context in
                     try await plan.makeSession(reusingContext: context)
                 }) {

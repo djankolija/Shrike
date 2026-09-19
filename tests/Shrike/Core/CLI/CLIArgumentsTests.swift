@@ -119,13 +119,13 @@ import Testing
         ]).contains("--top-k"))
     }
 
-    @Test func conciseFlagParsesAndDefaultsOff() throws {
-        let on = try ShrikeGenerateCommand.parse([
-            "--model", "m.gturbo", "--prompt", "hi", "--concise",
-        ])
-        #expect(on.concise)
-        let off = try ShrikeGenerateCommand.parse(["--model", "m.gturbo", "--prompt", "hi"])
-        #expect(!off.concise)
+    @Test func theTrimmedGenerateFlagsNoLongerParse() {
+        for argv in [["--concise"], ["--force-tokens", "/tmp/ids.txt"]] {
+            #expect(throws: (any Error).self) {
+                _ = try ShrikeGenerateCommand.parse(
+                    ["--model", "m.gturbo", "--prompt", "hi"] + argv)
+            }
+        }
     }
 
     @Test func thinkingModeParsesOnlyTheOfficialBinaryValues() throws {
@@ -143,9 +143,9 @@ import Testing
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--help",
-            "--expert-cache-slots", "--prefill-chunk", "--concise",
+            "--expert-cache-slots", "--prefill-chunk",
             "--kv-bits", "--rope-scaling", "--thinking",
-            "--logits-head", "--force-tokens", "--dump-logits", "--dump-hidden",
+            "--logits-head", "--dump-logits", "--dump-hidden",
             "--tokenize", "--follow-up",
         ]
         let words = ShrikeGenerateCommand.helpMessage()

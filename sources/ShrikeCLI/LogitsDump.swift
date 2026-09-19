@@ -4,14 +4,10 @@ import Shrike
 
 enum InstrumentError: Error, CustomStringConvertible {
     case cannotCreate(String)
-    case badToken(line: Int, text: String)
-    case noTokens(String)
 
     var description: String {
         switch self {
         case .cannotCreate(let path): return "cannot create \(path)"
-        case .badToken(let line, let text): return "forced tokens line \(line): not an id: \(text)"
-        case .noTokens(let path): return "forced tokens: no ids in \(path)"
         }
     }
 }
@@ -28,7 +24,7 @@ final class FileLogitsSink: LogitsSink, @unchecked Sendable {
     private var firstWriteError: Error?
     private var finished = false
 
-    init(path: String, forced: [Int32]?) throws {
+    init(path: String, forced: [Int32]? = nil) throws {
         guard FileManager.default.createFile(atPath: path, contents: nil) else {
             throw InstrumentError.cannotCreate(path)
         }
@@ -92,21 +88,6 @@ final class FileLogitsSink: LogitsSink, @unchecked Sendable {
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
-}
-
-func readForcedTokens(path: String) throws -> [Int32] {
-    let text = try String(contentsOfFile: path, encoding: .utf8)
-    var ids: [Int32] = []
-    for (index, raw) in text.components(separatedBy: .newlines).enumerated() {
-        let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if line.isEmpty || line.hasPrefix("#") { continue }
-        guard let id = Int32(line) else {
-            throw InstrumentError.badToken(line: index + 1, text: line)
-        }
-        ids.append(id)
-    }
-    guard !ids.isEmpty else { throw InstrumentError.noTokens(path) }
-    return ids
 }
 
 /// unchecked-invariant: as `FileLogitsSink`, one generation loop writes at a

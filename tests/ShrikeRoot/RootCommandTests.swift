@@ -68,7 +68,6 @@ import ShrikeServerCore
         let command = try parse([
             "serve",
             "--model", "./models/ornith15.gturbo",
-            "--model-id", "ornith15",
             "--port", "8081",
             "--max-context", "32768",
             "--ram-budget", "11324620800",
@@ -76,7 +75,6 @@ import ShrikeServerCore
         ])
         let serve = try #require(command as? ShrikeServerCommand)
         #expect(serve.model == "./models/ornith15.gturbo")
-        #expect(serve.modelIDOverride == "ornith15")
         #expect(serve.port == 8081)
         #expect(serve.maxContext == 32768)
         #expect(serve.thinkingMode == .off)

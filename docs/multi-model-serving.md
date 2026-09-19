@@ -1,5 +1,10 @@
 # Multi-model serving — design
 
+The record of its own chapter, kept as written. Four of the flags it names went in
+v24's trim: `--model-id`, `--models-dir`, `--preload` and `--idle-unload-seconds`
+left argv, the roster and idle machinery they selected did not. See
+[v24-unified-cli.md](v24-unified-cli.md).
+
 ## Objective
 
 One server process serves every installed model, and the `model` field of an ordinary

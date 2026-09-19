@@ -8,7 +8,7 @@ import ShrikeCatalog
         let json = """
         {
           "models_dir": "~/shrike-runtime/models",
-          "defaults": { "max_context": 32768, "ram_budget": "6G", "idle_unload_seconds": 0 },
+          "defaults": { "max_context": 32768, "ram_budget": "6G" },
           "models": [
             { "dir": "kimi-linear-48b-a3b-4bit.gturbo", "id": "kimi-linear-48b-a3b" },
             { "dir": "gpt-oss-20b-mlx-4bit.gturbo", "id": "gpt-oss-20b", "default": true }
@@ -19,7 +19,6 @@ import ShrikeCatalog
         #expect(config.modelsDir == "~/shrike-runtime/models")
         #expect(config.defaults.maxContext == 32_768)
         #expect(config.defaults.ramBudget == "6G")
-        #expect(config.defaults.idleUnloadSeconds == 0)
         #expect(config.models.count == 2)
         #expect(config.models[0].id == "kimi-linear-48b-a3b")
         #expect(!config.models[0].isDefault)
@@ -54,9 +53,9 @@ import ShrikeCatalog
         #expect(throws: ShrikeConfigError.self) { try ShrikeConfig.parse(Data(json.utf8)) }
     }
 
-    @Test func negativeIdleFails() throws {
+    @Test func nonPositiveMaxContextFails() throws {
         let json = """
-        {"defaults": {"idle_unload_seconds": -1}}
+        {"defaults": {"max_context": 0}}
         """
         #expect(throws: ShrikeConfigError.self) { try ShrikeConfig.parse(Data(json.utf8)) }
     }

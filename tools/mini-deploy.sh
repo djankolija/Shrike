@@ -65,7 +65,7 @@ ssh macmini '
   cd ~/shrike-runtime
   [ -f /tmp/ornith.log ] && mv -f /tmp/ornith.log "/tmp/ornith.log.$(date +%Y%m%d-%H%M%S)"
   env SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/shrike serve \
-    --model ./models/ornith15.gturbo --model-id ornith15 --port 8081 \
+    --model ./models/ornith15.gturbo --port 8081 \
     --max-context 32768 --ram-budget 8G --thinking off > /tmp/ornith.log 2>&1 &
   tries=0
   until curl -sf -m 3 http://127.0.0.1:8081/v1/models > /dev/null 2>&1; do

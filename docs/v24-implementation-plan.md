@@ -48,8 +48,9 @@ onto the root that Task 4 then deletes.
       **Partial**: named for `--lazy-load` (the `preload` conflict branch),
       `--prompt-cache-disk` (plumbed through five files into the runtime's
       snapshot store, and whether that store is shared with the in-memory cache
-      is still open), `--concise`, `--rope-scaling` and `--resume`. The other
-      thirteen are named in Task 4, before anything is cut.
+      is still open), `--concise`, `--rope-scaling` and `--resume`. Ten are
+      named in `f8d1ffd`'s message, each beside the path it took; the seven that
+      reach `ModelSessionPlan` are named in T4b, before anything is cut.
 - [x] Settle `--tokenize`: **stays a flag on the bare form.** Two tools read it,
       `expert-pool-replay.py` and `q3-drafter-routes.py`, so it survives rule 1.
       Graduating it to its own verb is recorded as out of scope.
@@ -66,7 +67,7 @@ onto the root that Task 4 then deletes.
       than inherited.
 - [x] Write the table into `v24-unified-cli.md` as an inventory section, with the
       resulting count stated as an output of the classification.
-- [ ] Link check, commit. Text only.
+- [x] Link check, commit. Text only. (`b6dee21`, the link check clean at 84 files.)
 
 The count is not a target. The aim discussed at the outset was roughly a dozen;
 the evidence supports 27 in the shipped surface, and going below that would mean
@@ -128,7 +129,9 @@ here can only mean the harness moved.
       64 naming `--model`, not help at exit 0 as this plan first claimed. The 0
       was measured on a probe whose options were all optional. Task 3 changes
       it.
-- [ ] Four gates, `tools/golden-baseline.sh --check` byte-identical, commit.
+- [x] Four gates, `tools/golden-baseline.sh --check` byte-identical, commit.
+      (`a8a12d6`: zero warnings, swiftlint 0 in 182 files, link check 84 files,
+      1,147 tests in 151 suites, golden identical on all five profiles.)
 
 ---
 
@@ -167,7 +170,9 @@ here can only mean the harness moved.
       path across both roots. This is the second time a plan step about
       golden-baseline needed correcting, both times for the same reason: the
       baseline's bindings are not the CLI's conveniences.
-- [ ] Four gates, golden `--check` byte-identical, commit.
+- [x] Four gates, golden `--check` byte-identical, commit. (`5c0f06b`: zero
+      warnings, swiftlint 0 in 183 files, link check 84 files, 1,155 tests in
+      152 suites, golden identical on all five profiles.)
 
 ---
 
@@ -175,7 +180,7 @@ here can only mean the harness moved.
 
 Seventeen flags, not eighteen: `--rope-scaling` is a keep, see the spec.
 
-- [ ] **T4a, the ten self-contained flags.** `--lazy-load`, `--preload`,
+- [x] **T4a, the ten self-contained flags.** `--lazy-load`, `--preload`,
       `--models-dir`, `--queue-limit`, `--model-id` (serve only; it stays on
       `repack import-snapshot`) and `--idle-unload-seconds` on the server;
       `--overwrite` and `--resume` on repack; `--concise` and `--force-tokens`
@@ -184,7 +189,15 @@ Seventeen flags, not eighteen: `--rope-scaling` is a keep, see the spec.
       `--idle-unload-seconds`, so does `ShrikeConfig.Defaults.idleUnloadSeconds`,
       and `SHRIKE_REASONING_RETENTION` must leave the environment registry when
       `--reasoning-retention` goes or it becomes the silent no-op CLAUDE.md
-      warns about for `NVMAI_*` (15 names to 14; a test pins the count).
+      warns about for `NVMAI_*`; a test pins the count. **Corrected while doing
+      it: the registry goes 15 to 13, not 14.** `SHRIKE_MODEL` has had no reader
+      since `8e50806` deleted the Mac app with
+      `AppModelInstallDescriptor.swift`, and because
+      `refuseUnknownEnvironment` reads the registry as an allow-list, a stale
+      entry means the name is silently accepted rather than loudly refused,
+      which is the one hole in that tripwire. It leaves with
+      `SHRIKE_REASONING_RETENTION` in T4b, since both are one edit to one `Set`
+      and one count.
 - [ ] **T4b, the seven that reach `ModelSessionPlan`.** Per the owner's ruling
       the argument goes and the code stays: give the `ModelSessionPlan` parameter
       a default and stop passing it from `ModelRegistry`, rather than freezing it

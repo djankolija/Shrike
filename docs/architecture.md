@@ -624,10 +624,13 @@ is [v17-consolidation.md](v17-consolidation.md)'s Task 4 table.
   stop and drained must leave that state exactly as a run without it). `CLI_EXTRA_ARGS`
   appends to every run, e.g. `--expert-cache-slots 160` for the mini's two-chunk arena
   (v22).
-- `ShrikeCLI --force-tokens <ids> --dump-logits <file>` with `tools/logit-compare.py`:
-  the class-2 gate's instrument (v19): two builds decode the same forced tokens, every
-  position's logits dumped, the comparison lists each argmax flip against the old
-  build's top-2 margin and a band from the median logit difference.
+- `shrike generate --dump-logits <file>` with `tools/logit-compare.py`: the class-2
+  gate's instrument (v19), every position's logits dumped and the comparison listing
+  each argmax flip against the old build's top-2 margin and a band from the median
+  logit difference. v24 retired `--force-tokens`, which held the two builds on one
+  token sequence by construction; `--temperature 0 --seed <n>` holds them on one
+  sequence as long as they agree, and `GenerationConfig.forcedTokens` remains for a
+  chapter that needs the stronger form back.
 - `ShrikeCLI --dump-hidden <file>`: every position's fp16 residual before the final
   norm, the prompt's rows then the answer's, with a JSON sidecar of the positions; a
   `HiddenSink` beside the logits sink that forces the plain pass, fed from the prefill

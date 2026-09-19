@@ -6,12 +6,11 @@ import Testing
 @Suite struct ServerInvocationTests {
     @Test func rigLaunchLineParses() throws {
         let arguments = try ShrikeServerCommand.parse([
-            "--model", "./models/ornith15.gturbo", "--model-id", "ornith15",
+            "--model", "./models/ornith15.gturbo",
             "--port", "8081", "--max-context", "32768",
             "--ram-budget", "8G", "--thinking", "off",
         ])
         #expect(arguments.model == "./models/ornith15.gturbo")
-        #expect(arguments.modelIDOverride == "ornith15")
         #expect(arguments.port == 8081)
         #expect(arguments.maxContext == 32_768)
         #expect(arguments.expertCacheBudgetBytes == 8 << 30)
@@ -21,7 +20,7 @@ import Testing
 
     @Test func productionLaunchLineParses() throws {
         let arguments = try ShrikeServerCommand.parse([
-            "--model", "./models/ornith15.gturbo", "--model-id", "ornith15",
+            "--model", "./models/ornith15.gturbo",
             "--port", "8081", "--max-context", "32768",
             "--ram-budget", "11324620800", "--thinking", "off",
         ])
@@ -34,6 +33,5 @@ import Testing
         let arguments = try ShrikeServerCommand.parse(["--model", "models/ornith15.gturbo"])
         #expect(arguments.model == "models/ornith15.gturbo")
         #expect(arguments.port == 8080)
-        #expect(arguments.modelIDOverride == nil)
     }
 }

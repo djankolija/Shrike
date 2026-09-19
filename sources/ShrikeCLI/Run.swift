@@ -67,9 +67,6 @@ public func run(args: ShrikeGenerateCommand,
         let tokenizer = try await GFTokenizer.load(
             forModelDirectory: modelURL,
             thinkingMode: args.thinkingMode)
-        // Concise mode injects a per-quantization system prompt. The routed
-        // expert bit width comes from the manifest so the right prompt
-        // variant is selected before the full model load.
         let expectedArch: ArchConfig
         switch resolveExpectedArch(modelURL: modelURL, stderr: stderr) {
         case .value(let arch):
@@ -78,11 +75,7 @@ public func run(args: ShrikeGenerateCommand,
             return result
         }
         let promptIds: [Int32]
-        switch try buildPrompt(args: args,
-                               modelURL: modelURL,
-                               tokenizer: tokenizer,
-                               expectedArch: expectedArch,
-                               stderr: stderr) {
+        switch try buildPrompt(args: args, tokenizer: tokenizer, stderr: stderr) {
         case .value(let ids):
             promptIds = ids
         case .exit(let result):
@@ -103,26 +96,14 @@ public func run(args: ShrikeGenerateCommand,
             seed: args.seed,
             stopStrings: args.stops,
             extraStopTokens: [])
-        if let path = args.forceTokensPath {
-            let forced = try readForcedTokens(path: path)
-            guard forced.count <= effectiveMaxNew else {
-                return errored(
-                    stderr,
-                    "forced tokens: \(forced.count) ids exceed the budget of \(effectiveMaxNew); raise --max-new or --max-context",
-                    2)
-            }
-            config.forcedTokens = forced
-        }
-        let dump = try args.dumpLogitsPath.map {
-            try FileLogitsSink(path: $0, forced: config.forcedTokens)
-        }
+        let dump = try args.dumpLogitsPath.map { try FileLogitsSink(path: $0) }
         defer { try? dump?.finish() }
         config.logitsSink = dump
         let hiddenDump = try args.dumpHiddenPath.map { try FileHiddenSink(path: $0) }
         defer { try? hiddenDump?.finish() }
         config.hiddenSink = hiddenDump
         let logitsHead = !config.isPureGreedy || args.logitsHead
-            || config.forcedTokens != nil || dump != nil || hiddenDump != nil
+            || dump != nil || hiddenDump != nil
         let loaded: LoadedRuntime
         switch try buildRuntime(args: args,
                                 modelURL: modelURL,
@@ -234,42 +215,20 @@ private func resolveExpectedArch(modelURL: URL,
 }
 
 private func buildPrompt(args: ShrikeGenerateCommand,
-                         modelURL: URL,
                          tokenizer: GFTokenizer,
-                         expectedArch: ArchConfig,
                          stderr: FileHandle) throws -> StageOutcome<[Int32]> {
-    let concisePrompt: String?
-    if args.concise {
-        let bits = (try? ManifestReader.load(
-            directoryURL: modelURL,
-            expecting: expectedArch).quant?.routedExpert.weightBits) ?? 4
-        concisePrompt = ConcisePrompt.prompt(forRoutedExpertBits: bits)
-    } else {
-        concisePrompt = nil
-    }
     let promptIds: [Int32]
     if let rawPrompt = args.prompt {
-        if let concisePrompt {
-            let messages = ConcisePrompt.appendingSystemPrompt(
-                concisePrompt,
-                to: [GFTokenizer.Message(role: .user, content: rawPrompt)])
-            let rendered = try tokenizer.applyChatTemplate(messages)
-            promptIds = tokenizer.encode(rendered, addBOS: false)
-        } else {
-            promptIds = tokenizer.encode(rawPrompt, addBOS: true)
-        }
+        promptIds = tokenizer.encode(rawPrompt, addBOS: true)
     } else if let messagesFile = args.messagesFile {
         let data = try Data(contentsOf: URL(fileURLWithPath: messagesFile),
                             options: [.mappedIfSafe])
         let rows = try JSONDecoder().decode([MessageJSON].self, from: data)
-        var messages = try rows.map { row -> GFTokenizer.Message in
+        let messages = try rows.map { row -> GFTokenizer.Message in
             guard let role = GFTokenizer.Role(rawValue: row.role) else {
                 throw GFTokenizerError.invalidChatTemplate("unsupported role \(row.role)")
             }
             return GFTokenizer.Message(role: role, content: row.content)
-        }
-        if let concisePrompt {
-            messages = ConcisePrompt.appendingSystemPrompt(concisePrompt, to: messages)
         }
         let rendered = try tokenizer.applyChatTemplate(messages)
         promptIds = tokenizer.encode(rendered, addBOS: false)

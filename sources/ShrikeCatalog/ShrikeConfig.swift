@@ -12,20 +12,15 @@ public struct ShrikeConfig: Sendable, Equatable {
     public struct Defaults: Sendable, Equatable, Decodable {
         public let maxContext: Int?
         public let ramBudget: String?
-        public let idleUnloadSeconds: Int?
 
         enum CodingKeys: String, CodingKey {
             case maxContext = "max_context"
             case ramBudget = "ram_budget"
-            case idleUnloadSeconds = "idle_unload_seconds"
         }
 
-        public init(maxContext: Int? = nil,
-                    ramBudget: String? = nil,
-                    idleUnloadSeconds: Int? = nil) {
+        public init(maxContext: Int? = nil, ramBudget: String? = nil) {
             self.maxContext = maxContext
             self.ramBudget = ramBudget
-            self.idleUnloadSeconds = idleUnloadSeconds
         }
     }
 
@@ -144,9 +139,6 @@ extension ShrikeConfig {
         }
         if let context = defaults.maxContext, context < 1 {
             throw ShrikeConfigError.invalid("max_context must be positive")
-        }
-        if let idle = defaults.idleUnloadSeconds, !(0...86_400).contains(idle) {
-            throw ShrikeConfigError.invalid("idle_unload_seconds must be within 0...86400")
         }
     }
 }

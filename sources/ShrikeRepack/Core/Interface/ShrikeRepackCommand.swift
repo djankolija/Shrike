@@ -33,8 +33,8 @@ extension ShrikeRepackCommand {
             abstract: "Stream a supported checkpoint from Hugging Face and repack it.",
             discussion: """
                 Repackages without materializing the source checkpoint on disk. A \
-                cancelled or interrupted download can be continued with --resume or \
-                removed with the discard-partial subcommand.
+                cancelled or interrupted download is saved and continued on the \
+                next run; the discard-partial subcommand throws it away.
                 """)
 
         @Option(help: ArgumentHelp("Checkpoint to install.", valueName: "name"))
@@ -43,20 +43,12 @@ extension ShrikeRepackCommand {
         @Option(help: ArgumentHelp("Destination bundle.", valueName: "model.gturbo"))
         public var output: String
 
-        @Flag(help: "Replace an existing bundle at --output.")
-        public var overwrite = false
-
-        @Flag(help: "Continue a previously interrupted download.")
-        public var resume = false
-
         public init() {}
 
         public func run() async throws {
             let options = model.installOptions(
                 outputDirectory: URL(fileURLWithPath: output),
-                overwrite: overwrite,
-                token: ProcessInfo.processInfo.environment["HF_TOKEN"],
-                resume: resume)
+                token: ProcessInfo.processInfo.environment["HF_TOKEN"])
             let result = try await RemoteStreamingRepacker(options: options).run()
             print("Installed \(model.displayName)")
             print("Source revision: \(result.resolvedCommit)")
@@ -70,7 +62,7 @@ extension ShrikeRepackCommand {
             abstract: "Import a completed local MLX-affine safetensors snapshot.",
             discussion: """
                 Intended for reproducibly derived sidecars such as Ornith's native \
-                MTP draft. There is no --resume because no network payload is involved.
+                MTP draft. Nothing is downloaded, so there is nothing to resume.
                 """)
 
         @Option(name: .customLong("input-snapshot"),
@@ -84,9 +76,6 @@ extension ShrikeRepackCommand {
         @Option(help: ArgumentHelp("Destination bundle.", valueName: "model.gturbo"))
         public var output: String
 
-        @Flag(help: "Replace an existing bundle at --output.")
-        public var overwrite = false
-
         public init() {}
 
         public func run() async throws {
@@ -94,8 +83,7 @@ extension ShrikeRepackCommand {
                 options: LocalSnapshotRepackOptions(
                     inputSnapshotDir: inputSnapshot,
                     outputDir: output,
-                    modelID: modelID,
-                    overwrite: overwrite))
+                    modelID: modelID))
             print("Imported local snapshot")
             print("Source fingerprint: \(result.resolvedCommit)")
             print("Model: \(result.outputDir)")

@@ -10,7 +10,6 @@ public struct RemoteStreamingRepackOptions: Sendable {
     public let writeTileBytes: Int
     public let minFreeReserveBytes: UInt64
     public let overwrite: Bool
-    public let resume: Bool
     public let dryRunSpaceCheck: Bool
     public let downloadSession: RemoteDownloadSession
     public let baseURL: URL
@@ -27,7 +26,6 @@ public struct RemoteStreamingRepackOptions: Sendable {
                 writeTileBytes: Int = WriterCore.tileBytes,
                 minFreeReserveBytes: UInt64 = 1 * 1024 * 1024 * 1024,
                 overwrite: Bool = false,
-                resume: Bool = false,
                 dryRunSpaceCheck: Bool = false,
                 downloadSession: RemoteDownloadSession = RemoteDownloadSession(),
                 baseURL: URL = RemoteBaseURL.huggingFace,
@@ -43,7 +41,6 @@ public struct RemoteStreamingRepackOptions: Sendable {
         self.writeTileBytes = writeTileBytes
         self.minFreeReserveBytes = minFreeReserveBytes
         self.overwrite = overwrite
-        self.resume = resume
         self.dryRunSpaceCheck = dryRunSpaceCheck
         self.downloadSession = downloadSession
         self.baseURL = baseURL
@@ -119,16 +116,10 @@ public final class RemoteStreamingRepacker {
                 path: paths.partialDirectory,
                 detail: "partial directory and checkpoint must exist together")
         }
-        if options.resume {
-            guard hasPartial else {
-                throw RepackError.installStateMissing(path: paths.checkpointFile)
-            }
-        } else if hasPartial {
-            throw RepackError.installStateIncompatible(
-                detail: "saved download exists; resume or discard it")
-        }
         do {
-            return try await runPrepared(paths: paths, progress: progress)
+            return try await runPrepared(resuming: hasPartial,
+                                         paths: paths,
+                                         progress: progress)
         } catch {
             if !hasCheckpoint,
                (try? Posix.entryKind(paths.checkpointFile)) != .regular {
@@ -199,10 +190,13 @@ public final class RemoteStreamingRepacker {
     }
 
     /// The install pipeline for one prepared plan: fetch ranges, verify, write, checkpoint, promote.
-    private func runPrepared(paths: RemoteInstallPaths,
+    private func runPrepared(resuming: Bool,
+                             paths: RemoteInstallPaths,
                              progress: @escaping @Sendable (ModelInstallProgress) -> Void) async throws
         -> RemoteStreamingRepackResult {
-        var prepared = try await validateResume(paths: paths, progress: progress)
+        var prepared = try await validateResume(resuming: resuming,
+                                                paths: paths,
+                                                progress: progress)
         if let dryRunResult = try reserveOutput(prepared, paths: paths, progress: progress) {
             return dryRunResult
         }
@@ -214,11 +208,12 @@ public final class RemoteStreamingRepacker {
                                          progress: progress)
     }
 
-    private func validateResume(paths: RemoteInstallPaths,
+    private func validateResume(resuming: Bool,
+                                paths: RemoteInstallPaths,
                                 progress: @escaping @Sendable (ModelInstallProgress) -> Void) async throws
         -> PreparedInstall {
         try Task.checkCancellation()
-        let saved = options.resume
+        let saved = resuming
             ? try RemoteInstallCheckpoint.load(from: paths.checkpointFile)
             : nil
         if let saved {
@@ -948,7 +943,7 @@ public extension RemoteStreamingRepacker {
         guard try Posix.entryKind(paths.partialDirectory) == .absent,
               try Posix.entryKind(paths.checkpointFile) == .absent else {
             throw RepackError.installStateIncompatible(
-                detail: "saved remote download exists; resume or discard it first")
+                detail: "saved remote download exists; finish or discard it first")
         }
     }
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""The forced-token logit comparison (docs/v19-scan-rewrite.md, Task 1).
+"""The per-position logit comparison (docs/v19-scan-rewrite.md, Task 1).
 
-Two dumps from `shrike generate --dump-logits`, the same prompt and the same forced
-tokens on two builds, compared position by position: the KL divergence old to
-new, the largest logit difference, and every argmax flip with the old build's
-top-2 margin. The band is a multiple of the median over positions of the largest
+Two dumps from `shrike generate --dump-logits`, the same prompt on two builds,
+compared position by position: the KL divergence old to new, the largest logit
+difference, and every argmax flip with the old build's top-2 margin. Give both
+runs `--temperature 0 --seed <n>` so they decode one sequence for as long as they
+agree; v24 retired `--force-tokens`, which held them on one sequence by
+construction, so `forced` is absent from sidecars written since. The band is a multiple of the median over positions of the largest
 logit difference (the median, so one bad position cannot widen the band and
 hide the rest); a flip inside the band is variance, a flip outside it is a
 defect, a position whose largest difference is far above the median is a defect
@@ -12,8 +14,8 @@ on its own, a non-finite logit anywhere is a defect, and the exit status says
 which. Pure Python: neither box has numpy.
 
 A dump is raw little-endian float16 rows, vocab values each, beside a
-`<dump>.json` sidecar with vocab, positions, chosen and forced ids; the file's
-length must be vocab * positions * 2 bytes or the run is refused.
+`<dump>.json` sidecar with vocab, positions, chosen and (null since v24) forced
+ids; the file's length must be vocab * positions * 2 bytes or the run is refused.
 """
 import argparse
 import heapq

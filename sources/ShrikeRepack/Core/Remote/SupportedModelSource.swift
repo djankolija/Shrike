@@ -17,9 +17,8 @@ public struct SupportedModelSource: Sendable, Equatable {
     public let reserveBytes: UInt64
 
     public func installOptions(outputDirectory: URL,
-                               overwrite: Bool,
                                token: String?,
-                               resume: Bool = false)
+                               overwrite: Bool = false)
         -> RemoteStreamingRepackOptions {
         RemoteStreamingRepackOptions(
             repoID: repoID,
@@ -28,8 +27,7 @@ public struct SupportedModelSource: Sendable, Equatable {
             token: token,
             requireKnownSource: true,
             minFreeReserveBytes: reserveBytes,
-            overwrite: overwrite,
-            resume: resume)
+            overwrite: overwrite)
     }
 
     /// Download estimate covers the `language_model.*` tensors plus tokenizer

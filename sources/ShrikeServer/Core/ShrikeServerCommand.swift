@@ -30,25 +30,8 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
                 valueName: "path"))
     public var configPath: String?
 
-    @Option(help: ArgumentHelp("""
-        Directory scanned for *.gturbo bundles (default: the config file's \
-        models_dir, else ~/shrike-runtime/models). Cannot be combined with --model.
-        """,
-        valueName: "dir"))
-    public var modelsDir: String?
-
-    @Flag(help: "Load the default model at startup instead of on the first request.")
-    public var preload = false
-
     @Option(help: ArgumentHelp("Loopback port.", valueName: "1...65535"))
     public var port = 8080
-
-    /// Explicit --model-id value; nil derives the API ID from the installed
-    /// manifest (for example qwen3.6-35b-a3b or ornith-1.5-35b-a3b).
-    @Option(name: .customLong("model-id"), parsing: .unconditional,
-            help: ArgumentHelp("API model identifier (default derived from the "
-                + "installed model manifest).", valueName: "id"))
-    public var modelIDOverride: String?
 
     @Option(name: .customLong("max-context"),
             help: ArgumentHelp("""
@@ -61,9 +44,6 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
     @Option(name: .customLong("rope-scaling"),
             help: ArgumentHelp("Context scaling: none or yarn.", valueName: "mode"))
     public var ropeScalingMode: RuntimeRoPEScalingMode = .none
-
-    @Option(help: ArgumentHelp("Maximum queued requests, 1...64.", valueName: "count"))
-    public var queueLimit = 4
 
     @Option(name: .customLong("prompt-cache-mode"),
             help: ArgumentHelp("Prompt KV reuse mode.", valueName: "mode"))
@@ -149,28 +129,10 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
             transform: Self.budgetBytes)
     public var expertCacheBudgetBytes: Int?
 
-    /// Defer the model load to the first inference request. This is the
-    /// default behaviour; the flag remains accepted for compatibility.
-    @Flag(help: """
-        Defer the model load to the first inference request. This is the default; \
-        the flag remains accepted for compatibility.
-        """)
-    public var lazyLoad = false
-
-    @Option(name: .customLong("idle-unload-seconds"),
-            help: ArgumentHelp("""
-                Release the model weights after n seconds with no requests, \
-                0...86400 (default 0, disabled). The next request reloads \
-                transparently. Implies --lazy-load. Pair with --prompt-cache-disk, \
-                since unloading discards the in-memory prefix cache.
-                """,
-                valueName: "n"))
-    var idleUnloadSecondsOption: Int?
-
     public init() {}
 
-    /// Three defaults ArgumentParser cannot state on the property: two depend on
-    /// another flag, and the third on the environment, which parsing no longer
+    /// Two defaults ArgumentParser cannot state on the property: one depends on
+    /// another flag, and the other on the environment, which parsing no longer
     /// reads.
     public var maxContext: Int {
         if let maxContextOption { return maxContextOption }
@@ -179,19 +141,7 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
             : RuntimeConfiguration.nativeMaximumContextTokens
     }
 
-    /// Release the weights after this many idle seconds; 0 disables unloading.
-    public var idleUnloadSeconds: Int { idleUnloadSecondsOption ?? 0 }
-
     public var thinkingMode: ModelThinkingMode { thinkingModeOption ?? .off }
-
-    /// Idle unloading discards the in-memory prefix cache with the session.
-    /// With a disk cache configured the entries rehydrate on reload; without
-    /// one, every unload costs a full cold prefill on the next request.
-    public var unloadDiscardsWarmCache: Bool {
-        idleUnloadSeconds > 0
-            && promptCacheMode != .off
-            && promptCacheDiskDirectory == nil
-    }
 
     static let nativeContextList = RuntimeConfiguration.supportedContextTokens
         .map(String.init).joined(separator: ", ")
@@ -207,22 +157,12 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
     }
 
     public func validate() throws {
-        if model != nil, configPath != nil || modelsDir != nil {
+        if model != nil, configPath != nil {
             throw ValidationError(
-                "--model serves exactly one model; it cannot be combined with --config or --models-dir")
-        }
-        if model == nil, modelIDOverride != nil {
-            throw ValidationError(
-                "--model-id requires --model; config mode names models in the config file")
-        }
-        if preload, lazyLoad {
-            throw ValidationError("--preload and --lazy-load contradict each other")
+                "--model serves exactly one model; it cannot be combined with --config")
         }
         guard (1...65_535).contains(port) else {
             throw ValidationError("--port must be between 1 and 65535")
-        }
-        guard (1...64).contains(queueLimit) else {
-            throw ValidationError("--queue-limit must be between 1 and 64")
         }
         guard (1...64).contains(promptCacheMaximumEntries) else {
             throw ValidationError("--prompt-cache-entries must be between 1 and 64")
@@ -232,9 +172,6 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
         }
         guard (0...65_536).contains(promptCacheDiskMiB) else {
             throw ValidationError("--prompt-cache-disk-mib must be between 0 and 65536")
-        }
-        if let idleUnloadSecondsOption, !(0...86_400).contains(idleUnloadSecondsOption) {
-            throw ValidationError("--idle-unload-seconds must be between 0 and 86400")
         }
         try validateOptionalMemberships()
         try Self.validateMaxContext(maxContext, ropeScalingMode: ropeScalingMode)
@@ -253,9 +190,8 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
                 + RuntimeConfiguration.allowedExpertCacheSlots.map(String.init)
                     .joined(separator: ", "))
         }
-        for (value, flag) in [(configPath, "--config"), (modelsDir, "--models-dir"),
-                              (promptCacheDiskDirectory, "--prompt-cache-disk"),
-                              (modelIDOverride, "--model-id")] {
+        for (value, flag) in [(configPath, "--config"),
+                              (promptCacheDiskDirectory, "--prompt-cache-disk")] {
             if let value, value.isEmpty {
                 throw ValidationError("\(flag) must not be empty")
             }
@@ -278,9 +214,9 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
     }
 
     /// Resolved in memory: a flag beats a config default (`max_context`,
-    /// `ram_budget`, `idle_unload_seconds`) and beats an environment setting (the
-    /// three `SHRIKE_*` below); no setting has both layers. A flag never writes
-    /// back into the config file, and parsing itself reads neither.
+    /// `ram_budget`) and beats an environment setting (the three `SHRIKE_*`
+    /// below); no setting has both layers. A flag never writes back into the
+    /// config file, and parsing itself reads neither.
     public func merging(
         configDefaults defaults: ShrikeConfig.Defaults,
         environment: [String: String] = ProcessInfo.processInfo.environment
@@ -289,9 +225,6 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
         if maxContextOption == nil, let value = defaults.maxContext {
             try Self.validateMaxContext(value, ropeScalingMode: ropeScalingMode)
             effective.maxContextOption = value
-        }
-        if idleUnloadSecondsOption == nil, let value = defaults.idleUnloadSeconds {
-            effective.idleUnloadSecondsOption = value
         }
         if expertCacheBudgetBytes == nil, let text = defaults.ramBudget {
             effective.expertCacheBudgetBytes = RuntimeConfiguration.parseBudgetBytes(text)

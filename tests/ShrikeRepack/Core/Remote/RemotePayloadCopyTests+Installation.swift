@@ -83,10 +83,7 @@ extension RemotePayloadCopyTests {
     #expect(!checkpoint.completedRanges.isEmpty)
 
     let result = try await RemoteStreamingRepacker(
-      options: remoteOptions(
-        outputDir: output,
-        session: fakeHFSession(),
-        resume: true)
+      options: remoteOptions(outputDir: output, session: fakeHFSession())
     ).run()
     #expect(result.reusedBytes > 0)
     #expect(result.downloadedThisRunBytes < result.remoteBytesToDownload)

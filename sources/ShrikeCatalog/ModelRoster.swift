@@ -180,9 +180,10 @@ extension ModelRoster {
         }
     }
 
-    /// Roster for `--model`: exactly this bundle, ignoring any config, with
-    /// `--model-id` as its canonical id.
-    public static func single(directory: URL, overrideID: String?) throws -> ModelRoster {
+    /// Roster for `--model`: exactly this bundle, ignoring any config. Its
+    /// canonical id is the bundle's directory name unless one is given.
+    public static func single(directory: URL,
+                              overrideID: String? = nil) throws -> ModelRoster {
         let identity = try ManifestReader.peekIdentity(directoryURL: directory)
         let name = directory.lastPathComponent
         let bundleName = name.hasSuffix(".gturbo")

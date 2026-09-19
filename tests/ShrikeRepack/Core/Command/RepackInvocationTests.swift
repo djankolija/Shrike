@@ -21,18 +21,22 @@ import Testing
                                 as: ShrikeRepackCommand.Install.self)
         #expect(install.model == SupportedModelSource.default)
         #expect(install.output == "/models/out.gturbo")
-        #expect(!install.overwrite)
-        #expect(!install.resume)
     }
 
-    @Test func installAcceptsACheckpointNameAndBothFlags() throws {
+    @Test func installAcceptsACheckpointName() throws {
         let install = try parse(
-            ["install", "--model", "ornith15", "--output", "/models/out.gturbo",
-             "--overwrite", "--resume"],
+            ["install", "--model", "ornith15", "--output", "/models/out.gturbo"],
             as: ShrikeRepackCommand.Install.self)
         #expect(install.model.name == "ornith15")
-        #expect(install.overwrite)
-        #expect(install.resume)
+    }
+
+    @Test func theTrimmedInstallFlagsNoLongerParse() {
+        for flag in ["--overwrite", "--resume"] {
+            #expect(throws: (any Error).self) {
+                _ = try ShrikeRepackCommand.parseAsRoot(
+                    ["install", "--output", "/models/out.gturbo", flag])
+            }
+        }
     }
 
     @Test func installRejectsAnUnknownCheckpointName() {
@@ -45,12 +49,11 @@ import Testing
     @Test func importSnapshotParses() throws {
         let snapshot = try parse(
             ["import-snapshot", "--input-snapshot", "/snap", "--model-id", "ornith15-mtp",
-             "--output", "/models/out.gturbo", "--overwrite"],
+             "--output", "/models/out.gturbo"],
             as: ShrikeRepackCommand.ImportSnapshot.self)
         #expect(snapshot.inputSnapshot == "/snap")
         #expect(snapshot.modelID == "ornith15-mtp")
         #expect(snapshot.output == "/models/out.gturbo")
-        #expect(snapshot.overwrite)
     }
 
     @Test func discardPartialParses() throws {
@@ -71,7 +74,7 @@ import Testing
     @Test func aSubcommandRejectsAnotherSubcommandsOptions() {
         #expect(throws: (any Error).self) {
             _ = try ShrikeRepackCommand.parseAsRoot(
-                ["verify-install", "--input-gturbo", "/m.gturbo", "--overwrite"])
+                ["verify-install", "--input-gturbo", "/m.gturbo", "--input-snapshot", "/snap"])
         }
     }
 

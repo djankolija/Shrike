@@ -56,15 +56,6 @@ extension CLIArgumentsTests {
         #expect(arguments.expertCacheSlots == 160)
     }
 
-    @Test func classTwoGateInstrumentParses() throws {
-        let arguments = try ShrikeGenerateCommand.parse([
-            "--model", "/models/ornith15.gturbo", "--prompt", "Explain what a mutex is and when you would use one.",
-            "--force-tokens", "/tmp/ids.txt", "--dump-logits", "/tmp/out.f16",
-        ])
-        #expect(arguments.forceTokensPath == "/tmp/ids.txt")
-        #expect(arguments.dumpLogitsPath == "/tmp/out.f16")
-    }
-
     @Test func hiddenStateInstrumentParses() throws {
         let arguments = try ShrikeGenerateCommand.parse([
             "--model", "/models/ornith15.gturbo", "--prompt", "Explain what a mutex is and when you would use one.",

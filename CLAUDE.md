@@ -129,7 +129,7 @@ record in `docs/v22-pool-capacity.md`):
 ```bash
 SHRIKE_EXPERT_SLOT_TABLE=256,256,246,209,191,171,171,162,171,149,164,169,155,144,137,135,133,131,132,130,145,133,141,142,137,137,130,137,137,142,137,135,157,157,162,160,166,161,178,194 \
 SHRIKE_EXPERT_POLICY=slru \
-nohup ./bin/shrike serve --model ./models/ornith15.gturbo --model-id ornith15 --port 8081 --max-context 32768 --ram-budget 11324620800 --thinking off > /tmp/shrike-server.log 2>&1 &
+nohup ./bin/shrike serve --model ./models/ornith15.gturbo --port 8081 --max-context 32768 --ram-budget 11324620800 --thinking off > /tmp/shrike-server.log 2>&1 &
 ```
 
 The table is ornith15's (blend 0.3 of its production miss profile scaled to the

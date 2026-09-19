@@ -29,8 +29,9 @@
 # RAM_BUDGET (the launch's --ram-budget, default 8G; the slot table in SERVER_ENV
 # must sum to what it snaps to); PREFETCH_TRACE=1 adds SHRIKE_PREFETCH_TRACE (the next-layer router probe's
 # top-8 is logged per decode layer); NO_TURNS=1 skips the follow-up requests;
-# MAX_TOKENS (default 512) the cold request's answer length; MODEL / MODEL_ID
-# (default ./models/ornith15.gturbo / ornith15, matching tools/mini-deploy.sh);
+# MAX_TOKENS (default 512) the cold request's answer length; MODEL (default
+# ./models/ornith15.gturbo, matching tools/mini-deploy.sh) and MODEL_ID (default
+# ornith15, the id the server derives from it, used only to wait for readiness);
 # REUSE=<dir> (card only) the directory holding payload-*-turn2.json and
 # payload-*-turn3.json. A missing payload or a settle timeout aborts the shape
 # with a non-zero exit rather than sending a row that would read as valid.
@@ -58,7 +59,7 @@ relaunch() {  # $1 = extra env assignments for this shape (traces)
     if pgrep -f 'shrike serve' > /dev/null; then echo 'server still running' >&2; exit 1; fi
     cd ~/shrike-runtime
     [ -f /tmp/ornith.log ] && mv -f /tmp/ornith.log \"/tmp/ornith.log.\$(date +%Y%m%d-%H%M%S)\"
-    env $SERVER_ENV $1 SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/shrike serve --model $MODEL --model-id $MODEL_ID --port $PORT --max-context 32768 --ram-budget $RAM_BUDGET --thinking off > /tmp/ornith.log 2>&1 &
+    env $SERVER_ENV $1 SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/shrike serve --model $MODEL --port $PORT --max-context 32768 --ram-budget $RAM_BUDGET --thinking off > /tmp/ornith.log 2>&1 &
     exit 0
   " || exit 1
   tries=0

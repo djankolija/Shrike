@@ -298,7 +298,6 @@ struct ServerArgumentTests {
             ["--model", "model.gturbo"])
         #expect(arguments.port == 8080)
         #expect(arguments.maxContext == 262_144)
-        #expect(arguments.queueLimit == 4)
         #expect(arguments.promptCacheMode == .multiPrefix)
         #expect(arguments.promptCacheMaximumEntries == 4)
         #expect(arguments.promptCacheMemoryMiB == 256)
@@ -314,54 +313,42 @@ struct ServerArgumentTests {
         let arguments = try ShrikeServerCommand.parse([])
         #expect(arguments.model == nil)
         #expect(arguments.configPath == nil)
-        #expect(arguments.modelsDir == nil)
-        #expect(!arguments.preload)
     }
 
-    @Test func parsesConfigModelsDirAndPreload() throws {
-        let arguments = try ShrikeServerCommand.parse(
-            ["--config", "/tmp/server.json", "--models-dir", "/models", "--preload"])
+    @Test func parsesAConfigPath() throws {
+        let arguments = try ShrikeServerCommand.parse(["--config", "/tmp/server.json"])
         #expect(arguments.configPath == "/tmp/server.json")
-        #expect(arguments.modelsDir == "/models")
-        #expect(arguments.preload)
     }
 
-    @Test func modelExcludesConfigAndModelsDir() throws {
+    @Test func modelExcludesConfig() throws {
         #expect(throws: (any Error).self) {
             try ShrikeServerCommand.parse(["--model", "m.gturbo", "--config", "/tmp/c.json"])
         }
-        #expect(throws: (any Error).self) {
-            try ShrikeServerCommand.parse(["--model", "m.gturbo", "--models-dir", "/models"])
-        }
     }
 
-    @Test func modelIDRequiresModel() throws {
-        #expect(throws: (any Error).self) {
-            try ShrikeServerCommand.parse(["--model-id", "nice-name"])
-        }
-    }
-
-    @Test func preloadContradictsLazyLoad() throws {
-        #expect(throws: (any Error).self) {
-            try ShrikeServerCommand.parse(["--preload", "--lazy-load"])
+    @Test func theTrimmedServeFlagsNoLongerParse() {
+        for argv in [["--model-id", "nice-name"], ["--models-dir", "/models"],
+                     ["--preload"], ["--lazy-load"], ["--queue-limit", "8"],
+                     ["--idle-unload-seconds", "300"]] {
+            #expect(throws: (any Error).self) {
+                _ = try ShrikeServerCommand.parse(["--model", "m.gturbo"] + argv)
+            }
         }
     }
 
     @Test func configDefaultsMergeUnderFlagPrecedence() throws {
         let bare = try ShrikeServerCommand.parse([])
         let merged = try bare.merging(configDefaults: .init(
-            maxContext: 32_768, ramBudget: "6G", idleUnloadSeconds: 300))
+            maxContext: 32_768, ramBudget: "6G"))
         #expect(merged.maxContext == 32_768)
         #expect(merged.expertCacheBudgetBytes == 6 << 30)
-        #expect(merged.idleUnloadSeconds == 300)
 
         let flagged = try ShrikeServerCommand.parse(
-            ["--max-context", "65536", "--ram-budget", "2G", "--idle-unload-seconds", "0"])
+            ["--max-context", "65536", "--ram-budget", "2G"])
         let kept = try flagged.merging(configDefaults: .init(
-            maxContext: 32_768, ramBudget: "6G", idleUnloadSeconds: 300))
+            maxContext: 32_768, ramBudget: "6G"))
         #expect(kept.maxContext == 65_536)
         #expect(kept.expertCacheBudgetBytes == 2 << 30)
-        #expect(kept.idleUnloadSeconds == 0)
     }
 
     @Test func aConfigContextOutsideTheSupportedSetFails() throws {
