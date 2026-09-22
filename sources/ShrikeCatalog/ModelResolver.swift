@@ -33,32 +33,33 @@ public enum ModelResolver {
         return try ShrikeConfig.load(path: expanded)
     }
 
-    public static func modelsDirectory(flag: String?, config: ShrikeConfig) -> URL {
-        let path = flag ?? config.modelsDir ?? defaultModelsDirectory
+    public static func modelsDirectory(config: ShrikeConfig) -> URL {
+        let path = config.modelsDir ?? defaultModelsDirectory
         return URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL
     }
 
-    /// A `--model` that names an existing directory is taken as a path; anything
-    /// else is an id resolved against the models directory.
-    public static func resolve(requested: String?,
-                               configPath: String? = nil,
-                               modelsDir: String? = nil) throws -> URL {
-        if let requested, isDirectory(requested) {
-            return URL(fileURLWithPath: requested).standardizedFileURL
-        }
-        let config = try loadConfig(path: configPath)
-        let directory = modelsDirectory(flag: modelsDir, config: config)
+    public static func roster(config: ShrikeConfig) throws
+        -> (roster: ModelRoster, skipped: [ModelRoster.SkippedBundle]) {
+        let directory = modelsDirectory(config: config)
         let scan = try ModelRoster.scanBundles(in: directory)
-        let roster: ModelRoster
         do {
-            roster = try ModelRoster.resolve(candidates: scan.candidates,
-                                             overrides: config.models)
+            return (try ModelRoster.resolve(candidates: scan.candidates, overrides: config.models),
+                    scan.skipped)
         } catch ModelRosterError.emptyRoster {
             // The roster's own "no servable model bundles found" cannot name the
             // directory it scanned, which is the one thing a first run needs.
             throw ModelResolutionError.emptyCatalog(directory: directory.path)
         }
-        return try resolve(requested: requested, in: roster)
+    }
+
+    /// A `--model` that names an existing directory is taken as a path; anything
+    /// else is an id resolved against the models directory.
+    public static func resolve(requested: String?, configPath: String? = nil) throws -> URL {
+        if let requested, isDirectory(requested) {
+            return URL(fileURLWithPath: requested).standardizedFileURL
+        }
+        let config = try loadConfig(path: configPath)
+        return try resolve(requested: requested, in: roster(config: config).roster)
     }
 
     public static func resolve(requested: String?, in roster: ModelRoster) throws -> URL {

@@ -39,6 +39,15 @@ import ShrikeCatalog
         #expect(throws: ShrikeConfigError.self) { try ShrikeConfig.parse(Data(json.utf8)) }
     }
 
+    @Test func aDirWithAndWithoutItsExtensionIsADuplicate() throws {
+        let json = """
+        {"models": [{"dir": "a.gturbo", "default": true}, {"dir": "a", "id": "alpha"}]}
+        """
+        #expect(throws: ShrikeConfigError.invalid("model a appears twice")) {
+            try ShrikeConfig.parse(Data(json.utf8))
+        }
+    }
+
     @Test func twoDefaultsFail() throws {
         let json = """
         {"models": [{"dir": "a.gturbo", "default": true}, {"dir": "b.gturbo", "default": true}]}

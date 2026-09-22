@@ -89,9 +89,7 @@ public struct ModelRoster: Sendable, Equatable {
 
         var overrideByBundle: [String: ShrikeConfig.ModelOverride] = [:]
         for override in overrides {
-            let bundleName = override.dir.hasSuffix(".gturbo")
-                ? String(override.dir.dropLast(".gturbo".count))
-                : override.dir
+            let bundleName = override.bundleName
             guard let candidate = candidates.first(where: { $0.bundleName == bundleName }) else {
                 throw ModelRosterError.unknownOverrideDir(override.dir)
             }

@@ -31,24 +31,9 @@ extension ShrikeServerCommand {
                     directory: URL(fileURLWithPath: modelPath).standardizedFileURL),
                 skipped: [])
         }
-        let config: ShrikeConfig
-        if let path = configPath {
-            config = try ShrikeConfig.load(path: path)
-        } else {
-            let defaultPath = ("~/.shrike/config.json" as NSString).expandingTildeInPath
-            config = FileManager.default.fileExists(atPath: defaultPath)
-                ? try ShrikeConfig.load(path: defaultPath)
-                : ShrikeConfig()
-        }
-        let directory = URL(fileURLWithPath:
-            ((config.modelsDir ?? "~/shrike-runtime/models") as NSString)
-                .expandingTildeInPath).standardizedFileURL
-        let scan = try ModelRoster.scanBundles(in: directory)
-        return ResolvedRoster(
-            config: config,
-            roster: try ModelRoster.resolve(candidates: scan.candidates,
-                                            overrides: config.models),
-            skipped: scan.skipped)
+        let config = try ModelResolver.loadConfig(path: configPath)
+        let catalog = try ModelResolver.roster(config: config)
+        return ResolvedRoster(config: config, roster: catalog.roster, skipped: catalog.skipped)
     }
 
     private func makeRegistry(roster: ModelRoster,
@@ -87,6 +72,8 @@ extension ShrikeServerCommand {
     private func announce(registry: ModelRegistry,
                           effective: ShrikeServerCommand,
                           roster: ModelRoster) {
-        print("shrike serve ready at http://127.0.0.1:\(effective.port) models=\(registry.ids.joined(separator: ",")) default=\(roster.defaultID ?? "none") context=\(effective.maxContext) thinking=\(effective.thinkingMode.rawValue) reasoning_effort=\(effective.reasoningEffort?.rawValue ?? "auto")")
+        // Unbuffered: a print to a redirected stdout can sit in its buffer for as
+        // long as the server runs.
+        FileHandle.standardOutput.write(Data("shrike serve ready at http://127.0.0.1:\(effective.port) models=\(registry.ids.joined(separator: ",")) default=\(roster.defaultID ?? "none") context=\(effective.maxContext) thinking=\(effective.thinkingMode.rawValue) reasoning_effort=\(effective.reasoningEffort?.rawValue ?? "auto")\n".utf8))
     }
 }

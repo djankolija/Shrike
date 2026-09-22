@@ -73,21 +73,6 @@ public struct RemoteInstallCheckpoint: Codable, Sendable, Equatable {
             && self.planFingerprint == planFingerprint
     }
 
-    public func validatedDestinationBytes(maximum: UInt64, path: String) throws -> UInt64 {
-        try validate(path: path)
-        var total: UInt64 = 0
-        for range in completedRanges {
-            let sum = total.addingReportingOverflow(range.destinationBytes)
-            guard !sum.overflow, sum.partialValue <= maximum else {
-                throw RepackError.installStateCorrupt(
-                    path: path,
-                    detail: "completed destination bytes exceed the installed model")
-            }
-            total = sum.partialValue
-        }
-        return total
-    }
-
     private func validate(path: String) throws {
         guard schema == Self.schemaVersion,
               !repoID.isEmpty,

@@ -78,22 +78,24 @@ private func candidate(_ bundleName: String,
     @Test func anEmptyModelsDirectoryNamesTheDirectoryItScanned() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("resolver-empty-\(UUID().uuidString)")
+        let config = directory.appendingPathExtension("json")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.removeItem(at: config)
+        }
+        try Data(#"{"models_dir": "\#(directory.path)"}"#.utf8).write(to: config)
 
         #expect(throws: ModelResolutionError.emptyCatalog(
             directory: directory.standardizedFileURL.path)) {
-            try ModelResolver.resolve(requested: nil, modelsDir: directory.path)
+            try ModelResolver.resolve(requested: nil, configPath: config.path)
         }
     }
 
-    @Test func theModelsDirectoryPrefersTheFlagThenTheConfigThenTheDefault() throws {
-        let configured = ShrikeConfig(modelsDir: "/from-config")
-        #expect(ModelResolver.modelsDirectory(flag: "/from-flag", config: configured).path
-            == "/from-flag")
-        #expect(ModelResolver.modelsDirectory(flag: nil, config: configured).path
+    @Test func theModelsDirectoryPrefersTheConfigThenTheDefault() throws {
+        #expect(ModelResolver.modelsDirectory(config: ShrikeConfig(modelsDir: "/from-config")).path
             == "/from-config")
-        #expect(ModelResolver.modelsDirectory(flag: nil, config: ShrikeConfig()).path
+        #expect(ModelResolver.modelsDirectory(config: ShrikeConfig()).path
             == (ModelResolver.defaultModelsDirectory as NSString).expandingTildeInPath)
     }
 
@@ -107,6 +109,6 @@ private func candidate(_ bundleName: String,
         let config = try ModelResolver.loadConfig(path: path.path)
         #expect(config.modelsDir == "/configured")
         #expect(config.models.first?.isDefault == true)
-        #expect(ModelResolver.modelsDirectory(flag: nil, config: config).path == "/configured")
+        #expect(ModelResolver.modelsDirectory(config: config).path == "/configured")
     }
 }

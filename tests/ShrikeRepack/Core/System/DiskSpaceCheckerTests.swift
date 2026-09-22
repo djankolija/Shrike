@@ -3,32 +3,17 @@ import Testing
 @testable import ShrikeRepackCore
 
 @Suite struct DiskSpaceCheckerTests {
-    @Test func assessmentDoesNotCreateMissingTargetAndUsesExistingAncestor() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("shrike-space-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let target = root.appendingPathComponent("nested/model.gturbo", isDirectory: true)
-
-        let result = try DiskSpaceChecker.assess(path: target.path, bytes: 100, reserveBytes: 20)
-
-        #expect(result.path == root.path)
-        #expect(result.requiredBytes == 120)
-        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("nested").path))
-    }
-
-    @Test func authoritativeCheckUsesSameRequirement() throws {
+    @Test func theRequirementIsTheBytesPlusTheReserve() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("shrike-space-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let target = root.appendingPathComponent("model.gturbo", isDirectory: true)
 
-        let assessed = try DiskSpaceChecker.assess(path: target.path, bytes: 100, reserveBytes: 20)
         let required = try DiskSpaceChecker.requireAvailable(path: target.path,
                                                              bytes: 100,
                                                              reserveBytes: 20)
-        #expect(assessed.requiredBytes == required.requiredBytes)
+        #expect(required.requiredBytes == 120)
     }
 
     @Test func insufficientCheckReportsRequiredAndAvailableBytes() throws {

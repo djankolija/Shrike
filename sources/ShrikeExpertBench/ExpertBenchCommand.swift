@@ -16,8 +16,10 @@ public struct ExpertBenchCommand: ParsableCommand {
     @Option(help: ArgumentHelp("Experts per pass, the routed top-k.", valueName: "n"))
     public var experts = 8
 
+    static let armNames = ["plain", "coded", "coded+aux"]
+
     @Option(help: ArgumentHelp("Arms to run: plain, coded, coded+aux.", valueName: "a,b,..."))
-    public var arms = CommaSeparatedNames(["plain", "coded", "coded+aux"])
+    public var arms = CommaSeparatedNames(Self.armNames)
 
     @Option(help: ArgumentHelp("Timed command buffers per arm; the median is reported.",
                                valueName: "n"))
@@ -47,6 +49,10 @@ public struct ExpertBenchCommand: ParsableCommand {
         }
         guard (1...8).contains(experts) else {
             throw ValidationError("--experts is 1 to 8")
+        }
+        if let unknown = arms.names.first(where: { !Self.armNames.contains($0) }) {
+            throw ValidationError("unknown arm \(unknown); --arms takes "
+                + Self.armNames.joined(separator: ", "))
         }
         guard repeats > 0 else {
             throw ValidationError("--repeats needs a positive count")

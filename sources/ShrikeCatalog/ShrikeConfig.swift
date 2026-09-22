@@ -47,6 +47,10 @@ public struct ShrikeConfig: Sendable, Equatable {
             self.id = try container.decodeIfPresent(String.self, forKey: .id)
             self.isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
         }
+
+        public var bundleName: String {
+            dir.hasSuffix(".gturbo") ? String(dir.dropLast(".gturbo".count)) : dir
+        }
     }
 
     public let modelsDir: String?
@@ -124,7 +128,7 @@ extension ShrikeConfig {
             if let id = model.id, id.isEmpty {
                 throw ShrikeConfigError.invalid("model \(model.dir) has an empty id")
             }
-            guard seenDirs.insert(model.dir).inserted else {
+            guard seenDirs.insert(model.bundleName).inserted else {
                 throw ShrikeConfigError.invalid("model \(model.dir) appears twice")
             }
             if model.isDefault { defaultDirs.append(model.dir) }

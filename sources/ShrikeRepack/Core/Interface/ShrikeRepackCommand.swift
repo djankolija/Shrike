@@ -49,7 +49,8 @@ extension ShrikeRepackCommand {
             let options = model.installOptions(
                 outputDirectory: URL(fileURLWithPath: output),
                 token: ProcessInfo.processInfo.environment["HF_TOKEN"])
-            let result = try await RemoteStreamingRepacker(options: options).run()
+            let result = try await RemoteStreamingRepacker(options: options)
+                .run(progress: InstallProgressPrinter().report)
             print("Installed \(model.displayName)")
             print("Source revision: \(result.resolvedCommit)")
             print("Model: \(result.outputDir)")
@@ -83,7 +84,8 @@ extension ShrikeRepackCommand {
                 options: LocalSnapshotRepackOptions(
                     inputSnapshotDir: inputSnapshot,
                     outputDir: output,
-                    modelID: modelID))
+                    modelID: modelID),
+                progress: InstallProgressPrinter().report)
             print("Imported local snapshot")
             print("Source fingerprint: \(result.resolvedCommit)")
             print("Model: \(result.outputDir)")

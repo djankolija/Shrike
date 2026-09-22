@@ -13,26 +13,9 @@ public struct DiskSpaceRequirement: Equatable, Sendable {
     }
 
     public var canInstall: Bool { availableBytes >= requiredBytes }
-
-    public var shortfallBytes: UInt64 {
-        requiredBytes > availableBytes ? requiredBytes - availableBytes : 0
-    }
 }
 
 public enum DiskSpaceChecker {
-    public static func assess(path: String,
-                              bytes: UInt64,
-                              reserveBytes: UInt64 = 1 * 1024 * 1024 * 1024) throws
-        -> DiskSpaceRequirement {
-        // Probe the actual install location: the path itself is the volume we
-        // will write to, extension or not. `assess` walks up to the nearest
-        // existing directory (it never creates anything).
-        let probeDirectory = nearestExistingDirectory(path)
-        return try requirement(path: probeDirectory,
-                               bytes: bytes,
-                               reserveBytes: reserveBytes)
-    }
-
     public static func requireAvailable(path: String,
                                         bytes: UInt64,
                                         reserveBytes: UInt64 = 1 * 1024 * 1024 * 1024) throws -> DiskSpaceRequirement {
@@ -63,15 +46,5 @@ public enum DiskSpaceChecker {
         return DiskSpaceRequirement(path: path,
                                     requiredBytes: required,
                                     availableBytes: available)
-    }
-
-    private static func nearestExistingDirectory(_ path: String) -> String {
-        var url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
-        while !FileManager.default.fileExists(atPath: url.path) {
-            let parent = url.deletingLastPathComponent()
-            if parent.path == url.path { return url.path }
-            url = parent
-        }
-        return url.path
     }
 }

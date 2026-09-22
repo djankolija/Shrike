@@ -89,6 +89,16 @@ import Testing
             }
         }
     }
+
+    @Test func anUnknownArmIsRejectedBeforeTheModelIsRead() {
+        do {
+            _ = try ExpertBenchCommand.parse(["--model", "/m.gturbo", "--arms", "plain,codded"])
+            Issue.record("an unknown arm should not parse")
+        } catch {
+            #expect(ExpertBenchCommand.message(for: error)
+                == "unknown arm codded; --arms takes plain, coded, coded+aux")
+        }
+    }
 }
 
 @Suite struct BenchSeedTests {

@@ -56,11 +56,12 @@ import ShrikeServerCore
         #expect(serve.expertCacheSlots == 160)
     }
 
-    @Test func serveStillRefusesAnUnsupportedContext() throws {
-        #expect(throws: (any Error).self) {
-            var command = try ShrikeRootCommand.parseAsRoot(
-                ["serve", "--model", "m.gturbo", "--max-context", "50000"])
-            try command.validate()
+    @Test func serveStillRefusesAnUnsupportedContext() {
+        do {
+            _ = try parse(["serve", "--model", "m.gturbo", "--max-context", "50000"])
+            Issue.record("an unsupported --max-context should not parse")
+        } catch {
+            #expect(ShrikeRootCommand.message(for: error).hasPrefix("--max-context must be one of"))
         }
     }
 
@@ -90,9 +91,12 @@ import ShrikeServerCore
         #expect(try parse(["bench", "expert", "--model", "m.gturbo"]) is ExpertBenchCommand)
     }
 
-    @Test func anUnknownVerbIsRejected() throws {
-        #expect(throws: (any Error).self) {
-            try ShrikeRootCommand.parseAsRoot(["srve"])
+    @Test func anUnknownVerbIsRejected() {
+        do {
+            _ = try parse(["srve", "--model", "m.gturbo", "--prompt", "hi"])
+            Issue.record("a mistyped verb should not reach generate")
+        } catch {
+            #expect(ShrikeRootCommand.message(for: error).contains("srve"))
         }
     }
 }
