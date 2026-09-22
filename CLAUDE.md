@@ -175,3 +175,5 @@ loud; the pool is the only layout since v17 (per-slot was v9's measured loss).
 dated — `v6-dialect-normalized-cache.md` alongside `v6-implementation-plan.md`. Follow that
 shape for new work. The plan's own per-task checkboxes are the status of record; do not
 duplicate status into other files.
+
+This project's open work is tracked in `tt`.
