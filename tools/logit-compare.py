@@ -6,7 +6,9 @@ compared position by position: the KL divergence old to new, the largest logit
 difference, and every argmax flip with the old build's top-2 margin. Give both
 runs `--temperature 0 --seed <n>` so they decode one sequence for as long as they
 agree; v24 retired `--force-tokens`, which held them on one sequence by
-construction, so `forced` is null in every sidecar written since. The band is a multiple of the median over positions of the largest
+construction, so `forced` is null in every sidecar written since, and the
+comparison stops at the first position whose chosen ids differ: every row after
+it is conditioned on a different history. The band is a multiple of the median over positions of the largest
 logit difference (the median, so one bad position cannot widen the band and
 hide the rest); a flip inside the band is variance, a flip outside it is a
 defect, a position whose largest difference is far above the median is a defect
@@ -64,6 +66,13 @@ def compare_rows(old, new):
         if not (d <= max_delta):
             max_delta = d
     return kl, max_delta, old.index(m_old), new.index(m_new), margin
+
+
+def first_divergence(old_chosen, new_chosen):
+    for i, (a, b) in enumerate(zip(old_chosen or [], new_chosen or [])):
+        if a != b:
+            return i
+    return None
 
 
 def compare(old_rows, new_rows, band_factor, show_all):
@@ -179,6 +188,11 @@ def main(argv):
     if old_meta["positions"] != new_meta["positions"]:
         print("warning: position counts differ (%d vs %d); comparing the first %d"
               % (old_meta["positions"], new_meta["positions"], positions))
+    diverged = first_divergence(old_meta.get("chosen"), new_meta.get("chosen"))
+    if diverged is not None and diverged + 1 < positions:
+        positions = diverged + 1
+        print("the chosen tokens diverge at position %d; comparing positions 0..%d, since every "
+              "later one is conditioned on a different history" % (diverged, diverged))
     print("old %s (%s)\nnew %s (%s)" % (args.old, old_meta.get("binary_sha256", "?")[:16],
                                         args.new, new_meta.get("binary_sha256", "?")[:16]))
     return compare(rows(args.old, vocab, positions), rows(args.new, vocab, positions),

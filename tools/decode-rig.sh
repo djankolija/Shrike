@@ -11,8 +11,8 @@
 # rows read as a full re-prefill rather than a follow-up). `d512-300` /
 # `d512-1k` / `d512-7k`: the 300- / 1k- / 7k-token prompt answered at
 # MAX_TOKENS, the settle awaited, then the warm same-length second prompt
-# (t300b / t1kb / t7kb) at 8. `restore`: relaunch the bare production server
-# and stop.
+# (t300b / t1kb / t7kb) at 8. `restore`: relaunch the production server
+# (tools/mini-production.sh, whatever the env below says) and stop.
 #
 # <host>:<port> is where this machine polls the server's HTTP API for
 # readiness after a relaunch; the requests run ON the mini over ssh and target
@@ -23,15 +23,15 @@
 # prefetch-*.jsonl (with PREFETCH_TRACE=1), resp-*.json, server-mini-*.log,
 # and one row per request from tools/decode-rows.py.
 #
-# Env: SERVER_ENV (prepended to the server launch, e.g.
-# SERVER_ENV="SHRIKE_PREFILL_ANE=on" for an A/B arm; every launch also carries
-# SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 and SHRIKE_ROUTE_TRACE);
-# RAM_BUDGET (the launch's --ram-budget, default 8G; the slot table in SERVER_ENV
-# must sum to what it snaps to); PREFETCH_TRACE=1 adds SHRIKE_PREFETCH_TRACE (the next-layer router probe's
+# Every launch is production's with SERVER_ENV layered on top and
+# SHRIKE_ROUTE_TRACE added. Env: SERVER_ENV (e.g. SERVER_ENV="SHRIKE_PREFILL_ANE=on"
+# for an A/B arm; a production value is overridden by assigning it again);
+# RAM_BUDGET (the launch's --ram-budget, default production's; an arm changing it
+# gives SERVER_ENV a SHRIKE_EXPERT_SLOT_TABLE summing to what it snaps to, or an
+# empty one for the uniform pool); PREFETCH_TRACE=1 adds SHRIKE_PREFETCH_TRACE (the next-layer router probe's
 # top-8 is logged per decode layer); NO_TURNS=1 skips the follow-up requests;
 # MAX_TOKENS (default 512) the cold request's answer length; MODEL (default
-# ./models/ornith15.gturbo, matching tools/mini-deploy.sh) and MODEL_ID (default
-# ornith15, the id the server derives from it, used only to wait for readiness);
+# production's; readiness waits for the id the server derives from its name);
 # REUSE=<dir> (card only) the directory holding payload-*-turn2.json and
 # payload-*-turn3.json. A missing payload or a settle timeout aborts the shape
 # with a non-zero exit rather than sending a row that would read as valid.
@@ -41,10 +41,11 @@ if [ $# -lt 6 ]; then
   exit 2
 fi
 HOST=$1; PORT=$2; PROMPTS=$3; OUT=$4; TAG=$5; shift 5
-MODEL=${MODEL:-./models/ornith15.gturbo}; MODEL_ID=${MODEL_ID:-ornith15}
-SERVER_ENV=${SERVER_ENV:-}; MAX_TOKENS=${MAX_TOKENS:-512}; RAM_BUDGET=${RAM_BUDGET:-8G}
-PREFETCH_TRACE=${PREFETCH_TRACE:-0}; NO_TURNS=${NO_TURNS:-0}; REUSE=${REUSE:-}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+source "$ROOT/tools/mini-production.sh"
+MODEL=${MODEL:-$PRODUCTION_MODEL}
+SERVER_ENV=${SERVER_ENV:-}; MAX_TOKENS=${MAX_TOKENS:-512}; RAM_BUDGET=${RAM_BUDGET:-$PRODUCTION_RAM_BUDGET}
+PREFETCH_TRACE=${PREFETCH_TRACE:-0}; NO_TURNS=${NO_TURNS:-0}; REUSE=${REUSE:-}
 mkdir -p "$OUT"
 scp -q "$ROOT/tools/decode-stream-client.py" macmini:/tmp/decode-stream-client.py || exit 1
 
@@ -52,27 +53,29 @@ need_payload() {
   if [ ! -f "$1" ]; then echo "missing payload $1" >&2; exit 1; fi
 }
 
-relaunch() {  # $1 = extra env assignments for this shape (traces)
+relaunch() {  # $1 = model, $2 = port, $3 = ram budget, $4 = env assignments layered on production's
+  local launch id tries=0
+  launch=$(server_launch "$1" "$2" "$3" "$4")
   ssh macmini "
-    pkill -f 'bin/shrike serve --model $MODEL' || true
+    pkill -f 'bin/shrike serve --model' || true
     sleep 3
-    if pgrep -f 'shrike serve' > /dev/null; then echo 'server still running' >&2; exit 1; fi
+    if pgrep -x shrike > /dev/null; then echo 'a shrike process is still running' >&2; exit 1; fi
     cd ~/shrike-runtime
-    [ -f /tmp/ornith.log ] && mv -f /tmp/ornith.log \"/tmp/ornith.log.\$(date +%Y%m%d-%H%M%S)\"
-    env $SERVER_ENV $1 SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/shrike serve --model $MODEL --port $PORT --max-context 32768 --ram-budget $RAM_BUDGET --thinking off > /tmp/ornith.log 2>&1 &
+    [ -f $SERVER_LOG ] && mv -f $SERVER_LOG \"$SERVER_LOG.\$(date +%Y%m%d-%H%M%S)\"
+    $launch
     exit 0
   " || exit 1
-  tries=0
-  until curl -sf -m 3 "http://$HOST:$PORT/v1/models" 2>/dev/null | grep -q "$MODEL_ID"; do
+  id=$(basename "$1" .gturbo)
+  until curl -sf -m 3 "http://$HOST:$2/v1/models" 2>/dev/null | grep -q "$id"; do
     tries=$((tries + 1))
-    if [ "$tries" -gt 120 ]; then echo "server never listed the model" >&2; exit 1; fi
+    if [ "$tries" -gt 120 ]; then echo "server never listed $id" >&2; exit 1; fi
     sleep 2
   done
   sleep 5
 }
 
 wait_settle() {  # $1 = the settle_done count to wait for (one per request sent so far)
-  ssh macmini 'n=0; until [ "$(grep -a -c "settle_done" /tmp/ornith.log)" -ge '"$1"' ]; do n=$((n+1)); [ $n -gt 150 ] && { echo "settle wait timed out" >&2; exit 1; }; sleep 2; done; echo "settled after $((n*2))s"' || exit 1
+  ssh macmini 'n=0; until [ "$(grep -a -c "settle_done" '"$SERVER_LOG"')" -ge '"$1"' ]; do n=$((n+1)); [ $n -gt 150 ] && { echo "settle wait timed out" >&2; exit 1; }; sleep 2; done; echo "settled after $((n*2))s"' || exit 1
 }
 
 send_plain() {  # $1 = label, $2 = local payload path, $3 = max_tokens, $4 = run tag
@@ -96,18 +99,18 @@ for shape in "$@"; do
   run="$TAG-$shape"
   echo "=== $shape ($run) $(date +%H:%M:%S) [$SERVER_ENV] ==="
   if [ "$shape" = restore ]; then
-    SERVER_ENV="" relaunch ""
-    echo "production restored at the bare launch"
+    relaunch "$PRODUCTION_MODEL" "$PRODUCTION_PORT" "$PRODUCTION_RAM_BUDGET" ""
+    echo "production restored"
     continue
   fi
-  traces="SHRIKE_ROUTE_TRACE=/tmp/route-$run.trace"
+  arm_env="$SERVER_ENV SHRIKE_ROUTE_TRACE=/tmp/route-$run.trace"
   if [ "$PREFETCH_TRACE" = 1 ]; then
-    traces="$traces SHRIKE_PREFETCH_TRACE=/tmp/prefetch-$run.jsonl"
+    arm_env="$arm_env SHRIKE_PREFETCH_TRACE=/tmp/prefetch-$run.jsonl"
   fi
   ssh macmini "rm -f /tmp/route-$run.trace /tmp/prefetch-$run.jsonl"
   case "$shape" in
     card)
-      relaunch "$traces"
+      relaunch "$MODEL" "$PORT" "$RAM_BUDGET" "$arm_env"
       send_stream tX "$PROMPTS/tX.json" "$MAX_TOKENS" "$run"
       wait_settle 1
       if [ "$NO_TURNS" != 1 ]; then
@@ -131,7 +134,7 @@ PY
       ;;
     d512-300|d512-1k|d512-7k)
       p="${shape#d512-}"
-      relaunch "$traces"
+      relaunch "$MODEL" "$PORT" "$RAM_BUDGET" "$arm_env"
       send_stream "t$p" "$PROMPTS/t$p.json" "$MAX_TOKENS" "$run"
       wait_settle 1
       if [ "$NO_TURNS" != 1 ]; then
@@ -142,7 +145,7 @@ PY
     *) echo "unknown shape $shape" >&2; exit 2 ;;
   esac
   sleep 3
-  scp -q "macmini:/tmp/ornith.log" "$OUT/server-mini-$run.log" || exit 1
+  scp -q "macmini:$SERVER_LOG" "$OUT/server-mini-$run.log" || exit 1
   scp -q "macmini:/tmp/route-$run.trace" "$OUT/route-$run.trace" || exit 1
   if [ "$PREFETCH_TRACE" = 1 ]; then
     scp -q "macmini:/tmp/prefetch-$run.jsonl" "$OUT/prefetch-$run.jsonl" || exit 1

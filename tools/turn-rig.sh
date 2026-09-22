@@ -25,22 +25,25 @@
 # built the same way from turn 2's own real response plus tXturn3.json's
 # last user message. The built
 # payloads land beside the responses in <outdir> as payload-<tag>-turn2.json
-# and payload-<tag>-turn3.json. `restore`: relaunch production and stop.
-# Every phase rotates the server's /tmp/ornith.log first and copies the
+# and payload-<tag>-turn3.json. `restore`: relaunch production
+# (tools/mini-production.sh, whatever the env below says) and stop.
+# Every phase rotates the server's log first and copies the
 # whole log back afterwards. A missing payload or a `wait_settle` timeout
 # aborts the phase with a non-zero exit rather than sending a row that would
 # read as valid.
 #
-# MODEL (optional env, default ./models/ornith15.gturbo, matching
-# tools/mini-deploy.sh's launch): the model the relaunched server serves.
-# MODEL_ID (optional env, default ornith15): the id the server derives from it,
-# used only to wait for readiness. MAX_TOKENS (optional env): overrides the phase's cold
+# MODEL (optional env, default production's): the model the relaunched server
+# serves; readiness waits for the id the server derives from its name.
+# RAM_BUDGET (optional env, default production's): the launch's --ram-budget; an
+# arm changing it gives SERVER_ENV a SHRIKE_EXPERT_SLOT_TABLE summing to what it
+# snaps to, or an empty one for the uniform pool. MAX_TOKENS (optional env): overrides the phase's cold
 # request's max_tokens (the long-decode arm raises it to 512). TURN2_MAX_TOKENS
 # (optional env, `turns-live` only): overrides turn 2's max_tokens (default
 # 8; the long-answer follow-up arm sets it to 512, e.g. `TURN2_MAX_TOKENS=512`).
 # SERVER_ENV
-# (optional env): prepended to the server launch's env assignments, e.g.
-# SERVER_ENV="SHRIKE_PREFILL_ANE=on" for the A/B. REUSE=<dir> (optional
+# (optional env): layered on production's env assignments, e.g.
+# SERVER_ENV="SHRIKE_PREFILL_ANE=on" for the A/B; a production value is
+# overridden by assigning it again. REUSE=<dir> (optional
 # env, `turns-live` only): instead of building turn 2 and turn 3 from this
 # run's own live responses, copy the already-built payload-*-turn2.json and
 # payload-*-turn3.json found in <dir> (another run's <outdir>) and send those
@@ -55,26 +58,32 @@
 # turn 2 (e.g. a padded one) gets substituted.
 set -u
 HOST="$1"; PORT="$2"; PDIR="$3"; ODIR="$4"; TAG="$5"; phase="$6"; arg="${7:-}"
-MODEL="${MODEL:-./models/ornith15.gturbo}"
-MODEL_ID="${MODEL_ID:-ornith15}"
+source "$(dirname "$0")/mini-production.sh"
+MODEL="${MODEL:-$PRODUCTION_MODEL}"
+RAM_BUDGET="${RAM_BUDGET:-$PRODUCTION_RAM_BUDGET}"
 mkdir -p "$ODIR"
-LAUNCH="env ${SERVER_ENV:-} SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 nohup ./bin/shrike serve --model $MODEL --port $PORT --max-context 32768 --ram-budget 8G --thinking off > /tmp/ornith.log 2>&1 &"
 
-relaunch() {
+relaunch() {  # $1 = model, $2 = port, $3 = ram budget, $4 = env assignments layered on production's
+  local launch id tries=0
+  launch=$(server_launch "$1" "$2" "$3" "$4")
   ssh macmini "
-    pkill -f 'bin/shrike serve --model $MODEL' || true
+    pkill -f 'bin/shrike serve --model' || true
     sleep 3
-    if pgrep -f 'shrike serve' > /dev/null; then echo 'server still running' >&2; exit 1; fi
+    if pgrep -x shrike > /dev/null; then echo 'a shrike process is still running' >&2; exit 1; fi
     cd ~/shrike-runtime
-    [ -f /tmp/ornith.log ] && mv -f /tmp/ornith.log \"/tmp/ornith.log.\$(date +%Y%m%d-%H%M%S)\"
-    $LAUNCH
+    [ -f $SERVER_LOG ] && mv -f $SERVER_LOG \"$SERVER_LOG.\$(date +%Y%m%d-%H%M%S)\"
+    $launch
     exit 0
   " || exit 1
-  tries=0
-  until curl -sf -m 3 "http://$HOST:$PORT/v1/models" 2>/dev/null | grep -q "$MODEL_ID"; do
-    tries=$((tries + 1)); if [ "$tries" -gt 120 ]; then echo "server never listed the model" >&2; exit 1; fi; sleep 2
+  id=$(basename "$1" .gturbo)
+  until curl -sf -m 3 "http://$HOST:$2/v1/models" 2>/dev/null | grep -q "$id"; do
+    tries=$((tries + 1)); if [ "$tries" -gt 120 ]; then echo "server never listed $id" >&2; exit 1; fi; sleep 2
   done
   sleep 5
+}
+
+relaunch_arm() {
+  relaunch "$MODEL" "$PORT" "$RAM_BUDGET" "${SERVER_ENV:-}"
 }
 
 send() {  # $1 = payload label, $2 = optional max_tokens override, $3 = optional body path (default $PDIR/$1.json)
@@ -137,38 +146,38 @@ PY
 }
 
 wait_settle() {  # wait until the last request's settle_done, or fail after 90 s
-  ssh macmini 'n=0; until grep -a -q "settle_done" /tmp/ornith.log && [ "$(grep -a -c "settle_done" /tmp/ornith.log)" -ge '"$1"' ]; do n=$((n+1)); [ $n -gt 45 ] && { echo "settle wait timed out" >&2; exit 1; }; sleep 2; done; echo "settled after $((n*2))s"'
+  ssh macmini 'n=0; until grep -a -q "settle_done" '"$SERVER_LOG"' && [ "$(grep -a -c "settle_done" '"$SERVER_LOG"')" -ge '"$1"' ]; do n=$((n+1)); [ $n -gt 45 ] && { echo "settle wait timed out" >&2; exit 1; }; sleep 2; done; echo "settled after $((n*2))s"'
 }
 
 fetch_log() {
   sleep 2
-  scp -q macmini:/tmp/ornith.log "$ODIR/server-mini-$TAG.log"
+  scp -q "macmini:$SERVER_LOG" "$ODIR/server-mini-$TAG.log"
   echo "log: server-mini-$TAG.log ($(wc -l < "$ODIR/server-mini-$TAG.log") lines)"
 }
 
 case "$phase" in
   pair)
-    relaunch
+    relaunch_arm
     send "t$arg" "${MAX_TOKENS:-}"; wait_settle 1 || exit 1
     send "t${arg}b"; wait_settle 2 || exit 1
     fetch_log
     ;;
   suffix)
-    relaunch
+    relaunch_arm
     send "tX" "${MAX_TOKENS:-}"; wait_settle 1 || exit 1
     send "tXp4"; wait_settle 2 || exit 1
     send "tXp16"; wait_settle 3 || exit 1
     fetch_log
     ;;
   turns)
-    relaunch
+    relaunch_arm
     send "tX" "${MAX_TOKENS:-}"; wait_settle 1 || exit 1
     send "tXturn2"; wait_settle 2 || exit 1
     send "tXturn3"; wait_settle 3 || exit 1
     fetch_log
     ;;
   turns-live)
-    relaunch
+    relaunch_arm
     turn2_payload="$ODIR/payload-$TAG-turn2.json"
     turn3_payload="$ODIR/payload-$TAG-turn3.json"
     send "tX" "${arg:-512}"; wait_settle 1 || exit 1
@@ -189,7 +198,8 @@ case "$phase" in
     fetch_log
     ;;
   restore)
-    relaunch; echo "production restored"
+    relaunch "$PRODUCTION_MODEL" "$PRODUCTION_PORT" "$PRODUCTION_RAM_BUDGET" ""
+    echo "production restored"
     ;;
   *) echo "unknown phase $phase" >&2; exit 2 ;;
 esac

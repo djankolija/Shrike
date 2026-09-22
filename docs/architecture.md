@@ -570,11 +570,11 @@ were.
 | `SHRIKE_PREFETCH_TRACE` | `RuntimeConfiguration.swift:203` | a JSONL path: the ring's predictions, landings and misses per layer |
 | `SHRIKE_PREFILL_ANE` | `ANEPrefillAttention.swift:21` | `off` or `on`: the ANE prefill attention experiment ([ane-prefill.md](ane-prefill.md)) |
 
-The two pool names are what the mini's production launch sets (the launch line is in
-`CLAUDE.md`); a bare launch runs the uniform pool and the aging-LFU, the rig's `base` arm.
-The two stats names are what `tools/mini-deploy.sh` sets at the production launch and what
-`tools/decode-rig.sh` and `tools/turn-rig.sh` set on every launch of theirs, the rig adding
-the route trace and, under `PREFETCH_TRACE=1`, the prefetch trace.
+The two pool names and the two stats names are what the mini's production launch sets
+(`tools/mini-production.sh`, copied in `CLAUDE.md`); a bare launch runs the uniform pool
+and the aging-LFU. `tools/decode-rig.sh` and `tools/turn-rig.sh` launch production with an
+arm's env layered on top, the rig adding the route trace and, under `PREFETCH_TRACE=1`,
+the prefetch trace.
 
 One tripwire guards the set, and it is an **allow**-list, which is the one way it can
 fail quietly: a name left in `knownEnvironmentNames` after its reader is deleted is
@@ -652,14 +652,14 @@ is [v17-consolidation.md](v17-consolidation.md)'s Task 4 table.
 - `tools/decode-rig.sh` with `tools/decode-rows.py`: the four request shapes on the
   mini (the card, the 300, the 1k and, since v19, the 7k), a fresh server per shape,
   every token's arrival streamed, one row per request.
-  Every launch carries `SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1` and a
-  `SHRIKE_ROUTE_TRACE` path; `PREFETCH_TRACE=1` adds a `SHRIKE_PREFETCH_TRACE` path. Its
+  Every launch is production's plus an arm's `SERVER_ENV` and a `SHRIKE_ROUTE_TRACE`
+  path; `PREFETCH_TRACE=1` adds a `SHRIKE_PREFETCH_TRACE` path. Its
   rows since v20: the misses, the io, `agreed_overflow` and `cells_leased_peak` per
   request, the word clock's layers sum, slowest layer and boundary, and `drained_passes`
   with `drain_ms`; the miss-window rows of v15 to T3.1 read n/a since the fixup rides in
   the layer's command.
 - `tools/turn-rig.sh` with `tools/turn-summary.py`: the turn's shapes (a pair, a suffix,
-  the multi-turn chain), the same two stats names on every launch.
+  the multi-turn chain), launched as production like the decode rig.
 - `tools/expert-pool-replay.py`: a route trace replayed against the pool's policy and
   the ring's fills; trustworthy for misses, blind to milliseconds (v16). It keeps the
   fill-mode controls, including no fills, that the runtime no longer has, and since v20
@@ -680,9 +680,11 @@ is [v17-consolidation.md](v17-consolidation.md)'s Task 4 table.
   submission that waited them out; `cb2_ms`, `io_hidden_pct`, `io_fixup_wake_ms`,
   `path_pin_ms`, `path_fixup_build_ms`, `path_fixup_commit_to_kernel_ms`,
   `io_host_waits_avoided` and `path_router_wake_ms` went with the paths they measured.
-- `tools/mini-deploy.sh`: the one release binary and its bundles to the mini, optionally
-  a restart at the production launch, whose env and flags must stay byte-for-byte
-  CLAUDE.md's line (v24's close found they had not been since v20 T1).
+- `tools/mini-deploy.sh`: the one release binary and its bundles to the mini, anything
+  else in `bin/` removed, optionally a restart at the production launch. That launch is
+  `tools/mini-production.sh`, shared with both rigs' `restore`, because every copy had
+  drifted from CLAUDE.md's line since v20 T1: the deploy's, found at v24's close, and
+  the rigs', found in the review after it.
 
 ## History
 

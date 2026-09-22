@@ -14,7 +14,7 @@ Before anything that loads a model — a server, the CLI, a benchmark, or the go
 baseline — check:
 
 ```bash
-pgrep -fl 'shrike serve|shrike generate|ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
+pgrep -lx shrike; pgrep -fl 'ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 ```
 
 If something is already running, **stop and say so**. Never terminate a process you did not
@@ -124,9 +124,12 @@ on the four shapes, the record in `docs/v20-ssd-mechanism.md`), and **since v22
 Task 3 (2026-09-18) the budget is 160 slots per layer** (the arena in two Metal
 buffers, the prefill scratch released between requests, oMLX's models unloaded;
 measured +9.9 to +15.6 % tok/s and 40 to 52 % fewer misses on the four shapes, the
-record in `docs/v22-pool-capacity.md`):
+record in `docs/v22-pool-capacity.md`). The launch is written once, in
+`tools/mini-production.sh`, which `tools/mini-deploy.sh --restart` and both rigs'
+`restore` source; the block below is a copy of it:
 
 ```bash
+SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 \
 SHRIKE_EXPERT_SLOT_TABLE=256,256,246,209,191,171,171,162,171,149,164,169,155,144,137,135,133,131,132,130,145,133,141,142,137,137,130,137,137,142,137,135,157,157,162,160,166,161,178,194 \
 SHRIKE_EXPERT_POLICY=slru \
 nohup ./bin/shrike serve --model ./models/ornith15.gturbo --port 8081 --max-context 32768 --ram-budget 11324620800 --thinking off > /tmp/shrike-server.log 2>&1 &
@@ -156,9 +159,9 @@ execution, the spin host wait and the word wake, and the A/B knobs that once
 selected their losers (`SHRIKE_DECODE_EXPERT_EXECUTION`, `SHRIKE_EXPERT_IO_SYNC`,
 `SHRIKE_EXPERT_IO_SUBMISSION`, `SHRIKE_SPEC_PHASE1`, `SHRIKE_ROUTER_WAKE`,
 `SHRIKE_HOST_WAIT`) are gone with the losing code; git history is their record
-(`docs/v17-consolidation.md`). Add
-`SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1` when measuring with
-`tools/decode-measure.sh` and the `tools/parse-*-stats.py` parsers.
+(`docs/v17-consolidation.md`). Production carries
+`SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1`, the rows `tools/decode-measure.sh`
+and the `tools/parse-*-stats.py` parsers read.
 **The mini's budget is 160 slots per layer since v22** (11.33 GB of cells; the
 arena in two Metal buffers since the device caps one at 8.88 GiB; the box at 82
 to 85 % free under load with oMLX empty and the prefill scratch released between

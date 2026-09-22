@@ -15,7 +15,7 @@ ts=[float(l) for l in open('/tmp/m_times.txt') if l.strip()]
 d=json.load(open('/tmp/m_1.json')); c=d['choices'][0]['message']['content']
 h=hashlib.sha256(c.encode()).hexdigest()[:12]; tok=d['usage']['completion_tokens']
 import subprocess
-lines=[l for l in open('/tmp/ornith.log',errors='ignore') if 'Shrike runner' in l][-len(ts):]
+lines=[l for l in open('/tmp/shrike-server.log',errors='ignore') if 'Shrike runner' in l][-len(ts):]
 def field(f):
     v=[float(l.split(f+'=')[1].split()[0]) for l in lines if f+'=' in l]
     return (statistics.mean(v), statistics.stdev(v) if len(v)>1 else 0.0)
