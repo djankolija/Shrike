@@ -17,6 +17,19 @@ struct OpenAIValidationTests {
         #expect(validated.generationConfig.presencePenalty == 0)
     }
 
+    @Test func goldenServeProfileRequestIsGreedy() throws {
+        let data = Data(#"""
+        {"model":"ornith15","max_tokens":96,"temperature":0,"seed":1234,"stream":false,
+         "messages":[{"role":"user","content":"Explain what a mutex is and when you would use one."}]}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(request)
+        #expect(validated.generationConfig.isPureGreedy)
+        #expect(validated.generationConfig.maxNewTokens == 96)
+        #expect(validated.generationConfig.seed == 1_234)
+        #expect(!validated.stream)
+    }
+
     @Test func requiredToolChoiceIsRejected() throws {
         let data = Data(#"""
         {"model":"m","messages":[{"role":"user","content":"x"}],"tool_choice":"required"}

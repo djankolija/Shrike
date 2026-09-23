@@ -1,0 +1,15 @@
+# profile:     serve-turns (prompt 33 bytes)
+# max-new:     128
+# temperature: 0 (greedy)
+# head:        logits (shrike serve at tools/mini-production.sh's launch)
+# seed:        1234
+# model:       ornith15.gturbo
+# captured-on: Mac16,7, 48 GB, macOS 26.6.2
+# commit:      3faa7b2-dirty
+---
+A mutex (short for "mutual exclusion") is a synchronization primitive that ensures only one thread or process can access a shared resource or critical section of code at a time, preventing concurrent access and the data corruption that could result.
+--- follow-up ---
+A semaphore is a synchronization primitive that uses a counter to control access to a shared resource, allowing a limited number of threads to access it simultaneously (unlike a mutex, which permits only one).
+--- usage ---
+turn1 prompt=21 cached=0 completion=47 finish=stop
+turn2 prompt=89 cached=69 completion=40 finish=stop
