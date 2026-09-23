@@ -89,7 +89,7 @@ candidates to delete **by fixing what forced them**. **Retiring the three is fil
    The cost is determinism: the CLI is one process with a fixed seed, and a
    server adds a request path, a prompt cache and a queue. Whether a server-driven
    golden can be byte-identical run to run is the question the chapter turns on,
-   and it is a measurement, not an opinion. **Filed in tt as SHRIKE-2 (2026-09-23).**
+   and it is a measurement, not an opinion. **Filed in tt as SHRIKE-2 (2026-09-23).** **Measured on the mini: it can, byte-identical run to run; the record is [Step zero: the golden through the server](#step-zero-the-golden-through-the-server).**
 2. **What does the mini actually need?** "No toolchain" is the constraint behind
    rule 1. It is worth asking directly whether that is fixed or merely inherited,
    because most of this chapter disappears if a test harness can reach that box. **Filed in tt as SHRIKE-3 (2026-09-23).**
@@ -123,3 +123,58 @@ is the second thing v24's close exposed: **this project has no task tracking, an
 needs a fresh investigation to act on; one that records the *conclusion* needs an
 afternoon. Where this repository keeps that backlog, and in what form, is an open
 question for the owner and is not settled by this document. **Answered 2026-09-23: the owner chose `tt`, CLAUDE.md says so, and this chapter's own items are the SHRIKE ids above (SHRIKE-1 the chapter, SHRIKE-2 to SHRIKE-4 its step zero, SHRIKE-12 and SHRIKE-6 the two restated deferrals).**
+
+## Step zero: the golden through the server
+
+Measured 2026-09-23 for SHRIKE-2, with the instrument the golden's server profiles
+(`tools/golden-baseline.sh`) productize: the same launch, requests and readiness check.
+It runs on the box that serves, since the server binds 127.0.0.1 only. Each launch
+is a fresh `shrike serve` at `tools/mini-production.sh`'s exact launch (160 slots,
+the slot table, SLRU; the load line read `expert_slots=130..256 policy=slru:0.5`)
+on port 8082, the binary built from `c3e25d7` (sha256 `105b1b58e13d048d…`, the
+same file on both boxes). Each launch sends one sequence twice: the golden's short
+and long prompts as one-message chats at temperature 0 (`max_tokens` 96 and 128),
+each sent a second time at once, then the `turns` question answered to its stop
+and the follow-up with that answer in the history. The mini ran five launches
+(60 requests), the dev box (Mac16,7) three (36).
+
+- **Byte-identical run to run.** Every request's text and usage row (prompt,
+  cached and completion tokens, finish reason) is the same in all ten passes on
+  the mini and all six on the dev box, across fresh processes and within one: the
+  second pass, sent to a process that had served the whole sequence, repeats the
+  first pass's rows, cached counts included.
+- **An immediate replay is its own answer.** A prompt sent again right after a
+  `max_tokens` stop resumes from the cached prefix (18 of 25 tokens cached for
+  short, 3,749 of 3,756 for long) and prefills the last 7. Its greedy text departs
+  from the first answer's (on the mini, short at character 310 of 417 and long at
+  160 of 331) and is itself identical in every run. Production gives a retry after
+  a `max_tokens` stop at temperature 0 a different answer from the first request
+  (a retry after a stop token was not measured). The prompt reaches the
+  model in a different chunk split, and a 7-row chunk is under
+  `prefillMatrixMinRows` (16, `RealForwardRunner.swift:316`), so it runs the scalar
+  kernels; which difference flips the pick is not isolated.
+- **`turns-lh` does not test production's continuation.** The server's first turn
+  matches the CLI baseline's on both boxes; its second does not (the mini's is a
+  55-token answer on counting and binary semaphores where the baseline's is a
+  one-clause contrast with a mutex; the dev box's differs in the last clause). The
+  tokens are the same and the split is not: the server re-feeds the boundary token
+  in the settle's 2-token prefill between requests, where `--follow-up` prefills it
+  with the follow-up as one chunk of about 22 rows (`Run.swift:159-186`). Today's
+  CLI still reproduces its own `turns-lh` baseline, so the difference is the path,
+  not a stale file.
+- **`short` and `long` run a path production never runs.** The server always takes
+  the logits head (`ServerInference.swift:704`, `:816`), has no raw-prompt route and
+  renders every prompt as ChatML, so four of the five CLI profiles have no server
+  equivalent and a server golden needs new baselines.
+- **The ready line is not readiness.** `shrike serve` prints it and answers
+  `/v1/models` before any model loads; the model loads on the first request. The
+  harness sends `POST /v1/models/load` and polls `/health` until `resident` names the
+  model (3 s on either box).
+
+So a golden driven through `shrike serve` is byte-identical run to run on the mini,
+given a fresh process and a fixed request order, at production's exact launch. The
+gate does not need `--logits-head`, `--follow-up` or `--expert-cache-slots`: the
+server takes the logits head, continues a turn and sizes its pool from the launch
+line, as production does, and outside the golden nothing in the repository passes
+the three to `generate`. Whether any of them stays as a capability of `generate` is
+SHRIKE-4's verdict, one flag at a time.
