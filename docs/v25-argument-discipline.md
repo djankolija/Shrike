@@ -78,7 +78,7 @@ and are the direct analogue of `-dump-ast`: they expose something the engine
 genuinely computes, useful to anyone reasoning about it. `--tokenize` answers
 "what will you actually send to the model", which is a real question a user has.
 Those are candidates to keep on their merits. The three in the table above are
-candidates to delete **by fixing what forced them**. **Retiring the three is filed in tt as SHRIKE-1 (2026-09-23).**
+candidates to delete **by fixing what forced them**. **Retiring the three is filed in tt as SHRIKE-1 (2026-09-23).** **Two are deleted; see [Verdicts](#verdicts).**
 
 ## What step zero has to answer
 
@@ -221,3 +221,16 @@ The rest of v24's rule-1 keeps stand on another rule: generate's `--model`,
 launch-line flags (`--port`, `--max-context`, `--thinking`, `--ram-budget`) are a
 server's launch configuration, whose home is SHRIKE-5's question, not this
 chapter's.
+
+## Verdicts
+
+Each flag judged on its own, per the test above; SHRIKE-4 adds the rest.
+
+- **`--logits-head`, prosthetic, deleted.** It chose the logits head for a greedy
+  run, which only the golden's imitation of the server wanted; the golden's
+  server profiles now run the server's head itself, and `generate` still takes
+  the logits head whenever it samples or dumps.
+- **`--follow-up`, prosthetic, deleted.** It re-implemented the server's cached
+  continuation, and the step-zero run measured that it is not the same
+  computation: the same tokens in a different chunk split, a different second
+  turn on both boxes. `serve-turns` checks the continuation production computes.

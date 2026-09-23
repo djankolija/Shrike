@@ -110,12 +110,6 @@ public struct ShrikeGenerateCommand: ParsableCommand, Sendable {
     @Flag(help: "Suppress the timing footer.")
     public var quiet = false
 
-    @Flag(help: """
-        Run the server's logits head even at temperature 0 (the fused greedy head \
-        is the default there).
-        """)
-    public var logitsHead = false
-
     @Option(name: .customLong("dump-logits"),
             help: ArgumentHelp("""
                 Write every position's fp16 logits as raw rows to <path> and a \
@@ -140,15 +134,6 @@ public struct ShrikeGenerateCommand: ParsableCommand, Sendable {
                 """,
                 valueName: "path"))
     public var tokenizePath: String?
-
-    @Option(parsing: .unconditional,
-            help: ArgumentHelp("""
-        After the first answer stops, append this text (encoded verbatim) to the \
-        tokens the run holds and generate once more from that state; the second \
-        answer follows a separator line. The two-turn continuation gate.
-        """,
-        valueName: "string"))
-    public var followUp: String?
 
     public init() {}
 

@@ -129,8 +129,7 @@ import Testing
             "--seed", "--stop", "--quiet", "--help",
             "--expert-cache-slots",
             "--kv-bits", "--rope-scaling", "--thinking",
-            "--logits-head", "--dump-logits", "--dump-hidden",
-            "--tokenize", "--follow-up",
+            "--dump-logits", "--dump-hidden", "--tokenize",
         ]
         let words = ShrikeGenerateCommand.helpMessage()
             .split { $0.isWhitespace || $0 == "(" || $0 == ")" }
@@ -156,6 +155,15 @@ import Testing
         }
     }
 
+    @Test func theGoldensRetiredImitationFlagsAreRejected() throws {
+        for extra in [["--logits-head"], ["--follow-up", "and a semaphore?"]] {
+            let error = #expect(throws: (any Error).self) {
+                _ = try ShrikeGenerateCommand.parse(["--model", "m.gturbo", "--prompt", "hi"] + extra)
+            }
+            #expect(ShrikeGenerateCommand.exitCode(for: try #require(error)) != .success)
+        }
+    }
+
     @Test func aPromptIsRequiredButTheModelNeedNotBeNamed() throws {
         #expect(throws: (any Error).self) {
             _ = try ShrikeGenerateCommand.parse(["--model", "m.gturbo"])
@@ -167,11 +175,10 @@ import Testing
     @Test func anOptionValueMayBeginWithADash() throws {
         let arguments = try ShrikeGenerateCommand.parse([
             "--model", "m.gturbo", "--prompt", "-- explain this",
-            "--stop", "-->", "--follow-up", "-- and again",
+            "--stop", "-->",
         ])
         #expect(arguments.prompt == "-- explain this")
         #expect(arguments.stops == ["-->"])
-        #expect(arguments.followUp == "-- and again")
     }
 
     @Test func messagesFileSelectsChatMode() throws {

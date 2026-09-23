@@ -5,15 +5,13 @@ extension CLIArgumentsTests {
     @Test func instrumentFlagsParse() throws {
         let instrumented = try ShrikeGenerateCommand.parse([
             "--model", "m.gturbo", "--prompt", "hi",
-            "--dump-logits", "out.f16", "--logits-head",
+            "--dump-logits", "out.f16",
             "--tokenize", "pieces.json",
         ])
         #expect(instrumented.dumpLogitsPath == "out.f16")
-        #expect(instrumented.logitsHead)
         #expect(instrumented.tokenizePath == "pieces.json")
         let plain = try ShrikeGenerateCommand.parse(["--model", "m.gturbo", "--prompt", "hi"])
         #expect(plain.dumpLogitsPath == nil)
-        #expect(!plain.logitsHead)
         #expect(plain.tokenizePath == nil)
         #expect(throws: (any Error).self) {
             _ = try ShrikeGenerateCommand.parse(["--model", "m.gturbo", "--prompt", "hi", "--dump-logits"])

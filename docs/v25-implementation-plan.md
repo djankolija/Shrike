@@ -620,7 +620,7 @@ tools/golden-baseline.sh --check
   the logits head. `RawDecodeResult.kvBackedTokenIDs` and
   `uncommittedBoundaryTokenIDs` stay: the server reads them.
 
-- [ ] **Step 1: Write the failing test.** In `CLIArgumentsTests.swift`, after
+- [x] **Step 1: Write the failing test.** In `CLIArgumentsTests.swift`, after
       `unsupportedSelectorsAreRejectedWithANonZeroExit`:
 
 ```swift
@@ -634,10 +634,10 @@ tools/golden-baseline.sh --check
     }
 ```
 
-- [ ] **Step 2: Run it.** `swift test --no-parallel --filter theGoldensRetiredImitationFlagsAreRejected`.
+- [x] **Step 2: Run it.** `swift test --no-parallel --filter theGoldensRetiredImitationFlagsAreRejected`.
       Expected: FAIL, both invocations parse.
 
-- [ ] **Step 3: Delete the flags.** In `ShrikeGenerateCommand.swift`, delete the
+- [x] **Step 3: Delete the flags.** In `ShrikeGenerateCommand.swift`, delete the
       `@Flag ... public var logitsHead = false` block and the
       `@Option(parsing: .unconditional ...) public var followUp: String?` block. In
       `Run.swift`, change
@@ -656,7 +656,7 @@ tools/golden-baseline.sh --check
       and delete the `if let followUp = args.followUp { ... }` block and the whole
       `runFollowUp` function with its `///` line.
 
-- [ ] **Step 4: Update the pins that named them.** In `CLIArgumentsTests.swift`,
+- [x] **Step 4: Update the pins that named them.** In `CLIArgumentsTests.swift`,
       remove `"--logits-head"` and `"--follow-up"` from
       `helpListsExactlyThePublicOptions`, and in `anOptionValueMayBeginWithADash`
       remove `"--follow-up", "-- and again"` from the argv and its `#expect`
@@ -666,10 +666,10 @@ tools/golden-baseline.sh --check
       remove `#expect(!arguments.logitsHead)` from
       `goldenBaselineShortProfileParses`.
 
-- [ ] **Step 5: Run the CLI tests.** `swift test --no-parallel --filter CLIArgumentsTests`.
+- [x] **Step 5: Run the CLI tests.** `swift test --no-parallel --filter CLIArgumentsTests`.
       Expected: PASS, including the new test.
 
-- [ ] **Step 6: Record the verdicts.** Append to `docs/v25-argument-discipline.md`:
+- [x] **Step 6: Record the verdicts.** Append to `docs/v25-argument-discipline.md`:
 
 ```markdown
 ## Verdicts
@@ -689,16 +689,16 @@ Each flag judged on its own, per the test above; SHRIKE-4 adds the rest.
       and on line 81, after `**Retiring the three is filed in tt as SHRIKE-1 (2026-09-23).**`,
       append ` **Two are deleted; see [Verdicts](#verdicts).**` on the same line.
 
-- [ ] **Step 7: The four gates.**
+- [x] **Step 7: The four gates.**
 
-- [ ] **Step 8: Check on the dev box.** `swift build -c release`, the process checks,
+- [x] **Step 8: Check on the dev box.** `swift build -c release`, the process checks,
       `tools/golden-baseline.sh --check`. Expected: five `ok` lines (the deletion
       changes no computation the golden runs).
 
-- [ ] **Step 9: Deploy and check on the mini**, with the owner's go-ahead:
+- [x] **Step 9: Deploy and check on the mini**, with the owner's go-ahead:
       `tools/mini-deploy.sh --restart`, then `tools/mini-golden.sh --check`.
       Expected: five `ok` lines and production relaunched on the new binary.
 
-- [ ] **Step 10: Commit** the two sources, the three test files, the v25 doc and
+- [x] **Step 10: Commit** the two sources, the three test files, the v25 doc and
       this plan with this task ticked:
       `cli: generate loses --logits-head and --follow-up, the golden's imitation flags (SHRIKE-57)`.

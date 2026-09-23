@@ -15,7 +15,6 @@ extension CLIArgumentsTests {
         #expect(arguments.temperature == 0)
         #expect(arguments.seed == 1_234)
         #expect(arguments.quiet)
-        #expect(!arguments.logitsHead)
     }
 
     @Test func hiddenStateInstrumentParses() throws {
