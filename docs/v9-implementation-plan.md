@@ -21,7 +21,7 @@ Numbers cited as baselines are ornith15, n=12.
       (32.6 → 16.7 ms/token) and every CB got faster (GPU busy 66.2 → 59.8).
       Pool is now part of the deployed env. Follow-up recorded in S4: flipping
       the code default requires a graceful per-slot fallback, because pool
-      allocation failure currently aborts startup (`StreamerError.allocFailed`).
+      allocation failure currently aborts startup (`StreamerError.allocFailed`). **Superseded: pool became the code default in v10 T5 (v10 plan:66-67) and per-slot was deleted (v17-consolidation.md:65) (noted 2026-09-23).**
 
 ## S1 — classifier writes the speculative dispatch surface
 
@@ -121,23 +121,23 @@ Numbers cited as baselines are ornith15, n=12.
       (−15.9 %), digest exact, no thermal decay over minutes (post-card
       convergence run settles back to 48.8). The scheduler wake was
       ~175 µs/layer, not the estimated 50–100. S3b+spin is the mini's
-      standing config as of 2026-08-31; multi-hour real-traffic trial open.
+      standing config as of 2026-08-31; multi-hour real-traffic trial open. **Done: the live deployment was the trial (v10 plan:68-69) (noted 2026-09-23).**
 
 ## S4 — measurement and the standing prediction
 
-- [ ] n=12 vs the pre-v9 baseline (**post-E5: body 77.13 sd 1.43, wall
-      17.188 sd 0.293**, digest `494bab3edb62`).
-- [ ] Consider flipping `ExpertCacheLayout`'s code default to pool (with a
+- [x] n=12 vs the pre-v9 baseline (**post-E5: body 77.13 sd 1.43, wall
+      17.188 sd 0.293**, digest `494bab3edb62`). **Ticked 2026-09-23:** the n=12 acceptances at :51, :69, :83 and :119-120, starting from this baseline.
+- [ ] (superseded: v10 plan:66-67; per-slot deleted, v17-consolidation.md:65) Consider flipping `ExpertCacheLayout`'s code default to pool (with a
       graceful per-slot fallback on allocation failure) — E5 leaves ~23 % on
       the table for any deployment that forgets the env var.
-- [ ] Verify the shared_expert→routed gap collapses for all-hit layers in the
+- [ ] (superseded: v10-decode-kernel-mergers.md:87; architecture.md:757-759) Verify the shared_expert→routed gap collapses for all-hit layers in the
       per-role/gap report.
-- [ ] Verify Davor's prediction: the win exceeds the gap reduction by roughly
+- [x] Verify Davor's prediction: the win exceeds the gap reduction by roughly
       the ~1.4 ms absorbed at `a8168d9`. If absent, halt and re-measure before
-      any further change.
-- [ ] Decide default: flip `SHRIKE_DECODE_EXPERT_EXECUTION` to `speculative`
+      any further change. **Ticked 2026-09-23:** confirmed at S2's acceptance (:57-58).
+- [x] Decide default: flip `SHRIKE_DECODE_EXPERT_EXECUTION` to `speculative`
       only after a soak beyond the fixed rig prompt (longer contexts, MTP off,
-      concurrent requests).
-- [ ] Revisit the parked GPU-side items now that savings can cash out:
+      concurrent requests). **Ticked 2026-09-23:** done in v10 T5 (f169f51; v10 plan:66-67; v17-consolidation.md:64).
+- [ ] (superseded: v10 T1, 99a66cd; v18-implementation-plan.md:230-266) Revisit the parked GPU-side items now that savings can cash out:
       shared-expert CB encoder merge (B1c), `fused_qkv_epilogue` on the gated
       path, norm→GEMV fusions.

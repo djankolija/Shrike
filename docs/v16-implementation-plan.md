@@ -97,7 +97,7 @@ record. Every number is measured on the mini unless marked modelled.
         an adopted-only layer has one adoption (10 adoptions over about 10 layers with
         any), no RAM, and the replay's finding that the landing keeps today's miss count.
         Against v15's levers (+2 to +6 % each) it is the smallest, and the arms decide it
-        for real if built. **Ruling pending.**
+        for real if built. **Ruling pending.** **Done: ruled 2026-09-07 to build it as the merge, `v16-landing.md:212-214` (noted 2026-09-23).**
   - [x] The review (2026-09-07, a fresh reviewer on the instrument): one MEDIUM, the
         swiftlint baseline had gained a new entry (the server's runner-line function
         crossed 120 lines with the seven new arguments and the baseline was regenerated
@@ -248,21 +248,21 @@ record. Every number is measured on the mini unless marked modelled.
 - **The landing in the pool's own slot (variant B, Task 2 as first designed).** A victim
   claimed at issue for every prediction, wrong ones included; the replay prices its misses
   at the swap's (19.7 / 19.9 / 18.9 against 19.9 / 19.8 / 18.7). Superseded by the merge,
-  which evicts only for a right prediction and deletes the copy; kept as the record.
+  which evicts only for a right prediction and deletes the copy; kept as the record. **Superseded: by the merge, 7652fb6 (noted 2026-09-23).**
 - **The exchange at plan time (variant C).** The blit's copy alone; retired with the blit
-  by the merge.
+  by the merge. **Superseded: by the merge, 7652fb6 (noted 2026-09-23).**
 - **A second base for cells beyond one buffer.** The merge's single buffer fits the mini's
   8.88 GiB limit only up to about 128 slots at the production stride; a larger budget
-  there needs the kernels given a second base and the cell index split across the two.
+  there needs the kernels given a second base and the cell index split across the two. **Done: 1dcf745, v22 Task 2, the expert cell arena in chunks (noted 2026-09-23).**
 - **The consolidation series (a following chapter, Davor's direction of 2026-09-07).**
   After the merge: the architecture document the repo lacks (the decode path as it stands,
   each surviving piece annotated by the measurement that keeps it); the knobs pruned by
   measured status (losers and nulls deleted with git as their record, winners as defaults
   without a switch, an A/B only for a lever still open); one residency publish path; the
   runner decomposed into explicit stages (the baseline's eighteen long functions). Each
-  step real (fewer states) and free (golden identical, the arms unmoved).
+  step real (fewer states) and free (golden identical, the arms unmoved). **Done: as v17, [v17-consolidation.md](v17-consolidation.md) (noted 2026-09-23).**
 - **The reading layers themselves.** 12.6 to 13.7 per token at production's per-read
-  cost; no lever named.
+  cost; no lever named. **Done: under other names, v18's surface A, then v20, v21 and v22 (noted 2026-09-23).**
 
 ## Follow-ons (not scheduled)
 
@@ -282,4 +282,4 @@ record. Every number is measured on the mini unless marked modelled.
   errors and five naming cleanups folded; the fixes amended into 7652fb6; the four gates and
   five golden cells on the final tree, the mini at the final build (245d62e5a09420bf) with
   golden identical at the default and with the prefetch off; the closing block written;
-  Davor's go and the merge pending.
+  Davor's go and the merge pending. **Done: merged to `main`, e959d55 (noted 2026-09-23).**

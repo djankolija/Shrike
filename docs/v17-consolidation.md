@@ -65,7 +65,7 @@ its read site, its users and its citation is Task 1's deliverable in
 | the streamer: `SHRIKE_EXPERT_CACHE_LAYOUT`, `SHRIKE_EXPERT_IO_BACKEND`, `SHRIKE_BOUNDED_IO`, `SHRIKE_PARALLEL_IO`, `SHRIKE_EXPERT_IO_THREADS`, `SHRIKE_EXPERT_IO_BATCH_DEPTH`, `SHRIKE_EXPERT_CACHE_POLICY`, `SHRIKE_EXPERT_CACHE_PROTECT`, `SHRIKE_NO_PIN` | 9 | per-slot is v9's measured loss; the Metal IO backend lost its A/B on 2026-09-01 (rig wait 43.29 sd 9.2 % against pread's 38.68 sd 2.2 %, and the server died mid-prefill; `v10-implementation-plan.md`); four threads the knee and two batches v13's winner; aging-LFU and chunk protection v13's defaults | delete all nine; one layout, one reader, the thread and batch counts constants, one policy, protection always on |
 | the prefetch: `SHRIKE_PREDICTIVE_PREFETCH`, `SHRIKE_PREFETCH_TOP_M`, `SHRIKE_PREFETCH_INFLIGHT`, `SHRIKE_PREFETCH_PROBE_DISTANCE`, `SHRIKE_PREFETCH_JOIN_US`, `SHRIKE_PREFETCH_PLACEMENT`, `SHRIKE_PREFETCH_PROBE`, `SHRIKE_PREFETCH_ADOPT` | 8 | the ring won in v15 and v16 (the off control 14.0 / 14.5 / 14.6 tok/s against 15.3 / 16.5 / 16.1, misses 30.5 / 30.2 / 28.1 against 20.0 / 20.0 / 18.8; the replay reproduces the control to the tenth); placement after and the fused probe v15's winners; distance above one closed by the recall curve (`architecture.md`, 2026-08-31); the adopt knob already refused by name | delete all eight; top-m, in-flight, distance and the join bound become constants at their measured values (top-k, 1, 1, 400 us), the reclaim's distance window goes with the distance |
 | prefill and the kernels: `SHRIKE_ATTN_MATRIX_TILE`, `SHRIKE_MPP_TILE_N`, `SHRIKE_MPP_TILE_K`, `SHRIKE_MPP_DEQUANT_BUFFERS`, `SHRIKE_MPP_WEIGHT_LOADS`, `SHRIKE_PREFILL_ATTENTION`, `SHRIKE_PREFILL_ROUTER`, `SHRIKE_PREFILL_ROUTER_TOKENS`, `SHRIKE_PREFILL_ROUTED_GEMM`, `SHRIKE_PREFILL_ROUTE_OVERLAP`, `SHRIKE_PREFILL_POOL_RESIDENCY`, `SHRIKE_PREFILL_TAIL_TILE`, `SHRIKE_PREFILL_TILE_BATCH`, `SHRIKE_PREFILL_TILE_DEPTH`, `SHRIKE_PREFILL_FETCH_DEPTH`, `SHRIKE_PREFILL_MATRIX_MIN_ROWS`, `SHRIKE_PREFILL_SWEEP`, `SHRIKE_PREFILL_SWEEP_TAIL`, `SHRIKE_GDN_PREFILL_SCAN`, `SHRIKE_ATTN_FULL_CHUNKS`, `SHRIKE_SAMPLER_PATH` | 21 | each default is the winner of a v12 or v13 arm (the matrix path, the grouped routed GEMM, the resident sweep, fetch depth 2, matrix min rows 16, the tiled sampler); the losing variants are kernels with reference suites | delete all twenty-one; the default's value becomes a constant; where the knob selected a code path, the losing path and its reference tests go |
-| `SHRIKE_PREFILL_ANE` | 1 | off by default, an open candidate with its own record ([ane-prefill.md](ane-prefill.md)) | stays: the one switch the rule keeps, an A/B for a lever still open |
+| `SHRIKE_PREFILL_ANE` | 1 | off by default, an open candidate with its own record ([ane-prefill.md](ane-prefill.md)) | stays: the one switch the rule keeps, an A/B for a lever still open. **Filed in tt as SHRIKE-21 (2026-09-23).** |
 | MTP: `SHRIKE_MTP_VERIFY`, `SHRIKE_MTP_EXPERT_SLOTS` | 2 | speculative decode retired at v12's P17 (rig acceptance 20.6 %, the verify pass at width 2) | delete with the subsystem: the draft runner, the verify pair, the sidecar load, the server's prompt-cache forcing |
 | product configuration: `SHRIKE_THINKING_MODE`, `SHRIKE_REASONING_EFFORT`, `SHRIKE_REASONING_RETENTION`, `SHRIKE_STRIP_CLI_PROMPT`, `SHRIKE_STRIP_TAGS`, `SHRIKE_CONCISE_MODE`, `SHRIKE_TOKENIZER_DIR`, `SHRIKE_MODEL`, `SHRIKE_EXPERT_CACHE_SLOTS` | 9 | selects product behaviour per launch, not an implementation fallback | eight stay; `SHRIKE_EXPERT_CACHE_SLOTS` goes, `--expert-cache-slots` already carries it |
 | diagnostics: `SHRIKE_RUNNER_STATS`, `SHRIKE_KERNEL_STATS`, `SHRIKE_ROUTE_TRACE`, `SHRIKE_PREFETCH_TRACE`, `SHRIKE_LAYER_TRACE`, `SHRIKE_GPU_CAPTURE_DIR`, `SHRIKE_CACHE_DIAG`, `SHRIKE_GEN_DIAG`, `SHRIKE_PHASES` | 9 | the first four are read by `tools/decode-rig.sh`, `tools/turn-rig.sh`, `tools/expert-pool-replay.py`, `tools/prefetch-coverage.py` and the parsers; the other five have no reader outside `docs/` | four stay; five go |
@@ -172,7 +172,7 @@ covers all four with the design as presented.
 2. **ShrikeBench** (the target and its eight files): its MoE mode measures a dispatch
    production never uses (the hand-stuffed argument buffer, no `useResource`, no constants;
    Davor's note of 2026-08-30), and nothing in `tools/` runs it. A microbench the reading
-   layers' chapter needs will be written against production's dispatch.
+   layers' chapter needs will be written against production's dispatch. **Done: ShrikeExpertBench, v21 (noted 2026-09-23).**
 3. **The prefetch's off switch**: the lever won three times; the replay's no-fills row
    reproduces the off control to the tenth of a miss, so the control survives in the
    instrument, not in the binary.
@@ -254,7 +254,7 @@ Two things the deletions surfaced that the plan did not name: the prompt cache's
 identity lost two knob names (rdadvise, the policy), so persisted prompt-cache entries
 re-key once after the deploy, a one-time miss with no numerics involved; and the GDN
 delta-step kernels keep a checkpoint parameter whose only writer was MTP (a production
-kernel signature, left for a decision of its own; the review's fold takes it out).
+kernel signature, left for a decision of its own; the review's fold takes it out). **Done: the checkpoint parameter went in the review's fold (noted 2026-09-23).**
 
 **The arms (2026-09-08, the mini at `4003388`'s build before the review's fold, deployed
 at the bare launch; golden identical on both profiles there; two production lifetimes per
@@ -440,7 +440,7 @@ The count, at `8e81f7e` against `3bfcd89`:
 | what | before | after |
 | --- | ---: | ---: |
 | swiftlint baseline entries | 14 | 0, the file gone |
-| the longest function body | 289 lines | 110 (the server parser's switch, ten from the bar: the next two or three flags put it over, and the honest split then is by option group) |
+| the longest function body | 289 lines | 110 (the server parser's switch, ten from the bar: the next two or three flags put it over, and the honest split then is by option group). **Superseded: 74025c3, v23 (noted 2026-09-23).** |
 | `lint:allow-long` doc paragraphs (prose only) | 18 | 0 |
 | the ten files | 11830 lines | 12472 (+642: signatures, structs, calls, returns) |
 | lines under `sources/` | | +1792 −1152 |
@@ -607,4 +607,4 @@ scheduled: the ANE prefill's switch (its own record decides); the `.gturbo` form
 family and the two sidecar bundles on the mini (a delete is Davor's); the server parser's
 exhaustive switch at 110 lines, ten from the bar (split by option group when the next
 flags come); the markdown link checker globbing the gitignored SDD workspace (a review
-package with a diff of markdown links trips it; keep those out of the repo directory).
+package with a diff of markdown links trips it; keep those out of the repo directory). **The reading layers are done under other names (v18's surface A, then v20, v21 and v22), and the server parser's switch is superseded (74025c3, v23); the ANE prefill's switch, the MTP family with the two sidecar bundles, and the link checker are filed in tt as SHRIKE-21, SHRIKE-18 and SHRIKE-46 (2026-09-23).**

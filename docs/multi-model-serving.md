@@ -5,14 +5,14 @@ v24's trim: `--model-id`, `--models-dir`, `--preload`, `--idle-unload-seconds`,
 `--prompt-cache-mode` and `--prompt-cache-disk` left argv; the roster, the idle
 machinery and the prompt cache they selected did not, and the cache's settled
 values are `ModelSessionPlan` defaults now. Its open question about the disk cache
-rehydrating across a swap is therefore still open and now costs an edit to ask.
+rehydrating across a swap is therefore still open and now costs an edit to ask. **Filed in tt as SHRIKE-49 (2026-09-23).**
 
 Two lines of the **config format** below were corrected rather than left as the
 record, because this is the only place that format is documented and a reader
 following it would have been misled rather than merely dated: the file is
 `~/.shrike/config.json`, not `server.json`, and `idle_unload_seconds` is no
 longer a key — `ShrikeConfig` does not reject unknown keys, so it would have been
-accepted and silently discarded. See [v24-unified-cli.md](v24-unified-cli.md).
+accepted and silently discarded. See [v24-unified-cli.md](v24-unified-cli.md). **Filed in tt as SHRIKE-6 (2026-09-23).**
 
 ## Objective
 
@@ -234,7 +234,7 @@ not something a client can reach.
   (v6 plan, *Global constraints*), so the check is a pre/post A/B generation on the same
   machine and model (temperature 0, fixed seed), plus a `memory_pressure` watch across
   one forced swap — the strict-ordering claim in Residency is checkable there and
-  nowhere else.
+  nowhere else. **Done: measured at deploy, 2026-08-28 (:163-168) (noted 2026-09-23).**
 
 `ServerPromptCache` needs nothing. `ServerPromptCacheDomain` already keys every entry by
 `modelID` alongside the runtime profile, template hash and KV storage, so cross-model KV
@@ -253,7 +253,7 @@ than a week. This is a shape, not a commitment: the server module has been read,
   help text states "Pair with `--prompt-cache-disk`, since unloading discards the
   in-memory prefix cache," and entries are domain-keyed by `modelID`, so a swap back
   should find its own entries. The load-side rehydrate path has not been traced. Verify
-  during implementation; do not claim the benefit until then.
+  during implementation; do not claim the benefit until then. **Filed in tt as SHRIKE-49 (2026-09-23).**
 - **Whether two models could ever be co-resident on 16 GiB.** Two sets of dense weights
   plus two expert caches is not obviously impossible, and is not measured. Out of scope
   either way — the design assumes one slot.
@@ -273,11 +273,11 @@ than a week. This is a shape, not a commitment: the server module has been read,
 - **MTP is excluded, not removed.** Withdrawing it from `ServerModelSession.load`, the
   `qwen36_mtp` family, `RepackPlanner` and ShrikeBench is a separate change with its own
   blast radius. Here the family is simply not servable, so the two `-mtp` bundles never
-  enter the roster and config never sets `mtpModelDirectory`.
+  enter the roster and config never sets `mtpModelDirectory`. **Filed in tt as SHRIKE-18 (2026-09-23).**
 - **Per-model overrides beyond `id` are not built.** The manifest already supplies what
   varies per model — `prefillChunkTokens` resolves from family inside `previewFacts`, and
   prompt cache mode resolves through `effectivePromptCacheMode`. The `defaults` block
-  exists so a per-model override slot can be added later without reshaping the file.
+  exists so a per-model override slot can be added later without reshaping the file. **Filed in tt as SHRIKE-7 and SHRIKE-12 (2026-09-23).**
 
 ## Two things not to misread
 

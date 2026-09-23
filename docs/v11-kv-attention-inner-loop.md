@@ -59,4 +59,4 @@ still reads its KV head's chunk). Floor estimate at 1900 ctx: ~0.25
 ms/layer vs today's ~2.0 — i.e., most of the depth tax, worth ~10+
 ms/token at 2–3k ctx. If the twin shows less, the residual is load
 latency, and a KV-head-major regrouping (share K/V reads across the 8 Q
-heads of a KV head) is the follow-on, not a rewrite of this design.
+heads of a KV head) is the follow-on, not a rewrite of this design. **Done: V4 (df74636; v11 plan:60-71) (noted 2026-09-23).**

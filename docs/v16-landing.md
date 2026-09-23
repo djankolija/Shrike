@@ -459,4 +459,4 @@ per-read cost, the one term every chapter since v13 has circled and none has mov
 consolidation series (the plan's Candidates: the architecture document, the knobs pruned
 by measured status, one residency publish path, the runner decomposed) is the next
 chapter, on Davor's direction of 2026-09-07; the reading layers come after it on a
-smaller tree.
+smaller tree. **The reading layers are done under other names: v18's surface A, then v20, v21 and v22 (noted 2026-09-23).**

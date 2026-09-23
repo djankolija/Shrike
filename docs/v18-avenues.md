@@ -259,13 +259,13 @@ lands) hides 30 µs of compute per expert and nothing else.
   width eight's numbers exactly. At width eight, full-layer coverage is 0.442 / 0.428
   / 0.462 (the 300 / the 1k / the card) at distance one and 0.342 / 0.337 / 0.367 at
   distance two. Pricing a wider net needs one capture with the probe's top-24 logged,
-  a diagnostic change and a model run; it goes to v20's step zero.
+  a diagnostic change and a model run; it goes to v20's step zero. **Done: v20 S0.5 and S0.5b, the wide capture and the ranking at distance two and three (noted 2026-09-23).**
 - **A1. Fewer misses by a better slot split** (priceable offline). 128 slots per layer
   is uniform. If some layers route more concentrated than others, their spare slots
   belong to the flat layers. `tools/expert-pool-replay.py` reproduces the box's miss
   totals exactly from a route trace (v14 step zero), so a per-layer allocation can be
   priced with zero model runs on the archived traces
-  (`route-v17t4-prod-*-*.trace`).
+  (`route-v17t4-prod-*-*.trace`). **Done: v20 S0.4, the split shipped as T1.2 (`bc3e25c`) (noted 2026-09-23).**
 - **A2. Fewer misses by a better policy** (priceable offline). Aging-LFU is the one
   policy since v17. The same replay prices alternatives: LRU, frequency over a longer
   horizon, or a policy that knows the layer's router probe. v14 step zero compared
@@ -292,13 +292,13 @@ lands) hides 30 µs of compute per expert and nothing else.
   future instead of the real one. The slot split (A1) was not run: the replay takes
   one slot count for all layers, and the U-shaped profile says the split would move
   slots from the middle layers to both ends; a small patch of the replay prices it,
-  deferred to v20's step zero with the rest of the SSD pricing.
+  deferred to v20's step zero with the rest of the SSD pricing. **Done: v20 S0.4, SLRU shipped as T1.3 (`f0e056c`) (noted 2026-09-23).**
 - **A3. Earlier prediction** (idea; one arm measured null). The ring predicts the next
   layer's top-8 from the router probe at distance one and lands 6 to 7 hits per token.
   The two-distance queue measured null in v15 (remembered). Unexplored: predicting
   from the previous token's routing at the same layer (temporal locality), priceable
   offline from the traces by counting how often layer L's top-8 at token t+1 overlaps
-  token t's.
+  token t's. **Superseded: v20 S0.2 priced the previous position as a null by construction (noted 2026-09-23).**
 - **A4. Faster reads** (one arm measured null). Splitting one expert read across N
   preads is null on the mini's drive (2026-09-04, remembered). Unexplored: splitting
   by matrix so the fixup's gate and up projections start while the down projection is
@@ -381,7 +381,7 @@ lands) hides 30 µs of compute per expert and nothing else.
     layers where the lead is long and the miss share is high (30-39, a quarter of
     the demand), and layer 0, where it is the only predictor and the miss rate is
     the highest. Belady's bound (A2) says what perfect knowledge would be worth.
-    The design, the width and the cell accounting are v20's.
+    The design, the width and the cell accounting are v20's. **Superseded: v20 S0.2 priced the table as fills and S0.7 ruled it not built (noted 2026-09-23); the token of lead is filed in tt as SHRIKE-16 (2026-09-23).**
   - **Q3, needs a run: a real draft's expert overlap when its token is wrong.** The
     MTP head is out of the runtime since v17 (git history has it; the sidecar bundle
     is on both boxes). Cheaper drafts: prompt lookup (an n-gram match in the context,
@@ -438,7 +438,7 @@ lands) hides 30 µs of compute per expert and nothing else.
     (the prefill chunk's rows blitted out of the private scratch, each decode
     pass's row after its command completes), and the replica as
     `tools/q3-drafter-routes.py`, whose fills feed `tools/expert-pool-replay.py`
-    as `--speculative-fills`.
+    as `--speculative-fills`. **Done: `17babb9` (noted 2026-09-23); the kept `--dump-hidden` is filed in tt as SHRIKE-4 (2026-09-23).**
   - **The economics** (modelled): 26 non-resident experts per token at precision p
     means 26 / p reads; the drive's headroom is about 120 reads per token, so p above
     roughly 0.3 fits. The ring's cells are 9 per layer, 360 in all, enough for a
@@ -455,7 +455,7 @@ runs; v11's honest floor 1.3; measured 2.0.
   on half-row slices, the 64-chunk wall, the 4-position barrier cadence. A read of
   `attention_decode_partial_shared` and its dispatch geometry against the M1's 8
   cores, then a microbench if the read is inconclusive. The prize: the slope from 2.0
-  toward 1.0 per 1,000, about 7 ms per token at 7k and 16 at 16k.
+  toward 1.0 per 1,000, about 7 ms per token at 7k and 16 at 16k. **Done: v19 S0.3, the ablation ladder, named the loop form as the constraint (noted 2026-09-23).**
 - **B2. Fewer bytes per position** (numerics). Production already stores the KV cache
   at 8 bits; the engine's 4-bit mode is the remaining step and halves the roof under
   B1. Davor's call; a fresh golden. Note that the 8-bit rows mean the scan already
@@ -466,10 +466,10 @@ runs; v11's honest floor 1.3; measured 2.0.
   2.4 ms per token of walls across the ten layers, the same class as the GDN chain
   (D). Candidates: fold the combine pass into the o-projection's prologue, the RoPE
   and the KV append into the projection's epilogue. v10's half round-trip lesson
-  applies (fused kernels need the volatile slot or the bitwise arm catches it).
+  applies (fused kernels need the volatile slot or the bitwise arm catches it). **Filed in tt as SHRIKE-19 (2026-09-23).**
 - **B4. The two-pass structure** (idea). Partial plus combine is 20 dispatches per
   token. At short context a single pass may pay fewer walls; at long context the split
-  is what gives parallelism. Price after B1.
+  is what gives parallelism. Price after B1. **Filed in tt as SHRIKE-19 (2026-09-23).**
 - **B5. The calibration probe: what the hardware allows** (one model run, no Shrike
   code; Claude, 2026-09-08). Before anyone rewrites the scan, measure the best-known
   Metal decode-attention kernels (MLX's vector SDPA, llama.cpp's flash-attention
@@ -511,12 +511,12 @@ runs; v11's honest floor 1.3; measured 2.0.
   reduction once per tile instead of once per position. This is how the reference
   kernels in B5 treat GQA. The output changes at the level of fp32 summation order,
   the class v11 accepted with a fresh golden (`a264b22`); not an approximation, but
-  not byte-identical either. Davor's call whether that class is open in v18.
+  not byte-identical either. Davor's call whether that class is open in v18. **Filed in tt as SHRIKE-24 (2026-09-23).**
 - **B7. The ablation microbench** (a day, throwaway). If B5 says the hardware allows
   it, find what binds the current kernel before touching it: the same kernel with the
   softmax removed, with V removed, and as a pure load at the same layout. The one
   that collapses the slope names the constraint; v11's residual list is the
-  hypothesis set, and its M4 numbers do not transfer to the M1.
+  hypothesis set, and its M4 numbers do not transfer to the M1. **Done: v19 S0.3, the ablation ladder on the mini (noted 2026-09-23).**
 - **A note that closes a class of ideas.** Unified memory is one bus. The CPU, the
   ANE and the GPU draw from the same 68 GB/s, and the GPU already streams at 62.5. A
   second engine adds compute, never bytes; the ANE prefill wins on compute, and
@@ -551,10 +551,10 @@ had a chapter of its own.
   between the spec kernel's end and the hit kernel's start: a host round trip to
   classify and encode. Unexplored: encoding the hit dispatch unconditionally as an
   indirect dispatch off the GPU-side classifier (v16 put the classifier on the GPU),
-  so an empty hit layer costs a 10 µs wall and a full one no round trip.
+  so an empty hit layer costs a 10 µs wall and a full one no round trip. **Superseded: v18 T1.2 deleted the hit command and its submit gap (noted 2026-09-23).**
 - **C3. Fold the hit pass into the fixup pass on miss layers** (idea, small). On the
   13.6 layers that read, the hit kernel runs before the window opens; folding it into
-  the fixup dispatch saves a wall only on the 2.1 layers with hits and no miss.
+  the fixup dispatch saves a wall only on the 2.1 layers with hits and no miss. **Superseded: C1's pricing found its premise wrong, and v18 T1.2 deleted the hit command (noted 2026-09-23).**
 - **C4. Closed (2026-09-09).** An earlier draft asked whether the speculative pass
   computes a ninth expert. It computes the classifier's hits among the router's
   top-8, never more; the ring's nine cells per layer are the prefetch's, not the
@@ -715,7 +715,7 @@ the tail alone is five or six of them. v10 landed mergers where the bits allowed
 - **D2. The in-projection at the roof?** (needs a finer instrument). The role covers
   the chain; a per-kernel split needs a Metal capture or a kernel-level stats mode.
   14.2 MB per layer is 227 µs at the roof; if the GEMV runs slower than that, the
-  chain has a second pool.
+  chain has a second pool. **Filed in tt as SHRIKE-19 (2026-09-23).**
 - **D3. The delta state** (numerics). 4.2 MB read and written per layer, 2 ms per
   token at the roof, inevitable for GDN at 16-bit. A narrower state changes the
   output. Recorded, not proposed.
@@ -819,11 +819,11 @@ Levers, sized at these shapes:
   attention block is 0.8 to 2.0 s of 6.7 to 10.2 here, 12 to 25 %, so the switch is
   worth 1 to 2 s per tool turn at these contexts, more as the session grows. The
   record notes the two arms' outputs differ (the ANE runs fp16), a numerics question
-  for Davor before it is on.
+  for Davor before it is on. **Filed in tt as SHRIKE-21 (2026-09-23).**
 - **G2. The routed tile and the GDN chunk kernels' efficiency** (needs a read). v12
   built the matrix kernels and took 12k from 725 to 68 s; the tile is at about a third
   of peak, the GDN chunk kernel unmeasured against a floor. The M1 has simdgroup
-  matrix units and no more; the headroom is real but its size is a microbench away.
+  matrix units and no more; the headroom is real but its size is a microbench away. **Filed in tt as SHRIKE-22 (2026-09-23).**
 - **The outlier, read 2026-09-09 (S0.7, measured from the log):** the 20:07:21
   request (1,733 prompt, 600 cached, 140 answer tokens) took 25.5 s, and the GPU's
   kernel span for it was 9.9 s against 15.8 and 15.6 s for its two neighbours, whose
@@ -876,7 +876,7 @@ more tokens, or make each byte carry more information. Both exist as engineering
   produce row 0 bit-identical to the plain GEMV or the output changes; and the
   width-k decode path is a build (the k-row GEMVs, the expert-union dispatch, the KV
   append and the GDN checkpoint with rollback, which the fold took out of the kernels
-  and git history keeps). Workload-specific: the prize lives on code and tool turns.
+  and git history keeps). Workload-specific: the prize lives on code and tool turns. **Filed in tt as SHRIKE-16 (2026-09-23).**
 - **H2. Each byte carries more information: lossless compression with in-kernel
   decode.** The 4-bit affine format spends 4.5 bits per weight: 256 bits of indices
   and a bf16 scale and bias per group of 64. The indices are not uniform over 16
@@ -937,7 +937,7 @@ more tokens, or make each byte carry more information. Both exist as engineering
   to A5's dead time); the draft's bus traffic during a GPU-busy stretch would slow the
   GPU's GEMVs, so it must run only inside windows; and the second GPU queue variant
   of this idea is not recommended (v15's dedicated queue paid 162 µs per miss layer,
-  and the AGX driver's concurrent-encoder trap).
+  and the AGX driver's concurrent-encoder trap). **Filed in tt as SHRIKE-17 (2026-09-23).**
 - **What does not convert.** Recompute instead of read: the KV rows are already
   smaller than the hidden states they come from, and the GDN state is a sequence
   accumulator. Skipping small activations in the expert down-projection: lossy.
@@ -994,7 +994,7 @@ gaps; it is not a hidden row. The host waits (`path_router_wake` 2.42,
   (`ServerInference.swift:729`, `:837`), so every server token, greedy or not, takes
   the logits path. For a temperature-zero request the fused path saves the 0.16 ms
   sample role and part of the 0.9 ms token boundary. Worth it only if Pi sends
-  temperature zero; find out first.
+  temperature zero; find out first. **Closed 2026-09-23 with no tt entry, by the owner's ruling: Pi's config sets no temperature, so its requests get Shrike's default 0.6 (`Sampler.swift:7`) and would never take a greedy path (read from config, not observed on the wire); the fused head stays not scheduled.**
 - **I2. The decode loop's core and QoS** (verify, one run). The reader queues are
   `.userInitiated`; the decode loop runs on Swift concurrency's cooperative pool with
   no priority I could find. On an idle box it lands on P-cores anyway, but QoS also
@@ -1066,12 +1066,12 @@ where compute or structure binds:
   scalar FMAs at about a third of the M1's peak (G2). Hand-written
   `simdgroup_matrix` fragments were v12's named fallback ("more code, same math")
   and were never built. The dequantised 4-bit weights become 8×8 half tiles; the
-  reduction order changes.
+  reduction order changes. **Filed in tt as SHRIKE-22 (2026-09-23).**
 - **J2. The attention scan's arithmetic** (class 2; B6 is the structural half).
   Lazy rescaling in the online softmax (rescale the accumulator only when the
   running max moves by more than a threshold, exact in real arithmetic), `exp2` with
   the scale folded into the query, and the 8-heads-as-a-matrix tile. All change
-  rounding, none change the math.
+  rounding, none change the math. **Filed in tt as SHRIKE-23 (2026-09-23).**
 - **J3. An exact argmax over fewer rows** (class 1 for greedy only). The head reads
   all 248k rows because the maximum could be anywhere. With a stored norm per row
   (1 MB), rows whose `‖w‖·‖h‖` cannot beat the best logit found so far are provably
@@ -1144,7 +1144,7 @@ chapter, whose agreed-cell mechanism it shares, and designed on its edges first 
 stop path against the GDN state a committed pass mutates, the error surfacing per
 layer, the agreed-cell contract, the cancel with two in flight); the architecture is
 the win and any speedup a bonus. v18 closes with Tasks 1, 3, 4 and 6 landed and Tasks
-2 and 5 folded into v20's design.
+2 and 5 folded into v20's design. **Done: v20 T3.0 to T3.4 (noted 2026-09-23).**
 
 The steps are the avenues in order, each measurable on its own: C5 (the hits in the
 speculative command), C6 (the fixup as a speculative command, reads into agreed
@@ -1186,7 +1186,7 @@ a class-2 commit passes three instruments and then re-captures the golden:
    wide margin is a defect. Forcing the tokens removes the butterfly effect, so the
    comparison measures the kernel, not the trajectory. This instrument does not exist
    yet: a forced-token decode mode plus a logits dump in the runner, a diagnostic and
-   itself class 1. Build it once, with the first class-2 change.
+   itself class 1. Build it once, with the first class-2 change. **Built as v19 Task 1 (T1.1 to T1.4); its `--force-tokens` was deleted in v24 (`ca5374f`), and a forced-token path back is SHRIKE-20's prerequisite (noted 2026-09-23).**
 3. **The read.** The golden prompts free-run on the new build, the answers read by
    Davor for route and language. This is the one judgment only a reader makes; the
    instruments above make it rare that the read finds anything. It is not a
@@ -1220,7 +1220,7 @@ the whole board priced once at its step zero; its pair is
 step zero names (A0, A9 or A1/A2); v20 is lossless compression scoped to the experts
 and the head (H2); v21 is the class-2 block (B6, J1, J2, G1) with the forced-token
 instrument and one golden re-capture; H1 and H3 after that. Each chapter sized like
-v13 through v17 so each gets a clean measured close.
+v13 through v17 so each gets a clean measured close. **The later chapters' items are filed in tt: the class-2 block as SHRIKE-20, H1 as SHRIKE-16 and H3 as SHRIKE-17 (2026-09-23).**
 
 **2026-09-09, step zero's close (S0.10): what the pricing says about the order, for
 Davor's ruling.** The SSD surface's mechanism, as priced: no online policy is worth
@@ -1333,7 +1333,7 @@ large; it can run beside them if the chapter has two hands.
 J2 if B5 allowed them, J1, and G1 if wanted; one golden re-capture at the end.
 
 **Next chapter:** H1 (speculation with prompt lookup and a decode-width pass), H3
-(the draft in the spin-wait), G2's remainder.
+(the draft in the spin-wait), G2's remainder. **H1 is filed in tt as SHRIKE-16, H3 as SHRIKE-17 and G2 as SHRIKE-22 (2026-09-23).**
 
 **What "fastest and easiest first" gets right:** phase 0 is exactly that, and it is
 the correct first week because its outputs decide which mechanisms exist. **What it
@@ -1345,8 +1345,8 @@ measurement for the end.
 
 - Which surface opens first: the miss window (the larger number on the fixed shapes),
   attention at context (the larger number in the sessions the box actually serves),
-  or the fixup machinery (never had a chapter)?
+  or the fixup machinery (never had a chapter)? **Resolved 2026-09-09 by section 5's decisions: the fixup machinery first as v18, the quiet host; attention at context as v19, the scan rewrite, by the owner's ruling that the recommendation stands; the miss window as v20 (noted 2026-09-23).**
 - Resolved 2026-09-09 (section 5): class 3 closed, class 2 open under the variance
   rule with the three-instrument gate; C4 resolved (eight, never nine).
 - What temperature Pi sends: the model's default per Davor, likely 0.6 for ornith
-  (its model card carries suggested values); not logged by the server. Decides I1.
+  (its model card carries suggested values); not logged by the server. Decides I1. **Answered 2026-09-23 by the owner's ruling: Pi's config sets no temperature, so its requests get Shrike's default 0.6 (`Sampler.swift:7`), read from config, not observed on the wire; I1 is closed with no tt entry.**

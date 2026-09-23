@@ -176,4 +176,10 @@ dated — `v6-dialect-normalized-cache.md` alongside `v6-implementation-plan.md`
 shape for new work. The plan's own per-task checkboxes are the status of record; do not
 duplicate status into other files.
 
-This project's open work is tracked in `tt`.
+This project's open work is tracked in `tt`; the docs hold design and outcome. While a chapter
+runs, its plan's checkboxes are the status of its own tasks. Anything it leaves undone (a
+follow-on, an "Out of scope" item, a deferred step) is filed in `tt`, and the doc points at the
+id (`**Filed in tt as SHRIKE-n.**`) rather than carrying the work. A step that did not run
+keeps its `- [ ]` with its status in the lead, `(not run: <reason>)`, so an unticked box with
+no status is open work. Mark a closed item on its last line rather than adding lines: docs,
+`tt` and notes cite each other by line number.

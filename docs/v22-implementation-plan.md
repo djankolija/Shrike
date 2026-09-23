@@ -41,9 +41,9 @@ at the close.
 
 ## The close
 
-- [ ] ThreadSanitizer over the whole suite.
-- [ ] The whole-branch review, its findings folded into the owning commits.
-- [ ] `docs/architecture.md` at the close's tree (the arena's chunks, the
-      allowed counts, the scratch's lifetime, the production launch).
-- [ ] Production on the mini at the close's build and configuration,
-      golden-verified on both boxes.
+- [x] ThreadSanitizer over the whole suite. **Ticked 2026-09-23:** v22's own run is not recorded in the repo; the later clean runs at `ae18920` (v23's close) and `108e5b9` (v24's close) cover its code.
+- [x] The whole-branch review, its findings folded into the owning commits. **Ticked 2026-09-23:** the review is `close-review.md` in `~/.claude/handoffs/archive/shrike-v22-t3/`, outside the repo; the branch merged as three task commits ending at `e9e6084`, and the two findings kept as bounds are recorded in the design document's Task 1 and Task 2.
+- [x] `docs/architecture.md` at the close's tree (the arena's chunks, the
+      allowed counts, the scratch's lifetime, the production launch). **Ticked 2026-09-23:** `e9e6084` updated its arena paragraph, invariant 1, the golden instrument and the v22 history entry.
+- [x] Production on the mini at the close's build and configuration,
+      golden-verified on both boxes. **Ticked 2026-09-23:** the golden byte-identical on the mini at the two-chunk arena and production relaunched at the configuration (v22-pool-capacity.md:199-203, `e9e6084`); this box's golden at Task 2.

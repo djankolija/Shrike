@@ -1,6 +1,6 @@
 # v5: a second and third architecture — objective and steps
 
-Status: objective agreed, implementation plan not yet written.
+Status: objective agreed, implementation plan not yet written. **Done: both families are in `ModelFamily` (ModelTypes.swift:11-12) and served since the multi-model deploy (multi-model-serving.md:66-71, 163-168) (noted 2026-09-23).**
 
 ## Objective
 

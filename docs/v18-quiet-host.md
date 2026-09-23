@@ -632,7 +632,7 @@ agreed-cell contract between the host and kernels encoded before the router has 
 and the cancel with two in flight. The architecture is the win; any speedup is a
 bonus. Its graded value today, 0.6 to 0.85 ms per token, is under the noise and grows
 in relative terms as the token gets faster (about 1.5 to 2 % of a 45 ms token after
-v19's scan rewrite). v18 closes without it.
+v19's scan rewrite). v18 closes without it. **Done: v20 T3.0 to T3.4 (noted 2026-09-23).**
 
 ### Task 6: the walls (D1; scheduled by Davor's ruling, 2026-09-09, after Task 3)
 
@@ -935,10 +935,10 @@ drift is Task 1's reduce, and it is pinned above.
 - **The class-2 block** (B6, J1, J2, G1): the scan rewrite (B6, J2) is v19 by the
   close's ruling, behind the variance gate with the forced-token instrument built
   there ([v19-scan-rewrite.md](v19-scan-rewrite.md)); the rest after v21, one
-  golden re-capture each.
-- **Speculation revisited** (H1) and **the draft in the spin-wait** (H3): after v21.
+  golden re-capture each. **The rest is filed in tt as SHRIKE-20 (2026-09-23).**
+- **Speculation revisited** (H1) and **the draft in the spin-wait** (H3): after v21. **Filed in tt as SHRIKE-16 and SHRIKE-17 (2026-09-23).**
 - **The fused greedy head in the server** (I1): only if a client sends temperature
-  zero; not scheduled.
+  zero; not scheduled. **Closed 2026-09-23 with no tt entry, by the owner's ruling: Pi's config sets no temperature, so its requests get Shrike's default 0.6 (`Sampler.swift:7`) and would never take a greedy path (read from config, not observed on the wire); it stays not scheduled.**
 
 ## Risks
 
@@ -972,7 +972,7 @@ that could return the sentinel as a token, a dead hit-slot copy and a stale name
 the routed stage, the T4 record's claim about the CLI's path, the loop tests all at
 temperature 0 (a seeded temperature-0.8 parity test added), and the architecture
 document's stale stage list. The runtime and test fixes were folded into their owning
-commits; the documents into the close commit.
+commits; the documents into the close commit. **The golden's missing boundary path is done: v19 T1.3 and T1.5, the `-lh` baselines (noted 2026-09-23); SHRIKE-2 re-examines the golden's shape.**
 
 The tally on the mini, the cold answers' tok/s, two lifetimes per shape, a slow-drive
 lifetime (`prefetch_late` above zero) marked with an asterisk:
@@ -1060,4 +1060,4 @@ rule; their reads archived); Task 3 and T6.0 never A/B'd at their size (the scri
 in the T6 archive); the shadow ledger (the board's section 2) keeps every hidden item
 with its exposer; the tracks page is pre-Task-4. The chapter order after v18: v19 the
 scan rewrite (class 2, behind the variance gate, about 14 ms per token at 7k), v20 the
-SSD mechanism with the fold, v21 compression, then the class-2 block.
+SSD mechanism with the fold, v21 compression, then the class-2 block. **Done: the fold, v20 T3.0 to T3.4; superseded: the four small merges, by the floor rule (the plan's T6.2 and T6.4 to T6.6) (noted 2026-09-23).**

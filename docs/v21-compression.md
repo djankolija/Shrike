@@ -339,7 +339,7 @@ decoder that recovers it runs an order of magnitude below the roof.
 reach the same prizes are all to be tried, in the order of Claude's choosing:
 the pool's capacity by freeing RAM (S0.2's slope, a RAM ledger on the mini
 first), speculation revisited with the drafter's measured acceptance (H1, Q3's
-82 to 86 %), and the attention row's fixed part (B3, B4) with its instrument.
+82 to 86 %), and the attention row's fixed part (B3, B4) with its instrument. **The pool's capacity is done (v22, v22-pool-capacity.md, noted 2026-09-23); speculation revisited is filed in tt as SHRIKE-16 and the attention row's fixed part as SHRIKE-19 (2026-09-23).**
 
 ## The chapter's close (2026-09-18)
 
@@ -362,7 +362,7 @@ performance one.
 
 ## Approaches for the decoder
 
-Held until S0.1 names the code; the candidates' decoders are sketched above.
+Held until S0.1 names the code; the candidates' decoders are sketched above. **Superseded: the chapter closed at step zero by the ruling of 2026-09-18 (noted 2026-09-23).**
 
 ## Tasks
 
@@ -370,7 +370,7 @@ Held until S0.5. The expected shape, if the gate opens: Task 1 the repack and th
 loader (the coded expert file and head, the per-layer stride, the scheme gate, the
 golden on both builds); Task 2 the decode kernels (phase 1, phase 2, their
 variants); Task 3 the head; Task 4 prefill's landing decode; Task 5 the dense
-weights only by S0.4's number; the close.
+weights only by S0.4's number; the close. **Superseded: the gate did not open and the chapter closed at step zero by the ruling of 2026-09-18 (noted 2026-09-23).**
 
 ## Method
 
@@ -388,9 +388,9 @@ the coder or the decoder, never a numerics decision.
 
 ## Out of scope, and where it goes
 
-- **The dense weights** (GDN, attention, the shared expert): by S0.4's number.
+- **The dense weights** (GDN, attention, the shared expert): by S0.4's number. **Superseded: S0.4 failed the gate and H2 closed at step zero (noted 2026-09-23).**
 - **KV compression**: the KV row is already 8-bit affine with `--kv-bits 4|16`
-  on the shared kernel; a lossless code over it is another chapter's question.
+  on the shared kernel; a lossless code over it is another chapter's question. **Closed 2026-09-23 with no tt entry, by the owner's ruling: even with the scan at its byte roof (0.17 ms per 1,000 context per token; measured 0.39 after v19) the whole KV read is about 1.2 ms per token at 7k and 5.4 ms at 32k, int8 with a per-64 affine range leaves only a few percent of entropy slack (an estimate; v21 measured about 4 % on the similar expert format), so a code saves at most about 0.3 ms at 32k, under the rig's 1.7 % noise, before a decoder v21 measured at 5 to 7× slower, and a few percent of the KV's 356 MB at 32k is a quarter of a slot. Only fewer bits move KV bytes, and that is class 3 (closed; `--kv-bits 4` exists).**
 - **Lossy requantization** of any kind: not this chapter, not this model.
 - **The ANE**: unchanged.
 

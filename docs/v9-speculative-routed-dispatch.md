@@ -128,7 +128,7 @@ the hole. A realistic target is body 77 → low 60s ms/token.
   measured as part of S2's equivalence run.
 - **Why per-slot is the default today** is not recorded anywhere. E5 answers
   the perf half (pool is far faster here); the remaining unknown is whether
-  per-slot exists for boxes where a contiguous pool cannot be allocated.
+  per-slot exists for boxes where a contiguous pool cannot be allocated. **Superseded: pool became the code default in v10 T5 (v10 plan:66-67) and per-slot was deleted (v17-consolidation.md:65) (noted 2026-09-23).**
 
 Implementation stages, gates, and status of record:
 [v9-implementation-plan.md](v9-implementation-plan.md).

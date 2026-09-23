@@ -7,7 +7,7 @@ learns to outgrow one Metal buffer so it can take them. Companion plan:
 the status of record. The chapter is the first of the three venues Davor ruled
 at v21's close ([v21-compression.md](v21-compression.md), S0.5: the pool's
 capacity, then speculation revisited, then the attention row's fixed part); the
-tree it starts from is `main` at `57c7f2f`.
+tree it starts from is `main` at `57c7f2f`. **Speculation revisited is filed in tt as SHRIKE-16 and the attention row's fixed part as SHRIKE-19 (2026-09-23).**
 
 Every number in this document is labelled **measured** (a counter, a clock or a
 footprint on the mini), **modelled** (arithmetic on measured inputs) or
@@ -75,7 +75,7 @@ a `defer` and `ensurePrefillScratch` reallocates at the next prefill, the
 settle rewrite included; a runner test that a prefill, a decode, a reset and a
 second prefill match pure decode with the scratch gone after each. The cost is
 one allocation and first touch per request, measured on the mini by the turn
-rig. Built and committed 2026-09-18 (`9e02f3b`).
+rig. Built and committed 2026-09-18 (`9e02f3b`). **Keeping the scratch across a short idle window is filed in tt as SHRIKE-42 (2026-09-23).**
 
 The release is bounded to the success path, and the bound is worth stating.
 Every span drains before `prefillChunked` returns (each chunk's tail, the shared
@@ -133,7 +133,7 @@ is that Shrike will serve them itself in a chapter of its own (the right
 architecture: one process owning the box's RAM), which frees the rest of this
 table. The on-demand alternative was priced and declined: a reload during a
 tool call would compress the pool's idle pages and re-fault them at the next
-turn, about what the slots save.
+turn, about what the slots save. **Filed in tt as SHRIKE-43 (2026-09-23).**
 
 ## Step zero
 
@@ -194,7 +194,7 @@ turn, about what the slots save.
   a cold prefill; a short warm turn pays a larger share, noted as a follow-on
   (keep the scratch across a short idle window). The `base` arm on the T2
   build sits 1 to 3 % under the v20 close's arms, the box's drift; the
-  one-chunk arena's indirection is not visible in the layers' sum.
+  one-chunk arena's indirection is not visible in the layers' sum. **The follow-on is filed in tt as SHRIKE-42 (2026-09-23).**
 
   The golden on the mini at the two-chunk arena (`--expert-cache-slots 160`
   through the golden script's new `CLI_EXTRA_ARGS`, 6,400 cells plus the ring's

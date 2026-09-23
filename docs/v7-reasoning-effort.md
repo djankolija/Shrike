@@ -63,7 +63,7 @@ Effort exists on exactly one of the three supported families:
   working and get the closest honest behavior.
 - **Effort threads through render calls as a parameter, not tokenizer state.**
   The tokenizer stays immutable; per-request values pass down the encode path.
-  This is also the shape a later per-request ChatML thinking mode would take.
+  This is also the shape a later per-request ChatML thinking mode would take. **Filed in tt as SHRIKE-36 (2026-09-23).**
 - **No forced-token injection.** A hard thinking budget needs the runtime to
   force a transition sequence mid-generation (`</think>`, or Harmony's
   `<|end|><|start|>assistant<|channel|>final<|message|>`). Declined for now:
@@ -136,11 +136,11 @@ Two knobs, both unit-testable without loading a model:
 ## Out of scope
 
 - Per-request thinking control for ChatML models (deferred; needs a
-  request-field convention decision — no OpenAI standard exists for on/off).
+  request-field convention decision — no OpenAI standard exists for on/off). **Filed in tt as SHRIKE-36 (2026-09-23).**
 - Thinking budgets / forced-token injection.
 - The Bug-1 renderer change (re-rendering assistant tool-call turns in the
   model's emission form rather than the upstream template's form) — awaits the
-  evidence Phase A produces.
+  evidence Phase A produces. **Done: in v8 (1da1c4c) (noted 2026-09-23).**
 - Responses API effort surface.
 - `/v1/models` capability enrichment for LLMBench.
 - Gemma support.
@@ -153,4 +153,4 @@ are covered by unit tests against fixture tokenizers; no model run is required
 for correctness. Live confirmation (pi sends the field, the rendered system
 block reflects it, per-effort thinking-length differences) happens at the next
 mini deploy, which independently carries the rename checklist from
-[CLAUDE.md](../CLAUDE.md).
+[CLAUDE.md](../CLAUDE.md). **The live confirmation is filed in tt as SHRIKE-38 (2026-09-23); the rename checklist is done (the rename landed 2026-08-30).**

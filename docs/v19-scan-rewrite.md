@@ -400,7 +400,7 @@ hundred registers a lane at four heads; the reference runs the same chain behind
 ten times the simdgroups, which our register budget cannot buy. The arithmetic
 levers left (the affine dot that folds the dequant into one scale per head, a
 shared butterfly reduction across the four heads) are class-2 and worth 5 to 10 %
-each (C), none structural.
+each (C), none structural. **Filed in tt as SHRIKE-23, in the SHRIKE-20 chapter (2026-09-23).**
 
 Transferred to the runner (T, the bench's 1.7× on the fix's measured slope): 0.72
 to about 0.42 ms per 1,000; at 7k the scan 5.2 to 3.0 ms, **about 2 ms per token,
@@ -859,7 +859,7 @@ the quantize, the combine, the walls and the layer's speculative work) is the ro
 floor now and belongs to the walls and the fold. The register cliff and the double
 row read are recorded risks of the design, not defects. The mini's drift is
 unexplained. The next chapter is v20, the SSD mechanism with the fold as structure,
-per the order ruled at v18's close.
+per the order ruled at v18's close. **The arithmetic levers are filed in tt as SHRIKE-23, in the SHRIKE-20 chapter, and the attention row's fixed part as SHRIKE-19 (2026-09-23).**
 
 **The close's gates.** The four gates on the final tree (the hardening's run: 1,258
 tests in 213 s, zero warnings, lint and links clean); the golden identical on all
@@ -960,12 +960,12 @@ approximation enters the scan.
 - **The context-independent part of the attention row** (B3, B4: the walls around
   the projections, the combine's fixed 2 MB per layer, the two-pass structure at
   short context): priced after this chapter's arms show the new slope, a class-1
-  chapter of its own or a v20 task.
+  chapter of its own or a v20 task. **Filed in tt as SHRIKE-19 (2026-09-23).**
 - **Prefill**: untouched; the scan is decode-only and prefill attention runs the
   matrix kernels of v12.
 - **The SSD mechanism and the fold**: v20. **Compression**: v21. **The other
   class-2 avenues** (J1, G1, the GDN chain's math): after v21, on this chapter's
-  instrument.
+  instrument. **Filed in tt under SHRIKE-20, the GDN chain's math with SHRIKE-23 (2026-09-23).**
 
 ## Risks
 

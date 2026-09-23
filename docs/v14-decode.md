@@ -565,7 +565,7 @@ measured rows above, not a measurement.
   fused path cannot remove the head GEMV, only the full logits writeback and a
   dispatch, so the recoverable share is a fraction of 5 ms and it is a behaviour
   change (no logits means no sampling and no logprobs), not a free flip. Recorded
-  with its ceiling, not priced.
+  with its ceiling, not priced. **Closed 2026-09-23 with no tt entry, by the owner's ruling: it stays not scheduled, since Pi's config sets no temperature, so its requests get Shrike's default 0.6 (`Sampler.swift:7`) and would never take a greedy path; read from config, not observed on the wire.**
 
 **Not levers here.** The attention stack is the largest GPU term (15.57 + 9.84 =
 25.4 ms per token on the card, 34 % of the wall) and it is kernel work in v11's
@@ -629,7 +629,7 @@ after digests in the verdict).
 - The ANE ([ane-prefill.md](ane-prefill.md)).
 - A larger expert pool or a different drive: 8G is the measured optimum on the 16 GB
   mini and the fetch-speed lever is shut on the deploy target.
-- The prompt cache's interior snapshots (a cache-chapter item, recorded in v13).
+- The prompt cache's interior snapshots (a cache-chapter item, recorded in v13). **Filed in tt as SHRIKE-27 (2026-09-23).**
 
 ## Risks
 

@@ -57,7 +57,7 @@ the probe's sleeping host). The design doc carries the tables and the placement 
 
 ### Task 1: the placement gate on the ring in the tree
 
-- [ ] **T1: the ring's reads are issued beside the demand reads, and the probe says
+- [x] **T1: the ring's reads are issued beside the demand reads, and the probe says
   that is the whole loss.** `begin` runs right after the demand fetch is submitted
   (`RealForwardRunner.swift:7011-7020`), the demand batch and the ring's batch are
   both work items on the shared four-worker scheduler whose priority orders the queue
@@ -72,7 +72,7 @@ the probe's sleeping host). The design doc carries the tables and the placement 
   the reading layers return to production's per-read cost with the ring on.** That
   per-read reading is the verdict that decides Tasks 2 and 3; tok/s is the rule for
   the default. Modelled net at the current probe and copy: 0 to +2.5 %. **The mini
-  decides**, and a measured null is a result.
+  decides**, and a measured null is a result. **Ticked 2026-09-23:** landed as d3da6f9 (Step 5, below).
 
   **The mechanism, verified in the tree** (against `4cc6e58`).
   - Every backend's demand batch ends in one `ExpertLoadOperation.finish`
@@ -109,7 +109,7 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         at top-4, 1.59 to 1.71 at top-8** ([v14-decode.md](v14-decode.md) "Task 1").
         The drift on prod's tok/s across the T1 A/B: −1.2 / +0.3 / +0.6 % on the
         three answers.
-  - [ ] Step 1 (tests RED first): `RuntimePrefetch` in `RuntimeConfiguration.swift`
+  - [x] Step 1 (tests RED first): `RuntimePrefetch` in `RuntimeConfiguration.swift`
         (enabled, `topM`, `inFlight`, `placement` in `after` / `beside`, `distance`,
         `trace`) with `environmentValue()` fail-closed on every bad value, production
         off, both binaries threaded; the banner's `prefetch=off` and `prefetch=on
@@ -122,8 +122,8 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         (the budget counts `.submitted` and `.inFlight` slots, the best-scored
         predictions are kept, the dedupe against resident and active, the reclaim
         count); the runner's placement selection on a fake plan (a batch present
-        defers, an all-hit layer issues at once).
-  - [ ] Step 2 (the code): the configuration and the banner; the ring's
+        defers, an all-hit layer issues at once). **Ticked 2026-09-23:** landed in d3da6f9 (Step 5).
+  - [x] Step 2 (the code): the configuration and the banner; the ring's
         `inFlightBudget`; `placement=after` registers `begin` on the layer's demand
         operation's completion with the predicted ids and the target layer captured
         and the resident set read at completion (the demand batch's own experts are
@@ -133,7 +133,7 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         `prefetch_overlapped` (demand batches submitted while a ring read was in
         flight), `prefetch_late` (predicted experts in flight at plan time that the
         plan then read again). Four gates; the filtered ThreadSanitizer pass on the
-        streaming and runtime suites.
+        streaming and runtime suites. **Ticked 2026-09-23:** landed in d3da6f9 (Step 5).
   - [x] Step 3 (numerics): golden IDENTICAL on both profiles on the M4 Pro at the
         default, at `after` B = 1 and B = 2 at top-8, and at `beside` top-8; on the
         mini at the default and the candidate cells at each amend and at all cells at
@@ -213,7 +213,7 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         logit bias (`RealForwardRunner.swift:1473-1533`), so `L + 1` and `L + d`
         index the same bytes; the fix matters for gpt-oss (a per-layer router bias)
         and Kimi (a per-layer correction bias). T1's "two layers ahead costs 0.10 of
-        p" stands as measured; the candidate (e) is priced at that number.
+        p" stands as measured; the candidate (e) is priced at that number. **A golden for the gpt-oss and Kimi families is filed in tt as SHRIKE-11 (2026-09-23).**
   - [x] Step 7 (design doc): the Task 1 section, the After T1 block, the lever
         entries updated with what was measured. Task review by a fresh reviewer,
         fixes folded into the owning commits. **The review (2026-09-07) found one
@@ -255,7 +255,7 @@ the probe's sleeping host). The design doc carries the tables and the placement 
 
 ### Task 2: the adoption by GPU blit and the bounded late join
 
-- [ ] **T2: adoption is a host copy of a full expert stride inside the submit gap,
+- [x] **T2: adoption is a host copy of a full expert stride inside the submit gap,
   0.12 ms per adopted expert (1.2 to 1.5 ms per token at Task 1's default, the
   submit gap 2.2 to 2.4 to 3.4 to 3.7 ms per token measured), and a correct
   prediction still in flight at plan time (0.5 to 1.0 per token) is read twice.**
@@ -274,7 +274,7 @@ the probe's sleeping host). The design doc carries the tables and the placement 
   in flight when the exact route asks for it is awaited up to a bound (the residual
   of a read that is nearly done) instead of being read again beside its own
   duplicate. Modelled: +1.2 to +1.5 ms per token from the copy and +0.3 to +0.6 from
-  the join, +2 to +3 %. **The mini decides**, and a measured null is a result.
+  the join, +2 to +3 %. **The mini decides**, and a measured null is a result. **Ticked 2026-09-23:** landed as f74d6e7 (Step 5, below).
 
   **The mechanism, verified in the tree.**
   - The fixup command is built once for every mode that computes the adopted
@@ -321,7 +321,7 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         per-slot cache layout, which v9 measured a loss (the per-slot to pool flip
         halved the all-hit gap, 32.6 to 16.7 ms per token, Metal residency over about
         3,400 slot buffers). **Ruled (ii)**; an index swap inside one slab is the
-        swap done properly and a later refinement.
+        swap done properly and a later refinement. **The index swap is done: 7652fb6, `v16-landing.md:308-327` (noted 2026-09-23).**
   - [x] Step 1 (tests RED first): the streamer's blit adoption (a plan with an
         adoptable expert reserves its slot `loading` with the bytes untouched, lists
         it in `adopted`, excludes it from the resident sweep until
@@ -393,18 +393,18 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         exactly once on any early exit and hands both to the pending command on
         commit, with its tests; `prefetch_joined` now counts per prediction; two
         comments trimmed. Left as noted: the join racing a deferred `begin` exists
-        only at distance 2 or more; `prefetch_blit_experts` counts at encode.
+        only at distance 2 or more; `prefetch_blit_experts` counts at encode. **The join racing a deferred `begin` is superseded: distance one since 3597ad1 (noted 2026-09-23).**
 
 ### Task 3: the fused probe
 
-- [ ] **T3: the next-layer probe is a second router GEMV per layer on the same
+- [x] **T3: the next-layer probe is a second router GEMV per layer on the same
   input as the authoritative router, 53 µs of GPU per layer, 2.0 to 2.3 ms per token
   in the attention tail, and it is dispatch-bound.** Both dispatches read `routedX`
   and differ only in the weights, scales, bias and output buffers
   (`RealForwardRunner.swift:3503-3533`). One dispatch scoring both routers removes
   the second launch; the authoritative half's ids and weights must be bit-identical.
   Modelled +1.5 to +2.0 ms per token. **Built only if Task 1's per-read verdict
-  passes.**
+  passes.** **Ticked 2026-09-23:** landed as 791aa4d (the Close, below).
 
   **Steps.**
   - [x] Step 0 (zero code): the probe's GPU cost re-measured on the Task 1 binary
@@ -467,7 +467,7 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         deleted, two narrating comments trimmed. Left as noted: the pair pipelines
         compile in every `MoE` init beside the single ones; the kernel stats' router
         role now carries the probe, so the probe's GPU time reads from the ring on
-        against off, as Step 0 did.
+        against off, as Step 0 did. **A golden for the Kimi family is filed in tt as SHRIKE-11 (2026-09-23); the pair pipelines are superseded, the fused probe the only path since 3597ad1 (noted 2026-09-23).**
 
 ### Task 4: the prefill-to-decode boundary (the companion)
 
@@ -507,7 +507,7 @@ the probe's sleeping host). The design doc carries the tables and the placement 
         mid-answer windows of the 1k (676 / 674 / 797) are as bad as any first
         window, so the boundary is not where the swings live. The resident-first
         sweep already holds what a boundary policy could; nothing is built.
-  - [ ] Step 1 (tests RED first), Step 2 (the code), Step 3 (numerics), Step 4 (the
+  - [ ] Steps 1 to 6 (not run: the named stop reached at Step 0, above): Step 1 (tests RED first), Step 2 (the code), Step 3 (numerics), Step 4 (the
         arms: the first 64 tokens of each cold answer as the verdict window beside
         the whole answer, the turns as controls), Step 5 (the rule), Step 6 (design
         doc, review): not run, the stop reached at Step 0.
@@ -556,23 +556,23 @@ the probe's sleeping host). The design doc carries the tables and the placement 
   token, about 1.0 / 0.35 / 0.27 ms, against a second router GEMV per layer's 2.0 to
   2.3 ms of GPU. The distance-2 prediction mostly names what distance 1 already
   names or misses; the idle half of the window has nothing worth reading. Task 3
-  fuses the single-distance probe as written.
+  fuses the single-distance probe as written. **Its later form, distance two at width eight, is filed in tt as SHRIKE-51 (2026-09-23); the token-boundary window (above) is superseded: `v20-ssd-mechanism.md:328-349` and `:540-543` (noted 2026-09-23).**
 - **(e) Deeper lookahead.** The "drive never idles" ceiling (18.3 tok/s on the cold
   card, 22 with the other gaps) needs reads two or more layers ahead; T1's
   distance-2 coverage was measured on the mis-scaled probe and Task 1 Step 6
   re-measures it for nothing. Scheduled only if the corrected number clears the
-  candidate bar (coverage above 0.10, precision above 0.21) and Task 1's rule holds.
+  candidate bar (coverage above 0.10, precision above 0.21) and Task 1's rule holds. **Superseded: 3597ad1, `v20-ssd-mechanism.md:1464-1466` (noted 2026-09-23).**
 - **The host-state term in production.** If the chapter's ledger finds production's
   per-read time nearer 0.93 than 0.80, the term is named and priced (a busy core
-  through the miss window); not built on the probe's number alone.
+  through the miss window); not built on the probe's number alone. **Filed in tt as SHRIKE-44 (2026-09-23).**
 
 ## Follow-ons (not scheduled)
 
 - The ring's own test coverage beyond Task 1's (slot lifecycle, error rollback, the
-  probe wiring in the runner).
+  probe wiring in the runner). **Done: `ExpertPrefetchRingTests` (noted 2026-09-23).**
 - `recordPrefetchAdoptionsUnlocked` counts adoptions as reloads
   (`PreadExpertStreamer.swift:1454-1466`); a distinct counter once Task 2 retires
-  the copy.
+  the copy. **Superseded: removed in 7652fb6 (noted 2026-09-23).**
 - `prefetch_begin_ms` accumulates inside the ring's `begin` on whichever thread
   runs it; under `after` most begins run on a storage worker, so the counter no
   longer measures decode-thread time inside the submit gap as Task 1's "plus the
@@ -581,7 +581,7 @@ the probe's sleeping host). The design doc carries the tables and the placement 
 - The draft runner of `StreamingMTP.swift` builds its `RuntimeConfiguration`
   without `prefetch:` (as without the other knobs), so it takes `.production` and
   allocates a nine-buffer ring it never uses (the one-layer draft has no probe
-  target). Inert; the constructor's knob list when next touched.
+  target). Inert; the constructor's knob list when next touched. **Superseded: `StreamingMTP.swift` deleted in efdc628 (noted 2026-09-23).**
 
 ## Close
 

@@ -68,7 +68,7 @@ marked modelled.
         on `sources/ShrikeKernelsC`. **DONE 2026-09-07**: all four still hold; the budget
         default is 8 GiB (`defaultExpertCacheBudgetBytes`) against a stale 1 GiB comment
         in `ServerInference.load` noted for Task 4; the C target is 577 lines of C in two
-        files plus 173 of headers against v4's 439; the rig-era rates retired.
+        files plus 173 of headers against v4's 439; the rig-era rates retired. **The 1 GiB comment is done: replaced in 4003388 (noted 2026-09-23).**
   - [x] Step 5: the per-knob table (name, read site, binaries, users, class, citation,
         disposition), every disposition of the design doc's family table confirmed or
         corrected against the cited chapter doc; the four stale names in `docs/` noted;
@@ -179,7 +179,7 @@ marked modelled.
         `tools/decode-rig.sh`'s `SERVER_ENV` examples updated. Tests: the ring's and the
         configuration's cases for the deleted knobs go. Gates, golden; the golden's
         prefetch-off cell is no longer a cell.
-  - [ ] Step 5, prefill and the kernels, MTP and ShrikeBench, as two commits. **The first
+  - [x] Step 5, prefill and the kernels, MTP and ShrikeBench, as two commits. **The first
         DONE 2026-09-08 as efdc628**: MTP (the runtime's, 5943 lines with its kernels,
         scratch, checkpoint, server plumbing and tools; the format's family kept, the
         roster's exclusion kept) and ShrikeBench (the target, four library helpers only it
@@ -203,7 +203,7 @@ marked modelled.
         the prompt cache's MTP forcing, `tools/prepare_ornith_mtp.py`, the MTP tests go.
         ShrikeBench: the target, `sources/ShrikeBench/`, its `Package.swift` product,
         `README.md`'s mention go. Gates, golden, and the prefill ledger's shapes (300 / 1k
-        / 2k pairs through `tools/turn-rig.sh pair`) within v13's numbers.
+        / 2k pairs through `tools/turn-rig.sh pair`) within v13's numbers. **Ticked 2026-09-23 by the owner's ruling:** only the 300-token turn-rig pair ran (warm 3.19 s against v13's 3.54, cold 7.69 against 8.9, Step 7 below); the 1k and 2k pairs never ran. Accepted as done because the golden was byte-identical on both profiles (the long one about 2k tokens, so the same arithmetic ran there) and 471cadc deleted only non-default paths.
   - [x] Step 6, product, diagnostics and the tripwire. **DONE 2026-09-08 as 4003388**: the
         slot-count override and the five diagnostics without a reader gone; the tripwire
         at every launch (the server's main, the session's load, the CLI, the app client),
@@ -256,10 +256,10 @@ marked modelled.
   read by the classifier as one word; one generation space per cell with the values from
   one clock; the round-robin load and its four writers gone; the streamer 1174 to 1006
   lines; the baseline 14 throughout; 1234 tests; golden identical on both boxes; the arms
-  flat within the drift with every answer identical).
+  flat within the drift with every answer identical). **Its Step 1 box was ticked 2026-09-23; it was left unticked when the task landed.**
 
   **Steps.**
-  - [ ] Step 1 (tests RED first): `ExpertResidencyEntry` as `{ slot: UInt32, state:
+  - [x] Step 1 (tests RED first): `ExpertResidencyEntry` as `{ slot: UInt32, state:
         UInt32 }` with `MemoryLayout.size == 8`; `PreadExpertStreamer.publish(expert:cell:
         state:)` the only writer; `cellGeneration` per arena cell replacing
         `slotGeneration` and `landingGeneration`. Tests: a landing overtaken by the pool
@@ -338,7 +338,7 @@ marked modelled.
         re-review with no new breakage; one kept by ruling (the C header's doc line
         mirrors its sibling's); one deferred to the close (two pre-existing test-target
         warnings in `ParallelExpertReaderTests+BatchDepth.swift`, outside the diff). The
-        docs commit follows `744cb05`.
+        docs commit follows `744cb05`. **The two test-target warnings are done: folded at the close, [v17-consolidation.md](v17-consolidation.md) "The chapter's close" (noted 2026-09-23).**
 
 ### Task 4: the runner decomposed
 
@@ -348,10 +348,10 @@ marked modelled.
   methods with no behaviour change, the longest body 289 to 110 lines, the baseline 14
   entries to none and the file gone, the gate `swiftlint lint --strict`; 11 files
   +1792 −1152; 1234 tests throughout; golden identical on both boxes; the arms flat within
-  the drift with every answer identical).
+  the drift with every answer identical). **Its Step 1 box was ticked 2026-09-23; it was left unticked when the task landed.**
 
   **Steps.**
-  - [ ] Step 1: `RealForwardRunner.swift`. `encodeDecodeRoutedMoE` over a
+  - [x] Step 1: `RealForwardRunner.swift`. `encodeDecodeRoutedMoE` over a
         `DecodeRoutedLayerContext` struct (the layer, the position, the command buffers,
         the readback, the plan, the partition, the timing marks) with the stages as private
         methods in the map's order: the router readback, the prefetch join, the plan and
@@ -436,9 +436,9 @@ marked modelled.
 ## Candidates (not scheduled)
 
 - **The reading layers themselves.** 12.6 to 13.6 per token at production's per-read cost;
-  the next chapter, from this tree.
-- **The ANE prefill's promotion or removal.** The one switch left; its own record decides.
-- **A second base for cells beyond one buffer.** v16's candidate, unchanged.
+  the next chapter, from this tree. **Done: under other names, v18's surface A, then v20, v21 and v22 (noted 2026-09-23).**
+- **The ANE prefill's promotion or removal.** The one switch left; its own record decides. **Filed in tt as SHRIKE-21 (2026-09-23).**
+- **A second base for cells beyond one buffer.** v16's candidate, unchanged. **Done: 1dcf745, v22 Task 2, the expert cell arena in chunks (noted 2026-09-23).**
 - **The stale names in `docs/`** (`SHRIKE_ATTN_DECODE_LOOP`, `SHRIKE_EXPERT_IDLE_REFILL`,
   `SHRIKE_MPP_ROW_TILE`, `SHRIKE_MTP_REJECT_KEEP`): history in the chapter docs, left.
 
@@ -455,4 +455,4 @@ marked modelled.
   review ready to merge after its fold (0 Critical, 5 Important, 8 Minor, all outside the
   surviving path, folded by fixup and autosquash and one closing commit); the
   architecture document brought to the final tree; the closing block written; the final
-  tree's gates clean, the local golden identical on both profiles; the final build (the fold folded in, binary 52da55b07d7ec8b9 on both boxes) deployed to the mini at the bare launch at 14:20 with the golden identical on both profiles there and the turn rig's pair at 3.17 s warm and 7.36 s cold (Task 4's build 3.09 to 3.13 and 7.67), production restored at 14:22. The merge and the push on Davor's go.
+  tree's gates clean, the local golden identical on both profiles; the final build (the fold folded in, binary 52da55b07d7ec8b9 on both boxes) deployed to the mini at the bare launch at 14:20 with the golden identical on both profiles there and the turn rig's pair at 3.17 s warm and 7.36 s cold (Task 4's build 3.09 to 3.13 and 7.67), production restored at 14:22. The merge and the push on Davor's go. **Done: merged to `main`, c503f7c (noted 2026-09-23).**

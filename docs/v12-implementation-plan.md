@@ -124,7 +124,7 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
   moved back onto `encodeRoutedMoEPrefill` (now 276 lines, was 325), gate
   on `MPPPrefillInt4QMM.isAvailable`, scalar-gate test at D=2048, `weightBits`
   retained by the type. M1 qualification is by construction (no toolchain
-  there) plus the coherent golden continuation.**
+  there) plus the coherent golden continuation.** **Its step boxes were ticked 2026-09-23; they were left unticked when it landed.**
 
   **Files:**
   - Modify: `Sources/Shrike/Kernels/Prefill/MoE/PrefillSharedExpert.swift`
@@ -171,7 +171,7 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
     `dequant_int8_gemv_simd` does) and `sigmoid_scalar_mul_rows_fp16`
     (`dispatchThreads(w: d, h: rows)`), both in `moe.metal`.
 
-  - [ ] Step 1: write the failing test in `PrefillSharedExpertTests`:
+  - [x] Step 1: write the failing test in `PrefillSharedExpertTests`:
 
         ```swift
         @Test func chunkSharedExpertMatchesRowLoop() throws {
@@ -197,16 +197,16 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
         add `makeInputBlock(rows:d:rng:)` beside it (`makeWeights(rows:cols:rng:)`
         already takes its shape). Plus `chunkSharedExpertRejectsShortChunks`:
         `queryCount: 8` must throw `PrefillSharedExpertError.chunkTooShort(8)`.
-  - [ ] Step 2: `swift test --no-parallel --filter PrefillSharedExpertTests` —
+  - [x] Step 2: `swift test --no-parallel --filter PrefillSharedExpertTests` —
         expect FAIL: `encodeChunk` undefined.
-  - [ ] Step 3: implement `encodeChunk`: `mpp.encode(... x: x, y: scratchGate,
+  - [x] Step 3: implement `encodeChunk`: `mpp.encode(... x: x, y: scratchGate,
         m: queryCount, n: intermediate, k: d)` with `gate`'s buffers/offsets;
         same into `scratchUp` with `up`; `silu_mul_fp16` over
         `queryCount * intermediate` elements (gate := silu(gate) * up, in place);
         `mpp.encode(... x: scratchGate, y: y, m: queryCount, n: d, k: intermediate)`
         with `down`. Throw `chunkTooShort` below 32 rows. Add the two Metal
         kernels and their `Elementwise` encoders.
-  - [ ] Step 4: grow the scratch: `sharedExpertScratchElements = chunkTokens *
+  - [x] Step 4: grow the scratch: `sharedExpertScratchElements = chunkTokens *
         sharedIntermediate` (and the `3 *` multiplier at `:121` stays: gate, up,
         act). Update the call site at `RealForwardRunner.swift:4740`: if
         `t >= PrefillSharedExpert.matrixPathMinimumRows`, `prefillMPPAffineInt4`
@@ -214,12 +214,12 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
         runner already passes to `PrefillSharedExpert` at `:660`), call `encodeChunk`
         then, when `cfg.sharedExpertGated`, `encodeScalarGateRows` +
         `encodeSigmoidScalarMulRows` once each; else the existing row loop.
-  - [ ] Step 5: `swift test --no-parallel --filter PrefillSharedExpertTests` —
+  - [x] Step 5: `swift test --no-parallel --filter PrefillSharedExpertTests` —
         PASS; then the five gates.
-  - [ ] Step 6: `tools/golden-baseline.sh --check` — record the mismatch (it is
+  - [x] Step 6: `tools/golden-baseline.sh --check` — record the mismatch (it is
         the expected numerics change); recapture on this box; commit —
         `prefill: shared expert as three chunk GEMMs (v12 P1)`.
-  - [ ] Step 7: ledger on this box (3.7k, 12k); deploy + mini ledger at the next
+  - [x] Step 7: ledger on this box (3.7k, 12k); deploy + mini ledger at the next
         agreed restart; mini baseline recapture. Verdict line: role ms/token
         before → after on both boxes, digests before/after.
 
@@ -252,7 +252,7 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
   budget, 32k max context, 25,245-token prompt): `memory_pressure -Q` free
   83 % → 25 % across the request (the expert pool becoming resident dominates;
   the attention shadow at 25k is ~50 MB), server RSS 10.7 GB, no pressure
-  warning, wall 320 s.**
+  warning, wall 320 s.** **Done: the eightfold GQA re-read, at P7 (:1219-1228) (noted 2026-09-23).** **Its step boxes were ticked 2026-09-23; they were left unticked when it landed.**
 
   **Files:**
   - Create: `Sources/Shrike/Metal/Prefill/attention_matrix.metal` (new module:
@@ -283,14 +283,14 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
     matrix path, since `prefill_load_kv` handles 4-bit and the int4 case is
     tested); everything else keeps `attention_prefill_causal_tiled`.
 
-  - [ ] Step 1 (spike, throwaway numbers, kept harness): add `ShrikeBench attn
+  - [x] Step 1 (spike, throwaway numbers, kept harness): add `ShrikeBench attn
         <variant> [iterations]` that builds synthetic Q (T × 4096 fp16), an int8
         K/V cache with `kvValid = start + T`, and dispatches either
         `attention_prefill_causal_tiled` or the new kernel at
         `(start, T) ∈ {(0, 3756), (8192, 4096)}`; prints per-launch ms and
         TFLOPS = `4 · 16 · 256 · pairs / seconds`. Record the scalar kernel's
         numbers first (expected ≈ 1 % of the gemm ceiling).
-  - [ ] Step 2 (spike): write the kernel with rows-per-threadgroup and key-tile
+  - [x] Step 2 (spike): write the kernel with rows-per-threadgroup and key-tile
         as function constants and try the candidates `(rows, keys) ∈ {(16, 32),
         (32, 32), (32, 64), (64, 32)}` for one KV-head group (all 8 query heads
         of `rows` queries = `8 · rows` matmul rows). Structure, in order per key
@@ -305,7 +305,7 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
         if none does within 32 KB of threadgroup memory, fall back to
         `simdgroup_matrix` fragments (the design's risk item) before proceeding.
         Verdict line: the table of candidates.
-  - [ ] Step 3: write the failing tests (production dims, the shapes the gate
+  - [x] Step 3: write the failing tests (production dims, the shapes the gate
         accepts):
 
         ```swift
@@ -341,15 +341,15 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
         `attention_prefill_causal_tiled` dispatch (`:4221`). Expose the selection
         as `PrefillAttention.selectPath(params:sinks:kvRingCapacity:) ->
         RuntimePrefillAttentionPath` so the fallback test needs no GPU run.
-  - [ ] Step 4: `swift test --no-parallel --filter PrefillAttentionTests` —
+  - [x] Step 4: `swift test --no-parallel --filter PrefillAttentionTests` —
         FAIL: `.causalMatrix` undefined.
-  - [ ] Step 5: land the kernel with the spike's constants, the selection gate,
+  - [x] Step 5: land the kernel with the spike's constants, the selection gate,
         and the dispatch (`threadgroups = (ceil(queryCount / rows), numKVHeads)`,
         `threadsPerThreadgroup = 128`). Tests PASS; five gates.
-  - [ ] Step 6: `tools/golden-baseline.sh --check` (expected to differ),
+  - [x] Step 6: `tools/golden-baseline.sh --check` (expected to differ),
         recapture, commit — `prefill: matrix-path causal attention for the
         256/16/2 shape (v12 P2)`.
-  - [ ] Step 7: ledger on both boxes (3.7k, 12k, and 25k here); mini recapture.
+  - [x] Step 7: ledger on both boxes (3.7k, 12k, and 25k here); mini recapture.
         Verdict line with the attention role before → after and the achieved
         share of the ceiling.
 
@@ -369,7 +369,7 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
   `k % 64` guard, throwing bounds check on tile ranges, below-threshold
   fallback test. Expert sub-tensor `setBuffer(offset:)` at 2 KiB multiples
   proven by the golden runs. Decision point: M4 Pro 3.7k GPU busy
-  2.42 ms/tok > 2.0 → P4 scheduled by the rule.**
+  2.42 ms/tok > 2.0 → P4 scheduled by the rule.** **Its step boxes were ticked 2026-09-23; they were left unticked when it landed.**
 
   **Files:**
   - Modify: `Sources/Shrike/Kernels/Prefill/MoE/PrefillGroupedRoutedMoE.swift`
@@ -408,22 +408,22 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
     `prefill_routed_scatter_rows` (`routePartials[pairStart + r] = down[r]`,
     same shape; the router weight is applied in the existing reduce).
 
-  - [ ] Step 1: failing test in `+Execution`: one synthetic tile of 3 experts
+  - [x] Step 1: failing test in `+Execution`: one synthetic tile of 3 experts
         with 40 / 32 / 5 pairs; run the scalar path and the GEMM path on the
         same inputs; expect `RelError` within `2e-2` on `routePartials` for the
         first two experts and the third returned as leftover.
-  - [ ] Step 2: run it — FAIL: `encodeExpertGEMMs` undefined.
-  - [ ] Step 3: implement gather → `mpp.encode` (gate: `n: 512, k: 2048`, weights
+  - [x] Step 2: run it — FAIL: `encodeExpertGEMMs` undefined.
+  - [x] Step 3: implement gather → `mpp.encode` (gate: `n: 512, k: 2048`, weights
         at the expert view's `gateW/gateS/gateB`; up likewise into the second
         staging block) → `silu_mul_fp16` over `rows × 512` → `mpp.encode` (down:
         `n: 2048, k: 512`) → scatter. Leftovers go through
         `encodeStreamedBatched` unchanged.
-  - [ ] Step 4: wire the tile loop: after `makeStreamedMetadataBuffers`, call
+  - [x] Step 4: wire the tile loop: after `makeStreamedMetadataBuffers`, call
         `encodeExpertGEMMs` when `prefillMPPAffineInt4 != nil`, then the scalar
         path for the leftovers. Tests PASS; five gates.
-  - [ ] Step 5: golden check (differs), recapture, commit — `prefill: per-expert
+  - [x] Step 5: golden check (differs), recapture, commit — `prefill: per-expert
         GEMMs on the matrix path (v12 P3)`.
-  - [ ] Step 6: ledger both boxes; mini recapture. Verdict line. **Decision
+  - [x] Step 6: ledger both boxes; mini recapture. Verdict line. **Decision
         point:** if the M4 Pro 3.7k ledger is ≤ 2.0 ms/token, P4 is optional.
 
 ### Task 4: P4 — GDN chunked scan
@@ -469,7 +469,7 @@ runtime-compiled `tensorops` module), swift-testing, ShrikeBench, the
   per-head decay shape only (ornith: `in_proj_a` has `Hv = 32` rows). The
   per-channel variant (`gdn_delta_step_prefill_vec`, Kimi KDA), any shape
   other than `Dk = Dv = 128`, chunks under 64 rows and the 32-token MTP draft
-  chunk keep the serial kernel.
+  chunk keep the serial kernel. **Superseded: the deferred minors went with the knob in v17 (v17-consolidation.md:67) (noted 2026-09-23).**
 
   **Math.** Per value head `h` (KV head `hk = h / (Hv/Hk)`), `S ∈ ℝ^{Dv×Dk}` is
   the fp32 state stored row-major as `state[h][dv][dk]`; the row vectors
@@ -752,7 +752,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   126.0 s). Two follow-on candidates fall out of the split and are recorded
   in the design doc: the fetch's ≈ 3.3 ms of non-I/O latency per tile, and a
   driver cost of ≈ 11 ms (M4 Pro) / ≈ 22 ms (M1) on the first routed buffer
-  of every layer (`prefill_shared_expert->prefill_routed_tile` `driver_ms`).
+  of every layer (`prefill_shared_expert->prefill_routed_tile` `driver_ms`). **Done: the driver cost on the first routed buffer, at P12 (Task 12) (noted 2026-09-23).** **Its step boxes were ticked 2026-09-23; they were left unticked when it landed.**
 
   **The measured cause.** Each routed tile gets its own command buffer
   (`RealForwardRunner.swift:5037-5048`), and the pending-tile machinery that
@@ -856,7 +856,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   Steps (TDD; the host policy first, so the bookkeeping is proven before any
   command buffer moves):
 
-  - [ ] Step 1: failing tests in `PrefillRoutedTileSchedulerTests.swift`:
+  - [x] Step 1: failing tests in `PrefillRoutedTileSchedulerTests.swift`:
         `batchOfOneReproducesTheSingleTileDecisions` (for each of the five
         existing `decide` cases, `PrefillRoutedTileSchedulerConfig(
         tilesPerCommandBuffer: 1)` gives the same decision);
@@ -874,7 +874,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         `lastTileAlwaysCommits`. `swift test --no-parallel --filter
         PrefillRoutedTileSchedulerTests` → FAIL: `tilesPerCommandBuffer` and
         `batchAction` undefined.
-  - [ ] Step 2: failing test `slotLifetimeRejectsReuseInsideAnOpenBatch` in the
+  - [x] Step 2: failing test `slotLifetimeRejectsReuseInsideAnOpenBatch` in the
         same file: `var lifetime = PrefillStreamedTileSlotLifetime();
         try lifetime.begin(tileIndex: 0, plannedSlots: [1, 2]);
         #expect(throws: PrefillStreamedTileLifetimeError.self) {
@@ -883,9 +883,9 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         This is the invariant the batched drain has to keep; it fails today
         only because `PrefillStreamedTileSlotLifetime` is not yet exercised
         from this suite.
-  - [ ] Step 3: implement `tilesPerCommandBuffer`, the widened
+  - [x] Step 3: implement `tilesPerCommandBuffer`, the widened
         `fitsSlotBudget`/`fitting`, and `batchAction`. Both tests PASS.
-  - [ ] Step 4: rewrite the tile loop: `PendingPrefillBatch { let tileIndices:
+  - [x] Step 4: rewrite the tile loop: `PendingPrefillBatch { let tileIndices:
         [Int]; let commandBuffer: MTLCommandBuffer; let fetches:
         [PrefillStreamedTileFetchResult]; let argumentBuffers:
         [PrefillStreamedTileArgumentBuffer] }`; one `ctx.queue.makeCommandBuffer()`
@@ -898,14 +898,14 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         The `while pendingTiles.count > schedulerConfig.maxPendingDepth` drain
         (`:5053-5055`) becomes a batch-count drain, and the tail drain
         (`:5057-5059`) flushes the open batch first.
-  - [ ] Step 5: the env knob, `prefillTileBatchDescription`, the residency line
+  - [x] Step 5: the env knob, `prefillTileBatchDescription`, the residency line
         field, and `PrefillRoutedTileSchedulerConfig(tilesPerCommandBuffer:)`
         from it — clamped, and re-`fitting`ed against
         `model.routedExpertCacheSlotCount()` at `:4867-4878` so a small
         streamed cache shrinks the tile instead of throwing. Five gates:
         release build 0 warnings, lint, links, `swift test --no-parallel`, the
         same under TSAN.
-  - [ ] Step 6: same-binary A/B on the M4 Pro at 3.7k, two pairs, fresh server
+  - [x] Step 6: same-binary A/B on the M4 Pro at 3.7k, two pairs, fresh server
         per prompt (`--port 8082 --ram-budget 20G --thinking off`,
         `SHRIKE_KERNEL_STATS=1 SHRIKE_RUNNER_STATS=1`):
         `SHRIKE_PREFILL_TILE_BATCH=1` against `=4` and `=8`. Read
@@ -917,13 +917,13 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         12k gap above 0.25 ms/token, the remaining cost is host encoding, not
         commit+wait — record that in the verdict and stop rather than widening
         further.
-  - [ ] Step 7: `tools/golden-baseline.sh --check 4` (M4 Pro, server stopped).
+  - [x] Step 7: `tools/golden-baseline.sh --check 4` (M4 Pro, server stopped).
         This step changes no arithmetic, so the expectation is **identical**;
         a diff is a bug in the batched encode order, not a numerics change —
         do not recapture, fix it. Commit `prefill: batch routed tiles per
         command buffer (v12 P5)`; if a baseline did change and the cause is
         understood and signed off, add it with `git commit --only`.
-  - [ ] Step 8: ledger on both boxes (fresh server, 3.7k + 12k,
+  - [x] Step 8: ledger on both boxes (fresh server, 3.7k + 12k,
         `tools/prefill-measure.sh <host> <port> <promptdir> <outdir> <tag>
         2k 6k`); mini `tools/mini-deploy.sh --restart`, mini golden
         `--check 4` (expect identical), scp any recapture into `baselines/`.
@@ -977,7 +977,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   deferred in the ledger. Deviations: the block tables go inline (`setBytes`)
   rather than into shared buffers rewritten per wave — a CPU→GPU hazard with
   the pending-tile overlap; the bench harness is a public façade in the module
-  because ShrikeBench sees only public API.
+  because ShrikeBench sees only public API. **Its step boxes were ticked 2026-09-23; they were left unticked when it landed.**
 
   **What the P3 path costs.** `encodeExpertGEMMs`
   (`PrefillGroupedRoutedMoE.swift:639-688`) loops experts and, per expert row
@@ -1138,7 +1138,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
   Steps (TDD; numerics against the path P3 already proved before any perf work):
 
-  - [ ] Step 1: failing test
+  - [x] Step 1: failing test
         `groupedGEMMsMatchThePerExpertPathAcrossAllExperts` in
         `PrefillGroupedRoutedMoETests+Execution.swift`, reusing
         `runExpertGEMMsMatchTheScalarPath`'s fixture (`:228-253`): four experts
@@ -1151,7 +1151,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         `#expect(leftoverRangesFromGrouped.isEmpty)`: the 5- and 3-pair experts
         are now inside the grouped dispatch, so their rows must be non-`-77`
         (the sentinel the existing tests fill with, `:277-280`).
-  - [ ] Step 2: failing test `groupedWavePlannerSplitsAndPadsOnRowTiles`
+  - [x] Step 2: failing test `groupedWavePlannerSplitsAndPadsOnRowTiles`
         (host-only, no GPU). With 64-row alignment the fixture's four experts
         (40 / 32 / 5 / 3 pairs) occupy `stagingRow` 0, 64, 128, 192 for
         `paddedRows` 256, so: `stagingRows: 512` gives one wave of four blocks;
@@ -1159,7 +1159,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         `stagingRow` 0; a single 600-pair expert at `stagingRows: 512` splits
         into blocks of 512 and 88 rows with `pairStart` 0 and 512. Expect exact
         `[PrefillRoutedExpertWave]` equality in all three cases.
-  - [ ] Step 3: failing test `groupedGEMMsMatchTheScalarPathAcrossWaves` —
+  - [x] Step 3: failing test `groupedGEMMsMatchTheScalarPathAcrossWaves` —
         the same fixture with `stagingRows: 128`, forcing three waves; and
         `groupedGEMMsHandleASingleOnePairExpert` — one expert, one pair,
         63 padded rows, compared against `encodeStreamedBatched` on the same
@@ -1167,12 +1167,12 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         the `-77` sentinel. `swift test --no-parallel --filter
         PrefillGroupedRoutedMoETests` → FAIL: `encodeGroupedExpertGEMMs`,
         `planExpertWaves`, `encodeGrouped` undefined.
-  - [ ] Step 4: implement `mpp_prefill_affine_grouped_f16`, the grouped
+  - [x] Step 4: implement `mpp_prefill_affine_grouped_f16`, the grouped
         gather/scatter, `MPPPrefillInt4QMM.encodeGrouped` (with
         `useResource(view.buffer, usage: .read)` for every bound view, as
         `encodeStreamedBatched` does at `PrefillGroupedRoutedMoE.swift:593-595`),
         `planExpertWaves`, and `encodeGroupedExpertGEMMs`. All three tests PASS.
-  - [ ] Step 5: `swift run -c release ShrikeBench routed_gemm 20` — the ornith
+  - [x] Step 5: `swift run -c release ShrikeBench routed_gemm 20` — the ornith
         tile shape (8 experts × 128 rows, D 2048, F 512, int4 group-64): the P3
         per-expert dispatch sequence against the grouped one, ms per tile and
         TFLOPS for gate/up (`128×2048×1024` per expert) and down
@@ -1182,7 +1182,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         is one wave, (b) `tileN` 32 → 64 for the `n = 2048` down GEMM only —
         measured, not assumed. If neither clears 50 %, record the achieved
         share and land it anyway if it beats 35 %; say so in the verdict.
-  - [ ] Step 6: wire `encodeRoutedTileExperts` (`RealForwardRunner.swift:5109-5165`):
+  - [x] Step 6: wire `encodeRoutedTileExperts` (`RealForwardRunner.swift:5109-5165`):
         grouped when `scratch.layout.usesRoutedExpertMatrixPath` and
         `prefillGroupedMoE.matrixPath(for:d:intermediate:)` returns an `mpp`
         (`PrefillGroupedRoutedMoE.swift:456-468`); the P3 per-expert path stays
@@ -1190,13 +1190,13 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         the whole-tile scalar path stays as the last fallback exactly as at
         `:5139-5146`. Five gates: release build 0 warnings, lint, links,
         `swift test --no-parallel`, the same under TSAN.
-  - [ ] Step 7: `tools/golden-baseline.sh --check 4` (M4 Pro, server stopped) —
+  - [x] Step 7: `tools/golden-baseline.sh --check 4` (M4 Pro, server stopped) —
         expected to differ (the row's reduction is unchanged but its owning
         threadgroup is not, and the 1–31-pair experts move from the scalar
         GEMV to the GEMM); recapture, record the before/after greedy digests,
         and commit `prefill: grouped routed-expert GEMMs (v12 P6)` with the
         baseline via `git commit --only`.
-  - [ ] Step 8: ledger on both boxes (fresh server, 3.7k + 12k + 25k on the
+  - [x] Step 8: ledger on both boxes (fresh server, 3.7k + 12k + 25k on the
         M4 Pro, 3.7k + 12k on the mini, `tools/prefill-measure.sh`); mini
         `tools/mini-deploy.sh --restart`, mini golden recapture, scp into
         `baselines/`. Verdict line with `prefill_routed_tile` before → after on
@@ -1251,7 +1251,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   4,096-token chunk); mini at 25k (label 12k, 25,245 tokens): `memory_pressure
   -Q` free percentage 91 % idle → 25 % floor during the request (31 samples,
   10 s apart), server RSS 10.27 GB, attention 3.29 ms/tok, wall 276 s. Five
-  gates green (1148 tests, TSAN 0 reports).
+  gates green (1148 tests, TSAN 0 reports). **Its step boxes were ticked 2026-09-23; they were left unticked when it landed.**
 
   **What P2 left.** `attention_prefill_causal_matrix_r32s4`
   (`attention_matrix.metal:42-210`, instantiated at `:232`) gives one
@@ -1391,7 +1391,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
   Steps (TDD; correctness on the reference before any geometry hunting):
 
-  - [ ] Step 1: failing test `qGroupPackMatchesStridedQuery` in
+  - [x] Step 1: failing test `qGroupPackMatchesStridedQuery` in
         `PrefillAttentionMatrixTests.swift`: `makeFixture(start: 512, chunk: 64,
         seed: 0xB130)` (whose `qStride` is `qHeads * headDim + 3`, `:127`),
         a non-zero `qOffset`, run the pack kernel alone, read back and
@@ -1399,7 +1399,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         == fixture.q[q * qStride + (kvh * 8 + hLocal) * 256 + d])` as exact
         fp16 bit equality over all 16 heads (a copy must not round). FAIL:
         `attention_prefill_q_group_pack` undefined.
-  - [ ] Step 2: failing test
+  - [x] Step 2: failing test
         `groupMatrixMatchesReferenceOnFP16Cache(c:)` — the three existing
         arguments `(single-tile, 0, 64)`, `(ragged-rows-three-key-tiles, 0,
         130)`, `(history-ragged-tail, 600, 40)` (`:15-19`) run through
@@ -1414,12 +1414,12 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         `PrefillAttention(context:supportsMLA:matrixTile:)` with the static as
         its default so the tests can pin a variant without a process-wide env
         var. FAIL: the group kernels do not exist.
-  - [ ] Step 3: failing test `groupTileGateRequiresEightHeadsPerKVHead`:
+  - [x] Step 3: failing test `groupTileGateRequiresEightHeadsPerKVHead`:
         `matrixPathAccepts` false for a params with `numQHeads = 16,
         numKVHeads = 4`, still true for 16/2; and
         `rejectedShapeRunsTheTiledKernelEndToEnd` (`:87-96`) re-run with the
         group variant pinned, expecting byte equality with `.causalTiled`.
-  - [ ] Step 4: implement `attention_prefill_q_group_pack`,
+  - [x] Step 4: implement `attention_prefill_q_group_pack`,
         `attention_prefill_causal_group_matrix_body<Rq, S, SG>` and the four
         instantiations, `ensureQGroup`, the `MatrixTile` enum, the gate clause
         and the dispatch. `static_assert` the threadgroup arithmetic in the
@@ -1427,7 +1427,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         `static_assert(S * kAttnMatrixHeadDim * 2 + 8 * Rq * S * 4 <= 32768)`.
         `swift test --no-parallel --filter PrefillAttentionMatrixTests` → PASS
         for every variant.
-  - [ ] Step 5 (spike, on the ledger — there is no `attn` bench mode in
+  - [x] Step 5 (spike, on the ledger — there is no `attn` bench mode in
         `sources/ShrikeBench/`, and P2's own geometry was settled this way):
         one M4 Pro server per variant, fresh each time, `--port 8082
         --ram-budget 20G --thinking off`, `SHRIKE_KERNEL_STATS=1
@@ -1439,19 +1439,19 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         if none reaches it, take the best above the shipped 36 % and record the
         table plus the achieved share as the verdict. Verdict line: the
         candidate table.
-  - [ ] Step 6: make the winner the default `matrixTile`, keep every variant
+  - [x] Step 6: make the winner the default `matrixTile`, keep every variant
         selectable by `SHRIKE_ATTN_MATRIX_TILE` (including `r32s4`/`r64s8` and
         `SHRIKE_PREFILL_ATTENTION=tiled` for the scalar kernel), extend
         `prefillAttentionPathDescription` (`RealForwardRunner.swift:189-196`)
         with `tile=<rawValue>` so the residency line records which geometry
         ran. Five gates: release build 0 warnings, lint, links,
         `swift test --no-parallel`, the same under TSAN.
-  - [ ] Step 7: `tools/golden-baseline.sh --check 4` (M4 Pro, server stopped) —
+  - [x] Step 7: `tools/golden-baseline.sh --check 4` (M4 Pro, server stopped) —
         expected to differ (the PV reduction order changes with the tile
         geometry); recapture, record the before/after greedy digests, and
         commit `prefill: KV-head-group attention tiles on the matrix path
         (v12 P7)` with the baseline via `git commit --only`.
-  - [ ] Step 8: ledger on both boxes (fresh server, 3.7k + 12k + 25k on the
+  - [x] Step 8: ledger on both boxes (fresh server, 3.7k + 12k + 25k on the
         M4 Pro, 3.7k + 12k on the mini, `tools/prefill-measure.sh`); the mini
         memory check at 25k (`memory_pressure -Q` free span, server RSS) as P2
         recorded; mini `tools/mini-deploy.sh --restart`, mini golden recapture,
@@ -1510,7 +1510,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   vectorised int4 weight loads (one `uint4` per 32 values) for the 20 %, and a
   128-wide K tile (two quant groups per staged tile, half the barriers and
   runs; not bit-identical) for the 31 %. The GDN role's GEMM share stays
-  unmeasured (no role moved). Five gates green; golden digests unchanged.
+  unmeasured (no role moved). Five gates green; golden digests unchanged. **Done: the two levers by P9 (560c888), the GDN role's GEMM share by P13 (noted 2026-09-23).** **Its step boxes were ticked 2026-09-23; they were left unticked when it landed.**
 
   **What P6 and P7 left.** After P7 the mini's 12k prefill spends 6.85 of its
   9.01 ms/prompt-token of GPU busy — **76 %** — in three roles that run through
@@ -1701,19 +1701,19 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
   Steps (TDD; the bit-equality claim is proved before any perf work):
 
-  - [ ] Step 1: failing test `doubleBufferedDequantIsBitIdenticalToTheSingleBuffered`
+  - [x] Step 1: failing test `doubleBufferedDequantIsBitIdenticalToTheSingleBuffered`
         in `MPPPrefillInt4QMMTests.swift`, reusing `makeInputs`/`makeBuffer`
         (`:28-87`): `.n32b1` against `.n32b2` over shapes with more than one K
         group — `(m 64, n 32, k 128)`, `(m 33, n 512, k 2048)` (gate/up with a
         ragged M), `(m 128, n 2048, k 512)` (down) — asserting fp16 equality
         element-for-element with the `:272-322` idiom, plus finiteness. FAIL:
         `TileVariant` and `init(context:weightBits:variant:)` undefined.
-  - [ ] Step 2: failing test `wideNTileMatchesTheNarrowTile` — the same three
+  - [x] Step 2: failing test `wideNTileMatchesTheNarrowTile` — the same three
         shapes, `.n64b1` and `.n64b2` against `.n32b1` at `RelError.maxAbsDiff
         ≤ 2e-2` and `RelError.compute ≤ 2e-2`, plus `cpuReference` (`:89-121`) at
         `runShape`'s own bars (`maxAbs ≤ 0.03`, `rel ≤ 1e-3`) so a wider tile
         cannot pass by matching a broken neighbour. FAIL: no `n64*` kernels.
-  - [ ] Step 3: failing tests at the call sites —
+  - [x] Step 3: failing tests at the call sites —
         `runChunkSharedExpertMatchesRowLoop`
         (`PrefillSharedExpertTests.swift:365-438`) over all four variants at rows
         64 and 33; `groupedGEMMsMatchThePerExpertPathAcrossAllExperts`
@@ -1723,13 +1723,13 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         table, the padded-row `-77` sentinel and the store guard under a 64-wide
         N tile are what those cover. `swift test --no-parallel --filter
         "MPPPrefillInt4QMM|PrefillSharedExpert|PrefillGroupedRoutedMoE"` → FAIL.
-  - [ ] Step 4: implement the templated body, the eight instantiations, the
+  - [x] Step 4: implement the templated body, the eight instantiations, the
         `TileVariant` enum, the env parsing and the per-variant pipeline build;
         Steps 1–3 PASS. Then the probe: tighten `wideNTileMatchesTheNarrowTile`
         to fp16 bit equality and run it. Passes → land the assertion. Fails →
         revert to the 2e-2 bar, record the first differing shape and element, and
         carry "golden differs, one recapture per box" into Step 7.
-  - [ ] Step 5 (spike, the gate): `swift run -c release ShrikeBench routed_gemm 20`
+  - [x] Step 5 (spike, the gate): `swift run -c release ShrikeBench routed_gemm 20`
         per arm under `env SHRIKE_MPP_TILE_N=… SHRIKE_MPP_DEQUANT_BUFFERS=…` —
         four arms, `n32b1` the P6 control — on the M4 Pro first, then on the
         **mini, which decides**. `tools/mini-deploy.sh` copies only
@@ -1746,14 +1746,14 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         golden identical. If no arm reaches 80 %, take the mini's best above P6's
         68 % and record the achieved share; if none beats 68 %, land the tests
         only and say so.** Verdict line: the eight-row table.
-  - [ ] Step 6: make the winner the default `tileVariant`, keep all four
+  - [x] Step 6: make the winner the default `tileVariant`, keep all four
         selectable on the same binary, and extend `prefillProjectionPath`
         (`RealForwardRunner.swift:185-187`) with `tile_n=` / `buffers=` so the
         residency line records which variant ran. Five gates: release build 0
         warnings, `swiftlint lint --strict --baseline .swiftlint-baseline.json`,
         markdown link check, `swift test --no-parallel`, the same under
         `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt … --sanitize=thread`.
-  - [ ] Step 7: `tools/golden-baseline.sh --check` (M4 Pro, server stopped).
+  - [x] Step 7: `tools/golden-baseline.sh --check` (M4 Pro, server stopped).
         **Expected IDENTICAL, short and long, if the winner is `n32b2`** — the K
         reduction order is provably unchanged and no recapture is allowed;
         expected to differ on the long profile only if the winner carries
@@ -1763,7 +1763,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         long `39c38734e8f9d22a`). Commit `prefill: double-buffered dequant and
         wider N tile in the MPP GEMM (v12 P8)`, baseline via `git commit --only`
         if there is one.
-  - [ ] Step 8: ledger on both boxes (fresh server, `tools/prefill-measure.sh`;
+  - [x] Step 8: ledger on both boxes (fresh server, `tools/prefill-measure.sh`;
         **mini 3.7k + 12k is the verdict**, M4 Pro 3.7k + 12k + 25k the check);
         `tools/mini-deploy.sh --restart`, mini golden check (recapture only if
         Step 7 established a deliberate change), scp into `baselines/`. Verdict
@@ -1841,7 +1841,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   P6 and P7 moved). One mini recapture had run before the cause was measured
   (the leg-3 wrapper recaptures on mismatch) and was reverted; it was redone
   after `mpp_compare` bounded the difference. Five gates green (1154 tests,
-  TSAN 0 reports); build + lint re-run on the final tree.
+  TSAN 0 reports); build + lint re-run on the final tree. **Its step boxes were ticked 2026-09-23; they were left unticked when it landed.**
 
   **What P8 left.** The probe ledger for the mini's 8.25 ms tile, and the same
   split on the M4 Pro (`.superpowers/sdd/v12-implementation-plan/task-8-report.md`,
@@ -2140,7 +2140,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
   Steps (TDD; lever A's bit-identity is proved before any perf work):
 
-  - [ ] Step 1: failing test `vectorWeightLoadsAreBitIdenticalToByteLoads` in
+  - [x] Step 1: failing test `vectorWeightLoadsAreBitIdenticalToByteLoads` in
         `MPPPrefillInt4QMMTests.swift`, `runPair` (`:213-244`) over
         `variantShapes` (`:207-211`: `(64, 32, 128)`, `(33, 512, 2048)`,
         `(128, 2048, 512)`) with `.byte` against `.vector` on `.n32b1`,
@@ -2150,7 +2150,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         provably falls back to the byte body and still matches. FAIL:
         `WeightLoads` and `init(context:weightBits:variant:weightLoads:)`
         undefined.
-  - [ ] Step 2: failing test `wideKTileMatchesTheNarrowTile` — `.n32k128b1`
+  - [x] Step 2: failing test `wideKTileMatchesTheNarrowTile` — `.n32k128b1`
         against `.n32b1` over the same three shapes (all `K % 128 == 0`) at
         `RelError.maxAbsDiff ≤ 2e-2` and `RelError.compute ≤ 2e-2`, plus
         `runShape(compareCPUReference: true)` at its own bars (`maxAbs ≤ 0.03`,
@@ -2159,7 +2159,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         asserting the `.n32k128b1` instance still returns
         `.affineThreadgroupF16` and is **bit-identical** to `.n32b1` because it
         took the narrow pipeline. FAIL: no `n32k128b1` kernel.
-  - [ ] Step 3: failing tests at the call sites.
+  - [x] Step 3: failing tests at the call sites.
         `PrefillSharedExpertTests.chunkSharedExpertMatchesRowLoop(rows:variant:)`
         (`:184-187`) picks up the fifth variant through `allCases` (2 rows × 5 =
         10 cases); add one non-crossed case pinning `.vector` on `.n32b1` rather
@@ -2181,7 +2181,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         scalar/streamed-batched paths below `matrixPathMinimumRows` and never
         reach `encodeGrouped`. `swift test --no-parallel --filter
         "MPPPrefillInt4QMM|PrefillSharedExpert|PrefillGroupedRoutedMoE"` → FAIL.
-  - [ ] Step 4: implement the chunk dequant with both load bodies, the
+  - [x] Step 4: implement the chunk dequant with both load bodies, the
         `TILE_K` template axis and its two instantiations, the alignment
         uniform, the pipeline pick, `TileVariant.n32k128b1`, `WeightLoads` and
         the env parsing; Steps 1–3 PASS. Then the probe: tighten
@@ -2190,7 +2190,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         revert to the 2e-2 bar, record the first differing shape and element,
         and carry "golden differs on the long profile, one recapture per box"
         into Step 7.
-  - [ ] Step 5 (spike, the gate): `swift run -c release ShrikeBench routed_gemm 20`
+  - [x] Step 5 (spike, the gate): `swift run -c release ShrikeBench routed_gemm 20`
         per arm under `env SHRIKE_MPP_TILE_K=… SHRIKE_MPP_WEIGHT_LOADS=…` — four
         arms (`n32b1`+byte = the P8 control, `n32b1`+vector = A, `n32k128b1`+byte
         = B, `n32k128b1`+vector = A+B), all at N 32 / one buffer — on the M4 Pro
@@ -2214,7 +2214,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         the achieved share; if none beats the control, land the tests and the
         template only and say so, as P8 did.** Verdict line: the five-row table
         (four arms + ceiling) per box per staging size.
-  - [ ] Step 6: make the winner the default (`tileVariant` and/or
+  - [x] Step 6: make the winner the default (`tileVariant` and/or
         `weightLoads`), keep every arm selectable on the same binary, and extend
         `prefillProjectionPath` (`RealForwardRunner.swift:185-188`) with
         `tile_k=` / `loads=` so the residency line records which arm ran. Five
@@ -2223,7 +2223,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         link check, `swift test --no-parallel`, the same under
         `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test
         --no-parallel --sanitize=thread`.
-  - [ ] Step 7: `tools/golden-baseline.sh --check` (M4 Pro, server stopped).
+  - [x] Step 7: `tools/golden-baseline.sh --check` (M4 Pro, server stopped).
         **Expected IDENTICAL, short and long, if the winner is lever A alone** —
         the values and the reduction order are provably unchanged and no
         recapture is allowed. Expected to differ on the long profile only if the
@@ -2233,7 +2233,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         `f24c61565618fdab`, M1 long `39c38734e8f9d22a`). Commit
         `prefill: vectorised int4 weight loads and a 128-wide K tile in the MPP
         GEMM (v12 P9)`, baseline via `git commit --only` if there is one.
-  - [ ] Step 8: ledger on both boxes (fresh server, `tools/prefill-measure.sh`,
+  - [x] Step 8: ledger on both boxes (fresh server, `tools/prefill-measure.sh`,
         one send per prompt per server lifetime; **mini 3.7k + 12k is the
         verdict**, M4 Pro 3.7k + 12k + 25k the check); `tools/mini-deploy.sh
         --restart`, mini golden check (recapture only if Step 7 established a
@@ -2318,7 +2318,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   recaptured once on the M4 Pro, sha256 `6fc391949c998e66` →
   `e04d4e8ee7f1590d`; the M1's long held (`899a25e60a365e60` — the last-ulp
   differences crossed no greedy tie, P4's precedent). Five gates green (1161
-  tests, TSAN 0 reports).
+  tests, TSAN 0 reports). **Done: the dense shape benched in isolation, by P13 (8692c3a) (noted 2026-09-23).** **Its step boxes were ticked 2026-09-23; they were left unticked when it landed.**
 
   **What P9 left.** The mini's 4.92 ms tile, split from measurements already
   on record (`.superpowers/sdd/v12-implementation-plan/task-9-report.md`,
@@ -2563,7 +2563,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
   Steps (TDD; the ladder and the 8-bit loader are proved before any perf work):
 
-  - [ ] Step 1: failing test `wideK256TileMatchesTheNarrowTile` in
+  - [x] Step 1: failing test `wideK256TileMatchesTheNarrowTile` in
         `MPPPrefillInt4QMMTests.swift` — `.n32k256b1` against `.n32b1` over
         `(64, 32, 256)`, `(33, 512, 2048)`, `(128, 2048, 512)` (all
         `K % 256 == 0`; note `variantShapes`' first entry K 128 is **not**, so
@@ -2572,7 +2572,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         `runShape(compareCPUReference: true, irregular: true)` at its own bars
         (`maxAbs ≤ 0.03`, `rel ≤ 1e-3`). No bit-equality assertion, ever.
         FAIL: `TileVariant.n32k256b1` undefined.
-  - [ ] Step 2: failing test `wideK256TileTakesTheWidestRungThatDividesK` —
+  - [x] Step 2: failing test `wideK256TileTakesTheWidestRungThatDividesK` —
         `(64, 32, 384)` (`% 128`, not `% 256`) asserts the `.n32k256b1`
         instance is **bit-identical to `.n32k128b1`** (same kernel, same
         reduction order — a real property), and `(33, 128, 2880)` (`% 64`
@@ -2583,7 +2583,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         buffers)` combinations, and `n32k256b1.kernelName`. FAIL: today's
         binary selection sends K 384 to the K64 pair, so the first assertion
         fails on a real mismatch.
-  - [ ] Step 3: failing test `wideK256TileMatchesTheNarrowTileAtEightBits` —
+  - [x] Step 3: failing test `wideK256TileMatchesTheNarrowTileAtEightBits` —
         an 8-bit `.n32k256b1` instance at `(33, 35, 256)` and `(33, 512,
         2048)`, byte loads against vector loads asserted **bit-identical**
         (lever A's property, which does hold within one K width), and against
@@ -2591,7 +2591,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         `mpp_affine_load_words` has no 64-byte branch, so the vector body
         dequantises only the first half of each chunk. This is the test that
         pins the loader bug; it must exist before the instantiation lands.
-  - [ ] Step 4: failing tests at the call sites.
+  - [x] Step 4: failing tests at the call sites.
         `PrefillSharedExpertTests.chunkSharedExpertMatchesRowLoop(rows:variant:)`
         picks up the sixth variant through `allCases` (2 rows × 6 = 12 cases).
         `PrefillGroupedRoutedMoETests+Execution`: raise `FourExpertTile`'s
@@ -2603,7 +2603,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         the grouped `.n32k256b1` instance is bit-identical to the grouped
         `.n32k128b1` across waves. `swift test --no-parallel --filter
         "MPPPrefillInt4QMM|PrefillSharedExpert|PrefillGroupedRoutedMoE"` → FAIL.
-  - [ ] Step 5: implement — the 64-byte load branch and `words[16]`, the two
+  - [x] Step 5: implement — the 64-byte load branch and `words[16]`, the two
         instantiations, `TileVariant.n32k256b1`, the pipeline ladder and its
         selector, the env parsing. Steps 1–4 PASS. Then, before any golden
         work, extend `compareTileK` to take the pair and run
@@ -2611,7 +2611,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         (4 and 8 bits), recording mismatch count, max abs and max rel. P9's
         lesson in order: measure the difference first, decide about golden
         second.
-  - [ ] Step 6 (spike, the gate): `swift run -c release ShrikeBench routed_gemm 20`
+  - [x] Step 6 (spike, the gate): `swift run -c release ShrikeBench routed_gemm 20`
         per arm under `env SHRIKE_MPP_TILE_K=64|128|256` at the default vector
         loads — three arms plus the two ceiling GEMMs the mode already runs
         (`RoutedGEMMBench.swift:20-21`) — on the M4 Pro first, then on the
@@ -2635,7 +2635,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         loader fix and the instantiation, keep `n32k128b1` the default, and
         say so — P8's precedent. Verdict line: the four-row table (three arms
         + ceiling) per box per staging size.
-  - [ ] Step 7: if it won, make `n32k256b1` the default
+  - [x] Step 7: if it won, make `n32k256b1` the default
         (`MPPPrefillInt4QMM.swift:36-42`), every arm still selectable on the
         same binary; the residency line reads
         `affine-threadgroup-f16 tile_n=32 tile_k=256 buffers=1 loads=vector` on
@@ -2644,13 +2644,13 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         link check, `swift test --no-parallel`, the same under
         `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test
         --no-parallel --sanitize=thread`.
-  - [ ] Step 8: `tools/golden-baseline.sh --check` (M4 Pro, server stopped).
+  - [x] Step 8: `tools/golden-baseline.sh --check` (M4 Pro, server stopped).
         Expected: **short IDENTICAL, long differs**, recaptured once per box
         with Step 5's `mpp_compare` numbers as the named reason. A short-profile
         mismatch is a bug — do not recapture. Commit
         `prefill: a 256-wide K tile in the MPP GEMM (v12 P10)`, baseline via
         `git commit --only`.
-  - [ ] Step 9: ledger on both boxes (fresh server per prompt,
+  - [x] Step 9: ledger on both boxes (fresh server per prompt,
         `tools/prefill-measure.sh`, one send per prompt per server lifetime;
         **mini 3.7k + 12k is the verdict**, M4 Pro 3.7k + 12k + 25k the check);
         `tools/mini-deploy.sh --restart`, mini golden recapture, scp into
@@ -3230,7 +3230,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   `SHRIKE_PREFILL_POOL_RESIDENCY=none` is the one-env rollback. Lint baseline
   regenerated for `encodeRoutedMoEPrefill` (261 → 230 lines, the routing
   extracted to `buildPrefillRoutes`) and `ServerInference.load` (180 → 181).
-  Five gates green (1163 tests, TSAN 0 reports in 1,866 s).
+  Five gates green (1163 tests, TSAN 0 reports in 1,866 s). **The counting sort is filed in tt as SHRIKE-32 (2026-09-23).** **Steps 1, 2, 5, 7 and 8 were ticked 2026-09-23; they were left unticked when it landed.**
 
   **What P5 and P9 left.** P5 added the three-way gap split (`host_ms` =
   previous buffer's GPU end → this buffer's `kernelStartTime`, `driver_ms` =
@@ -3442,7 +3442,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
   Steps (TDD; the go/no-go is Step 1, and it needs no code at all):
 
-  - [ ] Step 1 (spike A, the gate, **zero code**): three arms on the mini, one
+  - [x] Step 1 (spike A, the gate, **zero code**): three arms on the mini, one
         fresh server each, the 12k prompt once per server lifetime
         (`tools/prefill-measure.sh`; **the ledger's column names are not the
         prompt labels** — `tools/prefill-prompts.py:10-11` writes the
@@ -3477,7 +3477,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         Step 2. Note that A1 and A2 change cache pressure and therefore wall
         and the routed rows — `driver_ms` on this one boundary is the reading,
         not the wall.
-  - [ ] Step 2 (only if Step 1 keeps the model alive): failing test
+  - [x] Step 2 (only if Step 1 keeps the model alive): failing test
         `expertPoolResidencySetHoldsThePoolBuffer` in
         `ExpertPoolResidencyTests.swift` — build an `ExpertPoolResidency` over a
         small `makeBuffer(bytesNoCopy:)` allocation, assert non-nil,
@@ -3500,7 +3500,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         over the same pages, legal because `poolSlotStride` is page-rounded
         (`PreadExpertStreamer.swift:341-345`), so a routed buffer names 0.57 GB
         instead of 9.06. Record whichever landed.
-  - [ ] Step 3 (probe for lever B, uncommitted): a `Shrike p12probe` line
+  - [ ] Step 3 (probe for lever B, uncommitted; not run: the overlap left no host routing to shrink, :3219-3223): a `Shrike p12probe` line
         accumulated per prefill chunk under `SHRIKE_KERNEL_STATS`, splitting
         `:4982-5021` into `copy_ms` / `pairs_ms` / `validate_ms` / `sort_ms` /
         `group_ms` / `meta_ms` with a layer count — P5's precedent exactly
@@ -3512,7 +3512,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         or mostly the copy and the pair build (then the reorder is the whole
         lever). Verdict line: the six terms per layer on the M4 Pro, and the
         M4 Pro's 2.8 ms total as the sanity check.
-  - [ ] Step 4: failing test in `PrefillMoEGroupingTests.swift` —
+  - [ ] Step 4 (not run: the overlap left no host routing to shrink, :3219-3223; the counting sort filed in tt as SHRIKE-32, 2026-09-23): failing test in `PrefillMoEGroupingTests.swift` —
         `countingSortMatchesTheComparisonSortExactly`: over randomized inputs
         (4,096 tokens × top-8 against 256 experts, with and without
         `expertSortKeys`, including duplicate sort keys and experts with zero
@@ -3523,7 +3523,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         throws the *same* error as the `Set` on each case
         `groupingRejectsInvalidMetadataBeforeKernelUse` (`:117-174`) already
         covers, in the same input order. FAIL: `SortKind` undefined.
-  - [ ] Step 5 (lever B, the reorder): commit `sharedCB` at `:5039` without
+  - [x] Step 5 (lever B, the reorder): commit `sharedCB` at `:5039` without
         waiting; run `:4982-5021`'s routing after it; wait for it and call
         `recordKernelGPU` after the tile drain (`:5178-5181`) so its GPU
         interval is still recorded and a failed buffer still throws. Behind
@@ -3534,14 +3534,14 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         both reading `routedX`). `swift test --no-parallel` then the same under
         TSAN: this step changes host/GPU concurrency, so the sanitizer run is
         the point, not a formality.
-  - [ ] Step 6 (conditional): land the counting sort and the bitset as the
+  - [ ] Step 6 (conditional; not run: the overlap left no host routing to shrink, :3219-3223; the counting sort filed in tt as SHRIKE-32, 2026-09-23): land the counting sort and the bitset as the
         default **only if** Step 3 puts `sort_ms + validate_ms` above half the
         per-layer host time *and* Step 5's ledger leaves a residual
         `shared->routed` `host_ms` above 5 ms per layer-chunk — i.e. only if
         the routing still outruns the shared expert's 17.4 ms of GPU. Otherwise
         keep Step 4's tests (they cost nothing and pin the equality) and record
         the counting sort as a follow-on with the measured reason.
-  - [ ] Step 7: five gates on the final tree — release build with zero
+  - [x] Step 7: five gates on the final tree — release build with zero
         warnings; `swiftlint lint --strict --baseline .swiftlint-baseline.json`
         (regenerate the baseline if `encodeRoutedMoEPrefill`'s length moved);
         markdown link check; `swift test --no-parallel`; the same under
@@ -3551,7 +3551,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         short and long. A difference is a bug — do not recapture.** Commit
         `prefill: queue-resident expert pool and overlapped host routing (v12
         P12)`.
-  - [ ] Step 8: ledger on both boxes (`tools/mini-deploy.sh --restart`,
+  - [x] Step 8: ledger on both boxes (`tools/mini-deploy.sh --restart`,
         `tools/prefill-measure.sh`, fresh server per prompt, one send per prompt
         per server lifetime; **mini 3.7k + 12k is the verdict**, M4 Pro 3.7k +
         12k + 25k the check), then the mini golden check. Same-binary A/B per
@@ -3642,7 +3642,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   closes at 315 of 319 ms. The router is Task 14. Gates on 8692c3a: release
   build 0 warnings, lint 0, links 0, `swift test --no-parallel` (see the
   ledger); TSAN folded into Task 14's run (bench-only code, no concurrency).
-  Golden untouched (no production change).
+  Golden untouched (no production change). **Steps 1 to 3 were ticked 2026-09-23; they were left unticked when it landed.**
 
   **Where the 2.34 goes.** After P12 (HEAD 188d2b7) the mini's 12k prompt
   (12,285 tokens, `tools/prefill-prompts.py:10`; 3 chunks of 4,096 → 120
@@ -3712,7 +3712,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   **not** take: production issues the GDN in-projection as **four** dispatches
   (n 8192, 4096, 32, 32) where `GEMMBench`'s `gdn_inproj_chunk4096` models one
   fused n = 12,288; fusing needs the four weight blocks contiguous in the
-  `.gturbo` — a follow-on, like L7.
+  `.gturbo` — a follow-on, like L7. **Filed in tt as SHRIKE-48 (2026-09-23).**
 
   **Step 1 — the two benches.** Bench-only code, no production path change.
 
@@ -3915,7 +3915,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
 
   Steps (TDD; the measurement precedes any kernel decision):
 
-  - [ ] Step 1: `ShrikeBench gdn_pre`. New file, no production change, no test —
+  - [x] Step 1: `ShrikeBench gdn_pre`. New file, no production change, no test —
         a bench is not under test; its bar is that its PSOs and function
         constants match `GDN.swift`, which the review checks. Five gates, then
         `swift run -c release ShrikeBench gdn_pre 20` on the M4 Pro, then the
@@ -3926,16 +3926,16 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         ShrikeServer / ShrikeCLI / ShrikeRepack), `ssh macmini 'pgrep -fl
         ShrikeServer'`, stop production, run, relaunch with
         `tools/mini-deploy.sh --restart`.
-  - [ ] Step 2: `ShrikeBench dense_gemm` and the façade. Five gates, same deploy
+  - [x] Step 2: `ShrikeBench dense_gemm` and the façade. Five gates, same deploy
         and run on both boxes: `swift run -c release ShrikeBench dense_gemm 20`.
-  - [ ] Step 3 (the gate): fill the ledger — per kernel ms, bytes, GB/s and the
+  - [x] Step 3 (the gate): fill the ledger — per kernel ms, bytes, GB/s and the
         chain total `C`; per dense shape ms, TFLOPS, ceiling share and the
         headroom `H`. Apply the decision rule and re-derive the chosen arm's bars
         from the measured value. **Record the Step 1/2 verdict in the design doc
         whichever way it goes** — the benches are the durable deliverable even if
         neither arm proceeds. Commit `prefill: bench the GDN pre-scan chain and
         the dense MPP GEMM (v12 P13)`.
-  - [ ] Step 4: failing tests for the chosen arm.
+  - [ ] Step 4 (not run: neither arm cleared the rule's threshold, :3629-3632): failing tests for the chosen arm.
         **Chain:** `fusedConvQKNormMatchesTheReference` in `GDNKernelTests` —
         against `GDNReference.normalize` at 2e-2 `maxAbs`/`rel`, **plus bit
         equality against the unfused `gdn_conv_mix_prefill` + `gdn_qk_norm`
@@ -3950,13 +3950,13 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         bit-identical because it took the 64-row pipeline. `swift test
         --no-parallel --filter
         "GDNKernel|GDNChunkedScan|MPPPrefillInt4QMM|PrefillSharedExpert"` → FAIL.
-  - [ ] Step 5: implement; Step 4 PASS. Then the probe: for the chain, tighten
+  - [ ] Step 5 (not run: neither arm cleared the rule's threshold, :3629-3632): implement; Step 4 PASS. Then the probe: for the chain, tighten
         the fused conv+qk-norm to bit equality and run it — passes → land the
         assertion, golden stays identical for that item; fails → record the first
         differing element, keep 2e-2, carry "golden differs on the long profile"
         into Step 7. For the dense arm the bit-equality assertion **is** Step 4,
         and its failure means 2e-2 with the reason recorded.
-  - [ ] Step 6 (the spike, the second gate): re-run the Step 1/2 bench for the
+  - [ ] Step 6 (the spike, the second gate; not run: neither arm cleared the rule's threshold, :3629-3632): re-run the Step 1/2 bench for the
         chosen arm on both boxes; the mini decides. **Accept rule: the mini
         clears every bench bar above, or beats its Step 1/2 control by ≥ 5 % with
         no shape regressing more than 3 %.** Arms within 3 % are a tie (P6 saw
@@ -3964,7 +3964,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         bit-identical arm. If the mini shows nothing, land the tests and the
         kernel behind its env override with the default unchanged, and say so —
         the P8 precedent.
-  - [ ] Step 7: five gates —
+  - [ ] Step 7 (not run: neither arm cleared the rule's threshold, :3629-3632): five gates —
         `swift build -c release 2>&1 | grep -E "warning:|error:"` (empty),
         `swiftlint lint --strict --baseline .swiftlint-baseline.json`,
         `python3 tools/check-md-links.py`, `swift test --no-parallel`, and
@@ -3976,7 +3976,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         (P10's, unchanged through P12: M4 Pro long `e04d4e8ee7f1590d`, M1 long
         `899a25e60a365e60`). Commit `prefill: <the chosen lever> (v12 P13)`,
         baseline via `git commit --only` if there is one.
-  - [ ] Step 8: ledger on both boxes. `tools/prefill-measure.sh <host> <port>
+  - [ ] Step 8 (not run: neither arm cleared the rule's threshold, :3629-3632): ledger on both boxes. `tools/prefill-measure.sh <host> <port>
         <promptdir> <outdir> <tag> 3p7k 12k` against a **fresh server, one send
         per prompt per server lifetime** (a repeat hits the multi-prefix prompt
         cache and prefills only a suffix), roles via `tools/prefill-ledger.py` on
@@ -3984,14 +3984,14 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         verdict**, M4 Pro 3.7k + 12k + 25k the check. `tools/mini-deploy.sh
         --restart`, mini golden check (recapture only if Step 7 established a
         deliberate change), scp into `baselines/`.
-  - [ ] Step 9: design doc — a landed section carrying the Step 1/2 bench tables
+  - [x] Step 9: design doc — a landed section carrying the Step 1/2 bench tables
         (they close L1's and L8's bands whichever arm won), an "**After P13**"
         ledger block, and the GDN row of "Where the time goes" gaining the
         measured split. Follow-ons recorded: the fused n = 12,352 in-projection;
         the gated-norm-in-scan fold and what would make it possible; the arm this
         task did **not** take, with its measured size. Plan: Task 13 `[x]` with
         the landed paragraph. Task review by a fresh reviewer; fixes folded into
-        the commit (rebase and amend, never a fixup commit).
+        the commit (rebase and amend, never a fixup commit). **The fused in-projection is filed in tt as SHRIKE-48 (2026-09-23).** **Ticked 2026-09-23:** the design doc's "After P13" block (8692c3a) and this task's landed paragraph are this step, though the landed paragraph counts it among Steps 4 to 9 not run.
 
   **Verdict line template** (the controller fills in the measured values):
 
@@ -4126,7 +4126,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   Golden IDENTICAL on both boxes, short and long (digests unchanged: M4 Pro
   long `e04d4e8ee7f1590d`, M1 long `899a25e60a365e60`). Lint baseline
   regenerated for `ServerInference.load` (181 → 182). Five gates green (1165
-  tests, TSAN 0 reports in 1,820 s).
+  tests, TSAN 0 reports in 1,820 s). **Its step boxes were ticked 2026-09-23; they were left unticked when it landed.**
 
   **What Task 13 measured.** `ShrikeBench router_block 20`, the production
   encoder driving the production pipeline (`PrefillRouterBenchmark.run`, so the
@@ -4349,7 +4349,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   Steps (TDD; the gate is Step 3's bit-equality result, which decides the rung
   and therefore the bar):
 
-  - [ ] Step 1: the failing test, in `PrefillRouterTests.swift` —
+  - [x] Step 1: the failing test, in `PrefillRouterTests.swift` —
         `tiledRouterIsBitIdenticalToTheBlockRouter`. Run both `PrefillRouter`
         kinds over one set of buffers; compare `outIndices` element-for-element
         and `outWeights` **by bit pattern**, borrowing
@@ -4364,9 +4364,9 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         `routedScalingFactor` 2.446, kimi's value), and one at
         `hiddenStrideElements = d + 13` that re-asserts
         `assertPaddingUnchanged` (`:329`).
-  - [ ] Step 2: `swift test --no-parallel --filter PrefillRouterTests` — expect
+  - [x] Step 2: `swift test --no-parallel --filter PrefillRouterTests` — expect
         FAIL: `PrefillRouter.Kind` undefined.
-  - [ ] Step 3: implement the tiled kernel and walk the ladder. Start at **V1**
+  - [x] Step 3: implement the tiled kernel and walk the ladder. Start at **V1**
         (staged product + hoisted `sum_x`); if any case is not bit-identical,
         drop to **V2**, then to **V3**, and record in the verdict which rung
         survived and what that says about Metal's contraction of
@@ -4374,7 +4374,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         "fix" a mismatch by loosening the test to a tolerance: the whole
         argument for golden identity is bit equality against the current
         kernel.
-  - [ ] Step 4 (the bench spike, both boxes, **the mini decides**):
+  - [x] Step 4 (the bench spike, both boxes, **the mini decides**):
         `swift run -c release ShrikeBench router_block 20` prints, from one
         process, the `router_chunk4096` MPS ceiling, `block`, `tiled` and
         `scores_only` (the tiled kernel with the top-k compiled out — it prices
@@ -4388,18 +4388,18 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         write the null into the verdict and the design doc, and stop — do not
         open the MPP arm without the owner's call, because it moves golden on
         every profile.**
-  - [ ] Step 5: the five gates — release build with zero warnings;
+  - [x] Step 5: the five gates — release build with zero warnings;
         `swiftlint lint --strict --baseline .swiftlint-baseline.json`
         (regenerate if `ServerInference.load`'s length moved); markdown link
         check; `swift test --no-parallel`; the same under
         `env TSAN_OPTIONS=suppressions=tsan-suppressions.txt swift test
         --no-parallel --sanitize=thread`.
-  - [ ] Step 6: `tools/golden-baseline.sh --check` on this box with the server
+  - [x] Step 6: `tools/golden-baseline.sh --check` on this box with the server
         stopped — **expected IDENTICAL, short and long; a difference is a kernel
         bug, not a numerics change: debug it, never recapture**
         (`docs/v12-implementation-plan.md:38-42`). Commit
         `prefill: the router block on an operand-reusing kernel (v12 P14)`.
-  - [ ] Step 7: ledger on both boxes. `tools/mini-deploy.sh --restart`, then
+  - [x] Step 7: ledger on both boxes. `tools/mini-deploy.sh --restart`, then
         `tools/prefill-measure.sh` with a fresh server per prompt and one send
         per prompt per server lifetime (a repeat hits the multi-prefix prompt
         cache), reading roles with `tools/prefill-ledger.py`. **The ledger's
@@ -4411,7 +4411,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
         `SHRIKE_PREFILL_ROUTER=block`. Then the mini golden check — IDENTICAL.
         Nothing here changes allocation, so a `memory_pressure -Q` move would
         be a finding.
-  - [ ] Step 8: docs and review. Design doc gets the landed Step 12 section and
+  - [x] Step 8: docs and review. Design doc gets the landed Step 12 section and
         the "After P14" ledger block; the plan gets Task 14 `[x]`. Fresh
         reviewer; fixes folded into the commit (rebase and amend, never a
         fixup commit).
@@ -4722,7 +4722,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   threshold, which is the whole reason Step 1 comes first. At `α = 0.70` neither
   anchor clears it. The 16-row rung's ceiling is the entire padding residual,
   0.16–0.22 ms/token, reached only at `α₁₆ ≈ 0.25`; Step 1's `P16` prices it and
-  the bench decides, but the fixed dequant makes it unlikely.
+  the bench decides, but the fixed dequant makes it unlikely. **The 16-row rung is filed in tt as SHRIKE-48 (2026-09-23).**
 
   **Numerics for option 1.** The K reduction per output element is unchanged: it
   is the same `TILE_K`-wide loop over the same tiles with the same
@@ -5286,7 +5286,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   `buildPrefillRoutes` completes before `try waitForCompletion(sharedCB)`
   (`:5142-5156`), so tile 0's fetch could be issued against the shared expert's
   ≈ 17 ms of GPU. Record it as a follow-on — folding it in would make the A/B
-  measure two things.
+  measure two things. **Filed in tt as SHRIKE-33 (2026-09-23).**
 
   **Bars (mini, 12k, ms per prompt token unless stated), on the After-P15b rows.**
   `routed→routed` **0.101 → ≤ 0.07** (a 40 % capture of the 0.0766 host term; the
@@ -5466,7 +5466,7 @@ M4 Pro, 6.3 on the M1. The three tasks below are modelled to land at ≈ 2.0 and
   the P4 → P9 shift stays open (neither build measured here); the 57.4 % /
   2.25–2.59× figures asserted in code were measured on other runtimes and
   models (Davor, 2026-09-03) and are not comparable. Golden untouched (no code
-  landed); production restored to the plain launch.**
+  landed); production restored to the plain launch.** **Superseded: the P4 → P9 shift, MTP deleted (efdc628) (noted 2026-09-23).**
 
   **The decision rule, in two lines.** Step 1's contract read plus Step 2's
   three-prompt rig pick one of three exits: **(a)** a defect is found and fixed
@@ -5756,21 +5756,21 @@ The prefill levers the chapter leaves on the table — two fetches in flight, ti
 before the shared-expert wait, the reader's thread count, the 16-row rung, the
 byte-load fallback, the GDN pre-scan chain, the M4 Pro's per-tile host work, the
 ANE — are priced in the design doc's "Follow-ons, not scheduled"
-(`v12-prefill-matrix-kernels.md`); this list carries the decode-side items only.
+(`v12-prefill-matrix-kernels.md`); this list carries the decode-side items only. **The ANE is not priced there; it is filed in tt as SHRIKE-21 (2026-09-23).**
 
 - The mini's SSD term (v10 P3 follow-on: batched miss loads, deeper queue
   depth) — the lever for plain decode's hit-rate-bound steps (body 39.6 → 72.5
   ms = 25 → 14 tok/s by `1000 / body_ms`, 22 → 12.5 end to end, from a counting
   prompt to a 1.4k tools context, Task 17); not the verify
-  pass's lever — that pass is structure-bound (Step 17).
+  pass's lever — that pass is structure-bound (Step 17). **Done: the v10 P3 follow-on, run 2026-09-04 and null on the mini (v10-implementation-plan.md) (noted 2026-09-23).**
 - Speculative decode: audited at Task 17 and retired as a lever for now —
   acceptance is prompt-dependent (21 / 32 / 76 %), the verify pass runs the
   prefill kernels at width 2; the priced path (a decode-width verify without
-  round trips **and** two-token drafting) is in the design's out-of-scope note.
+  round trips **and** two-token drafting) is in the design's out-of-scope note. **Filed in tt as SHRIKE-16 (2026-09-23).**
 - Greedy speculation is not lossless on this runtime: the MTP arm's output
   diverged from the plain arm's on two of three shapes at Task 17 (prose text;
   a tool call's arguments), consistent with a last-ulp difference between the
   pair path's kernels and the decode kernels — unmeasured; a correctness item
-  for whoever revives the path.
+  for whoever revives the path. **Filed in tt as SHRIKE-16 (2026-09-23).**
 - The `expert_hit_rate_prefill` counter that reads 0–14 % with every expert
-  resident.
+  resident. **Superseded: its premise was false (P15, `v12-prefill-matrix-kernels.md:926-946`) (noted 2026-09-23).**

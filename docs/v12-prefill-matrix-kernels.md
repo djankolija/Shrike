@@ -217,7 +217,7 @@ the scalar kernel.
   The SSD term surfaces only once the kernels are ~5× faster.
 - The runner's `expert_hit_rate_prefill` reads 8–14 % even with every expert
   resident on the M4 Pro; warm and cold runs cost the same, so the counter,
-  not the cache, is what is off. Parked.
+  not the cache, is what is off. Parked. **Superseded: its premise was false (P15, :926-946) (noted 2026-09-23).**
 
 **After P5** (commits a7c8288 + bf469ad, 2026-09-02; routed tiles batched per
 command buffer behind `SHRIKE_PREFILL_TILE_BATCH`, default 1 — a measured
@@ -1205,15 +1205,15 @@ minors triaged 17 fine, 1 moot. Merge target and push are the owner's.
   and between chunks. The measure prompts have exactly that shape; the fix (capture the
   boundary snapshot at decode start; decouple the join) is the v10 plan's open
   item ([v10-implementation-plan.md](v10-implementation-plan.md)), not this
-  chapter's. Measurement hygiene: one send per server lifetime.
+  chapter's. Measurement hygiene: one send per server lifetime. **The fix is superseded by the owner's ruling that resolved v10's Q1 (v10-implementation-plan.md); the leftover re-prefill cost is filed in tt as SHRIKE-28 (2026-09-23).**
 - **The 16-row tail rung.** `P16` prices it (the table in Step 13): the
   whole padding residual is 0.225 ms/token at α₁₆ = 0.55, but a 16-row tile
   carries the same fixed dequant as a 64-row one; Task 15b's measured α says
-  whether a second rung is worth a bench.
+  whether a second rung is worth a bench. **Filed in tt as SHRIKE-48 (2026-09-23).**
 - **The per-tile host work on the M4 Pro (the audit's L10).** After P15
   `routed→routed` is 5.3 s of the M4 Pro's 22.7 s at 12k — `host_ms` 4.5 s
   over 3,482 boundaries, ≈ 1.3 ms each — the largest item left on that box; on
-  the M1 it is 0.07 ms/token (887 ms over 3,485). An M4 Pro lever.
+  the M1 it is 0.07 ms/token (887 ms over 3,485). An M4 Pro lever. **Filed in tt as SHRIKE-50 (2026-09-23).**
 - **Tile command-buffer batching — landed as a null result (P5, a7c8288 +
   bf469ad).** The boundary was never ≈ 1.3 ms of commit → wait → encode; it is
   the routed fetch's excess over the GPU tile, and batching removes the
@@ -1228,7 +1228,7 @@ minors triaged 17 fine, 1 moot. Merge target and push are the owner's.
   flight. On the M1 the tile is 7.5 ms of GPU after P6 and the fetch is still
   hidden, so this is an M4 Pro lever; there P6 shrank the tile to 2.25 ms and
   the fetch is now the whole boundary (routed→routed 1.39 ms per boundary,
-  4.5 s of 31.6 at 12k).
+  4.5 s of 31.6 at 12k). **The ≈ 3.3 ms is filed in tt as SHRIKE-50 (2026-09-23); two fetches in flight is done (v13 T1).**
 - **The first tile of each layer-chunk on the M1** still pays ≈ 6.9 ms of
   host time between the shared expert and the routed tiles after P12
   (`shared→routed` `host_ms` 827 ms at 12k over 120): the tile metadata
@@ -1236,7 +1236,7 @@ minors triaged 17 fine, 1 moot. Merge target and push are the owner's.
   follow-on above is the same cost seen from the other box. After P15 the
   alternating sweep leaves the modelled ≈ 112 (measured 119) of the layer's
   experts resident from the previous chunk and the row reads 400 ms (3.3 ms
-  per layer-chunk).
+  per layer-chunk). **The shared-to-routed gap is filed in tt as SHRIKE-31, tile 0's fetch within it as SHRIKE-33 (2026-09-23).**
 - **The MPP GEMM's byte-load fallback on the M1.** After P9 the dequant's
   byte-load body serves only weight bases that are not 16-byte aligned (and
   the `SHRIKE_MPP_WEIGHT_LOADS=byte` A/B), and inside the two-body kernel it
@@ -1249,10 +1249,10 @@ minors triaged 17 fine, 1 moot. Merge target and push are the owner's.
   K width the chunk mapping supports, so what is left of the staged structure
   needs the register-resident weight tile, not a wider one. The dense
   projections are at 85–99 % of the ceiling (Step 11) — a `kMPPAffineTileM`
-  sweep has ≈ 0.05 ms per token to take and is not scheduled.
+  sweep has ≈ 0.05 ms per token to take and is not scheduled. **The register-resident weight tile is filed in tt as SHRIKE-22 and the `kMPPAffineTileM` sweep as SHRIKE-48 (2026-09-23).**
 - **The GDN pre-scan chain** is within 2.3 ms per layer-chunk of its
   streaming floor (Step 11); fusing conv → qk-norm and vectorising the norms
-  would take ≤ 0.02 ms per token and is not scheduled.
+  would take ≤ 0.02 ms per token and is not scheduled. **Filed in tt as SHRIKE-48 (2026-09-23).**
 - **Attention after the FlashAttention null (Step 15).** The matrix-path
   attention is bound by its per-tile fixed work at 16 rows per K/V read, and
   the register-resident shape that removes the round-trip loses that reuse and
@@ -1280,7 +1280,7 @@ minors triaged 17 fine, 1 moot. Merge target and push are the owner's.
   2.81 GB/s against the v10 probe's 3.25 GB/s at queue depth 4 —
   `docs/v10-implementation-plan.md`, P3 — and depth 8 is unmeasured). None
   reaches the GPU roles; every further routed-GEMM cut on the M1 still lands in
-  the fetch term first.
+  the fetch term first. **Tile 0 is filed in tt as SHRIKE-33 (2026-09-23); two fetches in flight is done (v13 T1), and the reader's thread count is done as a measured null (v13 T2).**
 
 ## Numerics policy
 
@@ -1317,7 +1317,7 @@ step are recorded in the plan.
   trips **and** two-token drafting — ≈ 1.3× plain on tool-heavy shapes only,
   the two conditions composing tightly and the second unmeasured. The decode
   fetch work goes to plain decode instead, where decode is hit-rate-bound
-  (22 → 12.5 tok/s end to end from a counting prompt to a 1.4k tools context).
+  (22 → 12.5 tok/s end to end from a counting prompt to a 1.4k tools context). **The P4 → P9 shift is superseded, MTP deleted (efdc628); the priced path is filed in tt as SHRIKE-16 (2026-09-23).**
 ## Risks
 
 - Threadgroup memory at head-dim 256 caps the attention tile; if 40 % of the

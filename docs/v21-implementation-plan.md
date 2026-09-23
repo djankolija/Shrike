@@ -27,7 +27,7 @@ gate (S0.4), the ruling (S0.5); the tasks only if the gate opens.
       path to the 12 %, its per-lane length header 3.6 % of a row, A with C about
       11 %. The head's rows and the per-layer worst expert deferred to the coder's
       first run at Task 1. Script, JSON and log at
-      `~/.claude/handoffs/archive/shrike-v21-step0/`.
+      `~/.claude/handoffs/archive/shrike-v21-step0/`. **The deferral to Task 1 is superseded: the chapter closed at step zero and Task 1 never ran (noted 2026-09-23).**
 - [x] **S0.2 The pool's prize.** DONE 2026-09-18: the replay on the eight v19
       and the four Q3 traces; at the coded stride (0.88) the production pool's
       decode misses cut 22 to 29 % (145 slots uniform, the table scaled to

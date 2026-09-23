@@ -52,15 +52,15 @@ onto the root that Task 4 then deletes.
       bench's seven on the strength of a compile-out that was never implemented
       and must not be, since the benches run on the mini and the mini has no
       toolchain.
-- [ ] For every deletion candidate, name the code path that goes with it. v17's
+- [x] For every deletion candidate, name the code path that goes with it. v17's
       rule: the honest removal deletes a flag together with the path it selected.
       A flag with no path to delete is a suspicious deletion, not a free one.
       **Partial**: named for `--lazy-load` (the `preload` conflict branch),
       `--prompt-cache-disk` (plumbed through five files into the runtime's
       snapshot store, and whether that store is shared with the in-memory cache
       is still open), `--concise`, `--rope-scaling` and `--resume`. Ten are
-      named in `f8d1ffd`'s message, each beside the path it took; the seven that
-      reach `ModelSessionPlan` are named in T4b, before anything is cut.
+      named in `ca5374f`'s message, each beside the path it took; the seven that
+      reach `ModelSessionPlan` are named in T4b, before anything is cut. **Ticked 2026-09-23:** the ten are named in `ca5374f`'s message (T4a) and the seven in `fa0e72c`'s (T4b); this step cited `f8d1ffd`, a pre-rebase SHA not on `main`, corrected to `ca5374f` the same day.
 - [x] Settle `--tokenize`: **stays a flag on the bare form.** Two tools read it,
       `expert-pool-replay.py` and `q3-drafter-routes.py`, so it survives rule 1.
       Graduating it to its own verb is recorded as out of scope.
@@ -74,7 +74,7 @@ onto the root that Task 4 then deletes.
       (`ShrikeGenerateCommand.swift:201`). Both validate; they disagree on the
       contract. The defaults differ too, 4096 against 262144. Under one root
       these become siblings in one help tree, so the drift is resolved rather
-      than inherited.
+      than inherited. **No commit made the two contracts one; filed in tt as SHRIKE-47 (2026-09-23).**
 - [x] Write the table into `v24-unified-cli.md` as an inventory section, with the
       resulting count stated as an output of the classification.
 - [x] Link check, commit. Text only. (`b6dee21`, the link check clean at 84 files.)
@@ -84,7 +84,7 @@ the evidence supports 36 in the shipped surface, and going below that would mean
 deleting working behaviour rather than removing cost. The owner's reservation
 that several survivors still are not worth their cost is recorded in the spec's
 Out of scope, so a later chapter can reopen it from rule 3 rather than from
-scratch.
+scratch. **Filed in tt as SHRIKE-4 (2026-09-23).**
 
 ---
 
@@ -268,10 +268,10 @@ Sixteen distinct flags across nineteen slots. `--rope-scaling` is a keep, and
 - [x] The design doc's close: what this chapter got wrong about itself, and what
       the review caught that the gates could not — and, since the traffic ran
       both ways, what the gates caught that a reader would not.
-- [ ] Final four gates on the final state, plus `tools/golden-baseline.sh --check`
-      byte-identical on all five profiles against a release build of that state.
-- [ ] **Owner's go required:** deploy to the mini, relaunch production on the new
+- [x] Final four gates on the final state, plus `tools/golden-baseline.sh --check`
+      byte-identical on all five profiles against a release build of that state. **Ticked 2026-09-23:** `108e5b9`'s message records both.
+- [x] **Owner's go required:** deploy to the mini, relaunch production on the new
       launch line, and re-run the golden baseline there against the mini's own
       tagged baselines. The mini has no git; build release here and copy the
-      binary with its three `*.bundle` directories.
-- [ ] **Owner's go required:** merge to `main` and push.
+      binary with its three `*.bundle` directories. **Ticked 2026-09-23:** the deploy and relaunch are `5ce5d2e`; the mini's golden re-run of 2026-09-22 is recorded outside the repo.
+- [x] **Owner's go required:** merge to `main` and push. **Ticked 2026-09-23:** `5ce5d2e` is on `origin/main`.

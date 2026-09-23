@@ -223,4 +223,4 @@ disagrees.
       belong across all five task commits, and this harness does not support
       `git rebase -i`, so an interactive fold is unavailable. They land as one
       labelled review-fold commit naming the owning commit per finding.
-- [ ] Merge on Davor's go, delete the branch, update memory.
+- [x] Merge on Davor's go, delete the branch, update memory. **Ticked 2026-09-23:** `ae18920` is on `main` and `origin/main`, and no v23 branch remains.

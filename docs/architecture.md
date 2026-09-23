@@ -461,7 +461,7 @@ path, not a mode.
 Production's per-read cost on the mini is 0.73 to 0.80 ms at p50 inside a 1.0 to 1.1 ms
 reading layer (v15's ledger). The term's other factor moved in v20: the misses per token
 19 to 20 down to 14 to 17 by the pool's allocation, the io 13.5 to 15.1 ms per token to
-10.6 to 12.3 (`v20-ssd-mechanism.md`, Task 1); what a read costs is untouched.
+10.6 to 12.3 (`v20-ssd-mechanism.md`, Task 1); what a read costs is untouched. **The 0.73 to 0.80 ms is v15's probe figure (`v15-miss-window.md:122`), not production's; production's per-read cost is filed in tt as SHRIKE-44 (2026-09-23).**
 
 Two other readers stood beside it until v17 and are gone with their knobs: the legacy
 cached-pread path, and the Metal IO backend (its A/B of 2026-09-01: rig wait 43.29 ms sd
@@ -533,7 +533,7 @@ in [multi-model-serving.md](multi-model-serving.md); the channel-faithful turn d
    65 / 61 / 62 ms token (v15, v16). Splitting one read across several preads is null on
    the mini's internal drive (2026-09-04, `v10-implementation-plan.md`, the P3 follow-on);
    the mini needs many experts in flight to saturate. The I/O threads remain the one CPU load safe beside decode: they block in
-   the kernel rather than burn ALU (v4's measurement, unchanged in kind).
+   the kernel rather than burn ALU (v4's measurement, unchanged in kind). **The 0.73 to 0.80 ms per read is v15's probe figure, not production's; production's per-read cost is filed in tt as SHRIKE-44 (2026-09-23).**
 3. **No per-layer CPU round trip in decode.** Still true, and now the mechanism above:
    the classifier on the GPU, the speculative routed work a layer ahead in the layer's
    own command, the host woken by a word, the fixup encoded with the layer and gated on

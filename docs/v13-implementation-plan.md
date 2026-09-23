@@ -518,7 +518,7 @@ different kernels on a chunk.
   `try waitForCompletion(sharedCB)` (`:5250`), so tile 0's fetch could ride the
   shared expert's GPU — P16's own follow-on
   ([v12-prefill-matrix-kernels.md](v12-prefill-matrix-kernels.md):1276-1280);
-  folding it in would make this A/B measure two things.
+  folding it in would make this A/B measure two things. **Tile 0's fetch under the shared expert's GPU is filed in tt as SHRIKE-33 (2026-09-23).**
 
   **Byte-identity — scheduling only.** The change decides which slot an expert
   lands in and when, never its bytes; commit order is unchanged, each pair still
@@ -1083,7 +1083,7 @@ different kernels on a chunk.
         rewritten with the measured per-expert time and whatever is left of the
         term; the deeper-lookahead follow-on repriced now that batches overlap.
         Plan: Task 2 `[x]` with the landed paragraph. Task review by a fresh
-        reviewer; fixes folded into the owning commit.
+        reviewer; fixes folded into the owning commit. **The deeper lookahead is superseded: repriced and not scheduled, its knob deleted in v17, v17-consolidation.md:67 (noted 2026-09-23).**
 
   **Risks and what falsifies the model.**
   - **The realized rate does not rise.** `io_fetch_ms × 8` ÷ misses stays at
@@ -1220,7 +1220,7 @@ different kernels on a chunk.
   recorded as a follow-on, not taken. Threshold 4 is not taken either: lowering
   it would size `routedExpertStagingRows` on the 32-token MTP scratch and raise
   the draft path's hard memory budget for no measured gain (the routed GEMM is
-  already flat per tile at 21 rows).
+  already flat per tile at 21 rows). **The chunked scan below 64 rows is filed in tt as SHRIKE-25 (2026-09-23).**
 
   **The knob.** `SHRIKE_PREFILL_MATRIX_MIN_ROWS=<n>`, parsed beside
   `environmentPrefillTailTile` (`RealForwardRunner.swift:484-490`) in the shape of
@@ -1720,7 +1720,7 @@ different kernels on a chunk.
      under 0.1 s. **The follow-up turn is not where this lever pays**, and Task 3's
      closing sentence ([v13-the-turn.md](v13-the-turn.md):450-452) overstated it;
      what is left of that stage is its per-tile GPU (1.22 ms × 338 tiles at 21
-     rows), a kernel question recorded as a follow-on.
+     rows), a kernel question recorded as a follow-on. **The per-tile GPU is filed in tt as SHRIKE-22 (2026-09-23).**
   2. **Decode: the chapter's largest single term.** tX answers 219 tokens at 13.01
      tok/s with 7,451 misses = 34.0 per token = 0.85 per layer-token of 8 lookups
      (hit rate 0.8932). Four independent measurements of what one miss costs: the
@@ -2097,7 +2097,7 @@ different kernels on a chunk.
   `t4-out/t4-cap-aging-lfu-d512-300-r3/` (a 289-row prompt answered at 512 tokens, then a
   warm 305-row prompt), captured with protection off and replayed here at `--protect
   chunk`, which reproduces round 3's measured rows (705 / 614 on the follow-ups, 3,389 on
-  t300b against the box's 705 / 613 / 3,389).
+  t300b against the box's 705 / 613 / 3,389). **The no-prefix settle is filed in tt as SHRIKE-28 (2026-09-23).**
 
   **The offline verdict** (`tools/expert-pool-replay.py` at `--policy aging-lfu --slots
   128 --protect chunk`; prefill / decode misses per request, the settle chunks summed;
@@ -2237,7 +2237,7 @@ different kernels on a chunk.
     protect on the head and does its work only across the absent group's later tiles. The
     starvation fallback (the plan retried with `nil`, `:718-722`) therefore fires on
     strictly fewer plans than today, and the Follow-ons entry asking for a counter on it
-    matters less after this task, not more.
+    matters less after this task, not more. **Filed in tt as SHRIKE-45 (2026-09-23).**
   - **The settle's chunks take the same order** (`ServerPromptCache`'s rewrite calls
     `prefillChunked`, `RealForwardRunner.swift:2273`, which is the same chunk path;
     `recordRouteTraceRequestStart` is deliberately not called from it, `:2125`). The
@@ -2514,47 +2514,47 @@ which are Davor's alone.
   begin throws (the streamer's begin throws only before it executes a plan, whose miss
   slots would otherwise stay reserved), and the test now pins a failure inside a begin
   waiting out the begun predecessor. The branch is review-clean.
-- [ ] The fast-forward merge to main and the push (Davor's alone).
+- [x] The fast-forward merge to main and the push (Davor's alone). **Ticked 2026-09-23:** 5316d2a and e0bba79 are on main.
 
 ## Follow-ons (not scheduled)
 
 - The GDN chunked scan below its 64-row gate (`GDN.chunkTokens`): ≤ 33 ms on a
-  21-row turn, and a numerics change for every 32–63-row chunk (Task 3).
+  21-row turn, and a numerics change for every 32–63-row chunk (Task 3). **Filed in tt as SHRIKE-25 (2026-09-23).**
 - The routed experts' matrix gate reads the configured chunk and its strict
   `> 32` protects the 32-token MTP draft scratch's memory budget; lowering it
   needs that budget priced (Task 3; the routed path is already the matrix path at
-  21 rows in production).
+  21 rows in production). **Superseded: efdc628 deleted the MTP draft scratch; the gate is now `PrefillChunkScratch.swift:124-128` (noted 2026-09-23).**
 - The expert reader's publication signals `min(count, threads)` workers instead
   of broadcasting to all (Task 2 review): sound because every worker re-checks
   the claim predicate before parking; the shutdown path keeps its broadcast. The
   read is turn 3's +26 ms at eight threads; at the default four it is inside
-  noise, so this rides on any task that raises the thread count.
+  noise, so this rides on any task that raises the thread count. **Superseded: `SHRIKE_EXPERT_IO_THREADS` was deleted in v17 and the thread count is a constant; this comes back only if a task raises it (noted 2026-09-23).**
 - The resident sweep's route-build host on a tiny chunk (Task 5 round 2: the two short
   follow-up turns +13 to +16 ms, ≈ 0.45 ms per layer in the shared-to-routed gap by the
   gap counters; an allocation-free residency mask on the streamer and a cheaper tile
   placement are the candidates). Measure first: the runner's `SHRIKE_PHASES` print is
   lost to stdout buffering under the server's redirected launch (the next launch kills
-  the process before the buffer flushes), itself a one-line fix.
+  the process before the buffer flushes), itself a one-line fix. **Filed in tt as SHRIKE-32 (2026-09-23); the `SHRIKE_PHASES` buffering fix is superseded (4003388 removed `SHRIKE_PHASES`).**
 - The cold first request's prefill under the balanced recency composition (Task 5 round
   2: +0.4 % on three repeats at 2,125 rows, single runs +1.4 % at 2,093 and +0.7 % at
   12k): a cold pool's tiles are all-miss under any order, so only the packing's GPU
   overlap can move; the same family as Task 4's +0.27 s observation; measure before
-  explaining.
+  explaining. **Superseded: its A/B arms went in v17 and the pool was replaced in v20 and v22 (noted 2026-09-23).**
 - The prompt cache's settle after a request whose prompt has no cached prefix
   re-prefills the whole prompt in the background (`settle_reset reason=no_prefix_snapshot`,
   ≈ 6 GB of expert reads after a 300-token request, the pool swept): a cache-chapter
-  item found by Task 4's trace.
+  item found by Task 4's trace. **Filed in tt as SHRIKE-28 (2026-09-23).**
 - The expert-cache policy env parse lives in `PreadExpertStreamer.init`, so a bad value
   fails per layer mid-request instead of at launch, and never reaches
   `RuntimeConfiguration.expertCachePolicy` (Task 4 draft; a hoist to a static
-  `environmentValue` in the shape of `ExpertIOBackend`'s).
+  `environmentValue` in the shape of `ExpertIOBackend`'s). **Done: f0e056c, where `RuntimeConfiguration.environmentExpertPolicy` parses the policy at load (noted 2026-09-23).**
 - A counter for how often chunk-aware protection's starvation fallback fires (Task 4
-  review note; the replay models the fallback, the box does not report it).
+  review note; the replay models the fallback, the box does not report it). **Filed in tt as SHRIKE-45 (2026-09-23).**
 - The cold first request's +0.27 s under protection on one of two same-shape arms
   (Task 4 round 3: the `300` arm's 289-row first request 5.48 → 5.76 s, the `d512-300`
   arm's identical request 5.47 → 5.49): measure before explaining; a per-plan early-out
   when no resident is protected is the candidate only if the measurement points at
-  the scan.
+  the scan. **Superseded: its A/B arms went in v17 and the pool was replaced in v20 and v22 (noted 2026-09-23).**
 - The prompt cache's interior snapshots (a prompt that diverges inside a stored
-  entry re-prefills in full; append-only turns are served).
+  entry re-prefills in full; append-only turns are served). **Filed in tt as SHRIKE-27 (2026-09-23).**
 - v12's prefill kernel follow-ons stay in [v12-prefill-matrix-kernels.md](v12-prefill-matrix-kernels.md).

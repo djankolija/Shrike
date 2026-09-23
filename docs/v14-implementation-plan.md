@@ -830,7 +830,7 @@ moved under `tools/` by the first task that needs it in the tree).
   ceiling with all four: +3 to +7 % of tok/s; the contention model is the risk and
   the zero-code distance-2 probe (the same ring with `SHRIKE_PREFETCH_PROBE_DISTANCE=2`,
   three lifetimes) tests it before any line is written. Re-price on the box as it
-  stands after Task 2, never on this model.
+  stands after Task 2, never on this model. **Done: in v15 and v16 (noted 2026-09-23).**
 
 - **What the pool has left at the prefill-to-decode boundary.** Belady removes 64.7 %
   of the card answer's decode misses and 60.8 % of the 300 answer's
@@ -840,7 +840,7 @@ moved under `tools/` by the first task that needs it in the tree).
   exhausted is the state the prompt hands to the answer: v13 Task 5's resident-first
   sweep took the first cut of it and was worth 0.5 to 0.9 s of the first turn's
   decode. The replay tool and the four archived traces price any successor offline
-  before a line is written.
+  before a line is written. **Done as a measured null: v15 Task 4 (`v15-implementation-plan.md:472-508`) (noted 2026-09-23).**
 
 - **The LM head the server never fuses.** `head_logits` is 4.82 to 5.05 ms of GPU per
   token (6.6 to 7.2 % of the wall) and `head_fused_ms` is 0.000 on every step-zero
@@ -851,7 +851,7 @@ moved under `tools/` by the first task that needs it in the tree).
   remove the head GEMV, only the full logits writeback and a dispatch, and it is a
   behaviour change (no logits means no sampling and no logprobs), so the task is
   "measure the fused path's saving on a greedy request, then decide whether the
-  server can pick per request", not a flip.
+  server can pick per request", not a flip. **Closed 2026-09-23 with no tt entry, by the owner's ruling: it stays not scheduled, since Pi's config sets no temperature, so its requests get Shrike's default 0.6 (`Sampler.swift:7`) and would never take a greedy path; read from config, not observed on the wire.**
 
 - **The drive's idle-gap tax as a standalone.** 0.175 ms on the first read of every
   missing layer, 3.2 ms per token, 4.3 %. Not separately collectable (the only way
@@ -870,15 +870,15 @@ moved under `tools/` by the first task that needs it in the tree).
   have no host test (`begin` needs a `Model`; a seam would allow one). The
   speculative modes' fail-closed residency check is symmetric; a directional form
   (the GPU's misses a superset of the plan's, equal beyond the adopted set) would
-  keep the benign direction alive if it ever occurred.
+  keep the benign direction alive if it ever occurred. **The per-class counter was closed 2026-09-23 with no tt entry, by the owner's ruling: prefetch is always on, v20 T3.1 retired the adopted role v15 subtracted with, no tool divides by the counter any more (`tools/decode-rows.py:89` only prints it), and the per-read question behind the ratio is SHRIKE-44. The ring's counters are done: d3da6f9, `ExpertPrefetchRingTests` (noted 2026-09-23). The directional residency check is superseded: `architecture.md:367-370` (noted 2026-09-23).**
 - The runner's own overlap accounting and the regression disagree about how much of
   the fetch is exposed: `io_hidden_pct` reads 32.2 / 33.8 / 33.2 % hidden (so about
   14.5 ms per token exposed) while the kernel gap and the regression both put the
   whole 18 to 20 ms on the wall. One of the two definitions is not measuring what its
-  name says; worth settling before either is used in a verdict.
+  name says; worth settling before either is used in a verdict. **Superseded: `io_hidden_pct` was retired in 2a0f7d9 (noted 2026-09-23).**
 - The prompt cache's settle after a request whose prompt has no cached prefix
   re-prefills the whole prompt in the background (v13 Task 4's finding, visible again
-  in step zero's `settle chunk` rows at 2,706 to 2,982 misses); a cache-chapter item.
+  in step zero's `settle chunk` rows at 2,706 to 2,982 misses); a cache-chapter item. **Filed in tt as SHRIKE-28 (2026-09-23).**
 - v13's open follow-ons stay in [v13-implementation-plan.md](v13-implementation-plan.md):
   the GDN chunked scan below its 64-row gate, the routed matrix gate's `> 32`, the
   reader's `min(count, threads)` publication signal, the resident sweep's route-build

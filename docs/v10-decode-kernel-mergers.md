@@ -119,7 +119,7 @@ Mission reframe (Davor, 2026-09-01): from here the goal is a clean
 close-out — every lever landed or closed with a recorded verdict — not a
 number target. Gains are welcome; a null closes a door and counts the
 same. Non-trivial future speed lives in speculative drafting, which needs
-the prefill quest first. Four doubts surfaced 2026-09-01 must not survive
+the prefill quest first. **Filed in tt as SHRIKE-16 (2026-09-23).** Four doubts surfaced 2026-09-01 must not survive
 the chapter:
 
 - **P1 — machine-roof probe.** Standalone Metal streaming benchmark (blit

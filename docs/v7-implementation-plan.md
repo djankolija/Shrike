@@ -653,8 +653,8 @@ git commit -m "v7 6/6: document reasoning effort; retire the thinking-off no-op"
 - pi wiring on the client machine (`~/.pi/agent/models.json`): `"reasoning":
   true` + `"thinkingLevelMap": {"minimal": "low", "xhigh": "high"}` on
   `shrike/gpt-oss-20b`, then one live prompt per effort level to confirm the
-  field arrives and the rendered block reflects it.
+  field arrives and the rendered block reflects it. **Filed in tt as SHRIKE-38 (2026-09-23).**
 - The next mini deploy independently carries the rename checklist from
-  [CLAUDE.md](../CLAUDE.md).
+  [CLAUDE.md](../CLAUDE.md). **Done: the rename landed 2026-08-30 (noted 2026-09-23).**
 - Re-run the two gpt-oss repros with `SHRIKE_GEN_DIAG=1` to collect the Bug 1
-  tool name and the Bug 3 channel-marker verdict.
+  tool name and the Bug 3 channel-marker verdict. **Done: Bug 1's capture at v8-emission-form-tool-calls.md:23-29, Bug 3's at channel-faithful-turns.md:25-28 (noted 2026-09-23).**

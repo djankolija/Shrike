@@ -98,7 +98,7 @@ the default model, and the three keys it already has.
 | `--prompt` | raw-completion prompt | 8 | keep, gate |
 | `--messages-file` | JSON chat messages | 1 | keep, gate |
 | `--max-new` | generated-token limit | 1 | keep, gate |
-| `--max-context` | native context limit | 4 | keep, and **unify** |
+| `--max-context` | native context limit | 4 | keep, and **unify**. **Filed in tt as SHRIKE-47 (2026-09-23).** |
 | `--temperature` | sampling temperature | 2 | keep, gate |
 | `--top-k` | top-k truncation | 0 | keep, per-invocation |
 | `--top-p` | nucleus truncation | 0 | keep, per-invocation |
@@ -140,8 +140,8 @@ the default model, and the three keys it already has.
 | `--prompt-cache-mode` | prefix reuse mode | 1 | **delete**, settled |
 | `--prompt-cache-entries` | retained prefixes | 0 | **delete** |
 | `--prompt-cache-memory-mib` | RAM snapshot budget | 0 | **delete** |
-| `--prompt-cache-disk` | persistent SSD cache directory | 0 | **delete**, inherited |
-| `--prompt-cache-disk-mib` | SSD snapshot budget | 0 | **delete**, inherited |
+| `--prompt-cache-disk` | persistent SSD cache directory | 0 | **delete**, inherited. **The disk tier behind it is filed in tt as SHRIKE-49 (2026-09-23).** |
+| `--prompt-cache-disk-mib` | SSD snapshot budget | 0 | **delete**, inherited. **Filed in tt as SHRIKE-49 (2026-09-23).** |
 | `--prefill-chunk` | prefill chunk size | 0 | **delete** |
 | `--reasoning-retention` | history render form | 0 | **delete**, three surfaces |
 | `--lazy-load` | nothing | 0 | **delete**, dead |
@@ -184,7 +184,7 @@ the id `ornith15`. The mini's launch line passes `--model-id ornith15`, which is
 exactly what the default produces. The help claims the default is "derived from
 the installed model manifest", but the namespace only ever maps `entry.id` and
 `entry.bundleName`, never `manifestModelID`, so a client cannot select by the
-manifest id at all.
+manifest id at all. **Superseded: the flag left serve in `ca5374f` (noted 2026-09-23).**
 
 **The sole-bundle default already exists.** An earlier draft of this document
 called "the models directory's only bundle, when it holds exactly one" the one
@@ -246,7 +246,7 @@ not because no rule ran. `ShrikeCLICore` genuinely never references
 `supportedContextTokens`, but the conclusion drawn from that did not follow.
 Generate's help is accurate about generate. The defect is that two siblings
 enforce different contracts for one flag, and under one root they sit in one help
-tree, so it is resolved rather than inherited.
+tree, so it is resolved rather than inherited. **No commit made the two contracts one; filed in tt as SHRIKE-47 (2026-09-23).**
 
 ### Who names these binaries
 
@@ -284,7 +284,7 @@ and that path needs two modules' bundles in one process, since
 `Shrike_ShrikeAttnBenchCore.bundle`. The third resource-bearing module,
 `ShrikeExpertBenchCore`, needs real experts to run and was not executed; its
 mechanism is the same, and the hardcoded cross-bundle path it uses was confirmed
-to resolve (see below).
+to resolve (see below). **Running it is filed in tt as SHRIKE-52 (2026-09-23).**
 
 **A root with required options does not dispatch to subcommands.** With `--model`
 declared required on the root, `probe serve --port 9000` fails with
@@ -505,7 +505,7 @@ and already falls back to the sole entry.
    `*.bundle` directories still required beside it.
 8. **The receipt's `toolVersion` and the remediation text** move to the new
    spelling. Receipts already on disk keep the old string, which is provenance
-   and correct.
+   and correct. **Install receipts still take the old spelling; filed in tt as SHRIKE-47 (2026-09-23).**
 
 ## Out of scope
 
@@ -524,19 +524,19 @@ argv and so does not need this chapter's break (owner's ruling, 2026-09-19). Two
 smaller drifts belong with it: `--repetition-penalty` defaults to an inline `1.0`
 at `ShrikeGenerateCommand.swift:81` where its three siblings come from
 `GenerationDefaults`, and `GenerationDefaults.presencePenalty` is exposed by no
-flag at all.
+flag at all. **Filed in tt as SHRIKE-12 (2026-09-23).**
 
 **A further cut to the development flags.** The owner's standing reservation at
 this chapter's opening is that several surviving flags still are not worth their
 cost, kept "for the time being" rather than because the case for them is settled
 (2026-09-19). The disposition above is therefore a floor, not a ceiling: a later
 chapter revisiting it should start from the ones kept only by rule 3,
-per-invocation choice, since rules 1 and 2 are evidence and rule 3 is judgement.
+per-invocation choice, since rules 1 and 2 are evidence and rule 3 is judgement. **Filed in tt as SHRIKE-4 (2026-09-23).**
 
 **`--tokenize` as its own verb.** It exits without loading the model, so it is
 arguably not a generation flag at all, but whether it graduates to `shrike
 tokenize` is a question the flag classification answers, not one to settle ahead
-of it (owner's ruling, 2026-09-19).
+of it (owner's ruling, 2026-09-19). **Superseded: the classification kept it a flag on the bare form, v24-implementation-plan.md:64-66 (noted 2026-09-23); the flag is judged again under SHRIKE-4.**
 
 **An interactive mode.** There is none today, and `shrike chat` is the obvious
 name for one if it ever appears. Leaving the bare form as generation keeps that
@@ -556,7 +556,7 @@ It survives unification, since that bundle sits beside whatever binary is
 running, and the file was confirmed present at that path. But it hardcodes a
 string encoding both the package name and a target name, and it would fail at
 runtime rather than at compile time if either moved. Recorded here as a known
-bound, not fixed in this chapter.
+bound, not fixed in this chapter. **Filed in tt as SHRIKE-52 (2026-09-23).**
 
 ## The close
 
@@ -643,4 +643,4 @@ token sequence past an argmax flip. The disposition still stands and the runtime
 field remains, but the cost is now recorded beside it, and a second sweep by
 *concept* rather than by spelling found both the second instance
 (`restore_fidelity_probe.py`) and a defect that was not a flag at all:
-`SHRIKE_MODEL` sitting in an allow-list with no reader.
+`SHRIKE_MODEL` sitting in an allow-list with no reader. **The forced-token path back is filed in tt as SHRIKE-20's prerequisite (2026-09-23), and whether it returns as a flag is SHRIKE-4's to judge; `SHRIKE_MODEL` is done (`fa0e72c`, noted 2026-09-23).**

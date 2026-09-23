@@ -46,7 +46,7 @@ on hope. Baseline anchor at start of Phase 3: rig 40.0 / card 57.9
       perf/t2-gdn-merge for a future occupancy-tuned attempt (M4-class
       behavior unmeasured). ⚠ Deploy-trap re-confirmed the hard way:
       the new .metal kernel 500'd the server until the resource
-      bundles shipped alongside the binary.
+      bundles shipped alongside the binary. **Closed 2026-09-23 with no tt entry, by the owner's ruling: the occupancy-tuned attempt is retired, since v18 priced the wall between small kernels at about 3 µs (v18-implementation-plan.md:236-246) and its floor rule declined the similar merges T6.2 and T6.4 to T6.6, conv plus qk norm from this chain among them, leaving roughly 0.2 ms per token (an estimate, grade C), under the rig's noise; the branch conflicts with main. The branch perf/t2-gdn-merge is deleted under SHRIKE-14.**
 - [x] **T3: wake A/B (C4)** — RAN 2026-08-31/09-01, **NULL on the M1;
       winner = the encoded wait, host-spin knob deleted.** Four fresh-server
       arms on one binary (t3-747a18a): rig wall 9.308/9.307 s, card body
@@ -122,7 +122,7 @@ Each is "run once, record the verdict, close either way"; definitions in
       Follow-on (unscheduled): batch miss loads per discovery point,
       deepen in-flight QD; prefill batches whole tiles. Est. prize
       ~3–4 ms/token of real-shape exposed miss I/O + a large slice of
-      prefill's 33 ms/token.
+      prefill's 33 ms/token. **Superseded: by its own verdict below (:190-205), v14 plan:855-859 and v15 plan:17 (noted 2026-09-23).**
       **BACKEND A/B RAN 2026-09-01 ~04:30 — the dormant
       SHRIKE_EXPERT_IO_BACKEND=metal path (MetalExpertReader, batches
       per plan, exactly P3's winning shape) is NOT the vehicle:
@@ -152,7 +152,7 @@ Each is "run once, record the verdict, close either way"; definitions in
       across in-flight layers (drive gives +48 % aggregate at QD4) —
       a scheduling-structure change, smaller and harder than the
       original ~3–4 ms batching estimate. MTLIO's +0.54 ms single-load
-      overhead stands (probe-measured) but production never pays it.**
+      overhead stands (probe-measured) but production never pays it.** **Superseded: by the verdict at :190-205, v14 plan:855-859 and v15 plan:17 (noted 2026-09-23).**
       **P3 FOLLOW-ON RAN 2026-09-04 (Davor's SSD-fetch ideas, probed
       to exhaustion, all NULL on the mini).** Five standalone C probes
       on the mini's Apple-fabric SSD (APPLE SSD AP0512Q), 1.77 MB
@@ -206,7 +206,7 @@ Each is "run once, record the verdict, close either way"; definitions in
 
 ## Queued after T5 (Davor, 2026-08-31 — sequenced behind the original tasks)
 
-- [ ] **Q1: between-token host overhead** (~5–7 ms/token for every request:
+- [x] **Q1: between-token host overhead** (~5–7 ms/token for every request:
       decode window vs body_ms; GPU busy 77% of window on real turns vs 93%
       rig). First probe: stats-off A/B (RUNNER/KERNEL_STATS may tax the
       observed); then the per-token emit/detokenize/async-hop loop.
@@ -219,7 +219,7 @@ Each is "run once, record the verdict, close either way"; definitions in
       on the rig** (54.8 wall vs 39.9 body + ~4.9 head). Narrowed
       suspects: host greedy/sampling over the 248,320 vocab (the fused
       greedy head the server never uses — head_fused_ms=0.000 for all
-      server traffic), detokenize/emit, per-token async hops.
+      server traffic), detokenize/emit, per-token async hops. **Closed 2026-09-23 with no tt entry, by the owner's ruling: the fused greedy head stays not scheduled, since Pi's config sets no temperature, so its requests get Shrike's default 0.6 (`Sampler.swift:7`) and would never take a greedy path; read from config, not observed on the wire.**
       **LOOP EXONERATED, MECHANISM FOUND (loop timers b0f775b,
       deployed): measured loop_sample 0.43 / loop_detok 0.002 /
       loop_progress 0.001 / loop_produce 45.18 (= body 39.75 + head
@@ -239,7 +239,7 @@ Each is "run once, record the verdict, close either way"; definitions in
       state copy/request) so first-settle restores instead of
       resetting; (b) decouple the join so the next request does not
       stall behind normalization. Not touched overnight — spec'd,
-      correctness-adjacent (dialect re-render strips reasoning).**
+      correctness-adjacent (dialect re-render strips reasoning).** **Superseded: by the owner's ruling at :260-265 (noted 2026-09-23).**
       **ROOT CAUSE PINNED 2026-09-01 morning (kv_tail diagnostic
       3bff0d4, ids decoded against the tokenizer): the live-vs-settled
       divergence on ornith/thinking-off is the EMPTY THINK BLOCK —
@@ -262,7 +262,7 @@ Each is "run once, record the verdict, close either way"; definitions in
       models. Fix spun out as its own work item:
       [v6.1-reasoning-retention.md](v6.1-reasoning-retention.md)
       (reasoning-retention policy, as-generated default, Harmony
-      forces stripped). Q1 closes when v6.1's R4 verdict lands.**
+      forces stripped). Q1 closes when v6.1's R4 verdict lands.** **Ticked 2026-09-23:** v6.1's R4 verdict landed, CONFIRMED 2026-09-01 (v6.1-implementation-plan.md:31).
 - [x] **Q2 CLOSED 2026-09-01 (v11 V4+V4.1, default via V4.2 b7aa00b): depth tax +8.0 → +2.19 ms/1k ctx; verdict trail in docs/v11-implementation-plan.md.** Original entry: **Q2: context-depth tax — now sized as a genuine anomaly
       (2026-09-01).** Roofline for depth growth: only the 10 gated
       layers grow with context (30 GDN layers are constant-state);
@@ -311,7 +311,7 @@ Each is "run once, record the verdict, close either way"; definitions in
       position/layer — dequant/barrier/softmax-chain) is the redesign
       target. Knob KEPT deliberately as the tuning surface for that
       redesign (delete at settle if unused — deviation from the T3
-      delete-null-knobs precedent, stated reason).**
+      delete-null-knobs precedent, stated reason).** **Done: the knob was deleted in v17 (v17-consolidation.md:67) (noted 2026-09-23).**
 
 ## Quality-trading experiments (lane opened by Davor, 2026-09-01)
 
@@ -332,7 +332,7 @@ battery verdict.
       This router spreads mass unusually evenly (rank 1 only 18–22 %).
 - [ ] **E1: drop-bottom-miss experiment — GATED NEGATIVE by E0's
       measurement (see above); do not build without Davor explicitly
-      overriding the gate.** Original design: env-gated: on a miss whose
+      overriding the gate.** (superseded: gated negative at :329-331; class 3 closed, v18-avenues.md:1162) Original design: env-gated: on a miss whose
       normalized routing weight is below a threshold, drop the expert
       and renormalize over the executed set. Reproducible under the
       fresh-server rig protocol (deterministic cache trajectory), but in

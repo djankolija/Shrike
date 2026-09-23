@@ -189,7 +189,7 @@ no-load twin; the close.
 
 ## Task 4, held: the matrix-unit tile (B6)
 
-- [ ] **T4.0** Only if S0.4's no-load twin puts Approach A at the ALU wall short of
+- [ ] **T4.0** (filed in tt as SHRIKE-24, 2026-09-23) Only if S0.4's no-load twin puts Approach A at the ALU wall short of
       the roof: the pre-registration (including the wider band the half-precision
       inputs imply), then T3.2 to T3.8 for the tile kernel.
 

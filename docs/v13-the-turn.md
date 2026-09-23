@@ -49,7 +49,7 @@ on a fresh server's first request, 0.02–0.08 s afterwards.
    `routed→routed` 355 ms of host on turn 2) plus ≈ 0.4 s of decode. A prompt
    that diverges INSIDE a stored entry gets no prefix (`settle_reset
    reason=no_prefix_snapshot`, `cached=0`, a full re-prefill): append-only turns
-   — chat, tool rounds — are served; an edited document is not.
+   — chat, tool rounds — are served; an edited document is not. **Interior snapshots are filed in tt as SHRIKE-27 (2026-09-23).**
 3. For the cards, the answers (600–800 tokens at 18–21 tok/s: 30–40 s) still
    dominate; first-turn and tool-round prefills (0.5–2k tokens: 6–11 s each) are
    second; follow-up-turn overhead (1–2 s) third; the fresh-server first request
@@ -255,7 +255,7 @@ judgment: collapse them into one loop as a follow-on before the chapter merges
 to main, in its own commit with its own golden pair, and first if any task
 edits the loop before then; the begin/await/drain sequencing is factored into a
 host-testable decision with it (today it lives only in the runner, covered by
-golden). Done at the chapter's close (the close section after Task 5).
+golden). Done at the chapter's close (the close section after Task 5). **The deeper lookahead is superseded: repriced after Task 2 and not scheduled, its knob deleted in v17, v17-consolidation.md:67 (noted 2026-09-23).**
 
 ## Task 2 — the expert reader publishing two batches at once (commit d3efdeb)
 
@@ -368,7 +368,7 @@ deeper-lookahead follow-on, repriced now that batches overlap: two published
 batches already keep four threads busy across the tile boundary at 3–4 misses per
 tile, so a third batch (and the two-tile lookahead to feed it) adds reads in
 flight only where the thread count would — and the thread count measured null;
-still ≤ 1 %, not scheduled.
+still ≤ 1 %, not scheduled. **Superseded: repriced and not scheduled, its knob deleted in v17, v17-consolidation.md:67 (noted 2026-09-23).**
 
 ## Task 3 — the follow-up turn below the matrix kernels' row minimum (commit a1158b6)
 
@@ -451,7 +451,7 @@ The routed stage is now the largest term; Task 4 measured that its drive is
 hidden under its per-tile GPU floor (a perfect pool is worth ≈ 10 ms here) and
 that the miss count's price is in decode. Scope: measured on a launch without
 an MTP sidecar; the GDN chunked scan's 64-row gate and the routed gate's MTP
-scratch constraint are follow-ons.
+scratch constraint are follow-ons. **The chunked scan is filed in tt as SHRIKE-25 (2026-09-23); the MTP scratch constraint is superseded (efdc628 deleted the scratch; the gate is `PrefillChunkScratch.swift:124-128`).**
 
 ## Task 4 — the expert pool's retention across the turn boundary (commit 04d4de5)
 
@@ -573,7 +573,7 @@ restore settle costs 450–470 misses of its own (≈ 0.8 GB) off the critical
 path. `expert_evictions` is arithmetically the misses minus the empty slots;
 `expert_reloads` is a lifetime flag, trivially ≈ every miss after the first
 sweep. The policy env parse lives in the streamer's `init`, so a bad value
-fails per layer mid-request rather than at launch (recorded, not fixed here).
+fails per layer mid-request rather than at launch (recorded, not fixed here). **The no-prefix settle is filed in tt as SHRIKE-28 (2026-09-23); the policy env parse is done (f0e056c, parsed at load by `RuntimeConfiguration.environmentExpertPolicy`).**
 
 **After T4** (commit 04d4de5, 2026-09-05; `SHRIKE_EXPERT_CACHE_PROTECT=chunk`
 the default, `=off` the A/B; `SHRIKE_PREFILL_SWEEP=carry` unchanged; mini,
@@ -674,7 +674,7 @@ single runs to +1.4 %: a cold pool's tiles are all-miss under any order, so
 only the packing's GPU overlap can move; recorded beside Task 4's +0.27 s as a
 row to measure, not a mechanism. Golden is identical on both boxes and both
 profiles at `carry`, `resident` and `recency` at every landed commit.
-`SHRIKE_PREFILL_SWEEP=resident` is the default; `carry` and `recency` are the A/B.
+`SHRIKE_PREFILL_SWEEP=resident` is the default; `carry` and `recency` are the A/B. **The route build on a tiny chunk is filed in tt as SHRIKE-32 (2026-09-23); the phase timer's lost output is superseded (4003388 removed `SHRIKE_PHASES`).**
 
 **Side findings for the ledger.** The recency reference on the same binary
 reproduced Task 4's trade (the card's answer 15.94 s, the warm 305 pair 3.675 s
@@ -842,7 +842,7 @@ ships.
   already reaches 97.6 % of an answer's reuses, so the remaining lever is the
   prefill→decode boundary (the resident-first recency sweep, landed as Task 5),
   not the eviction rule; then prefetch accuracy on a tools context and the
-  drive's latency (an external NVMe on the mini is a copy-the-model experiment).
+  drive's latency (an external NVMe on the mini is a copy-the-model experiment). **Prefetch accuracy and the drive's latency are superseded: v14 T1, v15 and v16 took up the prefetch, and v14 recorded the fetch-speed lever shut on the deploy target, v14-decode.md:630-631 (noted 2026-09-23).**
 
 Not levers here: the GPU kernels (busy ≤ 70 % of the span below 2k tokens); the
 ANE (attention is 4 % of a 1.4k prefill); speculation (retired at v12 Task 17).
@@ -879,7 +879,7 @@ once per box with the digests in the verdict).
 - Kernel work on the prefill GEMMs and attention (v12's follow-ons stay there).
 - Speculative decoding (v12 Task 17).
 - The prompt cache's interior snapshots (an edited document re-prefills; a
-  cache-chapter item, recorded, not scheduled here).
+  cache-chapter item, recorded, not scheduled here). **Filed in tt as SHRIKE-27 (2026-09-23).**
 
 ## Risks
 

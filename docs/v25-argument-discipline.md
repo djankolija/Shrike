@@ -78,7 +78,7 @@ and are the direct analogue of `-dump-ast`: they expose something the engine
 genuinely computes, useful to anyone reasoning about it. `--tokenize` answers
 "what will you actually send to the model", which is a real question a user has.
 Those are candidates to keep on their merits. The three in the table above are
-candidates to delete **by fixing what forced them**.
+candidates to delete **by fixing what forced them**. **Retiring the three is filed in tt as SHRIKE-1 (2026-09-23).**
 
 ## What step zero has to answer
 
@@ -89,12 +89,12 @@ candidates to delete **by fixing what forced them**.
    The cost is determinism: the CLI is one process with a fixed seed, and a
    server adds a request path, a prompt cache and a queue. Whether a server-driven
    golden can be byte-identical run to run is the question the chapter turns on,
-   and it is a measurement, not an opinion.
+   and it is a measurement, not an opinion. **Filed in tt as SHRIKE-2 (2026-09-23).**
 2. **What does the mini actually need?** "No toolchain" is the constraint behind
    rule 1. It is worth asking directly whether that is fixed or merely inherited,
-   because most of this chapter disappears if a test harness can reach that box.
+   because most of this chapter disappears if a test harness can reach that box. **Filed in tt as SHRIKE-3 (2026-09-23).**
 3. **Which of the survivors are genuinely `-dump-ast`?** Per the test above,
-   judged one at a time, not as a class.
+   judged one at a time, not as a class. **Filed in tt as SHRIKE-4 (2026-09-23).**
 
 ## Out of scope, and why it is recorded here rather than deferred silently
 
@@ -109,10 +109,10 @@ chapter's subject and are restated so they are not rediscovered from scratch:
   the server as its per-request fallback (`OpenAIModels.swift:361`). v24 called
   this "a correctness gap rather than a tidiness one" and did not fix it. It is
   the same family as `--expert-cache-slots`: a default that does not match what
-  is served. It breaks no argv, so it does not need this chapter's break.
+  is served. It breaks no argv, so it does not need this chapter's break. **Filed in tt as SHRIKE-12 (2026-09-23).**
 - **`ShrikeConfig` does not reject unknown keys**, so any key ever removed from it
   becomes a silent no-op, where the environment layer fails the launch loudly
-  through `refuseUnknownEnvironment`. Recorded as a bound at v24's close.
+  through `refuseUnknownEnvironment`. Recorded as a bound at v24's close. **Filed in tt as SHRIKE-6 (2026-09-23).**
 
 ## A note on how this document came to exist
 
@@ -122,4 +122,4 @@ is the second thing v24's close exposed: **this project has no task tracking, an
 "Out of scope" is not a substitute for it.** A deferral that records the *topic*
 needs a fresh investigation to act on; one that records the *conclusion* needs an
 afternoon. Where this repository keeps that backlog, and in what form, is an open
-question for the owner and is not settled by this document.
+question for the owner and is not settled by this document. **Answered 2026-09-23: the owner chose `tt`, CLAUDE.md says so, and this chapter's own items are the SHRIKE ids above (SHRIKE-1 the chapter, SHRIKE-2 to SHRIKE-4 its step zero, SHRIKE-12 and SHRIKE-6 the two restated deferrals).**

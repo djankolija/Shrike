@@ -3,7 +3,7 @@
 **Status: design only.** No implementation plan exists yet; per the repo
 convention one gets written alongside this when the work is scheduled. Until
 then this document records the decision, the evidence, and the open
-questions, so the design survives the gap.
+questions, so the design survives the gap. **Filed in tt as SHRIKE-39 (2026-09-23).**
 
 ## The principle (settled 2026-08-30)
 
@@ -77,4 +77,4 @@ choice: proper over patched.
 ## Scheduling trigger
 
 Next time a restart turn bites in a benchmark or real use, or whenever
-Responses API work is otherwise scheduled — whichever comes first.
+Responses API work is otherwise scheduled — whichever comes first. **Filed in tt as SHRIKE-39 (2026-09-23).**

@@ -60,7 +60,7 @@ Two real defects and one cosmetic one survive:
   known.
 - **`--seed` accepts `0x` hex in AttnBench and decimal only in ExpertBench.**
   Neither help documents a format, so neither lies; a sibling inconsistency worth
-  fixing while the file is open, not a bug.
+  fixing while the file is open, not a bug. **Done: v23 T5, v23-implementation-plan.md:166 (noted 2026-09-23).**
 
 ## The shape
 
@@ -151,7 +151,7 @@ that wants its own evidence; run together, a mismatch has two candidate causes.
 The count is settled then rather than now, from what the pins and the migrated
 properties show: the deletion list is the flags no in-repo consumer names and
 that select between no live code paths, and v17's lesson is that the honest
-removal takes a flag together with the path it selected.
+removal takes a flag together with the path it selected. **Done: v24, `ca5374f` and `fa0e72c` (noted 2026-09-23).**
 
 One binary with a verb tree. The five executables stay five here. v24 unifies
 them into a single `shrike` with subcommands, `shrike serve`, `shrike repack
@@ -165,7 +165,7 @@ and that is most of the classification the trim needs.
 **The verbs themselves are not decided.** Only the naming convention is: standard
 lowercase CLI naming, which is what ArgumentParser already generates from the
 type names (`verify-install`, `import-snapshot`). Settle the tree at v24's step
-zero, not before.
+zero, not before. **Done: `a8a12d6` (noted 2026-09-23).**
 
 What this chapter leaves in place for it: every binary is a `ParsableCommand` in
 a library target under a three-line `@main` shim, so unifying is deleting the
@@ -177,7 +177,7 @@ links at all, with NIO, the Hugging Face streaming stack and three separate Meta
 resource bundles in one graph, and that `Bundle.module` still resolves per module.
 A migration that breaks nothing is available if wanted: keep the five old binaries
 for a chapter as one-line shims forwarding into the root, and delete them once the
-rigs and CLAUDE.md have moved.
+rigs and CLAUDE.md have moved. **The single-executable step zero is done (v24-unified-cli.md:272-287, noted 2026-09-23); the forwarding shims are superseded: v24 made a clean break with none (v24-unified-cli.md:443-446, noted 2026-09-23).**
 
 The benches' table output. `ShrikeExpertBench/Runner.swift:123` and `:152` pair a
 header format string with a row format string that must agree column for column

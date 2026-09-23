@@ -77,7 +77,7 @@ row 4, and the reading on line 516) measured the probe's sleeping host, and is
 withdrawn; the closed chapter's document is left as written. And every drive probe in
 the record that sleeps between reads overstates a read by 0.13 to 0.15 ms on the mini.
 Whether production pays any of this term is MODELLED, not measured: the chapter's
-ledger checks the per-read fetch time against 0.80 before anything is priced on it.
+ledger checks the per-read fetch time against 0.80 before anything is priced on it. **Whether production pays it is filed in tt as SHRIKE-44 (2026-09-23).**
 
 ### 2. Contention, against the production-faithful baseline
 
@@ -294,7 +294,7 @@ Davor ruled for the alternative: the ring stays, and the copy moves to the GPU. 
 per-slot buffer swap, the graphics-canonical answer, is out because v9 measured the
 per-slot layout a loss (the flip to one slab halved the all-hit gap, 32.6 to 16.7 ms
 per token, Metal residency over about 3,400 slot buffers); an index swap inside one
-slab is that answer done properly and a later refinement.
+slab is that answer done properly and a later refinement. **The index swap is done: 7652fb6, `v16-landing.md:308-327` (noted 2026-09-23).**
 
 **What was built.** The planner reserves an adopted prediction's slot as `loading`
 without copying (`PrefetchAdoption.gpuBlit`), and the fixup command that computes
@@ -440,7 +440,7 @@ considered). The follow-ons, not scheduled: the token-boundary window (the head 
 sampling, about 5 ms of idle drive per token, modelled); the join racing a deferred `begin` at
 distance 2 or more; the host-state term (the probe's 0.13 ms) in production;
 `prefetch_late` for a claimed-but-unattached slot; the pair pipelines compiled in
-every `MoE` init.
+every `MoE` init. **The index swap is done (7652fb6, `v16-landing.md:308-327`), and so is `prefetch_late` for a claimed-but-unattached slot (7652fb6); the token-boundary window is superseded (`v20-ssd-mechanism.md:328-349`, `:540-543`), and so are the join racing a deferred `begin` (distance one since 3597ad1) and the pair pipelines (the fused probe the only path since 3597ad1); the host-state term is filed in tt as SHRIKE-44 (2026-09-23).**
 
 ## Levers, ranked (modelled from the measured rows)
 
@@ -531,7 +531,7 @@ follows v12's policy instead.
 
 Kernel work on attention, GDN and the head GEMV; speculative decoding; the ANE; a
 larger pool or a different drive; expert dropping (recorded above, not pursued); the
-prompt cache's interior snapshots.
+prompt cache's interior snapshots. **The interior snapshots are filed in tt as SHRIKE-27 (2026-09-23).**
 
 ## Risks
 
@@ -552,7 +552,7 @@ prompt cache's interior snapshots.
   and the box decides.
 - **The host-state term is modelled for production.** If production's per-read
   time is 0.93 rather than 0.80, there is a term the ledger has not named; it is
-  measured before anything is built on it.
+  measured before anything is built on it. **Filed in tt as SHRIKE-44 (2026-09-23).**
 - **The mini is production.** Every arm stops the server on 8081 and relaunches it,
   Turbo on 8080 is never touched, `memory_pressure -Q` before every launch, one
   model process at a time.

@@ -66,7 +66,7 @@ Task 3 last, its design note before its build; Task 4 only by ruling; the close.
       recalls 0.40 to 0.45 of the remaining misses (bar 0.32) at precision 0.08 to
       0.09 (bar 0.13), ranks nine to twelve at 0.076; two more useful reads per token
       for 37 more reads; the width closed for the chapter with the number, distance
-      two at width eight noted for a later chapter; the record.
+      two at width eight noted for a later chapter; the record. **Distance two at width eight is filed in tt as SHRIKE-51 (2026-09-23).**
 - [x] **S0.6 The attention row's fixed part.** READ 2026-09-17, no run: the kernel
       stats cannot split a held command and the GPU counters sample per encoder, so
       the arm needs an instrument that does not exist; B3 and B4 to a chapter of
@@ -125,7 +125,7 @@ S0.5, S0.5b); the table's design and the replay's mode stay on record.
 ## Task 2: folded into Task 1 (Davor's ruling, 2026-09-17)
 
 SLRU is T1.3; the predicted-future eviction was null at a legitimate horizon
-(S0.4) and is not built.
+(S0.4) and is not built. **Superseded: folded into Task 1 by the S0.7 ruling, v20-ssd-mechanism.md:548-552 (noted 2026-09-23).**
 
 ## Task 3: the agreed cells and the fold (class 1; structure)
 
@@ -215,7 +215,7 @@ SLRU is T1.3; the predicted-future eviction was null at a legitimate horizon
 ## Task 4: to a chapter of its own (Davor's ruling, 2026-09-17)
 
 B3 and B4, the attention row's fixed part, leave this chapter: S0.6 found the
-per-kernel instrument does not exist, and that chapter's step zero builds it once.
+per-kernel instrument does not exist, and that chapter's step zero builds it once. **Filed in tt as SHRIKE-19 (2026-09-23).**
 
 ## Close
 

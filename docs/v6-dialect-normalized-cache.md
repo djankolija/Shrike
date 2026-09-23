@@ -300,12 +300,12 @@ behaviour measurement, not an implementation concern.
 - Harmony's mid-loop first-hop byte fidelity: measured once at `cached=0` on hop two
   with hop three recovering to 94.4% against hop two's own entry — first-hop
   emission-vs-render canonicalization of the analysis/tool-call block suspected, the
-  Harmony analog of the ChatML fix. One observation; a candidate small task, not chased.
+  Harmony analog of the ChatML fix. One observation; a candidate small task, not chased. **Superseded: by v8 (1da1c4c; v8-emission-form-tool-calls.md:77-78) (noted 2026-09-23).**
 - Whether replaying reasoning changes model behaviour. Two observations, neither
   established: LLMBench saw it restore gemma's tool use across turns (predicted by the
   mechanism, observed once, export lost), and the qwen36 fix-A run saw reasoning shorten
   on later hops once prior reasoning was replayed (228→150 and 341→300 chars — n=1,
-  single seed, exported this time). The deliberate per-model run stands.
+  single seed, exported this time). The deliberate per-model run stands. **Filed in tt as SHRIKE-37 (2026-09-23).**
 - Whether gemma-4-26b-a4b's chat template matches the gemma-4-12B-it one actually read
   (the boundary row in *The rule the templates encode*, the `dictsort` reorder, the
   `reasoning`/`reasoning_content` field). Same family, unverified; `gemma4.gturbo`
@@ -329,7 +329,7 @@ cache path's accumulation order, nothing else.)
 `quiesce()` lands on the residency backend: `--lazy-load`, `--idle-unload-seconds`, and
 `POST /v1/models/unload` can all unload a session whose rewrite task still drives the
 runner, co-loading a second session on a hard-ceiling box. The deployment runs without
-them.
+them. **Filed in tt as SHRIKE-29 (2026-09-23).**
 
 ## One thing not to misread
 

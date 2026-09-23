@@ -29,12 +29,12 @@ v18 closes (the Close box).
       predicted, identity 3× position at layers 0-3; recorded in A9.
 - [x] **S0.3 The width sweep** (A0): DONE 2026-09-09, blocked beyond width eight (the
       captures hold the probe's top-8 only); coverage at eight 0.43 to 0.46 at
-      distance one, 0.34 to 0.37 at two; a wider capture goes to v20's step zero.
+      distance one, 0.34 to 0.37 at two; a wider capture goes to v20's step zero. **Done: v20 S0.5 and S0.5b, the wide capture and the ranking at distance two and three (noted 2026-09-23).**
 - [x] **S0.4 The slot split and the policy** (A1, A2): DONE 2026-09-09 for the
       policies (seven, including Belady's bound at 2.5 to 2.8× below every online
       policy; SLRU and LRU 8 to 10 % better than aging-LFU on the longer shapes, none
       on the 300); the per-layer slot split deferred to v20's step zero (the replay
-      takes one slot count); recorded in A2.
+      takes one slot count); recorded in A2. **Done: the split priced at v20 S0.4 and shipped as T1.2 (`bc3e25c`), SLRU as T1.3 (`f0e056c`) (noted 2026-09-23).**
 - [x] **S0.5 Experts per small dispatch and dispatches per GDN layer** (C1, D1): DONE
       2026-09-09; the hit dispatch at the roof (6.7 experts each), the fixup 1.75×;
       about 820 dispatches per token (11 per GDN layer, 14 per KV layer, 7 per
@@ -45,8 +45,8 @@ v18 closes (the Close box).
       12.3 % fewer bytes on a typical layer and the head at an order-0 code, more on
       the shallow layers; the scales and biases are the second-order target; recorded
       in H2.
-- [ ] **S0.7 The prefill outlier**: the 20:07 request's log against its neighbours;
-      recorded in G.
+- [x] **S0.7 The prefill outlier**: the 20:07 request's log against its neighbours;
+      recorded in G. **Ticked 2026-09-23:** read 2026-09-09 and recorded in G of v18-avenues.md ("The outlier"): the cause not in the log, not chased as one of five, the reproduction left to the turn rig if it recurs.
 - [x] **S0.8 The calibration probe** (B5): DONE 2026-09-09 on the mini through oMLX
       (Qwen3-14B, fp16 KV): the reference scan runs at 20 ns per KB against the 16 ns
       roof; ours at 200. The gap is our kernel; the scan rewrite has a demonstrated
@@ -102,21 +102,21 @@ v18 closes (the Close box).
       **Davor's ruling (2026-09-09): skipped as a performance task.** T2.1 to T2.5
       below are not scheduled; they stay as the agreed-cell mechanism's step list for
       the fold's design note (T5.1).
-- [ ] **T2.1 Read**: the ring's cell leases and the index swap (`PreadExpertStreamer`,
+- [x] **T2.1 Read**: the ring's cell leases and the index swap (`PreadExpertStreamer`,
       `ExpertPrefetchRing`), the plan's swap and victim path, the fixup's encode; the
       agreed-cell contract written (miss i into cell i; the fallback when cells run
-      out).
-- [ ] **T2.2 Build**: the fixup encoded before the route with an indirect phase 1 over
+      out). **Ticked 2026-09-23:** done as v20's Task 3 design note (T3.0, `8ee535f`), which took T2.1 to T2.5 as its build order with two amendments (v20-ssd-mechanism.md, Task 3); built as v20 T3.1 (`2a0f7d9`).
+- [x] **T2.2 Build**: the fixup encoded before the route with an indirect phase 1 over
       the classifier's miss list, the reduce, the residual, behind the event wait; the
       host's on-word path reduced to the reads' issue into agreed cells; the plan
       moved to the next wake; the fallback to the host-built fixup when a layer's
-      misses exceed its free cells, counted.
-- [ ] **T2.3 Tests**: the agreed-cell contract; the fallback; the plan-after ordering
-      under the cache lock (the residency publish stays one release store per cell).
-- [ ] **T2.4 Gates and golden.**
-- [ ] **T2.5 Deploy and arms**: the host's path fields off the path, the fixup's
+      misses exceed its free cells, counted. **Ticked 2026-09-23:** built as v20 T3.1 (`2a0f7d9`), amended to the speculative kernels' pool addressing and the victim on the path in place of the host-built fallback.
+- [x] **T2.3 Tests**: the agreed-cell contract; the fallback; the plan-after ordering
+      under the cache lock (the residency publish stays one release store per cell). **Ticked 2026-09-23:** built as v20 T3.1 (`2a0f7d9`).
+- [x] **T2.4 Gates and golden.** **Ticked 2026-09-23:** v20 T3.1 (`2a0f7d9`).
+- [x] **T2.5 Deploy and arms**: the host's path fields off the path, the fixup's
       commit latency gone, the window's latency term; misses per token recorded for
-      drift; the task record.
+      drift; the task record. **Ticked 2026-09-23:** v20 T3.1 (`2a0f7d9`), deployed, the arms flat against v20 Task 1's.
 
 ## Task 3: one command per layer (prices E1)
 
@@ -207,7 +207,7 @@ v18 closes (the Close box).
       two in flight. The architecture is the win; any speedup is a bonus (0.6 to 0.85
       ms per token graded, the floor under the noise; it grows in relative terms as
       the token gets faster). v18 closes without it; T5.1's design note is the first
-      step of the fold wherever it is picked up.
+      step of the fold wherever it is picked up. **Done: v20 T3.0 to T3.4 (noted 2026-09-23).**
 
 ## Task 6: the walls (D1)
 

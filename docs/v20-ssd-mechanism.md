@@ -275,7 +275,7 @@ misses saved, because those are what the design allocates.
   combine, the layer's speculative routed work, and the remainder as walls. Prices
   B3 (the folds into neighbours) and B4 (one pass at short context) on the current
   tree; the v18 ledger's 2.4 ms of walls predates v18's one command per layer.
-  Decides whether B3 is a v20 task, a later chapter, or nothing.
+  Decides whether B3 is a v20 task, a later chapter, or nothing. **B3 and B4 are filed in tt as SHRIKE-19 (2026-09-23).**
 - **S0.7 The record and the ruling.** The pricing in this document; the read budget
   allocated among the wider probe, the table and the demand reads; Task 1's shape
   (the table, the probe, both, or neither); Task 2's go or no-go; the fold's design
@@ -497,7 +497,7 @@ width eight recalls nearly what distance one does (0.26 to 0.31 against 0.29 to
 0.33) with twice the lead, which would move some of the ring's 4.1 late landings
 per token to hits; its precision is lower (0.11 against 0.15), its form is v15's
 two-distance queue, measured null then, and its ceiling is about a millisecond.
-The instrument stays.
+The instrument stays. **Distance two at width eight is filed in tt as SHRIKE-51 (2026-09-23).**
 
 **S0.6 The attention row's fixed part (read, 2026-09-17; no run).** The arm as
 written cannot be run on the current tree: since v18's one command per layer the
@@ -512,7 +512,7 @@ Either is a day's work with a golden gate, for a number whose use is to slot B3 
 B4, both of which the ledger already grades under the arms' resolution once v18's
 walls are taken out. **Recommendation:** no diagnostic in this chapter; B3 and B4
 go to a chapter of their own on the attention row's fixed part, whose step zero
-builds the per-kernel instrument once. Davor's ruling at S0.7.
+builds the per-kernel instrument once. Davor's ruling at S0.7. **B3 and B4 are filed in tt as SHRIKE-19 (2026-09-23).**
 
 **S0.7 The record and the ruling (2026-09-17, for Davor).** The board priced,
 ranked by the modelled floor over production's probe:
@@ -543,7 +543,7 @@ reads, and it is under the arms' resolution; the design and the replay mode stay
 on record for a chapter with lead to spend. Task 3, the agreed cells and the fold,
 as planned, its design note first. Task 4 (B3, B4) to a chapter of its own; no
 splitting diagnostic here. The wide capture stays as an instrument. The read
-budget is untouched: nothing recommended spends a read.
+budget is untouched: nothing recommended spends a read. **The table, on record for a chapter with lead to spend, is filed in tt as SHRIKE-16 (2026-09-23).**
 
 **Davor's ruling (2026-09-17): proceed with what the data says.** The
 recommendation as written: Task 1 the pool's allocation, the split with SLRU as
@@ -695,12 +695,12 @@ handed this model's table. The mini's launch line carries the two variables (the
 project instructions record it); the table lives in this document and in the
 archive as `t11-slots-blend0.3.json`. A follow-up for a later chapter, not this
 one: the table shipped beside the model rather than in the launch, and an
-allocation derived at load from a profile the model carries.
+allocation derived at load from a profile the model carries. **Filed in tt as SHRIKE-7 (2026-09-23).**
 
 ### Task 2: the policy and the split (class 1; only on S0.4's number)
 
 The predicted-future eviction and the per-layer slot count, each its own commit and
-arm; misses per token the row; the answer identical.
+arm; misses per token the row; the answer identical. **Superseded: folded into Task 1 by the S0.7 ruling of 2026-09-17 in the step-zero record above (noted 2026-09-23).**
 
 ### Task 3: the agreed cells and the fold (class 1; structure)
 
@@ -1543,7 +1543,7 @@ and the table shipped beside the model or derived at load from a profile the mod
 carries is Task 1's follow-up. Distance two at width eight is noted in S0.5b. Lossless
 compression is v21. The KV row at the cursor after a stop is written by the extra
 pass and read by nothing, overwritten by the next prefill; recorded, not a defect.
-The cancel word stays unbuilt.
+The cancel word stays unbuilt. **Filed in tt 2026-09-23: the read's per-miss figure as SHRIKE-44, B3 and B4 as SHRIKE-19, the table beside the model or derived at load as SHRIKE-7, distance two at width eight as SHRIKE-51.**
 
 ## Method
 
@@ -1577,12 +1577,12 @@ about the arithmetic. Class 2 and 3 stay closed.
 - **Lossless compression** (H2): v21, scoped to the expert kernels and the head.
 - **The draft through a forward pass** (Q3's other form), **speculation revisited**
   (H1) and **the draft in the spin-wait** (H3): after v21; this chapter prices the
-  draft in the table form only.
+  draft in the table form only. **The draft through a forward pass is done (`17babb9`, noted 2026-09-23); speculation revisited is filed in tt as SHRIKE-16 and the draft in the spin-wait as SHRIKE-17 (2026-09-23).**
 - **The other class-2 avenues** (J1, G1, the scan's arithmetic levers): after v21,
-  on v19's instrument.
+  on v19's instrument. **Filed in tt as SHRIKE-20 (2026-09-23).**
 - **The ANE**: unchanged.
 - **The attention row's fixed part** (B3, B4): priced here in S0.6, built only by
-  ruling.
+  ruling. **Filed in tt as SHRIKE-19 (2026-09-23).**
 
 ## Risks
 

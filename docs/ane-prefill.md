@@ -20,7 +20,7 @@
 > ([v22-pool-capacity.md](v22-pool-capacity.md)): the mini now runs an 11.33 GB
 > expert pool on a 16 GB box at 15 to 17 % free, so a ~1 GB Core ML arena comes
 > straight out of expert slots. The trade that doc never had to price — attention
-> time saved against pool slots lost — is the first thing an ANE chapter would owe.
+> time saved against pool slots lost — is the first thing an ANE chapter would owe. **Filed in tt as SHRIKE-21 (2026-09-23).**
 
 Routes the prefill attention block of every full-attention layer through the
 Neural Engine via a Core ML sidecar. GDN layers, the MoE, the `.gturbo`
@@ -110,7 +110,7 @@ Greedy output on the smoke prompt matched the GPU path token-for-token, and
 each arm is internally deterministic, but long generations can diverge in
 low-probability positions. This is why the switch exists and defaults off,
 and why `tools/golden-baseline.sh` runs with it off. Promotion to default
-would require its own quality qualification, not just the speed number.
+would require its own quality qualification, not just the speed number. **Filed in tt as SHRIKE-21 (2026-09-23).**
 
 ## Research
 
@@ -192,4 +192,4 @@ reimplementing a safety check is worse than restoring the real one.
 - 8-bit models reuse the same exporter unchanged (attention weights
   dequantize to the same fp16 shapes); qualification for 8-bit not yet run.
 - Short-prompt variants (chunk 1024) would extend coverage below 4,096
-  tokens; unbuilt.
+  tokens; unbuilt. **These four are filed in tt under SHRIKE-21, which promotes the ANE path or removes it (2026-09-23).**
