@@ -92,7 +92,7 @@ candidates to delete **by fixing what forced them**. **Retiring the three is fil
    and it is a measurement, not an opinion. **Filed in tt as SHRIKE-2 (2026-09-23).** **Measured on the mini: it can, byte-identical run to run; the record is [Step zero: the golden through the server](#step-zero-the-golden-through-the-server).**
 2. **What does the mini actually need?** "No toolchain" is the constraint behind
    rule 1. It is worth asking directly whether that is fixed or merely inherited,
-   because most of this chapter disappears if a test harness can reach that box. **Filed in tt as SHRIKE-3 (2026-09-23).**
+   because most of this chapter disappears if a test harness can reach that box. **Filed in tt as SHRIKE-3 (2026-09-23).** **Answered: a harness reaches it, and rule 1 justifies no flag; the record is [Step zero: what the mini needs](#step-zero-what-the-mini-needs).**
 3. **Which of the survivors are genuinely `-dump-ast`?** Per the test above,
    judged one at a time, not as a class. **Filed in tt as SHRIKE-4 (2026-09-23).**
 
@@ -178,3 +178,46 @@ server takes the logits head, continues a turn and sizes its pool from the launc
 line, as production does, and outside the golden nothing in the repository passes
 the three to `generate`. Whether any of them stays as a capability of `generate` is
 SHRIKE-4's verdict, one flag at a time.
+
+## Step zero: what the mini needs
+
+Answered 2026-09-24 for SHRIKE-3.
+
+**A test harness reaches the mini, and needs nothing built there.** The SHRIKE-2
+run above is the demonstration: from the checkout, over `ssh macmini`, it stopped
+production, copied its script, ran 60 requests against five fresh servers at
+production's launch, fetched every output and relaunched production in about
+twelve minutes, with nothing on the box but the deployed binary and the system's
+`bash`, `curl`, `jq` and `python3`. `tools/decode-rig.sh` and `tools/turn-rig.sh`
+drive it the same way.
+
+**"No toolchain" is false as a fact about the box.** The mini carries Command Line
+Tools 26.6, installed 2026-07-26 together with Homebrew (which oMLX came through),
+and with them Swift 6.3.3, the dev box's version, and git 2.50.1. Shrike compiles
+its Metal from source at runtime (`Package.swift` copies `Metal/`), so no Metal
+compiler would be needed; no build was attempted there. What is true is a policy,
+CLAUDE.md's "a deploy target, not a checkout", which keeps the box at current state
+only.
+
+**So rule 1 justifies no flag.** Its premise (`v24-unified-cli.md:74-83`) is that a
+value the mini's gate or rig needs cannot be carried by a rebuild there. Nothing a
+gate or rig does on the mini needs one: the harness and the binary both arrive from
+the dev box, and a value that must change on the mini changes by deploy, a release
+build here and a copy. The keeps that rest on rule 1 alone, with no input to name
+(rule 2) and no per-invocation product choice (rule 3), lose their defence and go
+to SHRIKE-4's test:
+
+- generate's `--logits-head`, `--follow-up` and `--expert-cache-slots`, which the
+  gate does not need (above);
+- generate's `--dump-logits`, `--dump-hidden` and `--tokenize`, kept for their
+  tools;
+- bench's seven, `--arms`, `--positions`, `--repeats`, `--warmup`, `--layer`,
+  `--experts` and `--batch`, kept because the benches run on the mini
+  (`v24-unified-cli.md:157-175`).
+
+The rest of v24's rule-1 keeps stand on another rule: generate's `--model`,
+`--prompt` and `--messages-file` name inputs; its `--max-new`, `--temperature`,
+`--seed`, `--thinking` and `--quiet` are per-invocation choices; and serve's
+launch-line flags (`--port`, `--max-context`, `--thinking`, `--ram-budget`) are a
+server's launch configuration, whose home is SHRIKE-5's question, not this
+chapter's.

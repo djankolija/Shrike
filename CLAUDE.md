@@ -95,7 +95,7 @@ just to run tests. If a test cannot run, report why.
 
 ## The Mac mini is a deploy target, not a checkout
 
-There is no git on that box. Build release here and copy the binary over; never try to pull,
+There is no checkout on that box (its Homebrew Command Line Tools carry git and Swift, unused). Build release here and copy the binary over; never try to pull,
 check out, or build there.
 
 Reach it with `ssh macmini` — **never** the tailnet hostname, which is the HTTP endpoint
