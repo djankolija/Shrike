@@ -40,9 +40,6 @@ for f in shrike; do
   scp -q "$BIN/$f" "macmini:shrike-runtime/bin/$f.staging"
   shipped="$shipped $f"
 done
-# The mini runs the golden from its own copy; deploy it with the binary so its
-# process guard cannot go stale against a renamed binary.
-scp -q tools/golden-baseline.sh "macmini:shrike-runtime/golden-baseline.sh"
 for bundle in "$BIN"/*.bundle; do
   name=$(basename "$bundle")
   scp -q -r "$bundle" "macmini:shrike-runtime/bin/$name.staging"

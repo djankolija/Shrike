@@ -1,7 +1,8 @@
 # The mini's production server launch, written once and sourced by
 # tools/mini-deploy.sh (--restart), both rigs (their restore, and the arm every
-# A/B layers onto) and tools/golden-baseline.sh (its server profiles run at this
-# launch); CLAUDE.md's launch line is a copy of this one. The slot table
+# A/B layers onto), tools/golden-baseline.sh (its server profiles run at this
+# launch) and tools/mini-golden.sh (which relaunches production from it after
+# the golden); CLAUDE.md's launch line is a copy of this one. The slot table
 # is ornith15's at 160 slots per layer (v22 Task 3) and must sum to what the budget
 # snaps to, or the launch is refused.
 PRODUCTION_ENV="SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 SHRIKE_EXPERT_SLOT_TABLE=256,256,246,209,191,171,171,162,171,149,164,169,155,144,137,135,133,131,132,130,145,133,141,142,137,137,130,137,137,142,137,135,157,157,162,160,166,161,178,194 SHRIKE_EXPERT_POLICY=slru"

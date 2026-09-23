@@ -437,7 +437,7 @@ exit $status
   `PRODUCTION_RAM_BUDGET`, `SERVER_LOG`.
 - Produces: `tools/mini-golden.sh [--check] [profile ...]`, exit status the golden's.
 
-- [ ] **Step 1: Write `tools/mini-golden.sh`:**
+- [x] **Step 1: Write `tools/mini-golden.sh`:**
 
 ```bash
 #!/bin/bash
@@ -512,10 +512,10 @@ exit $status
       If production was not running when the wrapper starts, it still relaunches
       it at the end: the mini's intended state is production serving.
 
-- [ ] **Step 2: Stop the deploy copying the golden.** Delete `tools/mini-deploy.sh:43-45`
+- [x] **Step 2: Stop the deploy copying the golden.** Delete `tools/mini-deploy.sh:43-45`
       (the comment and the `scp` of `golden-baseline.sh`).
 
-- [ ] **Step 3: Syntax.** `bash -n tools/mini-golden.sh`. Then capture every string
+- [x] **Step 3: Syntax.** `bash -n tools/mini-golden.sh`. Then capture every string
       the wrapper sends and parse it as the mini's zsh would: in a scratch
       directory `stubs/`, write `ssh` as
 
@@ -532,23 +532,23 @@ printf '%s' "${@: -1}" > "$STUB_LOG/remote-$n.zsh"
       relaunch; the scratch directory's `rm` is skipped since the stubbed `mktemp`
       answered nothing) and no syntax errors.
 
-- [ ] **Step 4: The owner's go-ahead for production's downtime** (about five minutes
+- [x] **Step 4: The owner's go-ahead for production's downtime** (about five minutes
       for the capture below, plus under a minute for the failure check). Nothing on
       the mini before it.
 
-- [ ] **Step 5: The failure path on the real box.** `tools/mini-golden.sh --check nosuchprofile`.
+- [x] **Step 5: The failure path on the real box.** `tools/mini-golden.sh --check nosuchprofile`.
       Expected: the golden prints `unknown profile: nosuchprofile`, the wrapper exits
       1, and `production relaunched:` with the ready line. Confirm with
       `ssh macmini 'pgrep -lf "bin/shrike serve"'`: production's command line on 8081.
 
-- [ ] **Step 6: Capture the mini's server profiles.**
+- [x] **Step 6: Capture the mini's server profiles.**
       `tools/mini-golden.sh serve-short serve-long serve-turns`. Expected: three
       `captured ->` lines on the mini and three new files in `baselines/`; the
       replay's and follow-up's text match the step-zero mini run's
       `mini/launch1/pass1/` files; the usage rows show the cached counts;
       `git status --short baselines/` lists exactly the three new files.
 
-- [ ] **Step 7: Check all five on the mini.** `tools/mini-golden.sh --check`.
+- [x] **Step 7: Check all five on the mini.** `tools/mini-golden.sh --check`.
       Expected: five `ok` lines, production relaunched, `git status --short baselines/`
       unchanged by the check. `short` and `long` now run at `generate`'s default 64
       slots where their baselines were captured at 160 (the retired
@@ -556,14 +556,14 @@ printf '%s' "${@: -1}" > "$STUB_LOG/remote-$n.zsh"
       chunks (`v22-pool-capacity.md:107-108`), so a mismatch here is a finding:
       stop and report, never re-capture.
 
-- [ ] **Step 8: Retire the mini's own copies.** Delete
+- [x] **Step 8: Retire the mini's own copies.** Delete
       `baselines/ornith15-int4-{short,long,turns}-lh.mini.txt` (`git rm`). On the
       mini, confirm `~/shrike-runtime/baselines/*.txt` match the repo's `.mini.txt`
       files of the same names (`ssh macmini 'shasum ~/shrike-runtime/baselines/*.txt'`
       against `shasum baselines/*.mini.txt`), then remove
       `~/shrike-runtime/golden-baseline.sh` and `~/shrike-runtime/baselines/`.
 
-- [ ] **Step 9: The docs.** In CLAUDE.md's "Verifying a change that touches
+- [x] **Step 9: The docs.** In CLAUDE.md's "Verifying a change that touches
       inference", replace the sentences from "Baselines are stored" to "passes
       unseen." with:
 
@@ -578,8 +578,9 @@ stops production, runs the golden there against the repo's `baselines/*.mini.txt
 and relaunches production, so it needs the owner's go-ahead like any downtime.
 ```
 
-      In "The mini's layout", delete the clause "`baselines/` holds the mini's
-      golden-baseline files". In README.md, replace the line "To measure your own:"
+      In "The mini's layout", replace the clause "`baselines/` holds the mini's
+      golden-baseline files" with "the mini's golden baselines live in the repo,
+      not on the box", on the same line. In README.md, replace the line "To measure your own:"
       and the code block after it (`tools/golden-baseline.sh --check 4`: the golden
       checks output, not throughput, and `4` is not a profile) with:
 
@@ -595,7 +596,7 @@ tools/golden-baseline.sh --check
 
       Run the link check.
 
-- [ ] **Step 10: The four gates**, then commit `tools/mini-golden.sh`,
+- [x] **Step 10: The four gates**, then commit `tools/mini-golden.sh`,
       `tools/mini-deploy.sh`, CLAUDE.md, README.md, the three new and three deleted
       `.mini` baselines, and this plan with this task ticked:
       `tools: tools/mini-golden.sh runs the golden on the mini from the checkout (SHRIKE-57)`.

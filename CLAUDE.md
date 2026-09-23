@@ -76,14 +76,14 @@ model-load path. The only check that exercises real inference is:
 tools/golden-baseline.sh --check
 ```
 
-It counts as a model run, so the process rules above apply first. Baselines are stored
-in `baselines/`, tagged per machine (`short` and `long` ≈2k-token profiles); `--check`
-compares only against files whose machine tag matches the box it runs on — capture on
-the machine you intend to check. On the mini, run the script with its five env
-overrides (header comment) since that box has no checkout. The fifth,
-`CLI_EXTRA_ARGS="--expert-cache-slots 160"`, is what makes the run exercise the
-two-chunk arena production serves at; without it the golden runs the CLI's default
-64 slots, one chunk, and a regression at the chunk boundary passes unseen.
+It counts as a model run, so the process rules above apply first. Baselines are stored in
+`baselines/`, tagged per machine: `short` and `long` check `shrike generate`'s fused head, and
+`serve-short`, `serve-long` and `serve-turns` check a fresh `shrike serve` at production's launch
+over HTTP (the retry and the second turn resuming from the prompt cache); `--check` compares only
+against files whose machine tag matches the box it runs on, so capture on the machine you intend
+to check. For the mini, run `tools/mini-golden.sh --check` from the checkout: it stops production,
+runs the golden there against the repo's `baselines/*.mini.txt` and relaunches production, so it
+needs the owner's go-ahead like any downtime.
 
 A baseline is valid for one (machine, build, model) triple; re-capture only for a
 deliberate numerics change, never to make a mismatch go away.
@@ -108,7 +108,7 @@ The runtime is `~/shrike-runtime/` — `bin/` holds the single `shrike` binary
 plus its resource bundles (a deploy copies the `*.bundle`
 directories from `.build/release/` alongside the binaries, or resource lookups
 fail at runtime); `models/` holds the six `.gturbo`s, receipts bound to the
-`shrike-runtime` path; `baselines/` holds the mini's golden-baseline files.
+`shrike-runtime` path; the mini's golden baselines live in the repo, not on the box.
 The box carries current state only — no staged rollback binaries, no retired
 artifacts; git history and a fresh deploy are the rollback path (owner's
 ruling, 2026-09-01).

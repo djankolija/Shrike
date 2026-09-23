@@ -620,12 +620,12 @@ is [v17-consolidation.md](v17-consolidation.md)'s Task 4 table.
 
 - `tools/golden-baseline.sh --check`: the only check that runs real inference; greedy,
   byte-identical, five profiles per machine tag under `baselines/`: `short` and `long` on
-  the CLI's fused greedy head, their `-lh` twins on the server's logits head (v19), and
-  `turns-lh`, a chat turn answered to its stop token then a follow-up generated from the
-  state the stop left (the CLI's `--follow-up`, v20 T3.3: the pass committed ahead of a
-  stop and drained must leave that state exactly as a run without it). `CLI_EXTRA_ARGS`
-  appends to every run, e.g. `--expert-cache-slots 160` for the mini's two-chunk arena
-  (v22).
+  `shrike generate`'s fused greedy head, and `serve-short`, `serve-long` and `serve-turns`
+  on a fresh `shrike serve` at production's launch over HTTP (v25): each prompt sent twice,
+  the replay resuming from the prompt cache, and a turn answered to its stop then continued
+  with its answer in the history, each file ending with its requests' cached counts.
+  `tools/mini-golden.sh --check` runs it on the mini from the checkout, stopping and
+  relaunching production around it.
 - `shrike generate --dump-logits <file>` with `tools/logit-compare.py`: the class-2
   gate's instrument (v19), every position's logits dumped and the comparison listing
   each argmax flip against the old build's top-2 margin and a band from the median

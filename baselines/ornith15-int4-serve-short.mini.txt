@@ -1,0 +1,34 @@
+# profile:     serve-short (prompt 51 bytes)
+# max-new:     96
+# temperature: 0 (greedy)
+# head:        logits (shrike serve at tools/mini-production.sh's launch)
+# seed:        1234
+# model:       ornith15.gturbo
+# captured-on: Macmini9,1, 16 GB, macOS 26.5.2
+# commit:      unknown-dirty
+---
+# What is a Mutex?
+
+A **mutex** (short for "mutual exclusion") is a synchronization primitive used to protect shared resources from concurrent access by multiple threads or processes. Think of it as a lock that ensures only one thread can access a particular piece of data or code at a time.
+
+## How It Works
+
+The core idea is simple:
+
+1. A thread wants to access a shared resource
+2. It **acquires** the mutex (locks
+--- replay ---
+# What is a Mutex?
+
+A **mutex** (short for "mutual exclusion") is a synchronization primitive used to protect shared resources from concurrent access by multiple threads or processes. Think of it as a lock that ensures only one thread can access a particular piece of data or code at a time.
+
+## How It Works
+
+A mutex works on a simple principle: **lock it, do your work, unlock it.**
+
+```
+lock the mutex
+  → access
+--- usage ---
+first prompt=25 cached=0 completion=96 finish=length
+replay prompt=25 cached=18 completion=96 finish=length

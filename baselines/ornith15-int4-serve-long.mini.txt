@@ -1,0 +1,45 @@
+# profile:     serve-long (prompt 9857 bytes)
+# max-new:     128
+# temperature: 0 (greedy)
+# head:        logits (shrike serve at tools/mini-production.sh's launch)
+# seed:        1234
+# model:       ornith15.gturbo
+# captured-on: Macmini9,1, 16 GB, macOS 26.5.2
+# commit:      unknown-dirty
+---
+## Build Ledger Summary
+
+### Number of Entries
+**60 entries** (commits c0037 through c2220)
+
+### Shelf Distribution
+Shelves cycle through s0–s6 in order (entry 1 → s1, entry 2 → s2, ... entry 7 → s0, then repeating). Counting the 60 entries:
+
+| Shelf | Count |
+|-------|-------|
+| **s1** | **9** |
+| s2 | 9 |
+| s3 | 9 |
+| s4 | 9 |
+
+--- replay ---
+## Build Ledger Summary
+
+### Number of Entries
+**60 entries** (commits c0037 through c2220)
+
+### Shelf Distribution
+Shelves cycle through s0–s6 in order (entry N → shelf `s((N-1) mod 7)`):
+
+| Shelf | Count |
+|-------|-------|
+| **s0** | **9** |
+| s1 | 9 |
+| s2 | 9 |
+| s3 | 9 |
+| s4 | 9 |
+| s5 | 9 |
+|
+--- usage ---
+first prompt=3756 cached=0 completion=128 finish=length
+replay prompt=3756 cached=3749 completion=128 finish=length

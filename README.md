@@ -105,10 +105,12 @@ There are no published numbers in this repository, deliberately. Throughput depe
 on the machine, the model, the quantization, and the RAM budget, and figures measured
 on someone else's hardware do not transfer.
 
-To measure your own:
+To check a build against real inference on your machine, capture its baselines
+once, then check later builds against them:
 
 ```bash
-tools/golden-baseline.sh --check 4
+tools/golden-baseline.sh          # capture
+tools/golden-baseline.sh --check
 ```
 
 A baseline is valid for one (machine, build, model) triple and must be captured on
