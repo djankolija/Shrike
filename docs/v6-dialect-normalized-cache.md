@@ -244,7 +244,7 @@ each point cross-checks independently at 24.7 and 23.8 tok/s. Decode is the serv
 own accounting (`SHRIKE_RUNNER_STATS`, 256-token decode cells) at the same standing
 config, from the expert-cache slots sweep.
 
-⚠ Absolute rates are per-box and per-model — the mini is the IO-bound one. The **ratio**
+⚠ Absolute rates are per-box and per-model; Kimi measured compute-bound on the mini (v5-second-architecture-objective.md, end). The **ratio**
 is the transferable figure; it has not been re-measured on the MacBook or on a
 dense-attention model.
 
@@ -344,3 +344,11 @@ must be run over X. Normalization is a rewrite, and its bill is one forward pass
 the rewritten span. What it does *not* change is the response: the emitted tokens are
 kept exactly, and only their representation is recomputed under a context that lacks the
 reasoning — which is precisely the claim the template makes anyway.
+
+## Reading a hit rate
+
+Set no hit-rate targets. On a thinking model a cached-over-prompt ratio counts the model's
+own reasoning in both numerator and denominator, which is how figures of 94 to 97 % arose
+without saying anything about the cache. The column that measures the work is what each
+turn computes, about 20 tokens, invariant across runs and conversation length. The
+objective is eliminating the turns that cache zero, not moving the ones that don't.

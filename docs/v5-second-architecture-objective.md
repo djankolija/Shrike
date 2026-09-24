@@ -109,3 +109,23 @@ sandwich norms; leave them deleted.
 `d14376f` ("Route every Top-K in 1...64 through the tiled sampler" — upstream's commit, in
 `Pummelchen/NVMAI`, not resolvable here) is the **sampling** top-k over the vocabulary. It
 is a different code path from the MoE **router** top-k, and does nothing for step 3.
+
+## Kimi's decode, measured before the decode chapters
+
+Measured 2026-08-27 on that day's build; no later Kimi decode measurement is recorded in
+these docs.
+
+- **On the mini Kimi is compute-bound, not IO-bound.** `kimi-linear-48b-a3b-4bit`, 32K
+  context, `SHRIKE_RUNNER_STATS`, an expert-cache slots sweep: 6.05 tok/s at the standing
+  64 slots per layer (`--ram-budget 6G`), rising monotonically to 6.18 at 96 against an
+  extrapolated compute floor of about 6.35. At 96 slots misses, evictions and reloads are
+  equal: every miss is a capacity miss, none compulsory in the warm window. `wait_ms`
+  climbs at the top (70.2, 77.5, 95.9 at 32, 64, 96 slots) while `io_ms` falls, so
+  pressure starts to show at 96; 128 slots (about 12.3 GB on the 16 GB box) was not run.
+  An earlier slots matrix's "more slots is slower" did not reproduce; it is attributed to
+  that run's 262,144-token KV reservation, which 32,768 does not approach.
+- **On the MacBook, fully resident,** mlx runs Kimi at 48 to 81 tok/s where this engine ran
+  24 to 30, at identical arithmetic.
+- **Untried for Kimi's decode:** fusing the six-GEMV KDA f/g low-rank chains in
+  `encodeKDADecode` (`RealForwardRunner.swift`). No commit since the Kimi bring-up touches
+  them; the decode chapters targeted ornith15.

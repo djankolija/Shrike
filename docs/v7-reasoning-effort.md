@@ -154,3 +154,7 @@ for correctness. Live confirmation (pi sends the field, the rendered system
 block reflects it, per-effort thinking-length differences) happens at the next
 mini deploy, which independently carries the rename checklist from
 [CLAUDE.md](../CLAUDE.md). **The live confirmation is filed in tt as SHRIKE-38 (2026-09-23); the rename checklist is done (the rename landed 2026-08-30).**
+
+Adaptive thinking on qwen36 (`--thinking adaptive`, `4bc8d4e`) has never run against a live
+model; its coverage is decoder-level (`ChatMLDecoderTests`, `ChatMLTemplateTests`). A live run
+would check that the model's own `<think>` block streams as reasoning, not answer text.
