@@ -94,7 +94,7 @@ candidates to delete **by fixing what forced them**. **Retiring the three is fil
    rule 1. It is worth asking directly whether that is fixed or merely inherited,
    because most of this chapter disappears if a test harness can reach that box. **Filed in tt as SHRIKE-3 (2026-09-23).** **Answered: a harness reaches it, and rule 1 justifies no flag; the record is [Step zero: what the mini needs](#step-zero-what-the-mini-needs).**
 3. **Which of the survivors are genuinely `-dump-ast`?** Per the test above,
-   judged one at a time, not as a class. **Filed in tt as SHRIKE-4 (2026-09-23).**
+   judged one at a time, not as a class. **Filed in tt as SHRIKE-4 (2026-09-23).** **Answered: every surviving flag has its verdict in [Verdicts](#verdicts).**
 
 ## Out of scope, and why it is recorded here rather than deferred silently
 
@@ -224,7 +224,8 @@ chapter's.
 
 ## Verdicts
 
-Each flag judged on its own, per the test above; SHRIKE-4 adds the rest.
+Each flag judged on its own, per the test above. The first two are generate's,
+deleted; the rest follow by command.
 
 - **`--logits-head`, prosthetic, deleted.** It chose the logits head for a greedy
   run, which only the golden's imitation of the server wanted; the golden's
@@ -234,3 +235,121 @@ Each flag judged on its own, per the test above; SHRIKE-4 adds the rest.
   continuation, and the step-zero run measured that it is not the same
   computation: the same tokens in a different chunk split, a different second
   turn on both boxes. `serve-turns` checks the continuation production computes.
+
+### generate
+
+- **`--model`, legitimate.** It names the bundle to run, a path or an installed id.
+- **`--prompt`, legitimate.** A raw-completion prompt, and the only route to one: the
+  server renders every prompt as ChatML.
+- **`--messages-file`, legitimate.** It names the chat to render, the input the
+  server's `messages` carries over HTTP.
+- **`--max-new`, legitimate.** The request's `max_tokens`, a per-run choice.
+- **`--temperature`, legitimate.** The request's `temperature`; its default is the
+  server's fallback (`OpenAIModels.swift:361`).
+- **`--top-k`, legitimate.** The request's `top_k`, and one value more: 0 turns
+  truncation off, which the request's 1...256 cannot (`OpenAIModels.swift:372`).
+- **`--top-p`, legitimate.** The request's `top_p`.
+- **`--repetition-penalty`, legitimate.** The request's `repetition_penalty`.
+- **`--seed`, legitimate.** The request's `seed`, for a sampled run. At temperature 0
+  on the fused head the sampler never draws, so the golden's `--seed` is inert.
+- **`--stop`, legitimate.** The request's `stop`.
+- **`--max-context`, legitimate.** A run's context is the user's choice. Its default
+  of 4096 against the server's 262144 is two defaults for two jobs
+  (`v23-argument-parsing.md:39-41`); the ranges the two commands accept differ,
+  which SHRIKE-47 unifies.
+- **`--rope-scaling`, legitimate.** The only way to reach YaRN's extended context, a
+  path the engine carries and `YaRNRoPETests` covers. That nothing in the repository
+  passes it describes our runs, not the capability.
+- **`--kv-bits`, legitimate.** KV-cache precision trades memory against fidelity, a
+  choice a user on a different box makes; production runs the default, 8 bits.
+- **`--thinking`, legitimate.** The reasoning mode, a per-run choice.
+- **`--quiet`, legitimate.** It suppresses the timing footer, a user's convenience.
+  The golden passes it without needing it: the footer goes to stderr
+  (`Run.swift:246-251`), which the golden already writes to its own file.
+- **`--expert-cache-slots`, prosthetic, to be deleted.** Its default of 64 sits
+  below the cliff the default budget was measured against, 9.91 tok/s at 64 slots
+  and 18.91 at 128 (`RuntimeConfiguration.swift:93-94`), so a bare `generate`
+  decodes at about half speed, and until `2721903` the golden passed 160 by hand to
+  reach production's pool. Its one other use, running `generate` under production's
+  slot table, whose total must equal the uniform count across the routed layers
+  (`RuntimeConfiguration.swift:276-281`), a budget carries as well. `generate` takes
+  serve's `--ram-budget` and its default in its place: one knob for both commands,
+  the memory a user can give, with the slot count its outcome for each model.
+- **`--dump-logits`, legitimate.** It writes the logits the engine computes at every
+  position, the direct analogue of `-dump-ast`; `logit-compare.py` reads it.
+- **`--dump-hidden`, legitimate.** It writes the residual before the final norm, the
+  engine's own state. Its one reader, `q3-drafter-routes.py`, served closed work,
+  which does not change what the flag exposes.
+- **`--tokenize`, legitimate.** It shows what a run would send the model without
+  loading it; `expert-pool-replay.py` and `q3-drafter-routes.py` parse its output.
+- **`--force-tokens`, legitimate, and out of argv until it has a consumer.** It left
+  in v24 with none (`ca5374f`); the runtime half remains, tested
+  (`GenerationConfig.forcedTokens`, `Sampler.swift:33`). Feeding fixed ids in place
+  of the sampler is how two builds' logits are compared position by position, which
+  anyone checking numerics needs, and SHRIKE-20's gate is built on it. It returns
+  as a `generate` flag beside `--dump-logits` when that gate is built.
+
+### serve
+
+- **`--model`, legitimate.** It names the one bundle to serve.
+- **`--config`, legitimate.** It names the multi-model configuration file.
+- **`--port`, legitimate.** Where the server listens, its launch configuration.
+  Where launch configuration lives is SHRIKE-5's question.
+- **`--max-context`, legitimate.** The context the server reserves; production
+  passes 32768 against a default of 262144.
+- **`--thinking`, legitimate.** The server's default reasoning mode.
+- **`--reasoning-effort`, legitimate.** The server's default deliberation level for
+  Harmony models, which a request's `reasoning_effort` overrides.
+- **`--kv-bits`, legitimate.** As generate's.
+- **`--rope-scaling`, legitimate.** As generate's.
+- **`--ram-budget`, legitimate.** The memory the expert cache may use, the knob a
+  user sizes for their box; slots derive from it and the model's expert stride. Its
+  default of 8 GiB is the budget that first held the measured routing working set
+  (`RuntimeConfiguration.swift:79-104`); production's 160 slots are the mini's own
+  budget, passed at launch.
+- **`--expert-cache-slots`, prosthetic, to be deleted.** A second spelling of what
+  the budget derives, winning over it when both are given. Nothing passes it, and
+  only a parse test names it.
+
+### repack
+
+- **`install --model`, legitimate.** It names the model to install.
+- **`--output` on install, import-snapshot and discard-partial, legitimate.** It names
+  the destination.
+- **`import-snapshot --input-snapshot` and `--model-id`, legitimate.** They name the
+  snapshot and its id. The subcommand exists to import Ornith's MTP draft
+  (`ShrikeRepackCommand.swift:64-66`), which nothing consumes now
+  (`ModelRoster.swift:83`); whether it stays is SHRIKE-18's question, and its flags
+  go with it.
+- **`verify-install --input-gturbo`, legitimate.** It names the install to re-attest.
+
+### bench
+
+The flags are what makes a bench a bench; the verb is the prosthetic. `bench` is in
+the product binary only because the mini received one binary, and step zero found a
+harness carries whatever a run needs there. It leaves `shrike` for a development
+executable in the package, copied to the mini for a bench run, and its flags leave
+`shrike`'s argv with it. Bench's `--seed` (a `BenchSeed`, which takes hex) and expert
+bench's `--model` (a path, with no id resolution) are not generate's flags of those
+names. Judged as a bench's flags:
+
+- **attention `--arms`, legitimate.** The kernel variants to measure. Its default
+  ladder leaves out `prodstream`, the runner's path (`Arms.swift:60`), and
+  `copy` still calls itself the shipped kernel (`Arms.swift:61`); the move corrects
+  both.
+- **attention `--positions`, legitimate.** The context lengths measured.
+- **`--repeats`, legitimate.** The timed command buffers, whose median is reported.
+- **`--warmup`, legitimate.** The untimed command buffers before them.
+- **`--seed`, legitimate.** It fixes the synthetic rows or the activation vector.
+- **expert `--model`, legitimate.** It names the bundle whose experts are read.
+- **expert `--layer`, legitimate.** It names the layer read.
+- **expert `--experts`, legitimate, with its help wrong.** Every pass runs eight
+  experts, the kernel's fixed top-k, repeating the last one loaded when fewer load
+  (`Kernels.swift:72`); what it varies is how many distinct experts are read. The
+  move corrects its help to that.
+- **expert `--arms`, legitimate only while there are arms to choose between.**
+  `coded` and `coded+aux` belong to v21's compression experiment, closed at its first
+  measurement (`v21-compression.md:343-350`), and go with the move, which leaves
+  `plain` alone; the flag goes with them, and a new variant brings both back.
+- **expert `--batch`, legitimate.** Dispatches per command buffer, so the GPU holds
+  its clock.
