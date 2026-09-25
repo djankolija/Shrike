@@ -4,7 +4,9 @@
 
 **Goal:** the golden checks what production runs by driving `shrike serve` at
 production's launch, and `generate` loses the two flags that only let it imitate
-the server (SHRIKE-57).
+the server (SHRIKE-57); one knob, `--ram-budget`, sizes the expert pool on both
+commands (SHRIKE-60); and the kernel benches leave the product binary for a
+development executable, pruned to the kernels production runs (SHRIKE-61).
 
 **Architecture:** `tools/golden-baseline.sh` gains three server profiles that start
 a fresh `shrike serve` from `tools/mini-production.sh`'s launch values on a spare
@@ -12,24 +14,31 @@ port and send the golden's prompts over HTTP; the CLI keeps `short` and `long` o
 `generate`'s own fused head. A new `tools/mini-golden.sh` runs the golden on the
 mini from the checkout, stopping and relaunching production around it, with the
 repo's `baselines/*.mini.txt` as the only copy of the mini's baselines. Then
-`--logits-head` and `--follow-up` leave `generate`.
+`--logits-head` and `--follow-up` leave `generate`. `--ram-budget` replaces
+`--expert-cache-slots` on both commands through one parser in
+`ShrikeArgumentSupport` and one slot derivation from the model's manifest in
+`RuntimeConfiguration`, and `generate` prints the load line `serve` logs, so the
+slot count a budget gives is visible. The benches move to a `shrike-bench`
+executable built beside `shrike`; the deploy stops shipping their bundles, every
+guard that looks for a model process learns the second name, and the expert bench
+loses v21's coded arms.
 
 **Tech Stack:** bash (the scripts; the mini's login shell is zsh, which runs the
 remote strings), `curl` and `jq` (on both boxes at `/usr/bin`), Swift 6.3 with
 swift-argument-parser and Swift Testing.
 
 **Spec:** [v25-argument-discipline.md](v25-argument-discipline.md), its two step-zero
-sections: the golden through the server (SHRIKE-2) and what the mini needs
-(SHRIKE-3).
+sections, the golden through the server (SHRIKE-2) and what the mini needs
+(SHRIKE-3), and its Verdicts (SHRIKE-4).
 
-Three commits. The checkboxes here are the status of record.
+Six commits, one per task. The checkboxes here are the status of record.
 
 ## Global Constraints
 
 - The four gates before any task is called done: `swift build -c release` (zero
   warnings), `swiftlint lint --strict`, `python3 tools/check-md-links.py`,
   `swift test --no-parallel`. ThreadSanitizer once at the chapter's close, not here.
-- Before anything that loads a model: `pgrep -lx shrike; pgrep -fl
+- Before anything that loads a model: `pgrep -lx 'shrike(-bench)?'; pgrep -fl
   'ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`. Never terminate a
   process this session did not start.
 - Production on the mini goes down only with the owner's go-ahead at that step;
@@ -39,10 +48,10 @@ Three commits. The checkboxes here are the status of record.
   mismatch on them stops the task.
 - No new `SHRIKE_*` variable. Production's launch stays written once, in
   `tools/mini-production.sh`.
-- Stage by path, never `git add docs/` or `-a`: the tree carries another
-  session's uncommitted edits to `docs/v5-*`, `docs/v6-*` and `docs/v7-*`.
-- Commit subjects in the repo's style, at most 100 characters, ending
-  `(SHRIKE-57)`. No `Co-Authored-By`.
+- Stage by path, never `git add docs/` or `-a`, so nothing unreviewed rides along.
+- Commit subjects in the repo's style, at most 100 characters, ending in the
+  task's entry: `(SHRIKE-57)` for Tasks 1 to 3, `(SHRIKE-60)` for Task 4,
+  `(SHRIKE-61)` for Tasks 5 and 6. No `Co-Authored-By`.
 - Comments only for a non-obvious why.
 - A claim about what a script or binary does costs one run of it.
 
@@ -61,6 +70,19 @@ Three commits. The checkboxes here are the status of record.
 - The prompt cache stops resuming (a replay or a follow-up prefilled whole): the
   usage rows in each `serve-*` file carry the cached counts, so the gate fails
   even if the text survives. Checked in Task 1, Step 5.
+- A `shrike-bench` is running when the golden, a rig, the deploy or the mini's
+  golden starts: each refuses as it does for a `shrike`, since `shrike-bench
+  expert` maps a real `.gturbo`. Checked in Task 5, Steps 7 and 8.
+- A typed `--ram-budget` that is not a size (`0`, `8X`) is refused at parse with the
+  message `serve` gives, on both commands. Checked in Task 4, Step 1.
+- Production's launch still resolves to 160 slots per layer from its budget in bytes,
+  so its slot table still totals: a drift in the derivation fails a test, not a
+  launch. Checked in Task 4, Step 1.
+- The golden's `short` and `long` now run `generate` at 128 slots instead of 64: a
+  pool size must not change a greedy answer, so any mismatch stops Task 4. Checked
+  in Task 4, Step 9, and on the mini in Task 6, Step 10.
+- The deploy ships no bench bundle, and a deploy removes the mini's old ones as
+  retired. Checked in Task 5, Step 9, and Task 6, Step 10.
 
 ---
 
@@ -702,3 +724,864 @@ Each flag judged on its own, per the test above; SHRIKE-4 adds the rest.
 - [x] **Step 10: Commit** the two sources, the three test files, the v25 doc and
       this plan with this task ticked:
       `cli: generate loses --logits-head and --follow-up, the golden's imitation flags (SHRIKE-57)`.
+
+### Task 4: one knob sizes the expert pool, `--ram-budget` on both commands
+
+SHRIKE-60. `generate`'s `--expert-cache-slots` defaulted to 64, below the cliff the
+default budget was measured against, and `serve`'s was an override of the budget
+that nothing passed (the v25 doc's Verdicts). Both go; `generate` takes `serve`'s
+`--ram-budget`, and the two dead slot fields on the server side go with them.
+
+**Files:**
+- Modify: `Sources/ShrikeArgumentSupport/ShrikeArgumentConformances.swift` (the
+  shared `--ram-budget` parser and help)
+- Modify: `Sources/Shrike/Runtime/Configuration/RuntimeConfiguration.swift:131-149`
+  (slots for a model directory, after the stride form)
+- Modify: `Sources/ShrikeCLI/ShrikeGenerateCommand.swift:90-95` (the option),
+  `:110` (`--quiet`'s help), `:167-171` (the slot validation)
+- Modify: `Sources/ShrikeCLI/Run.swift:200-203`, `:232-236` (`buildRuntime`)
+- Modify: `Sources/ShrikeServer/Core/ShrikeServerCommand.swift:68-90`, `:111-117`,
+  `:127`, `:131-141`
+- Modify: `Sources/ShrikeServer/Core/ServerInference.swift:587-589`, `:670`,
+  `:715-719`, `:762`, `:774-798`, `:905`, `:923`
+- Modify: `Sources/ShrikeServer/Core/ModelSessionPlan.swift`,
+  `Sources/ShrikeServer/Core/ModelRegistry.swift:386`
+- Test: `tests/Shrike/Core/Runtime/Configuration/ExpertCacheBudgetTests.swift`,
+  `tests/Shrike/Core/CLI/CLIArgumentsTests.swift`,
+  `tests/ShrikeServer/ServerArgumentsTests.swift`, `tests/ShrikeRoot/RootCommandTests.swift`
+- Modify: the five `expertCacheSlots: nil` call sites,
+  `tests/ShrikeServer/ModelRegistryTests.swift:117`, `HTTPServerTests.swift:205` and
+  `:569`, `OpenAIValidationTests.swift:472`, `HTTPServerMultiModelTests.swift:48`
+- Modify: `README.md` (the two flags worth knowing), `docs/multi-model-serving.md:140-141`,
+  `docs/v25-argument-discipline.md` (line 81's marker and the two slot verdicts)
+
+**Interfaces:**
+- Consumes: nothing from Tasks 1 to 3 in code; the golden is this task's check.
+- Produces: `ExpertCacheBudgetArgument.help: ArgumentHelp` and
+  `ExpertCacheBudgetArgument.bytes(_: String) throws -> Int` in
+  `ShrikeArgumentSupport`; `RuntimeConfiguration.expertCacheSlots(modelDirectory: URL,
+  expecting: ArchConfig, budgetBytes: Int?) -> Int`;
+  `ShrikeGenerateCommand.expertCacheBudgetBytes: Int?`. `ShrikeServerCommand` keeps
+  `expertCacheBudgetBytes: Int?` and loses `expertCacheSlots`; `ModelSessionPlan.init`
+  and `ServerModelSession.load` lose their `expertCacheSlots:` parameter.
+
+- [ ] **Step 1: Write the failing tests.** In `ExpertCacheBudgetTests.swift`, add
+      `import Foundation` under `import Testing`, and append to the suite:
+
+```swift
+    @Test func productionsBudgetIs160SlotsAtTheFourBitStride() {
+        #expect(RuntimeConfiguration.expertCacheSlots(
+            expertStrideBytes: Self.stride4, layers: Self.layers,
+            budgetBytes: 11_324_620_800) == 160)
+    }
+
+    @Test func aModelDirectorysSlotsFollowItsManifestAndTheBudget() throws {
+        let (dir, toy) = try ManifestReaderTests.writeToyManifest(
+            ["expertStride": Int(Self.stride4)])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let perSlot = Int(Self.stride4) * toy.numLayers
+        #expect(RuntimeConfiguration.expertCacheSlots(
+            modelDirectory: dir, expecting: toy, budgetBytes: 160 * perSlot) == 160)
+        #expect(RuntimeConfiguration.expertCacheSlots(
+            modelDirectory: dir, expecting: toy, budgetBytes: nil)
+            == RuntimeConfiguration.expertCacheSlots(
+                expertStrideBytes: Self.stride4, layers: toy.numLayers))
+    }
+
+    @Test func anUnreadableManifestTakesTheSmallestCount() {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("no-model-\(UUID().uuidString)")
+        #expect(RuntimeConfiguration.expertCacheSlots(
+            modelDirectory: missing, expecting: .qwenToy(), budgetBytes: nil) == 8)
+    }
+```
+
+      In `CLIArgumentsTests.swift`, in `helpListsExactlyThePublicOptions` replace
+      `"--expert-cache-slots",` with `"--ram-budget",`, and after it add:
+
+```swift
+    @Test func theRAMBudgetAloneSizesTheExpertPool() throws {
+        #expect(try ShrikeGenerateCommand.parse(["--prompt", "hi"]).expertCacheBudgetBytes == nil)
+        #expect(try ShrikeGenerateCommand.parse(["--prompt", "hi", "--ram-budget", "2G"])
+            .expertCacheBudgetBytes == 2 << 30)
+        #expect(try ShrikeGenerateCommand.parse(["--prompt", "hi", "--ram-budget", "11324620800"])
+            .expertCacheBudgetBytes == 11_324_620_800)
+        for size in ["0", "8X"] {
+            #expect(try rejection(["--prompt", "hi", "--ram-budget", size])
+                .contains("--ram-budget must be a positive size such as 2G, 512M or a byte count"))
+        }
+        #expect(throws: (any Error).self) {
+            _ = try ShrikeGenerateCommand.parse(["--prompt", "hi", "--expert-cache-slots", "160"])
+        }
+    }
+```
+
+      In `ServerArgumentsTests.swift`, delete `#expect(arguments.expertCacheSlots == nil)`
+      from `productionLaunchLineParses`, and append after the suite:
+
+```swift
+@Suite struct ServerPoolArgumentTests {
+    @Test func theRAMBudgetIsTheOnlyPoolKnob() throws {
+        #expect(throws: (any Error).self) {
+            _ = try ShrikeServerCommand.parse(["--model", "m.gturbo", "--expert-cache-slots", "160"])
+        }
+        let error = #expect(throws: (any Error).self) {
+            _ = try ShrikeServerCommand.parse(["--model", "m.gturbo", "--ram-budget", "8X"])
+        }
+        #expect(ShrikeServerCommand.message(for: try #require(error))
+            .contains("--ram-budget must be a positive size such as 2G, 512M or a byte count"))
+    }
+}
+```
+
+      In `RootCommandTests.swift`, in `serveKeepsEveryFlagItSharesWithGenerate` replace
+      `"--expert-cache-slots", "160",` with `"--ram-budget", "11324620800",` and
+      `#expect(serve.expertCacheSlots == 160)` with
+      `#expect(serve.expertCacheBudgetBytes == 11_324_620_800)`.
+
+- [ ] **Step 2: Run them.** `swift test --no-parallel --filter 'ExpertCacheBudgetTests|CLIArgumentsTests|ServerPoolArgumentTests'`.
+      Expected: the build fails, `RuntimeConfiguration` has no
+      `expertCacheSlots(modelDirectory:expecting:budgetBytes:)` and
+      `ShrikeGenerateCommand` has no `expertCacheBudgetBytes`.
+
+- [ ] **Step 3: The shared parser.** Append to `ShrikeArgumentConformances.swift`:
+
+```swift
+public enum ExpertCacheBudgetArgument {
+    public static var help: ArgumentHelp {
+        ArgumentHelp("""
+            Bytes the routed-expert cache may use, e.g. 8G, 2G, 512M. Slots are \
+            derived from this and the model's expert stride, so this is the knob \
+            and the slot count is the result. Default 8G, which holds the \
+            measured routing working set; smaller budgets are markedly slower \
+            because expert reads bypass the page cache and have no fallback.
+            """,
+            valueName: "size")
+    }
+
+    public static func bytes(_ value: String) throws -> Int {
+        guard let parsed = RuntimeConfiguration.parseBudgetBytes(value) else {
+            throw ValidationError(
+                "--ram-budget must be a positive size such as 2G, 512M or a byte count")
+        }
+        return parsed
+    }
+}
+```
+
+      The help names no other flag: `helpListsExactlyThePublicOptions` collects every
+      `--word` in `generate`'s help.
+
+- [ ] **Step 4: Slots for a model directory.** In `RuntimeConfiguration.swift`, after
+      `expertCacheSlots(expertStrideBytes:layers:budgetBytes:)`, add:
+
+```swift
+    /// An unreadable manifest takes the smallest count: the load that follows
+    /// fails with a better message than this could give.
+    public static func expertCacheSlots(modelDirectory: URL,
+                                        expecting arch: ArchConfig,
+                                        budgetBytes: Int?) -> Int {
+        guard let manifest = try? ManifestReader.load(directoryURL: modelDirectory,
+                                                      expecting: arch) else {
+            return allowedExpertCacheSlots.first ?? 8
+        }
+        return expertCacheSlots(expertStrideBytes: manifest.expertStride,
+                                layers: manifest.arch.numLayers,
+                                budgetBytes: budgetBytes ?? defaultExpertCacheBudgetBytes)
+    }
+```
+
+- [ ] **Step 5: `generate` takes the budget.** In `ShrikeGenerateCommand.swift`, replace
+      the `@Option(help: ... Routed-expert cache slots per layer ...) public var
+      expertCacheSlots = 64` block with:
+
+```swift
+    @Option(name: .customLong("ram-budget"),
+            help: ExpertCacheBudgetArgument.help,
+            transform: ExpertCacheBudgetArgument.bytes)
+    public var expertCacheBudgetBytes: Int?
+```
+
+      delete the `guard RuntimeConfiguration.allowedExpertCacheSlots.contains(expertCacheSlots)`
+      block from `validate()`, and change `--quiet`'s help to
+      `"Suppress the load line and the timing footer."`. In `Run.swift`'s
+      `buildRuntime`, replace `expertCacheSlots: args.expertCacheSlots,` in the first
+      `RuntimeConfiguration(...)` with:
+
+```swift
+        expertCacheSlots: RuntimeConfiguration.expertCacheSlots(
+            modelDirectory: modelURL, expecting: expectedArch,
+            budgetBytes: args.expertCacheBudgetBytes),
+```
+
+      and after `let runner = try RealForwardRunner(...)` add:
+
+```swift
+    if !args.quiet {
+        stderr.write(Data("\(runner.prefillDescription)\n".utf8))
+    }
+```
+
+      It is the line `serve` logs at load (`ServerInference.swift:770`), ending
+      `expert_slots=<count> policy=<policy>`: the budget is the knob, and this is where
+      a user sees the slot count it gave.
+
+- [ ] **Step 6: `serve` loses its slot flag.** In `ShrikeServerCommand.swift`: delete
+      the `@Option(name: .customLong("expert-cache-slots") ...) public var
+      expertCacheSlots: Int?` block; replace the `--ram-budget` block, its `///`
+      comment included, with:
+
+```swift
+    @Option(name: .customLong("ram-budget"),
+            help: ExpertCacheBudgetArgument.help,
+            transform: ExpertCacheBudgetArgument.bytes)
+    public var expertCacheBudgetBytes: Int?
+```
+
+      delete `static func budgetBytes(_:)`; in `validate()` replace
+      `try validateOptionalMemberships()` with:
+
+```swift
+        if let configPath, configPath.isEmpty {
+            throw ValidationError("--config must not be empty")
+        }
+```
+
+      and delete `validateOptionalMemberships()`. In `ServerInference.swift`: delete
+      the session's `expertCacheSlots` property with its two `///` lines (`:587-589`),
+      the `expertCacheSlots: loadSlots,` argument to `ServerModelSession(...)`
+      (`:762`), the `expertCacheSlots: Int,` parameter of its `init` (`:905`) and
+      `self.expertCacheSlots = expertCacheSlots` (`:923`), since nothing reads it; in
+      `load(...)` delete the `expertCacheSlots requestedExpertCacheSlots: Int? = nil,`
+      parameter and replace the `let loadSlots = resolveExpertCacheSlots(...)` call with:
+
+```swift
+        let loadSlots = RuntimeConfiguration.expertCacheSlots(
+            modelDirectory: modelDirectory, expecting: expectedArch,
+            budgetBytes: expertCacheBudgetBytes)
+```
+
+      then delete `resolveExpertCacheSlots` with its three `//` lines (`:774-798`). In
+      `ModelSessionPlan.swift`: delete `ModelSessionFacts.expertCacheSlots` with its
+      three `///` lines, its `expertCacheSlots: Int = 0` init parameter (the parameter
+      before it now closes the list) and its assignment; delete
+      `ModelSessionPlan.expertCacheSlots`, its `expertCacheSlots: Int?,` init parameter,
+      its assignment, and `expertCacheSlots: expertCacheSlots,` in `makeSession`. In
+      `ModelRegistry.swift` delete `expertCacheSlots: arguments.expertCacheSlots,`. At
+      each of the five test call sites, delete the `expertCacheSlots: nil` argument and
+      the comma before it.
+
+- [ ] **Step 7: Run the tests.** `swift test --no-parallel --filter 'ExpertCacheBudgetTests|CLIArgumentsTests|ServerPoolArgumentTests|ServerInvocationTests|RootCommandTests|ModelRegistryTests|HTTPServer|OpenAIValidationTests'`.
+      Expected: PASS. If the two rejection messages do not contain the text, print
+      one with `ShrikeGenerateCommand.message(for:)` and stop: ArgumentParser wraps a
+      transform's error, and the test must pin the message users see.
+
+- [ ] **Step 8: The four gates.**
+
+- [ ] **Step 9: Check on the dev box.** The process checks, `swift build -c release`, then:
+
+```bash
+.build/release/shrike --model /Volumes/BuildSSD/shrike/ornith15.gturbo --prompt hi --max-new 4 2>&1 >/dev/null | grep -o 'expert_slots=[^ ]*'
+.build/release/shrike --model /Volumes/BuildSSD/shrike/ornith15.gturbo --prompt hi --max-new 4 --ram-budget 11324620800 2>&1 >/dev/null | grep -o 'expert_slots=[^ ]*'
+```
+
+      Expected: `expert_slots=uniform:128`, then `expert_slots=uniform:160`. Then
+      `tools/golden-baseline.sh --check`. Expected: five `ok` lines; `short` and `long`
+      now run at 128 slots where they ran at 64, and a pool size changes no greedy
+      answer, so a mismatch stops the task.
+
+- [ ] **Step 10: The documents.** In `README.md`, change `The two worth knowing first:`
+      to ``The two worth knowing first, which `shrike generate` takes too:``. In
+      `docs/multi-model-serving.md`, lines 140-141 become
+      ``larger than the machine's RAM on its own, and residency is bounded by `--ram-budget` ``
+      and `rather than by bundle size.`, keeping the line count. In
+      `docs/v25-argument-discipline.md`, on line 81 change
+      `**Two are deleted; see [Verdicts](#verdicts).**` to
+      `**All three are deleted; see [Verdicts](#verdicts).**`, and change both
+      `` **`--expert-cache-slots`, prosthetic, to be deleted.** `` to
+      `` **`--expert-cache-slots`, prosthetic, deleted.** ``.
+
+- [ ] **Step 11: Commit** the sources, the tests, the three documents and this plan
+      with this task ticked:
+      `cli+server: one knob sizes the expert pool, --ram-budget on generate and serve (SHRIKE-60)`.
+
+### Task 5: the benches leave `shrike` for `shrike-bench`
+
+SHRIKE-61, the move. `bench` was a verb of the product binary only because the mini
+received one binary (the v25 doc's Verdicts). It becomes a second executable built
+beside `shrike` and never deployed with it.
+
+**Files:**
+- Create: `Sources/ShrikeBench/Core/ShrikeBenchCommand.swift`,
+  `Sources/ShrikeBench/Command/ShrikeBenchMain.swift`
+- Modify: `Package.swift` (a product, two targets, `ShrikeRootCore`'s and
+  `ShrikeBenchTests`' dependencies)
+- Modify: `Sources/ShrikeRoot/Core/ShrikeRootCommand.swift` (`BenchCommand` goes)
+- Test: `tests/ShrikeRoot/RootCommandTests.swift`, `tests/ShrikeBench/BenchArgumentTests.swift`
+- Modify: the guards, `tools/golden-baseline.sh:94`, `tools/decode-rig.sh:62`,
+  `tools/turn-rig.sh:72`, `tools/mini-golden.sh:37` and `:56`, `tools/mini-deploy.sh:34`,
+  `CLAUDE.md:17`
+- Modify: `tools/mini-deploy.sh:3-4`, `:43-47` (no bench bundle ships)
+- Modify: `README.md:23-24`, `docs/architecture.md:642-651`, `CLAUDE.md:108-110`
+
+**Interfaces:**
+- Consumes: nothing from Task 4.
+- Produces: `ShrikeBenchCommand` (`commandName: "shrike-bench"`, subcommands
+  `AttnBenchCommand` and `ExpertBenchCommand`) in the `ShrikeBenchCore` module; the
+  `shrike-bench` executable product; the guard pattern `pgrep -x 'shrike(-bench)?'`.
+  Task 6 edits the two bench modules, not this wiring.
+
+- [ ] **Step 1: Write the failing tests.** In `RootCommandTests.swift`, delete
+      `import ShrikeAttnBenchCore` and `import ShrikeExpertBenchCore`, and replace
+      `benchResolvesEitherChild` with:
+
+```swift
+    @Test func benchIsNotAVerbOfTheProductBinary() {
+        #expect(throws: (any Error).self) {
+            _ = try parse(["bench", "attention"])
+        }
+        #expect(!ShrikeRootCommand.helpMessage().contains("bench"))
+    }
+```
+
+      In `BenchArgumentTests.swift`, add `import ShrikeBenchCore` after the two
+      `@testable` imports, and append:
+
+```swift
+@Suite struct ShrikeBenchCommandTests {
+    @Test func theBenchBinaryResolvesEitherChild() throws {
+        #expect(try ShrikeBenchCommand.parseAsRoot(["attention"]) is AttnBenchCommand)
+        #expect(try ShrikeBenchCommand.parseAsRoot(["expert", "--model", "m.gturbo"])
+            is ExpertBenchCommand)
+    }
+}
+```
+
+- [ ] **Step 2: Run them.** `swift test --no-parallel --filter 'RootCommandTests|ShrikeBenchCommandTests'`.
+      Expected: the build fails, no module `ShrikeBenchCore`.
+
+- [ ] **Step 3: The bench executable.** Create
+      `Sources/ShrikeBench/Core/ShrikeBenchCommand.swift`:
+
+```swift
+import ArgumentParser
+import ShrikeAttnBenchCore
+import ShrikeExpertBenchCore
+
+public struct ShrikeBenchCommand: ParsableCommand {
+    public static let configuration = CommandConfiguration(
+        commandName: "shrike-bench",
+        abstract: "Kernel benchmarks, a development tool built beside shrike.",
+        subcommands: [AttnBenchCommand.self, ExpertBenchCommand.self])
+
+    public init() {}
+}
+```
+
+      and `Sources/ShrikeBench/Command/ShrikeBenchMain.swift`:
+
+```swift
+import ShrikeBenchCore
+
+@main extension ShrikeBenchCommand {}
+```
+
+- [ ] **Step 4: The package.** In `Package.swift`, add
+      `.executable(name: "shrike-bench", targets: ["ShrikeBench"]),` after the `shrike`
+      product; remove `"ShrikeAttnBenchCore",` and `"ShrikeExpertBenchCore",` from
+      `ShrikeRootCore`'s dependencies; add `"ShrikeBenchCore",` to `ShrikeBenchTests`'
+      dependencies; and after the `ShrikeRoot` executable target add:
+
+```swift
+        .target(
+            name: "ShrikeBenchCore",
+            dependencies: [
+                "ShrikeAttnBenchCore",
+                "ShrikeExpertBenchCore",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "sources/ShrikeBench/Core"
+        ),
+        .executableTarget(
+            name: "ShrikeBench",
+            dependencies: ["ShrikeBenchCore"],
+            path: "sources/ShrikeBench/Command"
+        ),
+```
+
+- [ ] **Step 5: The root drops the verb.** In `ShrikeRootCommand.swift`, delete
+      `import ShrikeAttnBenchCore`, `import ShrikeExpertBenchCore`, `BenchCommand.self,`
+      from the subcommands, and the `BenchCommand` struct.
+
+- [ ] **Step 6: Run the tests.** `swift test --no-parallel --filter 'RootCommandTests|ShrikeBench'`.
+      Expected: PASS.
+
+- [ ] **Step 7: Every guard learns the second name.** `shrike-bench expert` maps a real
+      `.gturbo`, so it is a model process, and `pgrep -x shrike` matches the name
+      exactly. Replace `pgrep -x shrike` with `pgrep -x 'shrike(-bench)?'` at
+      `tools/golden-baseline.sh:94`, `tools/decode-rig.sh:62`, `tools/turn-rig.sh:72`,
+      `tools/mini-golden.sh:37` and `:56` (inside `\"\$(...)\"`), and
+      `tools/mini-deploy.sh:34`; on `CLAUDE.md:17` replace `pgrep -lx shrike;` with
+      `pgrep -lx 'shrike(-bench)?';`. Then `rg -n "pgrep -l?x shrike" tools CLAUDE.md`
+      (expected: no match) and `bash -n` on each of the five scripts.
+
+- [ ] **Step 8: Check the guards with stand-ins.** Write `/tmp/v25-guards.sh`:
+
+```bash
+#!/bin/bash
+set -u
+dir=/tmp/v25-guards
+mkdir -p "$dir"
+printf '#include <unistd.h>\nint main(void) { sleep(60); return 0; }\n' > "$dir/stub.c"
+clang -o "$dir/shrike-bench" "$dir/stub.c"
+clang -o "$dir/shrike-benchx" "$dir/stub.c"
+"$dir/shrike-bench" & bench=$!
+"$dir/shrike-benchx" & other=$!
+sleep 1
+echo "the pattern sees: $(pgrep -lx 'shrike(-bench)?' | tr '\n' ' ')"
+tools/golden-baseline.sh --check; echo "golden exit $?"
+kill "$bench" "$other"
+```
+
+      and run `bash /tmp/v25-guards.sh` from the repo root. Expected: the pattern sees
+      the `shrike-bench` pid and not `shrike-benchx` (a copied system binary is killed
+      at launch, hence compiled stand-ins), and the golden prints `a model process is
+      already running` with `golden exit 3`. The mini-side guards run the same pattern
+      through the same `pgrep`.
+
+- [ ] **Step 9: The deploy ships no bench bundle.** In `tools/mini-deploy.sh`, after
+      `name=$(basename "$bundle")` in the bundle loop, add:
+
+```bash
+  case "$name" in *BenchCore.bundle) continue ;; esac
+```
+
+      and in the header change `Copies the release binary and its resource bundles`
+      to `Copies the release binary and its resource bundles, not shrike-bench's,`.
+      Then `swift build -c release` and write two stubs, `/tmp/v25-deploy-stubs/ssh` and
+      `/tmp/v25-deploy-stubs/scp`, each:
+
+```bash
+#!/bin/bash
+echo "$(basename "$0") $*" >> /tmp/v25-deploy-stubs/log
+```
+
+      `chmod +x` both, and run
+      `env PATH="/tmp/v25-deploy-stubs:/usr/bin:/bin" bash tools/mini-deploy.sh`, then
+      `grep -c BenchCore.bundle /tmp/v25-deploy-stubs/log` (expected: 0) and
+      `grep -c Shrike_Shrike.bundle /tmp/v25-deploy-stubs/log` (expected: at least 1).
+      `.build/release/` holds the bench bundles by now, so the first count is a real
+      exclusion, not an absence.
+
+- [ ] **Step 10: The documents.** `README.md:23-24` become:
+
+```markdown
+`.build/release/` holds `shrike`, which generates once given a prompt, and `shrike-bench`,
+the kernel benches, which the deploy does not ship; `shrike serve` and `shrike repack` are the other verbs.
+```
+
+      In `docs/architecture.md`, the attention bullet's five lines at `:642-646` become:
+
+```markdown
+- `shrike-bench attention`: the decode attention scan on synthetic rows at the served
+  shape, the production pipeline through the wrapper, the shipped kernel's copy with one
+  switch per function constant, and the streaming prototype. A development executable
+  built beside `shrike` and never deployed with it; a run on the mini copies it and every
+  `.bundle` from `.build/release/` into a scratch directory there (v25).
+```
+
+      and the expert bullet's first line at `:647` begins `` - `shrike-bench expert`: ``
+      in place of `` - `shrike bench expert`: ``.
+
+      In `CLAUDE.md:108-110`, change
+      ``(a deploy copies the `*.bundle` directories from `.build/release/` alongside the binaries, or resource lookups fail at runtime)``
+      to
+      ``(a deploy copies `shrike`'s `*.bundle` directories from `.build/release/`, never `shrike-bench`'s, or resource lookups fail at runtime)``,
+      keeping the line count.
+
+- [ ] **Step 11: The four gates.**
+
+- [ ] **Step 12: Commit** `Package.swift`, the two new sources, the root command, the
+      two test files, the five scripts, `README.md`, `CLAUDE.md`, `docs/architecture.md`
+      and this plan with this task ticked:
+      `bench: the kernel benches leave shrike for a shrike-bench executable (SHRIKE-61)`.
+
+### Task 6: the benches measure what production runs
+
+SHRIKE-61, the pruning. The attention bench's default ladder leaves out the runner's
+kernel and calls a pre-streaming copy the shipped one; the expert bench carries v21's
+coded arms, closed at their first measurement, and a `--experts` whose help is wrong
+(the v25 doc's Verdicts). With the coded arms gone `plain` is the only arm, so
+`--arms` goes with them and the bench measures the production kernel alone.
+
+**Files:**
+- Modify: `Sources/ShrikeAttnBench/Arms.swift:52-55`, `:61`
+- Modify: `Sources/ShrikeExpertBench/ExpertBenchCommand.swift` (whole file below),
+  `Kernels.swift` (whole file below), `Runner.swift` (whole file below),
+  `BenchError.swift` (whole file below)
+- Delete: `Sources/ShrikeExpertBench/Coder.swift`, `Sources/ShrikeExpertBench/Metal/expert.metal`
+- Modify: `Package.swift` (`ShrikeExpertBenchCore` loses its resources)
+- Test: `tests/ShrikeBench/BenchArgumentTests.swift`
+- Modify: `docs/architecture.md:642-651`
+
+**Interfaces:**
+- Consumes: Task 5's `shrike-bench` executable (the dev-box run) and deploy exclusion
+  (the mini's retired bundles).
+- Produces: `ExpertBenchCommand` without `arms`; `PlainOffsets` in `Kernels.swift`;
+  `ExpertKernels` with `production` and `encodeProduction` only.
+
+- [ ] **Step 1: Write the failing tests.** In `BenchArgumentTests.swift`, add to
+      `AttnBenchArgumentTests`:
+
+```swift
+    @Test func theDefaultLadderMeasuresTheRunnersKernel() throws {
+        #expect(try AttnBenchCommand.parse([]).arms.names.contains("prodstream"))
+    }
+```
+
+      In `ExpertBenchArgumentTests`: delete `#expect(bench.arms.names == ["plain", "coded", "coded+aux"])`
+      from `modelIsRequiredAndTheRestDefault`; in `everyOptionParses` delete
+      `"--arms", "plain,coded",` from the argv and `#expect(bench.arms.names == ["plain", "coded"])`;
+      and replace `anUnknownArmIsRejectedBeforeTheModelIsRead` with:
+
+```swift
+    @Test func armsIsNotAnOptionOnceProductionIsTheOnlyArm() {
+        #expect(throws: (any Error).self) {
+            _ = try ExpertBenchCommand.parse(["--model", "/m.gturbo", "--arms", "plain"])
+        }
+    }
+```
+
+- [ ] **Step 2: Run them.** `swift test --no-parallel --filter 'AttnBenchArgumentTests|ExpertBenchArgumentTests'`.
+      Expected: FAIL, the ladder lacks `prodstream` and `--arms plain` parses.
+
+- [ ] **Step 3: The attention bench.** In `Arms.swift`, the default ladder becomes:
+
+```swift
+    static let defaultLadder = [
+        "prodstream", "prod", "copy", "qregs", "block8", "dbuf", "load8", "load16",
+        "qregs+dbuf+load8", "nosoftmax", "nov", "loadonly", "loadonly+fullrow",
+    ]
+```
+
+      and `copy`'s help becomes
+      `"the ladder kernel with every switch at its default (the kernel shipped before the streaming scan)"`.
+
+- [ ] **Step 4: The expert bench's command.** Replace `ExpertBenchCommand.swift` with:
+
+```swift
+import ArgumentParser
+import Foundation
+import ShrikeArgumentSupport
+
+public struct ExpertBenchCommand: ParsableCommand {
+    public static let configuration = CommandConfiguration(
+        commandName: "expert",
+        abstract: "The production decode phase-1 gate/up kernel over real experts.")
+
+    @Option(help: ArgumentHelp("The .gturbo directory.", valueName: "dir"))
+    public var model: String
+
+    @Option(help: ArgumentHelp("The layer whose experts are read.", valueName: "n"))
+    public var layer = 20
+
+    @Option(help: ArgumentHelp("""
+        Distinct experts read, 1 to 8. A pass always runs the routed top-k of eight, \
+        repeating the last expert read.
+        """,
+        valueName: "n"))
+    public var experts = 8
+
+    @Option(help: ArgumentHelp("Timed command buffers; the median is reported.",
+                               valueName: "n"))
+    public var repeats = 15
+
+    @Option(help: ArgumentHelp("Untimed command buffers before the repeats.", valueName: "n"))
+    public var warmup = 3
+
+    @Option(help: ArgumentHelp("""
+        Dispatches per command buffer, so the GPU holds its clock; the time \
+        reported is per dispatch.
+        """,
+        valueName: "n"))
+    public var batch = 20
+
+    @Option(help: ArgumentHelp("The activation vector's seed.", valueName: "n"))
+    public var seed = BenchSeed(0x5EED_0021)
+
+    public init() {}
+
+    public func validate() throws {
+        guard !model.isEmpty else {
+            throw ValidationError("--model must not be empty")
+        }
+        guard layer >= 0 else {
+            throw ValidationError("--layer must be zero or more")
+        }
+        guard (1...8).contains(experts) else {
+            throw ValidationError("--experts is 1 to 8")
+        }
+        guard repeats > 0 else {
+            throw ValidationError("--repeats needs a positive count")
+        }
+        guard warmup >= 0 else {
+            throw ValidationError("--warmup needs a count of zero or more")
+        }
+        guard batch > 0 else {
+            throw ValidationError("--batch needs a positive count")
+        }
+    }
+
+    public func run() throws {
+        try BenchRunner(args: self).run()
+    }
+}
+```
+
+- [ ] **Step 5: The production kernel alone.** Delete `Coder.swift` and
+      `Metal/expert.metal`, remove `resources: [.copy("Metal")]` from
+      `ShrikeExpertBenchCore` in `Package.swift`, and replace `Kernels.swift` with:
+
+```swift
+import Foundation
+import Metal
+import Shrike
+
+final class ExpertKernels {
+    static let hidden: UInt32 = 2048
+    static let intermediate: UInt32 = 512
+    static let topK: UInt32 = 8
+    static let rowsPerThreadgroup = 16
+
+    let context: MetalContext
+    let production: MTLComputePipelineState
+    let ioReady: MTLBuffer
+
+    init(context: MetalContext) throws {
+        self.context = context
+        self.production = try context.pipeline("moe_phase1_gate_up_act_u16load", constants: [
+            MetalFunctionConstant(index: 0, value: .uint32(Self.hidden)),
+            MetalFunctionConstant(index: 1, value: .uint32(Self.intermediate)),
+            MetalFunctionConstant(index: 2, value: .uint32(Self.topK)),
+            MetalFunctionConstant(index: 3, value: .bool(true)),
+            MetalFunctionConstant(index: 4, value: .bool(true)),
+            MetalFunctionConstant(index: 6, value: .bool(true)),
+        ])
+        guard let ready = context.device.makeBuffer(length: 16, options: .storageModeShared) else {
+            throw BenchError.allocation("io status")
+        }
+        ready.contents().storeBytes(of: UInt32(1), as: UInt32.self)
+        self.ioReady = ready
+    }
+
+    static func argumentBuffer(device: MTLDevice, blobs: [MTLBuffer]) throws -> MTLBuffer {
+        guard let buffer = device.makeBuffer(length: 8 * 8, options: .storageModeShared) else {
+            throw BenchError.allocation("argument buffer")
+        }
+        let p = buffer.contents().assumingMemoryBound(to: UInt64.self)
+        for i in 0..<8 { p[i] = blobs[min(i, blobs.count - 1)].gpuAddress }
+        return buffer
+    }
+
+    func encodeProduction(_ cb: MTLCommandBuffer, arguments: MTLBuffer, blobs: [MTLBuffer],
+                          offsets: PlainOffsets, x: MTLBuffer, acts: MTLBuffer) throws {
+        guard let encoder = cb.makeComputeCommandEncoder() else { throw BenchError.encoder }
+        defer { encoder.endEncoding() }
+        encoder.setComputePipelineState(production)
+        var d = Self.hidden, f = Self.intermediate, k = Self.topK
+        encoder.setBuffer(arguments, offset: 0, index: 0)
+        for blob in blobs { encoder.useResource(blob, usage: .read) }
+        var o = offsets
+        encoder.setBytes(&o, length: MemoryLayout<PlainOffsets>.stride, index: 1)
+        encoder.setBuffer(x, offset: 0, index: 2)
+        encoder.setBuffer(acts, offset: 0, index: 3)
+        encoder.setBytes(&d, length: 4, index: 4)
+        encoder.setBytes(&f, length: 4, index: 5)
+        encoder.setBytes(&k, length: 4, index: 6)
+        encoder.setBuffer(ioReady, offset: 0, index: 7)
+        let rows = Int(Self.topK * Self.intermediate)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (rows + Self.rowsPerThreadgroup - 1) / Self.rowsPerThreadgroup, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 512, height: 1, depth: 1))
+    }
+}
+
+/// Mirrors `ExpertOffsets` in moe.metal field for field.
+struct PlainOffsets {
+    var gateW: UInt32 = 0
+    var gateS: UInt32 = 0
+    var gateB: UInt32 = 0
+    var upW: UInt32 = 0
+    var upS: UInt32 = 0
+    var upB: UInt32 = 0
+    var downW: UInt32 = 0
+    var downS: UInt32 = 0
+    var downB: UInt32 = 0
+    var gateAB: UInt32 = 0
+    var upAB: UInt32 = 0
+    var downAB: UInt32 = 0
+}
+```
+
+      and `BenchError.swift` with:
+
+```swift
+enum BenchError: Error, CustomStringConvertible {
+    case model(String)
+    case allocation(String)
+    case commandBuffer
+    case encoder
+    case gpu(String)
+
+    var description: String {
+        switch self {
+        case .model(let text): return "model: \(text)"
+        case .allocation(let what): return "allocation failed: \(what)"
+        case .commandBuffer: return "command buffer creation failed"
+        case .encoder: return "compute encoder creation failed"
+        case .gpu(let text): return "GPU error: \(text)"
+        }
+    }
+}
+```
+
+      `bind` and `dispatch` fold into `encodeProduction`, their only caller now.
+
+- [ ] **Step 6: The runner.** Replace `Runner.swift` with:
+
+```swift
+import Foundation
+import Metal
+import Shrike
+
+final class BenchRunner {
+    private let args: ExpertBenchCommand
+    private let context: MetalContext
+    private let kernels: ExpertKernels
+    private let stride: Int
+    private let expertCount: Int
+    private let blobs: [MTLBuffer]
+    private let offsets: PlainOffsets
+    private let arguments: MTLBuffer
+    private let phase1Bytes: Int
+    private let x: MTLBuffer
+    private let acts: MTLBuffer
+
+    init(args: ExpertBenchCommand) throws {
+        self.args = args
+        self.context = try MetalContext()
+        self.kernels = try ExpertKernels(context: context)
+        let loaded = try Experts.load(model: args.model, layer: args.layer, count: args.experts)
+        self.stride = loaded.stride
+        self.expertCount = loaded.experts.count
+        let device = context.device
+
+        func buffer(_ bytes: [UInt8], label: String) throws -> MTLBuffer {
+            guard let b = device.makeBuffer(bytes: bytes, length: bytes.count, options: .storageModeShared) else {
+                throw BenchError.allocation(label)
+            }
+            b.label = label
+            return b
+        }
+
+        self.blobs = try loaded.experts.map { try buffer($0.bytes, label: "expert \($0.index)") }
+        let first = loaded.experts[0]
+        func off(_ name: String) throws -> UInt32 { UInt32(try first.tensor(name).offset) }
+        self.offsets = PlainOffsets(
+            gateW: try off("gate"), gateS: try off("gate_scales"), gateB: try off("gate_biases"),
+            upW: try off("up"), upS: try off("up_scales"), upB: try off("up_biases"),
+            downW: try off("down"), downS: try off("down_scales"), downB: try off("down_biases"))
+        self.arguments = try ExpertKernels.argumentBuffer(device: device, blobs: blobs)
+        self.phase1Bytes = try ["gate", "gate_scales", "gate_biases", "up", "up_scales", "up_biases"]
+            .map { try first.tensor($0).size }.reduce(0, +)
+
+        let d = Int(ExpertKernels.hidden)
+        var state = args.seed.value
+        var halves = [UInt16](repeating: 0, count: d)
+        for i in 0..<d {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            let unit = Float(Double(state >> 11) / Double(1 << 53))
+            halves[i] = Float16(unit * 2 - 1).bitPattern
+        }
+        self.x = try buffer(halves.withUnsafeBufferPointer { Array(UnsafeRawBufferPointer($0)) }, label: "x")
+        let actCount = Int(ExpertKernels.topK * ExpertKernels.intermediate)
+        guard let acts = device.makeBuffer(length: actCount * 2, options: .storageModeShared) else {
+            throw BenchError.allocation("acts")
+        }
+        self.acts = acts
+    }
+
+    func run() throws {
+        print("device \(context.device.name); layer \(args.layer), \(expertCount) experts of \(stride) bytes; "
+              + "repeats \(args.repeats), warmup \(args.warmup), \(args.batch) dispatches per command buffer")
+        print(String(format: "%14@ %10@ %8@", "phase1 B/expert", "gpu_us", "GB/s"))
+        _ = try Timing.medianGPUSeconds(context: context, warmup: 0, repeats: 20) { cb in
+            try self.encode(cb)
+        }
+        let batch = args.batch
+        let seconds = try Timing.medianGPUSeconds(context: context, warmup: args.warmup,
+                                                  repeats: args.repeats) { cb in
+            for _ in 0..<batch { try self.encode(cb) }
+        } / Double(batch)
+        print(String(format: "%14d %10.1f %8.2f", phase1Bytes, seconds * 1e6,
+                     Double(phase1Bytes * expertCount) / seconds / 1e9))
+    }
+
+    private func encode(_ cb: MTLCommandBuffer) throws {
+        try kernels.encodeProduction(cb, arguments: arguments, blobs: blobs,
+                                     offsets: offsets, x: x, acts: acts)
+    }
+}
+```
+
+      The first timing call is the old `spinUp`, twenty untimed buffers that bring the
+      GPU to its clock. The reference buffer and the per-arm comparison go: they held a
+      variant to bit-identity against `plain`, and no variant is left.
+
+- [ ] **Step 7: Run the bench tests.** `swift test --no-parallel --filter ShrikeBench`.
+      Expected: PASS.
+
+- [ ] **Step 8: The four gates.**
+
+- [ ] **Step 9: Run both benches on the dev box.** The process checks, `swift build -c release`,
+      then `.build/release/shrike-bench attention --positions 1024 --repeats 3 --warmup 1`
+      (expected: a row per default arm, `prodstream` first) and
+      `.build/release/shrike-bench expert --model /Volumes/BuildSSD/shrike/ornith15.gturbo`
+      (expected: the device line, then one row of `phase1 B/expert`, `gpu_us` and `GB/s`).
+      The expert run maps a real `.gturbo`, so it is a model run under the process rules.
+
+- [ ] **Step 10: Deploy and check on the mini**, with the owner's go-ahead (about five
+      minutes of production downtime): `tools/mini-deploy.sh --restart`, then
+      `tools/mini-golden.sh --check`. Expected: the deploy prints `removed retired
+      Shrike_ShrikeAttnBenchCore.bundle` and `removed retired
+      Shrike_ShrikeExpertBenchCore.bundle` and relaunches production; the golden prints
+      five `ok` lines, `short` and `long` at `generate`'s new 128 slots, and relaunches
+      production.
+
+- [ ] **Step 11: The documents.** In `docs/architecture.md`, the attention bullet's five
+      lines at `:642-646` become:
+
+```markdown
+- `shrike-bench attention`: the decode attention scan on synthetic rows at the served
+  shape, the production pipeline through the wrapper and on the streaming variant, the
+  pre-streaming kernel's copy with one switch per function constant, and the streaming
+  prototype. A development executable built beside `shrike` and never deployed with it;
+  a run on the mini copies it and every `.bundle` from `.build/release/` there (v25).
+```
+
+      and the expert bullet's five lines at `:647-651` become:
+
+```markdown
+- `shrike-bench expert`: the production decode phase-1 gate/up kernel on up to eight
+  real experts of a layer read from the `.gturbo`, a pass always the routed top-k of
+  eight, timed with the GPU kept busy by a batch of dispatches per command buffer. It
+  maps a real `.gturbo`, a model run. v21's coded arms, which closed the lossless-
+  compression avenue on their numbers, are in git history (v25).
+```
+
+      Check that `docs/architecture.md:757` still reads as `v9-implementation-plan.md:133`
+      cites it.
+
+- [ ] **Step 12: Commit** `Package.swift`, the attention and expert sources and the two
+      deletions, the test file, `docs/architecture.md` and this plan with this task
+      ticked: `bench: the benches measure production's kernels, v21's coded arms gone (SHRIKE-61)`.
