@@ -98,10 +98,7 @@ let package = Package(
                 "ShrikeArgumentSupport",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
-            path: "sources/ShrikeExpertBench",
-            resources: [
-                .copy("Metal"),
-            ]
+            path: "sources/ShrikeExpertBench"
         ),
         .target(
             name: "ShrikeServerCore",

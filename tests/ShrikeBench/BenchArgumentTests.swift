@@ -48,6 +48,10 @@ import ShrikeBenchCore
             }
         }
     }
+
+    @Test func theDefaultLadderMeasuresTheRunnersKernel() throws {
+        #expect(try AttnBenchCommand.parse([]).arms.names.contains("prodstream"))
+    }
 }
 
 @Suite struct ExpertBenchArgumentTests {
@@ -56,7 +60,6 @@ import ShrikeBenchCore
         #expect(bench.model == "/models/ornith15.gturbo")
         #expect(bench.layer == 20)
         #expect(bench.experts == 8)
-        #expect(bench.arms.names == ["plain", "coded", "coded+aux"])
         #expect(bench.repeats == 15)
         #expect(bench.warmup == 3)
         #expect(bench.batch == 20)
@@ -70,12 +73,11 @@ import ShrikeBenchCore
     @Test func everyOptionParses() throws {
         let bench = try ExpertBenchCommand.parse([
             "--model", "/models/ornith15.gturbo",
-            "--layer", "0", "--experts", "4", "--arms", "plain,coded",
+            "--layer", "0", "--experts", "4",
             "--repeats", "5", "--warmup", "0", "--batch", "1", "--seed", "99",
         ])
         #expect(bench.layer == 0)
         #expect(bench.experts == 4)
-        #expect(bench.arms.names == ["plain", "coded"])
         #expect(bench.repeats == 5)
         #expect(bench.warmup == 0)
         #expect(bench.batch == 1)
@@ -91,13 +93,9 @@ import ShrikeBenchCore
         }
     }
 
-    @Test func anUnknownArmIsRejectedBeforeTheModelIsRead() {
-        do {
-            _ = try ExpertBenchCommand.parse(["--model", "/m.gturbo", "--arms", "plain,codded"])
-            Issue.record("an unknown arm should not parse")
-        } catch {
-            #expect(ExpertBenchCommand.message(for: error)
-                == "unknown arm codded; --arms takes plain, coded, coded+aux")
+    @Test func armsIsNotAnOptionOnceProductionIsTheOnlyArm() {
+        #expect(throws: (any Error).self) {
+            _ = try ExpertBenchCommand.parse(["--model", "/m.gturbo", "--arms", "plain"])
         }
     }
 }

@@ -5,7 +5,7 @@ import ShrikeArgumentSupport
 public struct ExpertBenchCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "expert",
-        abstract: "The decode phase-1 gate/up kernel over real experts, plain and coded.")
+        abstract: "Decode's phase-1 gate/up math on real experts, through the kernel entry point without the expert pool.")
 
     @Option(help: ArgumentHelp("The .gturbo directory.", valueName: "dir"))
     public var model: String
@@ -13,15 +13,14 @@ public struct ExpertBenchCommand: ParsableCommand {
     @Option(help: ArgumentHelp("The layer whose experts are read.", valueName: "n"))
     public var layer = 20
 
-    @Option(help: ArgumentHelp("Experts per pass, the routed top-k.", valueName: "n"))
+    @Option(help: ArgumentHelp("""
+        Distinct experts read, 1 to 8. A pass always runs the routed top-k of eight, \
+        repeating the last expert read.
+        """,
+        valueName: "n"))
     public var experts = 8
 
-    static let armNames = ["plain", "coded", "coded+aux"]
-
-    @Option(help: ArgumentHelp("Arms to run: plain, coded, coded+aux.", valueName: "a,b,..."))
-    public var arms = CommaSeparatedNames(Self.armNames)
-
-    @Option(help: ArgumentHelp("Timed command buffers per arm; the median is reported.",
+    @Option(help: ArgumentHelp("Timed command buffers; the median is reported.",
                                valueName: "n"))
     public var repeats = 15
 
@@ -49,10 +48,6 @@ public struct ExpertBenchCommand: ParsableCommand {
         }
         guard (1...8).contains(experts) else {
             throw ValidationError("--experts is 1 to 8")
-        }
-        if let unknown = arms.names.first(where: { !Self.armNames.contains($0) }) {
-            throw ValidationError("unknown arm \(unknown); --arms takes "
-                + Self.armNames.joined(separator: ", "))
         }
         guard repeats > 0 else {
             throw ValidationError("--repeats needs a positive count")

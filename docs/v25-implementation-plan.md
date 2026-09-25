@@ -1230,7 +1230,7 @@ coded arms, closed at their first measurement, and a `--experts` whose help is w
 - Produces: `ExpertBenchCommand` without `arms`; `PlainOffsets` in `Kernels.swift`;
   `ExpertKernels` with `production` and `encodeProduction` only.
 
-- [ ] **Step 1: Write the failing tests.** In `BenchArgumentTests.swift`, add to
+- [x] **Step 1: Write the failing tests.** In `BenchArgumentTests.swift`, add to
       `AttnBenchArgumentTests`:
 
 ```swift
@@ -1252,14 +1252,14 @@ coded arms, closed at their first measurement, and a `--experts` whose help is w
     }
 ```
 
-- [ ] **Step 2: Run them.** `swift test --no-parallel --filter 'AttnBenchArgumentTests|ExpertBenchArgumentTests'`.
+- [x] **Step 2: Run them.** `swift test --no-parallel --filter 'AttnBenchArgumentTests|ExpertBenchArgumentTests'`.
       Expected: FAIL, the ladder lacks `prodstream` and `--arms plain` parses.
 
-- [ ] **Step 3: The attention bench.** In `Arms.swift`, the default ladder becomes:
+- [x] **Step 3: The attention bench.** In `Arms.swift`, the default ladder becomes:
 
 ```swift
     static let defaultLadder = [
-        "prodstream", "prod", "copy", "qregs", "block8", "dbuf", "load8", "load16",
+        "prod", "prodstream", "copy", "qregs", "block8", "dbuf", "load8", "load16",
         "qregs+dbuf+load8", "nosoftmax", "nov", "loadonly", "loadonly+fullrow",
     ]
 ```
@@ -1267,7 +1267,7 @@ coded arms, closed at their first measurement, and a `--experts` whose help is w
       and `copy`'s help becomes
       `"the ladder kernel with every switch at its default (the kernel shipped before the streaming scan)"`.
 
-- [ ] **Step 4: The expert bench's command.** Replace `ExpertBenchCommand.swift` with:
+- [x] **Step 4: The expert bench's command.** Replace `ExpertBenchCommand.swift` with:
 
 ```swift
 import ArgumentParser
@@ -1338,7 +1338,7 @@ public struct ExpertBenchCommand: ParsableCommand {
 }
 ```
 
-- [ ] **Step 5: The production kernel alone.** Delete `Coder.swift` and
+- [x] **Step 5: The production kernel alone.** Delete `Coder.swift` and
       `Metal/expert.metal`, remove `resources: [.copy("Metal")]` from
       `ShrikeExpertBenchCore` in `Package.swift`, and replace `Kernels.swift` with:
 
@@ -1447,7 +1447,7 @@ enum BenchError: Error, CustomStringConvertible {
 
       `bind` and `dispatch` fold into `encodeProduction`, their only caller now.
 
-- [ ] **Step 6: The runner.** Replace `Runner.swift` with:
+- [x] **Step 6: The runner.** Replace `Runner.swift` with:
 
 ```swift
 import Foundation
@@ -1538,19 +1538,19 @@ final class BenchRunner {
       GPU to its clock. The reference buffer and the per-arm comparison go: they held a
       variant to bit-identity against `plain`, and no variant is left.
 
-- [ ] **Step 7: Run the bench tests.** `swift test --no-parallel --filter ShrikeBench`.
+- [x] **Step 7: Run the bench tests.** `swift test --no-parallel --filter ShrikeBench`.
       Expected: PASS.
 
-- [ ] **Step 8: The four gates.**
+- [x] **Step 8: The four gates.**
 
-- [ ] **Step 9: Run both benches on the dev box.** The process checks, `swift build -c release`,
+- [x] **Step 9: Run both benches on the dev box.** The process checks, `swift build -c release`,
       then `.build/release/shrike-bench attention --positions 1024 --repeats 3 --warmup 1`
-      (expected: a row per default arm, `prodstream` first) and
+      (expected: a row per default arm, `prod` first, then `prodstream`) and
       `.build/release/shrike-bench expert --model /Volumes/BuildSSD/shrike/ornith15.gturbo`
       (expected: the device line, then one row of `phase1 B/expert`, `gpu_us` and `GB/s`).
       The expert run maps a real `.gturbo`, so it is a model run under the process rules.
 
-- [ ] **Step 10: Deploy and check on the mini**, with the owner's go-ahead (about five
+- [x] **Step 10: Deploy and check on the mini**, with the owner's go-ahead (about five
       minutes of production downtime): `tools/mini-deploy.sh --restart`, then
       `tools/mini-golden.sh --check`. Expected: the deploy prints `removed retired
       Shrike_ShrikeAttnBenchCore.bundle` and `removed retired
@@ -1558,7 +1558,7 @@ final class BenchRunner {
       five `ok` lines, `short` and `long` at `generate`'s new 128 slots, and relaunches
       production.
 
-- [ ] **Step 11: The documents.** In `docs/architecture.md`, the attention bullet's five
+- [x] **Step 11: The documents.** In `docs/architecture.md`, the attention bullet's five
       lines at `:642-646` become:
 
 ```markdown
@@ -1582,6 +1582,6 @@ final class BenchRunner {
       Check that `docs/architecture.md:757` still reads as `v9-implementation-plan.md:133`
       cites it.
 
-- [ ] **Step 12: Commit** `Package.swift`, the attention and expert sources and the two
+- [x] **Step 12: Commit** `Package.swift`, the attention and expert sources and the two
       deletions, the test file, `docs/architecture.md` and this plan with this task
       ticked: `bench: the benches measure production's kernels, v21's coded arms gone (SHRIKE-61)`.

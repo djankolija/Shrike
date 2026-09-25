@@ -50,7 +50,7 @@ struct Arm {
     let kind: ArmKind
 
     static let defaultLadder = [
-        "prod", "copy", "qregs", "block8", "dbuf", "load8", "load16",
+        "prod", "prodstream", "copy", "qregs", "block8", "dbuf", "load8", "load16",
         "qregs+dbuf+load8", "nosoftmax", "nov", "loadonly", "loadonly+fullrow",
     ]
 
@@ -58,7 +58,7 @@ struct Arm {
         ("prod", "the production pipeline through the library's wrapper (partial and combine)"),
         ("prodplain", "the production pipeline without the V4.1 function-constant specialization"),
         ("prodstream", "the production pipeline on the streaming variant (v19 Task 3, the runner's path)"),
-        ("copy", "the ladder kernel with every switch at its default (the shipped kernel)"),
+        ("copy", "the ladder kernel with every switch at its default (the kernel shipped before the streaming scan)"),
         ("qregs", "Q in per-lane registers, the 8 KB threadgroup copy gone"),
         ("block8", "eight positions per staging block instead of four"),
         ("dbuf", "double-buffered staging: the next block loads while this one computes"),

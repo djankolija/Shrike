@@ -159,13 +159,13 @@ and the follow-up with that answer in the history. The mini ran five launches
   one-clause contrast with a mutex; the dev box's differs in the last clause). The
   tokens are the same and the split is not: the server re-feeds the boundary token
   in the settle's 2-token prefill between requests, where `--follow-up` prefills it
-  with the follow-up as one chunk of about 22 rows (`Run.swift:159-186`). Today's
-  CLI still reproduces its own `turns-lh` baseline, so the difference is the path,
-  not a stale file.
+  with the follow-up as one chunk of about 22 rows (`Run.swift:159-186` at
+  `c3e25d7`). Today's CLI still reproduces its own `turns-lh` baseline, so the
+  difference is the path, not a stale file.
 - **`short` and `long` run a path production never runs.** The server always takes
-  the logits head (`ServerInference.swift:704`, `:816`), has no raw-prompt route and
-  renders every prompt as ChatML, so four of the five CLI profiles have no server
-  equivalent and a server golden needs new baselines.
+  the logits head (`ServerInference.swift:704`, `:816` at `c3e25d7`), has no
+  raw-prompt route and renders every prompt as ChatML, so four of the five CLI
+  profiles have no server equivalent and a server golden needs new baselines.
 - **The ready line is not readiness.** `shrike serve` prints it and answers
   `/v1/models` before any model loads; the model loads on the first request. The
   harness sends `POST /v1/models/load` and polls `/health` until `resident` names the
@@ -263,16 +263,16 @@ deleted; the rest follow by command.
 - **`--kv-bits`, legitimate.** KV-cache precision trades memory against fidelity, a
   choice a user on a different box makes; production runs the default, 8 bits.
 - **`--thinking`, legitimate.** The reasoning mode, a per-run choice.
-- **`--quiet`, legitimate.** It suppresses the timing footer, a user's convenience.
-  The golden passes it without needing it: the footer goes to stderr
-  (`Run.swift:246-251`), which the golden already writes to its own file.
+- **`--quiet`, legitimate.** It suppresses the load line and the timing footer, a
+  user's convenience. The golden passes it without needing it: both go to stderr
+  (`Run.swift:237-238`, `:249-255`), which the golden already writes to its own file.
 - **`--expert-cache-slots`, prosthetic, deleted.** Its default of 64 sits
   below the cliff the default budget was measured against, 9.91 tok/s at 64 slots
   and 18.91 at 128 (`RuntimeConfiguration.swift:93-94`), so a bare `generate`
   decodes at about half speed, and until `2721903` the golden passed 160 by hand to
   reach production's pool. Its one other use, running `generate` under production's
   slot table, whose total must equal the uniform count across the routed layers
-  (`RuntimeConfiguration.swift:276-281`), a budget carries as well. `generate` takes
+  (`RuntimeConfiguration.swift:285-290`), a budget carries as well. `generate` takes
   serve's `--ram-budget` and its default in its place: one knob for both commands,
   the memory a user can give, with the slot count its outcome for each model.
 - **`--dump-logits`, legitimate.** It writes the logits the engine computes at every
@@ -334,22 +334,26 @@ bench's `--model` (a path, with no id resolution) are not generate's flags of th
 names. Judged as a bench's flags:
 
 - **attention `--arms`, legitimate.** The kernel variants to measure. Its default
-  ladder leaves out `prodstream`, the runner's path (`Arms.swift:60`), and
-  `copy` still calls itself the shipped kernel (`Arms.swift:61`); the move corrects
-  both.
+  ladder includes `prodstream`, the runner's path (`Arms.swift:60`); `copy` names
+  the kernel shipped before the streaming scan (`Arms.swift:61`), the state since
+  the move.
 - **attention `--positions`, legitimate.** The context lengths measured.
 - **`--repeats`, legitimate.** The timed command buffers, whose median is reported.
 - **`--warmup`, legitimate.** The untimed command buffers before them.
 - **`--seed`, legitimate.** It fixes the synthetic rows or the activation vector.
 - **expert `--model`, legitimate.** It names the bundle whose experts are read.
 - **expert `--layer`, legitimate.** It names the layer read.
-- **expert `--experts`, legitimate, with its help wrong.** Every pass runs eight
-  experts, the kernel's fixed top-k, repeating the last one loaded when fewer load
-  (`Kernels.swift:72`); what it varies is how many distinct experts are read. The
-  move corrects its help to that.
+- **expert `--experts`, legitimate.** Every pass runs eight experts, the
+  kernel's fixed top-k, repeating the last one loaded when fewer load
+  (`Kernels.swift:37`); what it varies is how many distinct experts are read,
+  which is what its help now says.
 - **expert `--arms`, legitimate only while there are arms to choose between.**
   `coded` and `coded+aux` belong to v21's compression experiment, closed at its first
   measurement (`v21-compression.md:343-350`), and go with the move, which leaves
   `plain` alone; the flag goes with them, and a new variant brings both back.
 - **expert `--batch`, legitimate.** Dispatches per command buffer, so the GPU holds
   its clock.
+- **SHRIKE-52's run, recorded.** Measured 2026-09-26 on the dev box (Mac16,7), a
+  release build of this chapter, `shrike-bench expert` read ornith15 at 4-bit, layer 20,
+  eight experts, repeats 15, warmup 3, batch 20 dispatches per command buffer, and
+  printed 1,179,648 bytes per expert, 51.8 µs per dispatch, 182.03 GB/s.

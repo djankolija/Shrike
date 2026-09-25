@@ -295,7 +295,7 @@ load (`RealForwardRunner.swift:577`) rather than serve it slower without a word;
 tests load their toy shape.
 
 **Kept by:** v19 ([v19-scan-rewrite.md](v19-scan-rewrite.md)). The chapter's ladder on
-the mini, through what is now `shrike bench attention`, found the shipped kernel bound by
+the mini, through what is now `shrike-bench attention`, found the shipped kernel bound by
 its loop form, not by memory: a static trip count with the explicit fused multiply was
 2.7× on the kernel and bit for bit the shipped output (Task 2, class 1; the slope 2.23
 to 0.72 ms per 1,000 context tokens per decoded token); the streaming structure a
@@ -515,12 +515,12 @@ in [multi-model-serving.md](multi-model-serving.md); the channel-faithful turn d
 
 ## The four invariants of v4, re-verified at v17's close
 
-1. **RAM budget is an input, not an outcome.** Still true. `--ram-budget`
-   (`ShrikeServerCommand.swift:89`, the option's own transform over
-   `RuntimeConfiguration.parseBudgetBytes`) defaults to 8 GiB
-   (`defaultExpertCacheBudgetBytes`, `RuntimeConfiguration.swift:104`); the slot count is
-   the ladder value (8 to 256 since v22) nearest budget over stride times routed layers
-   (`expertCacheSlots`, `:137`, resolved at `ServerInference.swift:786`), or, under
+1. **RAM budget is an input, not an outcome.** Still true. `--ram-budget`, on `generate` and `serve`
+   (`ShrikeServerCommand.swift:68-71`), is transformed by the shared `ExpertCacheBudgetArgument.bytes`
+   (`ShrikeArgumentConformances.swift`) and defaults to 8 GiB (`defaultExpertCacheBudgetBytes`,
+   `RuntimeConfiguration.swift:104`); the slot count is the ladder value (8 to 256 since v22) nearest
+   budget over stride times routed layers (`expertCacheSlots`, `:137`, called via `:151` from
+   `ServerInference.swift:711` and `Run.swift:201`), or, under
    `SHRIKE_EXPERT_SLOT_TABLE`, the per-layer table whose total must equal that count
    times the routed layers; the arena is sized from the sum plus the ring's nine, in as
    many chunks as the device's `maxBufferLength` needs. The mini runs a budget of
@@ -557,17 +557,17 @@ were.
 | knob | read at | what it does |
 | --- | --- | --- |
 | `SHRIKE_THINKING_MODE` | `Tokenizer.swift:50` | off, on or `adaptive` thinking for a dialect that has it |
-| `SHRIKE_REASONING_EFFORT` | `Tokenizer.swift:68` (the server validates at `ShrikeServerCommand.swift:182`, at launch and again when it assembles its config, not while parsing) | low, medium or high, the default medium ([v7-reasoning-effort.md](v7-reasoning-effort.md)) |
+| `SHRIKE_REASONING_EFFORT` | `Tokenizer.swift:68` (the server validates at `ShrikeServerCommand.swift:144-149`, at launch and again when it assembles its config, not while parsing) | low, medium or high, the default medium ([v7-reasoning-effort.md](v7-reasoning-effort.md)) |
 | `SHRIKE_TOKENIZER_DIR` | `Tokenizer.swift:176` | an override tokenizer folder, unset by default |
 | `SHRIKE_STRIP_CLI_PROMPT` | `CLIStrip.swift:34` | drop a coding CLI's system and developer boilerplate from the prompt |
 | `SHRIKE_STRIP_TAGS` | `CLIStrip.swift:44` | the block tags that strip removes, `system-reminder` by default |
-| `SHRIKE_CONCISE_MODE` | `ServerInference.swift:935` | the per-quant concise instruction, off by default |
-| `SHRIKE_EXPERT_SLOT_TABLE` | `RuntimeConfiguration.swift:213` (the server and the CLI pass it at load) | a comma list or a JSON path of expert cache slots per layer, refused unless the count, the floor of 8, the dense layers' zeros and the budget's total hold; the uniform pool by default (v20 Task 1) |
-| `SHRIKE_EXPERT_POLICY` | `RuntimeConfiguration.swift:245` | `aging-lfu` (the default), `slru` or `slru:<share>`: the pool's eviction policy (v20 Task 1) |
-| `SHRIKE_RUNNER_STATS` | `ServerInference.swift:1937` (the runner's counters are always kept) | the runner line: the per-stage split every chapter's rows are read from |
-| `SHRIKE_KERNEL_STATS` | `RealForwardRunner.swift:1227` (the footer at `ServerInference.swift:1941`) | the per-kernel GPU timeline |
+| `SHRIKE_CONCISE_MODE` | `ServerInference.swift:900` | the per-quant concise instruction, off by default |
+| `SHRIKE_EXPERT_SLOT_TABLE` | `RuntimeConfiguration.swift:223` (the server and the CLI pass it at load) | a comma list or a JSON path of expert cache slots per layer, refused unless the count, the floor of 8, the dense layers' zeros and the budget's total hold; the uniform pool by default (v20 Task 1) |
+| `SHRIKE_EXPERT_POLICY` | `RuntimeConfiguration.swift:255` | `aging-lfu` (the default), `slru` or `slru:<share>`: the pool's eviction policy (v20 Task 1) |
+| `SHRIKE_RUNNER_STATS` | `ServerInference.swift:1902` (the runner's counters are always kept) | the runner line: the per-stage split every chapter's rows are read from |
+| `SHRIKE_KERNEL_STATS` | `RealForwardRunner.swift:1227` (the footer at `ServerInference.swift:2048-2055`) | the per-kernel GPU timeline |
 | `SHRIKE_ROUTE_TRACE` | `RealForwardRunner.swift:1235` | a path: every layer's top-k, what the replay and the coverage tool read |
-| `SHRIKE_PREFETCH_TRACE` | `RuntimeConfiguration.swift:203` | a JSONL path: the ring's predictions, landings and misses per layer |
+| `SHRIKE_PREFETCH_TRACE` | `RuntimeConfiguration.swift:213` | a JSONL path: the ring's predictions, landings and misses per layer |
 | `SHRIKE_PREFILL_ANE` | `ANEPrefillAttention.swift:21` | `off` or `on`: the ANE prefill attention experiment ([ane-prefill.md](ane-prefill.md)) |
 
 The two pool names and the two stats names are what the mini's production launch sets
@@ -639,16 +639,16 @@ is [v17-consolidation.md](v17-consolidation.md)'s Task 4 table.
   chunk (a blit out of the private scratch) and from each decode pass after its command
   completes (the Q3 close, 2026-09-18). With `tools/q3-drafter-routes.py` it replays the
   MTP drafter over a run and scores route predictors against the route trace.
-- `shrike-bench attention`: the decode attention scan on synthetic rows at the served
-  shape, the production pipeline through the wrapper, the shipped kernel's copy with one
-  switch per function constant, and the streaming prototype. A development executable
-  built beside `shrike` and never deployed with it; a run on the mini copies it and every
-  `.bundle` from `.build/release/` into a scratch directory there (v25).
-- `shrike-bench expert`: the decode phase-1 gate/up kernel on eight real experts of a
-  layer read from the `.gturbo`, the production pipeline itself as the plain arm and any
-  variant held to bit-identity against it, timed with the GPU kept busy by a batch of
-  dispatches per command buffer (v21's step zero, which closed the lossless-compression
-  avenue on its numbers).
+- `shrike-bench attention`: the decode attention scan on synthetic rows at the served shape,
+  the production pipeline through the wrapper and on the streaming variant, the pre-streaming
+  kernel's copy with one switch per function constant, and the streaming prototype.
+  A development executable built beside `shrike` and never deployed with it; a run on the mini
+  copies it and every `.bundle` from `.build/release/` into a scratch directory there (v25).
+- `shrike-bench expert`: decode's phase-1 gate/up math on up to eight real experts of a
+  layer read from the `.gturbo`, through the kernel's entry point without the expert pool
+  (decode dispatches the pool's `_spec_` variant, above), a pass always the routed top-k of
+  eight, timed over a batch of dispatches per command buffer. It maps a real `.gturbo`, a
+  model run; v21's coded arms, which closed lossless compression, are in git history (v25).
 - `tools/decode-rig.sh` with `tools/decode-rows.py`: the four request shapes on the
   mini (the card, the 300, the 1k and, since v19, the 7k), a fresh server per shape,
   every token's arrival streamed, one row per request.
