@@ -357,3 +357,14 @@ names. Judged as a bench's flags:
   release build of this chapter, `shrike-bench expert` read ornith15 at 4-bit, layer 20,
   eight experts, repeats 15, warmup 3, batch 20 dispatches per command buffer, and
   printed 1,179,648 bytes per expert, 51.8 µs per dispatch, 182.03 GB/s.
+
+## The chapter's close
+
+Closed 2026-09-26. Every surviving flag has its verdict above, and each one that failed
+is gone because what forced it was fixed: the golden drives `shrike serve` at
+production's launch, so `--logits-head` and `--follow-up` went; `--ram-budget` is the
+only pool knob on both commands; and the benches live in `shrike-bench`, which the
+deploy does not ship. At the close the golden matched on all five profiles on the dev
+box and on the mini, and the suite ran clean under ThreadSanitizer (1,168 tests, no
+report). The forced-token path returns with SHRIKE-20's numerics gate. Left open: the
+golden's hardening (SHRIKE-59) and the flag sweep's leftovers (SHRIKE-62).

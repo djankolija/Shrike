@@ -833,3 +833,15 @@ the status of record.
   refused, which is the one way that tripwire can fail quietly. No runtime or kernel
   code changed, and the golden baseline was byte-identical on all five profiles at every
   task.
+- v25 ([v25-argument-discipline.md](v25-argument-discipline.md)): flags are not a
+  substitute for infrastructure. Every flag was judged on whether it would survive a
+  deploy and a test harness as good as they should be, and v24's defence that the mini
+  has no checkout fell first: a harness reaches the mini from the dev box and needs
+  nothing built there. The golden stopped imitating the server: three profiles start a
+  fresh `shrike serve` at production's launch and check it over HTTP, byte-identical run
+  to run, and `tools/mini-golden.sh` runs it on the mini from the checkout. That retired
+  `--logits-head` and `--follow-up`; `--ram-budget` became the only pool knob on both
+  commands, since generate's `--expert-cache-slots` defaulted below the measured cliff;
+  and the benches left `shrike` for a `shrike-bench` executable the deploy never ships,
+  every model-process guard learning the second name. The golden matched on all five
+  profiles on both boxes at the close, and ThreadSanitizer was clean.
