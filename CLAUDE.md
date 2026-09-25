@@ -14,7 +14,7 @@ Before anything that loads a model — a server, the CLI, a benchmark, or the go
 baseline — check:
 
 ```bash
-pgrep -lx shrike; pgrep -fl 'ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
+pgrep -lx 'shrike(-bench)?'; pgrep -fl 'ShrikePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 ```
 
 If something is already running, **stop and say so**. Never terminate a process you did not
@@ -105,8 +105,8 @@ only and fails ssh with a misleading `Host key verification failed`. `sudo` ther
 ### The mini's layout (rename landed 2026-08-30)
 
 The runtime is `~/shrike-runtime/` — `bin/` holds the single `shrike` binary
-plus its resource bundles (a deploy copies the `*.bundle`
-directories from `.build/release/` alongside the binaries, or resource lookups
+plus its resource bundles (a deploy copies `shrike`'s `*.bundle`
+directories from `.build/release/`, never `shrike-bench`'s, or resource lookups
 fail at runtime); `models/` holds the six `.gturbo`s, receipts bound to the
 `shrike-runtime` path; the mini's golden baselines live in the repo, not on the box.
 The box carries current state only — no staged rollback binaries, no retired
@@ -120,13 +120,13 @@ usually serving one model on port 8081. Turbo (a separate project) serves on
 
 **Since v20 Task 1 (2026-09-17) the production launch carries two variables**, the
 pool's per-layer slot allocation and its eviction policy (measured +4.4 to +7.8 % tok/s
-on the four shapes, the record in `docs/v20-ssd-mechanism.md`), and **since v22
-Task 3 (2026-09-18) the budget is 160 slots per layer** (the arena in two Metal
-buffers, the prefill scratch released between requests, oMLX's models unloaded;
-measured +9.9 to +15.6 % tok/s and 40 to 52 % fewer misses on the four shapes, the
-record in `docs/v22-pool-capacity.md`). The launch is written once, in
-`tools/mini-production.sh`, which `tools/mini-deploy.sh --restart` and both rigs'
-`restore` source; the block below is a copy of it:
+on the four shapes, the record in `docs/v20-ssd-mechanism.md`), and **since v22 Task 3
+(2026-09-18) the budget is 160 slots per layer** (the arena in two Metal buffers, the
+prefill scratch released between requests, oMLX's models unloaded; measured +9.9 to
++15.6 % tok/s and 40 to 52 % fewer misses on the four shapes, the record in
+`docs/v22-pool-capacity.md`). The launch is written once, in `tools/mini-production.sh`,
+which `tools/mini-deploy.sh --restart`, both rigs' `restore`, `tools/golden-baseline.sh`
+and `tools/mini-golden.sh` source; the block below is a copy of it:
 
 ```bash
 SHRIKE_RUNNER_STATS=1 SHRIKE_KERNEL_STATS=1 \

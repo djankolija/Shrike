@@ -69,7 +69,7 @@ relaunch() {  # $1 = model, $2 = port, $3 = ram budget, $4 = env assignments lay
   ssh macmini "
     pkill -f 'bin/shrike serve --model' || true
     sleep 3
-    if pgrep -x shrike > /dev/null; then echo 'a shrike process is still running' >&2; exit 1; fi
+    if pgrep -x 'shrike(-bench)?' > /dev/null; then echo 'a shrike process is still running' >&2; exit 1; fi
     cd ~/shrike-runtime
     [ -f $SERVER_LOG ] && mv -f $SERVER_LOG \"$SERVER_LOG.\$(date +%Y%m%d-%H%M%S)\"
     $launch

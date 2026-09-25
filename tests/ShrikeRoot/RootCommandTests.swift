@@ -1,9 +1,7 @@
 import ArgumentParser
 import Testing
 
-import ShrikeAttnBenchCore
 import ShrikeCLICore
-import ShrikeExpertBenchCore
 import ShrikeRepackCore
 import ShrikeRootCore
 import ShrikeServerCore
@@ -86,9 +84,11 @@ import ShrikeServerCore
         #expect(command is ShrikeRepackCommand.VerifyInstall)
     }
 
-    @Test func benchResolvesEitherChild() throws {
-        #expect(try parse(["bench", "attention"]) is AttnBenchCommand)
-        #expect(try parse(["bench", "expert", "--model", "m.gturbo"]) is ExpertBenchCommand)
+    @Test func benchIsNotAVerbOfTheProductBinary() {
+        #expect(throws: (any Error).self) {
+            _ = try parse(["bench", "attention"])
+        }
+        #expect(!ShrikeRootCommand.helpMessage().contains("bench"))
     }
 
     @Test func anUnknownVerbIsRejected() {

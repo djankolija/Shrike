@@ -1031,7 +1031,7 @@ beside `shrike` and never deployed with it.
   `shrike-bench` executable product; the guard pattern `pgrep -x 'shrike(-bench)?'`.
   Task 6 edits the two bench modules, not this wiring.
 
-- [ ] **Step 1: Write the failing tests.** In `RootCommandTests.swift`, delete
+- [x] **Step 1: Write the failing tests.** In `RootCommandTests.swift`, delete
       `import ShrikeAttnBenchCore` and `import ShrikeExpertBenchCore`, and replace
       `benchResolvesEitherChild` with:
 
@@ -1057,10 +1057,10 @@ beside `shrike` and never deployed with it.
 }
 ```
 
-- [ ] **Step 2: Run them.** `swift test --no-parallel --filter 'RootCommandTests|ShrikeBenchCommandTests'`.
+- [x] **Step 2: Run them.** `swift test --no-parallel --filter 'RootCommandTests|ShrikeBenchCommandTests'`.
       Expected: the build fails, no module `ShrikeBenchCore`.
 
-- [ ] **Step 3: The bench executable.** Create
+- [x] **Step 3: The bench executable.** Create
       `Sources/ShrikeBench/Core/ShrikeBenchCommand.swift`:
 
 ```swift
@@ -1086,7 +1086,7 @@ import ShrikeBenchCore
 @main extension ShrikeBenchCommand {}
 ```
 
-- [ ] **Step 4: The package.** In `Package.swift`, add
+- [x] **Step 4: The package.** In `Package.swift`, add
       `.executable(name: "shrike-bench", targets: ["ShrikeBench"]),` after the `shrike`
       product; remove `"ShrikeAttnBenchCore",` and `"ShrikeExpertBenchCore",` from
       `ShrikeRootCore`'s dependencies; add `"ShrikeBenchCore",` to `ShrikeBenchTests`'
@@ -1109,14 +1109,14 @@ import ShrikeBenchCore
         ),
 ```
 
-- [ ] **Step 5: The root drops the verb.** In `ShrikeRootCommand.swift`, delete
+- [x] **Step 5: The root drops the verb.** In `ShrikeRootCommand.swift`, delete
       `import ShrikeAttnBenchCore`, `import ShrikeExpertBenchCore`, `BenchCommand.self,`
       from the subcommands, and the `BenchCommand` struct.
 
-- [ ] **Step 6: Run the tests.** `swift test --no-parallel --filter 'RootCommandTests|ShrikeBench'`.
+- [x] **Step 6: Run the tests.** `swift test --no-parallel --filter 'RootCommandTests|ShrikeBench'`.
       Expected: PASS.
 
-- [ ] **Step 7: Every guard learns the second name.** `shrike-bench expert` maps a real
+- [x] **Step 7: Every guard learns the second name.** `shrike-bench expert` maps a real
       `.gturbo`, so it is a model process, and `pgrep -x shrike` matches the name
       exactly. Replace `pgrep -x shrike` with `pgrep -x 'shrike(-bench)?'` at
       `tools/golden-baseline.sh:94`, `tools/decode-rig.sh:62`, `tools/turn-rig.sh:72`,
@@ -1125,7 +1125,7 @@ import ShrikeBenchCore
       `pgrep -lx 'shrike(-bench)?';`. Then `rg -n "pgrep -l?x shrike" tools CLAUDE.md`
       (expected: no match) and `bash -n` on each of the five scripts.
 
-- [ ] **Step 8: Check the guards with stand-ins.** Write `/tmp/v25-guards.sh`:
+- [x] **Step 8: Check the guards with stand-ins.** Write `/tmp/v25-guards.sh`:
 
 ```bash
 #!/bin/bash
@@ -1149,7 +1149,7 @@ kill "$bench" "$other"
       already running` with `golden exit 3`. The mini-side guards run the same pattern
       through the same `pgrep`.
 
-- [ ] **Step 9: The deploy ships no bench bundle.** In `tools/mini-deploy.sh`, after
+- [x] **Step 9: The deploy ships no bench bundle.** In `tools/mini-deploy.sh`, after
       `name=$(basename "$bundle")` in the bundle loop, add:
 
 ```bash
@@ -1173,7 +1173,7 @@ echo "$(basename "$0") $*" >> /tmp/v25-deploy-stubs/log
       `.build/release/` holds the bench bundles by now, so the first count is a real
       exclusion, not an absence.
 
-- [ ] **Step 10: The documents.** `README.md:23-24` become:
+- [x] **Step 10: The documents.** `README.md:23-24` become:
 
 ```markdown
 `.build/release/` holds `shrike`, which generates once given a prompt, and `shrike-bench`,
@@ -1199,9 +1199,9 @@ the kernel benches, which the deploy does not ship; `shrike serve` and `shrike r
       ``(a deploy copies `shrike`'s `*.bundle` directories from `.build/release/`, never `shrike-bench`'s, or resource lookups fail at runtime)``,
       keeping the line count.
 
-- [ ] **Step 11: The four gates.**
+- [x] **Step 11: The four gates.**
 
-- [ ] **Step 12: Commit** `Package.swift`, the two new sources, the root command, the
+- [x] **Step 12: Commit** `Package.swift`, the two new sources, the root command, the
       two test files, the five scripts, `README.md`, `CLAUDE.md`, `docs/architecture.md`
       and this plan with this task ticked:
       `bench: the kernel benches leave shrike for a shrike-bench executable (SHRIKE-61)`.

@@ -2,6 +2,7 @@ import ArgumentParser
 import Testing
 @testable import ShrikeAttnBenchCore
 @testable import ShrikeExpertBenchCore
+import ShrikeBenchCore
 
 @Suite struct AttnBenchArgumentTests {
     @Test func defaultsMatchTheStepZeroLadder() throws {
@@ -111,5 +112,13 @@ import Testing
         #expect(try AttnBenchCommand.parse(["--seed", "42"]).seed.value == 42)
         #expect(try ExpertBenchCommand.parse(
             ["--model", "/m.gturbo", "--seed", "42"]).seed.value == 42)
+    }
+}
+
+@Suite struct ShrikeBenchCommandTests {
+    @Test func theBenchBinaryResolvesEitherChild() throws {
+        #expect(try ShrikeBenchCommand.parseAsRoot(["attention"]) is AttnBenchCommand)
+        #expect(try ShrikeBenchCommand.parseAsRoot(["expert", "--model", "m.gturbo"])
+            is ExpertBenchCommand)
     }
 }

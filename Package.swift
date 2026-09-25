@@ -10,6 +10,7 @@ let package = Package(
         .library(name: "Shrike", targets: ["Shrike"]),
         .library(name: "ShrikeFormat", targets: ["ShrikeFormat"]),
         .executable(name: "shrike", targets: ["ShrikeRoot"]),
+        .executable(name: "shrike-bench", targets: ["ShrikeBench"]),
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
@@ -121,8 +122,6 @@ let package = Package(
                 "ShrikeCLICore",
                 "ShrikeServerCore",
                 "ShrikeRepackCore",
-                "ShrikeAttnBenchCore",
-                "ShrikeExpertBenchCore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "sources/ShrikeRoot/Core"
@@ -131,6 +130,20 @@ let package = Package(
             name: "ShrikeRoot",
             dependencies: ["ShrikeRootCore"],
             path: "sources/ShrikeRoot/Command"
+        ),
+        .target(
+            name: "ShrikeBenchCore",
+            dependencies: [
+                "ShrikeAttnBenchCore",
+                "ShrikeExpertBenchCore",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "sources/ShrikeBench/Core"
+        ),
+        .executableTarget(
+            name: "ShrikeBench",
+            dependencies: ["ShrikeBenchCore"],
+            path: "sources/ShrikeBench/Command"
         ),
         .target(
             name: "ShrikeValidationSupport",
@@ -159,6 +172,7 @@ let package = Package(
             dependencies: [
                 "ShrikeAttnBenchCore",
                 "ShrikeExpertBenchCore",
+                "ShrikeBenchCore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "tests/ShrikeBench"

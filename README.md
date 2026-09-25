@@ -20,8 +20,8 @@ repacking tool.
 swift build -c release
 ```
 
-One binary lands in `.build/release/`: `shrike`. Run it with a prompt to generate
-once; `shrike serve`, `shrike repack` and `shrike bench` are the other verbs.
+`.build/release/` holds `shrike`, which generates once given a prompt, and `shrike-bench`,
+the kernel benches, which the deploy does not ship; `shrike serve` and `shrike repack` are the other verbs.
 
 ## Install a model
 

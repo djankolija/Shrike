@@ -639,12 +639,12 @@ is [v17-consolidation.md](v17-consolidation.md)'s Task 4 table.
   chunk (a blit out of the private scratch) and from each decode pass after its command
   completes (the Q3 close, 2026-09-18). With `tools/q3-drafter-routes.py` it replays the
   MTP drafter over a run and scores route predictors against the route trace.
-- `shrike bench attention`: the decode attention scan on synthetic rows at the served
+- `shrike-bench attention`: the decode attention scan on synthetic rows at the served
   shape, the production pipeline through the wrapper, the shipped kernel's copy with one
-  switch per function constant, and the streaming prototype. It runs on the mini, which
-  has no toolchain, so it reaches that box only inside the one deployed binary — which
-  is why v24 withdrew its plan to compile the `bench` verb out of release (v19).
-- `shrike bench expert`: the decode phase-1 gate/up kernel on eight real experts of a
+  switch per function constant, and the streaming prototype. A development executable
+  built beside `shrike` and never deployed with it; a run on the mini copies it and every
+  `.bundle` from `.build/release/` into a scratch directory there (v25).
+- `shrike-bench expert`: the decode phase-1 gate/up kernel on eight real experts of a
   layer read from the `.gturbo`, the production pipeline itself as the plain arm and any
   variant held to bit-identity against it, timed with the GPU kept busy by a batch of
   dispatches per command buffer (v21's step zero, which closed the lossless-compression

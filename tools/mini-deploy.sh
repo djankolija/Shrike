@@ -1,13 +1,13 @@
 #!/bin/bash
 # mini-deploy.sh [--restart]
-# Copies the release binary and its resource bundles from .build/release to
-# the mini's ~/shrike-runtime/bin. Each binary and bundle is staged remotely as
-# <name>.staging first; only after every copy succeeds does one ssh command
-# rm -rf the old bundle (mv -f for a binary) and swap the staged copy into
-# place, so a dropped connection mid-copy can never leave a half-written
-# artifact live. Anything else in bin/ is removed then: the box carries the
-# current deploy only, and a retired binary left there escapes every guard
-# that looks for a running `shrike`.
+# Copies the release binary and its resource bundles, not shrike-bench's,
+# from .build/release to the mini's ~/shrike-runtime/bin. Each binary and
+# bundle is staged remotely as <name>.staging first; only after every copy
+# succeeds does one ssh command rm -rf the old bundle (mv -f for a binary)
+# and swap the staged copy into place, so a dropped connection mid-copy can
+# never leave a half-written artifact live. Anything else in bin/ is removed
+# then: the box carries the current deploy only, and a retired binary left
+# there escapes every guard that looks for a running `shrike`.
 #
 # By default this only copies — the mini's server is left running. The mini's
 # owner approved restarts and deploy actions on 2026-09-01, but --restart is
@@ -31,7 +31,7 @@ if [ "$RESTART" -eq 1 ]; then
   ssh macmini "
     pkill -f 'bin/shrike serve --model $PRODUCTION_MODEL' || true
     sleep 3
-    if pgrep -x shrike > /dev/null; then echo 'a shrike process is still running' >&2; exit 1; fi
+    if pgrep -x 'shrike(-bench)?' > /dev/null; then echo 'a shrike process is still running' >&2; exit 1; fi
   "
 fi
 
@@ -42,6 +42,7 @@ for f in shrike; do
 done
 for bundle in "$BIN"/*.bundle; do
   name=$(basename "$bundle")
+  case "$name" in *BenchCore.bundle) continue ;; esac
   scp -q -r "$bundle" "macmini:shrike-runtime/bin/$name.staging"
   shipped="$shipped $name"
 done

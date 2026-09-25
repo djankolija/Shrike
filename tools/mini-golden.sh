@@ -34,7 +34,7 @@ relaunch() {
   ssh macmini "
     $cleanup
     n=0
-    while pgrep -x shrike > /dev/null; do
+    while pgrep -x 'shrike(-bench)?' > /dev/null; do
       n=\$((n + 1))
       [ \$n -gt 30 ] && { echo 'a shrike process is still running' >&2; exit 1; }
       sleep 1
@@ -53,7 +53,7 @@ relaunch() {
 }
 
 ssh macmini "
-  if [ \"\$(pgrep -x shrike | sort)\" != \"\$(pgrep -f '$PRODUCTION_MATCH' | sort)\" ]; then
+  if [ \"\$(pgrep -x 'shrike(-bench)?' | sort)\" != \"\$(pgrep -f '$PRODUCTION_MATCH' | sort)\" ]; then
     echo 'a shrike other than production is running on the mini; stopping nothing' >&2
     exit 3
   fi
