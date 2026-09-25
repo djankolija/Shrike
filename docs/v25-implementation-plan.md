@@ -765,7 +765,7 @@ that nothing passed (the v25 doc's Verdicts). Both go; `generate` takes `serve`'
   `expertCacheBudgetBytes: Int?` and loses `expertCacheSlots`; `ModelSessionPlan.init`
   and `ServerModelSession.load` lose their `expertCacheSlots:` parameter.
 
-- [ ] **Step 1: Write the failing tests.** In `ExpertCacheBudgetTests.swift`, add
+- [x] **Step 1: Write the failing tests.** In `ExpertCacheBudgetTests.swift`, add
       `import Foundation` under `import Testing`, and append to the suite:
 
 ```swift
@@ -839,12 +839,12 @@ that nothing passed (the v25 doc's Verdicts). Both go; `generate` takes `serve`'
       `#expect(serve.expertCacheSlots == 160)` with
       `#expect(serve.expertCacheBudgetBytes == 11_324_620_800)`.
 
-- [ ] **Step 2: Run them.** `swift test --no-parallel --filter 'ExpertCacheBudgetTests|CLIArgumentsTests|ServerPoolArgumentTests'`.
+- [x] **Step 2: Run them.** `swift test --no-parallel --filter 'ExpertCacheBudgetTests|CLIArgumentsTests|ServerPoolArgumentTests'`.
       Expected: the build fails, `RuntimeConfiguration` has no
       `expertCacheSlots(modelDirectory:expecting:budgetBytes:)` and
       `ShrikeGenerateCommand` has no `expertCacheBudgetBytes`.
 
-- [ ] **Step 3: The shared parser.** Append to `ShrikeArgumentConformances.swift`:
+- [x] **Step 3: The shared parser.** Append to `ShrikeArgumentConformances.swift`:
 
 ```swift
 public enum ExpertCacheBudgetArgument {
@@ -872,7 +872,7 @@ public enum ExpertCacheBudgetArgument {
       The help names no other flag: `helpListsExactlyThePublicOptions` collects every
       `--word` in `generate`'s help.
 
-- [ ] **Step 4: Slots for a model directory.** In `RuntimeConfiguration.swift`, after
+- [x] **Step 4: Slots for a model directory.** In `RuntimeConfiguration.swift`, after
       `expertCacheSlots(expertStrideBytes:layers:budgetBytes:)`, add:
 
 ```swift
@@ -891,7 +891,7 @@ public enum ExpertCacheBudgetArgument {
     }
 ```
 
-- [ ] **Step 5: `generate` takes the budget.** In `ShrikeGenerateCommand.swift`, replace
+- [x] **Step 5: `generate` takes the budget.** In `ShrikeGenerateCommand.swift`, replace
       the `@Option(help: ... Routed-expert cache slots per layer ...) public var
       expertCacheSlots = 64` block with:
 
@@ -926,7 +926,7 @@ public enum ExpertCacheBudgetArgument {
       `expert_slots=<count> policy=<policy>`: the budget is the knob, and this is where
       a user sees the slot count it gave.
 
-- [ ] **Step 6: `serve` loses its slot flag.** In `ShrikeServerCommand.swift`: delete
+- [x] **Step 6: `serve` loses its slot flag.** In `ShrikeServerCommand.swift`: delete
       the `@Option(name: .customLong("expert-cache-slots") ...) public var
       expertCacheSlots: Int?` block; replace the `--ram-budget` block, its `///`
       comment included, with:
@@ -971,14 +971,14 @@ public enum ExpertCacheBudgetArgument {
       each of the five test call sites, delete the `expertCacheSlots: nil` argument and
       the comma before it.
 
-- [ ] **Step 7: Run the tests.** `swift test --no-parallel --filter 'ExpertCacheBudgetTests|CLIArgumentsTests|ServerPoolArgumentTests|ServerInvocationTests|RootCommandTests|ModelRegistryTests|HTTPServer|OpenAIValidationTests'`.
+- [x] **Step 7: Run the tests.** `swift test --no-parallel --filter 'ExpertCacheBudgetTests|CLIArgumentsTests|ServerPoolArgumentTests|ServerInvocationTests|RootCommandTests|ModelRegistryTests|HTTPServer|OpenAIValidationTests'`.
       Expected: PASS. If the two rejection messages do not contain the text, print
       one with `ShrikeGenerateCommand.message(for:)` and stop: ArgumentParser wraps a
       transform's error, and the test must pin the message users see.
 
-- [ ] **Step 8: The four gates.**
+- [x] **Step 8: The four gates.**
 
-- [ ] **Step 9: Check on the dev box.** The process checks, `swift build -c release`, then:
+- [x] **Step 9: Check on the dev box.** The process checks, `swift build -c release`, then:
 
 ```bash
 .build/release/shrike --model /Volumes/BuildSSD/shrike/ornith15.gturbo --prompt hi --max-new 4 2>&1 >/dev/null | grep -o 'expert_slots=[^ ]*'
@@ -990,7 +990,7 @@ public enum ExpertCacheBudgetArgument {
       now run at 128 slots where they ran at 64, and a pool size changes no greedy
       answer, so a mismatch stops the task.
 
-- [ ] **Step 10: The documents.** In `README.md`, change `The two worth knowing first:`
+- [x] **Step 10: The documents.** In `README.md`, change `The two worth knowing first:`
       to ``The two worth knowing first, which `shrike generate` takes too:``. In
       `docs/multi-model-serving.md`, lines 140-141 become
       ``larger than the machine's RAM on its own, and residency is bounded by `--ram-budget` ``
@@ -1001,7 +1001,7 @@ public enum ExpertCacheBudgetArgument {
       `` **`--expert-cache-slots`, prosthetic, to be deleted.** `` to
       `` **`--expert-cache-slots`, prosthetic, deleted.** ``.
 
-- [ ] **Step 11: Commit** the sources, the tests, the three documents and this plan
+- [x] **Step 11: Commit** the sources, the tests, the three documents and this plan
       with this task ticked:
       `cli+server: one knob sizes the expert pool, --ram-budget on generate and serve (SHRIKE-60)`.
 

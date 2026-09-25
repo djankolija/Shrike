@@ -383,7 +383,6 @@ public actor ModelRegistry {
                 ropeScalingMode: arguments.ropeScalingMode,
                 thinkingMode: arguments.thinkingMode,
                 reasoningEffort: arguments.reasoningEffort,
-                expertCacheSlots: arguments.expertCacheSlots,
                 expertCacheBudgetBytes: arguments.expertCacheBudgetBytes)
             let facts = try plan.previewFacts(modelID: entry.id)
             return Model(id: entry.id, plan: plan, facts: facts)

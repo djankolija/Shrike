@@ -78,7 +78,7 @@ and are the direct analogue of `-dump-ast`: they expose something the engine
 genuinely computes, useful to anyone reasoning about it. `--tokenize` answers
 "what will you actually send to the model", which is a real question a user has.
 Those are candidates to keep on their merits. The three in the table above are
-candidates to delete **by fixing what forced them**. **Retiring the three is filed in tt as SHRIKE-1 (2026-09-23).** **Two are deleted; see [Verdicts](#verdicts).**
+candidates to delete **by fixing what forced them**. **Retiring the three is filed in tt as SHRIKE-1 (2026-09-23).** **All three are deleted; see [Verdicts](#verdicts).**
 
 ## What step zero has to answer
 
@@ -266,7 +266,7 @@ deleted; the rest follow by command.
 - **`--quiet`, legitimate.** It suppresses the timing footer, a user's convenience.
   The golden passes it without needing it: the footer goes to stderr
   (`Run.swift:246-251`), which the golden already writes to its own file.
-- **`--expert-cache-slots`, prosthetic, to be deleted.** Its default of 64 sits
+- **`--expert-cache-slots`, prosthetic, deleted.** Its default of 64 sits
   below the cliff the default budget was measured against, 9.91 tok/s at 64 slots
   and 18.91 at 128 (`RuntimeConfiguration.swift:93-94`), so a bare `generate`
   decodes at about half speed, and until `2721903` the golden passed 160 by hand to
@@ -307,7 +307,7 @@ deleted; the rest follow by command.
   default of 8 GiB is the budget that first held the measured routing working set
   (`RuntimeConfiguration.swift:79-104`); production's 160 slots are the mini's own
   budget, passed at launch.
-- **`--expert-cache-slots`, prosthetic, to be deleted.** A second spelling of what
+- **`--expert-cache-slots`, prosthetic, deleted.** A second spelling of what
   the budget derives, winning over it when both are given. Nothing passes it, and
   only a parse test names it.
 

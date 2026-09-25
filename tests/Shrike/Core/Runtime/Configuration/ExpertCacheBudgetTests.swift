@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 @testable import Shrike
 
 /// The slot default is derived from a RAM budget and the model's own expert
@@ -78,6 +79,34 @@ import Testing
             let actual = Double(slots) * Double(stride) * Double(Self.layers)
             #expect(actual <= Double(budget) * 1.15,
                     "stride \(stride): \(actual / 1_073_741_824) GiB exceeds budget")
+        }
+    }
+
+    @Test func productionsBudgetIs160SlotsAtTheFourBitStride() {
+        #expect(RuntimeConfiguration.expertCacheSlots(
+            expertStrideBytes: Self.stride4, layers: Self.layers,
+            budgetBytes: 11_324_620_800) == 160)
+    }
+
+    @Test func aModelDirectorysSlotsFollowItsManifestAndTheBudget() throws {
+        let (dir, toy) = try ManifestReaderTests.writeToyManifest(
+            ["expertStride": Int(Self.stride4)])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let perSlot = Int(Self.stride4) * toy.numLayers
+        #expect(try RuntimeConfiguration.expertCacheSlots(
+            modelDirectory: dir, expecting: toy, budgetBytes: 160 * perSlot) == 160)
+        #expect(try RuntimeConfiguration.expertCacheSlots(
+            modelDirectory: dir, expecting: toy, budgetBytes: nil)
+            == RuntimeConfiguration.expertCacheSlots(
+                expertStrideBytes: Self.stride4, layers: toy.numLayers))
+    }
+
+    @Test func anUnreadableManifestFailsTheDerivation() {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("no-model-\(UUID().uuidString)")
+        #expect(throws: (any Error).self) {
+            _ = try RuntimeConfiguration.expertCacheSlots(
+                modelDirectory: missing, expecting: .qwenToy(), budgetBytes: nil)
         }
     }
 }

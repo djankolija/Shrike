@@ -46,14 +46,14 @@ import ShrikeServerCore
     @Test func serveKeepsEveryFlagItSharesWithGenerate() throws {
         let command = try parse([
             "serve", "--model", "m.gturbo", "--max-context", "32768",
-            "--thinking", "off", "--kv-bits", "4", "--expert-cache-slots", "160",
+            "--thinking", "off", "--kv-bits", "4", "--ram-budget", "11324620800",
         ])
         let serve = try #require(command as? ShrikeServerCommand)
         #expect(serve.model == "m.gturbo")
         #expect(serve.maxContext == 32768)
         #expect(serve.thinkingMode == .off)
         #expect(serve.kvCachePrecision == .int4)
-        #expect(serve.expertCacheSlots == 160)
+        #expect(serve.expertCacheBudgetBytes == 11_324_620_800)
     }
 
     @Test func serveStillRefusesAnUnsupportedContext() {

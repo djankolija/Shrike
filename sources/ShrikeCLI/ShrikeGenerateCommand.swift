@@ -1,4 +1,5 @@
 import ArgumentParser
+import Foundation
 import Shrike
 import ShrikeCatalog
 import ShrikeArgumentSupport
@@ -87,12 +88,10 @@ public struct ShrikeGenerateCommand: ParsableCommand, Sendable {
             help: ArgumentHelp("Stop substring (repeatable).", valueName: "string"))
     public var stops: [String] = []
 
-    @Option(help: ArgumentHelp("""
-        Routed-expert cache slots per layer: 8, 16, 24, 32, 64, 96, 128, 160, \
-        192, 224 or 256. More slots raise the hit rate but use more memory.
-        """,
-        valueName: "n"))
-    public var expertCacheSlots = 64
+    @Option(name: .customLong("ram-budget"),
+            help: ExpertCacheBudgetArgument.help,
+            transform: ExpertCacheBudgetArgument.bytes)
+    public var expertCacheBudgetBytes: Int?
 
     @Option(name: .customLong("kv-bits"),
             help: ArgumentHelp("KV-cache storage precision: 4, 8 or 16.", valueName: "bits"))
@@ -107,7 +106,7 @@ public struct ShrikeGenerateCommand: ParsableCommand, Sendable {
                 valueName: "mode"))
     public var thinkingMode: ModelThinkingMode = .off
 
-    @Flag(help: "Suppress the timing footer.")
+    @Flag(help: "Suppress the load line and the timing footer.")
     public var quiet = false
 
     @Option(name: .customLong("dump-logits"),
@@ -144,6 +143,11 @@ public struct ShrikeGenerateCommand: ParsableCommand, Sendable {
             : 4096
     }
 
+    func expertCacheSlots(modelDirectory: URL, expecting arch: ArchConfig) throws -> Int {
+        try RuntimeConfiguration.expertCacheSlots(modelDirectory: modelDirectory, expecting: arch,
+                                                  budgetBytes: expertCacheBudgetBytes)
+    }
+
     public func validate() throws {
         if prompt != nil, messagesFile != nil {
             throw ValidationError("--prompt and --messages-file are mutually exclusive")
@@ -163,11 +167,6 @@ public struct ShrikeGenerateCommand: ParsableCommand, Sendable {
         }
         guard repetitionPenalty > 0 else {
             throw ValidationError("--repetition-penalty must be above 0")
-        }
-        guard RuntimeConfiguration.allowedExpertCacheSlots.contains(expertCacheSlots) else {
-            throw ValidationError("--expert-cache-slots must be one of "
-                + RuntimeConfiguration.allowedExpertCacheSlots.map(String.init)
-                    .joined(separator: ", "))
         }
         if temperature > 0, topK == .off, topP < 1 {
             throw ValidationError("--top-p \(topP) requires --top-k between 1 and 256")

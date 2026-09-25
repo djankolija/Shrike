@@ -198,7 +198,7 @@ private func buildRuntime(args: ShrikeGenerateCommand,
                           logitsHead: Bool,
                           stderr: FileHandle) throws -> StageOutcome<LoadedRuntime> {
     let loadRuntime = try RuntimeConfiguration(
-        expertCacheSlots: args.expertCacheSlots,
+        expertCacheSlots: try args.expertCacheSlots(modelDirectory: modelURL, expecting: expectedArch),
         forceLogitsHead: logitsHead,
         prefetchTracePath: RuntimeConfiguration.environmentPrefetchTracePath())
 
@@ -234,6 +234,9 @@ private func buildRuntime(args: ShrikeGenerateCommand,
         context: context,
         maxContext: args.maxContext,
         runtimeConfiguration: runtime)
+    if !args.quiet {
+        stderr.write(Data("\(runner.prefillDescription)\n".utf8))
+    }
     let scratch = try RawCompletionScratch(context: context,
                                            vocab: model.config.vocabSize,
                                            logitSoftcap: Float(model.config.finalLogitSoftcap))

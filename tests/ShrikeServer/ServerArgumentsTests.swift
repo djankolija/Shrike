@@ -14,7 +14,6 @@ import Testing
         #expect(arguments.port == 8081)
         #expect(arguments.maxContext == 32_768)
         #expect(arguments.expertCacheBudgetBytes == 11_324_620_800)
-        #expect(arguments.expertCacheSlots == nil)
         #expect(arguments.thinkingMode == .off)
     }
 
@@ -22,5 +21,18 @@ import Testing
         let arguments = try ShrikeServerCommand.parse(["--model", "models/ornith15.gturbo"])
         #expect(arguments.model == "models/ornith15.gturbo")
         #expect(arguments.port == 8080)
+    }
+}
+
+@Suite struct ServerPoolArgumentTests {
+    @Test func theRAMBudgetIsTheOnlyPoolKnob() throws {
+        #expect(throws: (any Error).self) {
+            _ = try ShrikeServerCommand.parse(["--model", "m.gturbo", "--expert-cache-slots", "160"])
+        }
+        let error = #expect(throws: (any Error).self) {
+            _ = try ShrikeServerCommand.parse(["--model", "m.gturbo", "--ram-budget", "8X"])
+        }
+        #expect(ShrikeServerCommand.message(for: try #require(error))
+            .contains("--ram-budget must be a positive size such as 2G, 512M or a byte count"))
     }
 }

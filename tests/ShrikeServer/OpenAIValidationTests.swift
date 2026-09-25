@@ -468,8 +468,7 @@ struct ServerArgumentTests {
 
     @Test func theSessionPlanCarriesTheSettledCacheAndPrefillValues() throws {
         let plan = ModelSessionPlan(modelDirectory: URL(fileURLWithPath: "/m.gturbo"),
-                                   maxContext: 32_768,
-                                   expertCacheSlots: nil)
+                                   maxContext: 32_768)
         #expect(plan.promptCacheMode == .multiPrefix)
         #expect(plan.promptCacheMaximumEntries == 4)
         #expect(plan.promptCacheMemoryLimitBytes == 256 * 1_048_576)

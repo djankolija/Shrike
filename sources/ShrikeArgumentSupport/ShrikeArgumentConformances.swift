@@ -78,3 +78,24 @@ extension CommaSeparatedCounts: ExpressibleByArgument {
         counts.map(String.init).joined(separator: ",")
     }
 }
+
+public enum ExpertCacheBudgetArgument {
+    public static var help: ArgumentHelp {
+        ArgumentHelp("""
+            Bytes the routed-expert cache may use, e.g. 8G, 2G, 512M. Slots are \
+            derived from this and the model's expert stride, so this is the knob \
+            and the slot count is the result. Default 8G, which holds the \
+            measured routing working set; smaller budgets are markedly slower \
+            because expert reads bypass the page cache and have no fallback.
+            """,
+            valueName: "size")
+    }
+
+    public static func bytes(_ value: String) throws -> Int {
+        guard let parsed = RuntimeConfiguration.parseBudgetBytes(value) else {
+            throw ValidationError(
+                "--ram-budget must be a positive size such as 2G, 512M or a byte count")
+        }
+        return parsed
+    }
+}

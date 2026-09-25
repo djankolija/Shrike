@@ -584,9 +584,6 @@ public actor ServerModelSession: ServerInferenceBackend {
     // reads tight.
     public nonisolated let prefillChunkTokens: Int
     public nonisolated let prefillDescription: String
-    /// Routed-expert slots per layer actually in force, so the ready banner can
-    /// report the streaming budget rather than leaving the user to infer it.
-    public nonisolated let expertCacheSlots: Int
     private let maxContext: Int
     public nonisolated let promptCacheMode: ServerPromptCacheMode
     private let promptCacheDomain: ServerPromptCacheDomain
@@ -667,7 +664,6 @@ public actor ServerModelSession: ServerInferenceBackend {
                             thinkingMode: ModelThinkingMode = .off,
                             reasoningEffort: ReasoningEffort? = nil,
                             reasoningRetention: ReasoningRetention? = nil,
-                            expertCacheSlots requestedExpertCacheSlots: Int? = nil,
                             expertCacheBudgetBytes: Int? = nil,
                             reusingContext: MetalContext? = nil) async throws -> ServerModelSession {
         try RuntimeConfiguration.refuseUnknownEnvironment()
@@ -712,11 +708,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             }
             expectedArch = baseline
         }
-        let loadSlots = resolveExpertCacheSlots(
-            modelDirectory: modelDirectory,
-            expectedArch: expectedArch,
-            requestedExpertCacheSlots: requestedExpertCacheSlots,
-            expertCacheBudgetBytes: expertCacheBudgetBytes)
+        let loadSlots = try RuntimeConfiguration.expertCacheSlots(
+            modelDirectory: modelDirectory, expecting: expectedArch,
+            budgetBytes: expertCacheBudgetBytes)
         let slotTable = try RuntimeConfiguration.environmentExpertSlotTable(
             layers: expectedArch.numLayers, uniformSlots: loadSlots,
             leadingDenseLayers: expectedArch.numLeadingDenseLayers)
@@ -759,7 +753,6 @@ public actor ServerModelSession: ServerInferenceBackend {
                                          runner: runner,
                                          scratch: scratch,
                                          prefillConfig: runtime.prefillConfig,
-                                         expertCacheSlots: loadSlots,
                                          maxContext: maxContext,
                                          promptCacheMode: promptCacheMode,
                                          promptCacheDomain: promptCacheDomain,
@@ -769,32 +762,6 @@ public actor ServerModelSession: ServerInferenceBackend {
                                            ? ConcisePrompt.prompt(for: model) : nil)
         ServerLog.residency(session.prefillDescription)
         return session
-    }
-
-    // Precedence: --expert-cache-slots, then the ladder value nearest the
-    // budget (--ram-budget, default RuntimeConfiguration.defaultExpertCacheBudgetBytes)
-    // over the model's expert stride times its layers.
-    private static func resolveExpertCacheSlots(
-        modelDirectory: URL,
-        expectedArch: ArchConfig,
-        requestedExpertCacheSlots: Int?,
-        expertCacheBudgetBytes: Int?
-    ) -> Int {
-        let derivedSlots: Int
-        if let manifest = try? ManifestReader.load(directoryURL: modelDirectory,
-                                                  expecting: expectedArch) {
-            derivedSlots = RuntimeConfiguration.expertCacheSlots(
-                expertStrideBytes: manifest.expertStride,
-                layers: manifest.arch.numLayers,
-                budgetBytes: expertCacheBudgetBytes
-                    ?? RuntimeConfiguration.defaultExpertCacheBudgetBytes)
-        } else {
-            // Unreadable manifest means the `Model.load` that follows this stage's
-            // call will fail with a better message than anything this could throw,
-            // so pick the safe small end.
-            derivedSlots = RuntimeConfiguration.allowedExpertCacheSlots.first ?? 8
-        }
-        return requestedExpertCacheSlots ?? derivedSlots
     }
 
     private static func makeRunner(
@@ -902,7 +869,6 @@ public actor ServerModelSession: ServerInferenceBackend {
                  runner: RealForwardRunner,
                  scratch: RawCompletionScratch,
                  prefillConfig: PrefillRuntimeConfig,
-                 expertCacheSlots: Int,
                  maxContext: Int,
                  promptCacheMode: ServerPromptCacheMode,
                  promptCacheDomain: ServerPromptCacheDomain,
@@ -920,7 +886,6 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.prefillConfig = prefillConfig
         self.prefillChunkTokens = prefillConfig.chunkTokens
         self.prefillDescription = runner.prefillDescription
-        self.expertCacheSlots = expertCacheSlots
         self.maxContext = maxContext
         self.promptCacheMode = promptCacheMode
         self.promptCacheDomain = promptCacheDomain

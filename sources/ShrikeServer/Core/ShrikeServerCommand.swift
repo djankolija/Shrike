@@ -65,28 +65,9 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
                 valueName: "level"))
     public var reasoningEffort: ReasoningEffort?
 
-    @Option(name: .customLong("expert-cache-slots"),
-            help: ArgumentHelp("""
-                Routed-expert cache slots per layer: 8, 16, 24, 32, 64, 96, 128, \
-                160, 192, 224 or 256 (default: derived from --ram-budget).
-                """,
-                valueName: "count"))
-    public var expertCacheSlots: Int?
-
-    /// Bytes the routed-expert cache may use. Slots are derived from it and the
-    /// model's own expert stride, so this is the knob and the slot count is the
-    /// outcome. `--expert-cache-slots` still wins if both are given.
     @Option(name: .customLong("ram-budget"),
-            help: ArgumentHelp("""
-                Bytes the routed-expert cache may use, e.g. 8G, 2G, 512M. Slots are \
-                derived from this and the model's expert stride, so this is the knob \
-                and the slot count is the result. Default 8G, which holds the \
-                measured routing working set; smaller budgets are markedly slower \
-                because expert reads bypass the page cache and have no fallback. \
-                --expert-cache-slots overrides this.
-                """,
-                valueName: "size"),
-            transform: Self.budgetBytes)
+            help: ExpertCacheBudgetArgument.help,
+            transform: ExpertCacheBudgetArgument.bytes)
     public var expertCacheBudgetBytes: Int?
 
     public init() {}
@@ -108,14 +89,6 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
     static let yaRNContextList = RuntimeConfiguration.supportedYaRNContextTokens
         .map(String.init).joined(separator: " or ")
 
-    static func budgetBytes(_ value: String) throws -> Int {
-        guard let parsed = RuntimeConfiguration.parseBudgetBytes(value) else {
-            throw ValidationError(
-                "--ram-budget must be a positive size such as 2G, 512M or a byte count")
-        }
-        return parsed
-    }
-
     public func validate() throws {
         if model != nil, configPath != nil {
             throw ValidationError(
@@ -124,20 +97,10 @@ public struct ShrikeServerCommand: AsyncParsableCommand, Sendable {
         guard (1...65_535).contains(port) else {
             throw ValidationError("--port must be between 1 and 65535")
         }
-        try validateOptionalMemberships()
-        try Self.validateMaxContext(maxContext, ropeScalingMode: ropeScalingMode)
-    }
-
-    private func validateOptionalMemberships() throws {
-        if let expertCacheSlots,
-           !RuntimeConfiguration.allowedExpertCacheSlots.contains(expertCacheSlots) {
-            throw ValidationError("--expert-cache-slots must be one of "
-                + RuntimeConfiguration.allowedExpertCacheSlots.map(String.init)
-                    .joined(separator: ", "))
-        }
         if let configPath, configPath.isEmpty {
             throw ValidationError("--config must not be empty")
         }
+        try Self.validateMaxContext(maxContext, ropeScalingMode: ropeScalingMode)
     }
 
     static func validateMaxContext(_ value: Int,

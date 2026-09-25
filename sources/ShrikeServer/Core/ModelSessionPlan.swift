@@ -3,26 +3,21 @@ import Shrike
 
 /// The facts a caller needs before a model is resident.
 ///
-/// All three are derivable from `manifest.json`, which the installer writes
-/// next to the weights — so the startup banner reports real values even when
-/// the load has been deferred, instead of placeholders that resolve later.
+/// modelID comes from the roster, promptCacheMode from the plan, and only
+/// the prefill chunk from `manifest.json`'s family; none of the three maps
+/// weights, so the startup banner reports real values even when the load
+/// has been deferred, instead of placeholders that resolve later.
 public struct ModelSessionFacts: Sendable, Equatable {
     public let modelID: String
     public let prefillChunkTokens: Int
     public let promptCacheMode: ServerPromptCacheMode
-    /// Routed-expert slots per layer in force, so the banner can state the
-    /// streaming budget instead of leaving the user to infer it from a flag they
-    /// may not have passed.
-    public let expertCacheSlots: Int
 
     public init(modelID: String,
                 prefillChunkTokens: Int,
-                promptCacheMode: ServerPromptCacheMode,
-                expertCacheSlots: Int = 0) {
+                promptCacheMode: ServerPromptCacheMode) {
         self.modelID = modelID
         self.prefillChunkTokens = prefillChunkTokens
         self.promptCacheMode = promptCacheMode
-        self.expertCacheSlots = expertCacheSlots
     }
 }
 
@@ -45,7 +40,6 @@ public struct ModelSessionPlan: Sendable {
     public let thinkingMode: ModelThinkingMode
     public let reasoningEffort: ReasoningEffort?
     public let reasoningRetention: ReasoningRetention?
-    public let expertCacheSlots: Int?
     /// Bytes the routed-expert cache may use; slots are derived from it.
     public let expertCacheBudgetBytes: Int?
 
@@ -62,7 +56,6 @@ public struct ModelSessionPlan: Sendable {
                 thinkingMode: ModelThinkingMode = .off,
                 reasoningEffort: ReasoningEffort? = nil,
                 reasoningRetention: ReasoningRetention? = nil,
-                expertCacheSlots: Int?,
                 expertCacheBudgetBytes: Int? = nil) {
         self.modelDirectory = modelDirectory
         self.maxContext = maxContext
@@ -77,7 +70,6 @@ public struct ModelSessionPlan: Sendable {
         self.thinkingMode = thinkingMode
         self.reasoningEffort = reasoningEffort
         self.reasoningRetention = reasoningRetention
-        self.expertCacheSlots = expertCacheSlots
         self.expertCacheBudgetBytes = expertCacheBudgetBytes
     }
 
@@ -98,7 +90,6 @@ public struct ModelSessionPlan: Sendable {
             thinkingMode: thinkingMode,
             reasoningEffort: reasoningEffort,
             reasoningRetention: reasoningRetention,
-            expertCacheSlots: expertCacheSlots,
             expertCacheBudgetBytes: expertCacheBudgetBytes,
             reusingContext: reusingContext)
     }

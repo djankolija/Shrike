@@ -76,7 +76,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public static let maximumContextTokens = 1_048_576
     public static let allowedExpertCacheSlots = [8, 16, 24, 32, 64, 96, 128, 160, 192, 224, 256]
 
-    /// Target bytes for the routed-expert slot cache when no count is given.
+    /// Target bytes for the routed-expert slot cache when no budget is given.
     ///
     /// 8 GiB, which is a third of a 24 GB machine and deliberate. The slot cache
     /// has to hold the routing working set, and a routing trace over 383 real
@@ -147,6 +147,16 @@ public struct RuntimeConfiguration: Sendable, Equatable {
             abs(Double($0) - wanted) < abs(Double($1) - wanted)
         } ?? 8
     }
+
+    public static func expertCacheSlots(modelDirectory: URL,
+                                        expecting arch: ArchConfig,
+                                        budgetBytes: Int?) throws -> Int {
+        let manifest = try ManifestReader.load(directoryURL: modelDirectory, expecting: arch)
+        return expertCacheSlots(expertStrideBytes: manifest.expertStride,
+                                layers: manifest.arch.numLayers,
+                                budgetBytes: budgetBytes ?? defaultExpertCacheBudgetBytes)
+    }
+
     public static let allowedPrefillChunkTokens = [
         32, 64, 128, 256, 512, 1_024, 2_048, 4_096,
     ]

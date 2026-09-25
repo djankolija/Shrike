@@ -56,7 +56,7 @@ To serve exactly one model and ignore any config or roster:
 .build/release/shrike serve --model models/<name>.gturbo
 ```
 
-`--help` lists the full flag set. The two worth knowing first:
+`--help` lists the full flag set. The two worth knowing first, which `shrike generate` takes too:
 
 - `--ram-budget <size>` — bytes the routed-expert cache may use (default `8G`).
   This is the knob; slot count is derived from it and the model's expert stride.

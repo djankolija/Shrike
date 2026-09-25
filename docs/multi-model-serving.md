@@ -137,8 +137,8 @@ and `--config` is a startup error rather than a silent precedence puzzle.
 ### Residency
 
 One model resident at a time. The target is a 16 GiB M1 mini; every installed bundle is
-larger than the machine's RAM on its own, and residency is bounded by `--ram-budget` and
-`--expert-cache-slots` rather than by bundle size.
+larger than the machine's RAM on its own, and residency is bounded by `--ram-budget`
+rather than by bundle size.
 
 `ManagedModelBackend` generalizes into a registry over `[String: ModelSessionPlan]` with a
 `residentID`. Its existing body survives: `loadTask` still coalesces concurrent first
